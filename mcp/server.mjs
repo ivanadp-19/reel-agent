@@ -209,7 +209,8 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   const added = [];
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
-    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}`, {method: 'POST', body: fs.readFileSync(f)}).then((x) => x.json());
+    // same machine: hand the backend the path instead of streaming the file through memory
+    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST'}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     p.clips.push(r); added.push(`${r.id} (${f1(r.outSec)}s)`);
   }

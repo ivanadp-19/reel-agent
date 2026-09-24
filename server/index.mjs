@@ -338,33 +338,37 @@ const server = createServer(async (req, res) => {
     let n = 2;
     while (fs.existsSync(path.join(clipsDir, `${id}.mp4`))) id = `${base}-${n++}`;
 
-    const tmp = path.join(ROOT, `.upload-${id}.bin`);
-    const ws = fs.createWriteStream(tmp);
-    req.pipe(ws);
-    req.on('error', () => { try { fs.rmSync(tmp, {force: true}); } catch {} json(res, 500, {error: 'upload failed'}); });
-
-    ws.on('finish', async () => {
+    // a local file path (same machine, e.g. from the MCP server) skips the upload
+    const local = url.searchParams.get('path');
+    const tmp = local && fs.existsSync(local) ? local : path.join(ROOT, `.upload-${id}.bin`);
+    const cleanup = () => { if (tmp !== local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
+    const ingest = async () => {
       try {
         const out = path.join(clipsDir, `${id}.mp4`);
-        // probe codec / pixel format / duration
+        // probe codec / pixel format / size / rotation / duration
         const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-          '-show_entries', 'stream=codec_name,pix_fmt:format=duration', '-of', 'json', tmp]);
-        let codec = '', pix = '', duration = 0;
+          '-show_entries', 'stream=codec_name,pix_fmt,width,height:stream_side_data=rotation:format=duration', '-of', 'json', tmp]);
+        let codec = '', pix = '', duration = 0, w = 0, h = 0, rotated = false;
         try {
           const p = JSON.parse(probe.stdout);
-          codec = p.streams?.[0]?.codec_name ?? '';
-          pix = p.streams?.[0]?.pix_fmt ?? '';
+          const s = p.streams?.[0] ?? {};
+          codec = s.codec_name ?? ''; pix = s.pix_fmt ?? ''; w = s.width ?? 0; h = s.height ?? 0;
+          rotated = (s.side_data_list ?? []).some((d) => d.rotation && d.rotation % 180 !== 0);
           duration = parseFloat(p.format?.duration ?? '0');
         } catch {}
 
-        // h264 + yuv420p → fast remux; otherwise re-encode for browser/Remotion
-        const compatible = codec === 'h264' && pix.startsWith('yuv420');
+        // Already 1080p-class h264/yuv420 and not rotated → fast remux. Anything
+        // else (4K phones, HEVC, rotation metadata, 10-bit) is re-encoded: rotation
+        // baked in, fitted inside 1080×1920 (portrait) or 1920×1080 (landscape).
+        // Remotion's compositor cannot read 2160-tall sources.
+        const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920;
+        const fit = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':force_original_aspect_ratio=decrease:force_divisible_by=2";
         const enc = compatible
           ? await run('ffmpeg', ['-y', '-i', tmp, '-c', 'copy', '-movflags', '+faststart', out])
-          : await run('ffmpeg', ['-y', '-i', tmp, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
-              '-c:a', 'aac', '-movflags', '+faststart', out]);
+          : await run('ffmpeg', ['-y', '-i', tmp, '-vf', fit, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+              '-c:a', 'aac', '-ar', '48000', '-movflags', '+faststart', out]);
         if (enc.code !== 0) {
-          fs.rmSync(tmp, {force: true});
+          cleanup();
           return json(res, 500, {error: 'transcode failed', detail: enc.stderr.slice(-300)});
         }
 
@@ -377,16 +381,21 @@ const server = createServer(async (req, res) => {
         await run('ffmpeg', ['-y', '-ss', String(Math.min(0.5, dur / 2)), '-i', out, '-frames:v', '1',
           '-vf', 'scale=160:-1', path.join(thumbsDir, `${id}.jpg`)]);
 
-        fs.rmSync(tmp, {force: true});
+        cleanup();
         return json(res, 200, {
           id, src: `clips/${id}.mp4`, label: rawName.replace(/\.[^.]+$/, ''),
           inSec: 0, outSec: dur, sourceDurationSec: dur,
         });
       } catch (e) {
-        try { fs.rmSync(tmp, {force: true}); } catch {}
+        cleanup();
         return json(res, 500, {error: String(e).slice(0, 200)});
       }
-    });
+    };
+    if (tmp === local) { ingest(); return; }
+    const ws = fs.createWriteStream(tmp);
+    req.pipe(ws);
+    req.on('error', () => { cleanup(); json(res, 500, {error: 'upload failed'}); });
+    ws.on('finish', ingest);
     return;
   }
 
