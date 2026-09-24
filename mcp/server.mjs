@@ -23,7 +23,7 @@ import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
-import {renderProof} from './proof.mjs';
+import {renderProof, renderStrip} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
@@ -831,6 +831,15 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
     {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
+});
+
+server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutive frames (0.8 s at 30 fps) from a timeline time, tiled 8 per row left→right, top→bottom. Use it on a word arrival, a transition, a title or a B-roll cue to check timing and easing; caption_proof shows single stills.', inputSchema: {project_id: pid, at_sec: sec('timeline time to start from')}}, async ({project_id, at_sec}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  const outDir = path.join(ROOT, '.captions-tmp', `strip-${Date.now()}`);
+  const {sheet, first, fps} = await renderStrip(projectProps(p), at_sec, outDir);
+  const data = fs.readFileSync(sheet).toString('base64');
+  fs.rmSync(outDir, {recursive: true, force: true});
+  return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {

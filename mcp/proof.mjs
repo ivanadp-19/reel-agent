@@ -49,3 +49,23 @@ export async function renderProof(props, times, outDir, scale = 0.35) {
   if (r.status !== 0) throw new Error(`ffmpeg tiling failed: ${String(r.stderr).slice(-200)}`);
   return {sheet, stills, rows, cols};
 }
+
+// 24 consecutive frames from atSec → one strip (cols per row), so the agent can
+// SEE an arrival, a transition or a title, not just a still. Same bundle.
+export async function renderStrip(props, atSec, outDir, {frames = 24, cols = 8, scale = 0.17} = {}) {
+  fs.mkdirSync(outDir, {recursive: true});
+  const serveUrl = await getBundle();
+  const composition = await selectComposition({serveUrl, id: 'MultiClip', inputProps: props});
+  const first = Math.max(0, Math.min(composition.durationInFrames - frames, Math.round(atSec * composition.fps)));
+  const stills = [];
+  for (let i = 0; i < frames; i++) {
+    const out = path.join(outDir, `strip-${String(i).padStart(2, '0')}.jpg`);
+    await renderStill({composition, serveUrl, output: out, inputProps: props, frame: first + i, scale, imageFormat: 'jpeg', jpegQuality: 80});
+    stills.push(out);
+  }
+  const sheet = path.join(outDir, 'strip.jpg');
+  const layout = stills.map((_, i) => `${(i % cols) === 0 ? 0 : Array.from({length: i % cols}, (_, k) => `w${k}`).join('+')}_${Math.floor(i / cols) === 0 ? 0 : Array.from({length: Math.floor(i / cols)}, (_, k) => `h${k * cols}`).join('+')}`).join('|');
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...stills.flatMap((s) => ['-i', s]), '-filter_complex', `${stills.map((_, i) => `[${i}]`).join('')}xstack=inputs=${stills.length}:layout=${layout}`, '-q:v', '4', sheet]);
+  if (r.status !== 0) throw new Error(`ffmpeg tiling failed: ${String(r.stderr).slice(-200)}`);
+  return {sheet, first, fps: composition.fps};
+}
