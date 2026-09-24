@@ -102,6 +102,21 @@ async function health() {
   return {ok: checks.every((c) => c.ok || c.optional), checks};
 }
 
+// The only remote host we ever download from. Anything else in a B-roll src
+// (an agent talked into it by a transcript, a stray URL) is refused, and
+// redirects are re-checked hop by hop so a 302 cannot point at the LAN.
+const ALLOWED_REMOTE = /(^|\.)pexels\.com$/i;
+async function fetchAllowed(url, hops = 0) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:' || !ALLOWED_REMOTE.test(u.hostname)) throw new Error(`refusing to download from ${u.hostname}: only Pexels URLs are fetched`);
+  const r = await fetch(u, {redirect: 'manual'});
+  if ([301, 302, 303, 307, 308].includes(r.status)) {
+    if (hops >= 3) throw new Error('too many redirects');
+    return fetchAllowed(new URL(r.headers.get('location') ?? '', u).href, hops + 1);
+  }
+  return r;
+}
+
 // download remote B-roll srcs into public/broll/ and rewrite props in place
 const BROLL_DIR = path.join(PUBLIC, 'broll');
 async function localizeRemoteBrolls(props) {
@@ -113,7 +128,7 @@ async function localizeRemoteBrolls(props) {
     const name = `px-${Buffer.from(b.src).toString('base64url').slice(-24).replace(/[^\w-]/g, '')}.${ext}`;
     const file = path.join(BROLL_DIR, name);
     if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
-      const r = await fetch(b.src);
+      const r = await fetchAllowed(b.src);
       if (!r.ok) throw new Error(`B-roll download ${r.status}: ${b.src}`);
       const tmp = file + '.part';
       fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
@@ -136,12 +151,17 @@ async function localizeRemoteBrolls(props) {
   }
 }
 
-// only loopback callers: the backend has no auth, so refuse anything that did
-// not come through localhost (DNS-rebinding pages send a foreign Host header)
+// The backend has no auth, so only local callers may reach it:
+// - Host must be loopback (DNS-rebinding pages send a foreign Host header)
+// - a browser Origin, when present, must be a localhost page (the editor);
+//   cross-origin pages always send Origin, so this blocks CSRF POSTs, while
+//   non-browser clients (the MCP server, curl) send none and pass
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 const server = createServer(async (req, res) => {
   const host = (req.headers.host || '').replace(/:\d+$/, '');
   if (!LOCAL_HOSTS.has(host)) return json(res, 403, {error: 'local access only'});
+  if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return json(res, 403, {error: 'bad origin'});
   const url = new URL(req.url, 'http://localhost');
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
@@ -414,7 +434,7 @@ const server = createServer(async (req, res) => {
       await localizeRemoteBrolls(props);
       raw = JSON.stringify(props);
     } catch (e) {
-      console.error('render: could not prepare props:', e);
+      return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
     const id = String(Date.now());
     const propsFile = path.join(ROOT, `.props-${id}.json`);
