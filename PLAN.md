@@ -142,11 +142,11 @@ Entregables:
 - Runners headless: `scripts/claude-edit.sh` y `scripts/codex-edit.sh` (Codex ignora el config del usuario, pre-aprueba solo el servidor `reel` con `default_tools_approval_mode=approve` y corre con sandbox read-only: un `touch` en el repo queda bloqueado, verificado). No hace falta tocar `~/.codex/config.toml`. La skill `.agents/skills/reel-edit` sirve a los dos.
 - Crítica visual completa (contact sheet del render) con ≤ 3 rondas.
 
-Criterios:
-- Un solo comando produce un reel completo (corte, color, captions, ≥ 3 gráficos, B-roll propio, música) desde el crudo + biblioteca + brand kit, con cada cerebro, en el estilo de `research/style-references.md`.
-- 0 solapes caption/gráfico; todos los templates dentro de la safe zone.
-- Un test demuestra que el runner headless no puede usar shell ni escribir fuera del MCP.
-- `pruebaeditoria.mp4`: el tramo negro 7.2–40.1 s (intencional) queda cubierto por B-roll y etiquetas.
+Criterios (estado 2026-09-24):
+- Un solo comando produce un reel completo (corte, color, captions, ≥ 3 gráficos, B-roll propio, música) desde el crudo + biblioteca + brand kit, con cada cerebro: **Claude sí** (corridas 5–8), **Codex sí** en IMG_1778 (`scripts/codex-edit.sh`: 36.2 s, 0 errores, ve las imágenes de `caption_proof`; sin música ni B-roll propio en esa corrida). Falta la comparación de estilo contra `research/style-references.md` (gate subjetivo).
+- 0 solapes caption/gráfico: los captions se apartan solos de los gráficos (`avoidGraphics`); safe zone aún estimada (faltan capturas reales).
+- Test del runner headless: hecho (`test/runner.test.mjs`, Claude y Codex).
+- `pruebaeditoria.mp4`: el negro 7.2–40.1 s queda cubierto (corrida 7 con stock; corrida 8 con biblioteca propia + stock).
 
 ### Fase 4+ — solo si hace falta
 
