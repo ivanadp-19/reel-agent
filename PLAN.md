@@ -71,6 +71,8 @@ Por eso:
 
 ## 4b. Los 20 estilos de Captions.ai
 
+**Movimiento (2026-09-24):** cada movimiento de los 20 previews está descrito frame a frame en `research/captions-ai-motion.md` (Parte 1 por estilo, Parte 2 vocabulario de primitivas y reglas de tiempo comunes), y el plan de implementación por fases y tareas está en `docs/superpowers/plans/2026-09-24-captions-ai-motion.md` (Fase 0 `motion_proof` → Fase 1 Prism al 100 % → transiciones → títulos → layouts → 20 style packs).
+
 El usuario quiere poder **imitar cada uno de los 20 estilos** de AI Edit de Captions.ai. Análisis completo en `research/captions-ai-styles.md`. Conclusión: casi todos se construyen con el mismo vocabulario: captions que se van construyendo palabra a palabra (build-up), 1–2 palabras con tratamiento de énfasis (bold/itálica/otra fuente/color/píldora/bloque), un título grande al inicio, layouts de tarjeta/split, transiciones con blur y una paleta fija. Lo que los diferencia son fuentes, contenedores, marcos, texturas y stickers.
 
 Eso reordena las fases: la **fase 1** incluye captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, catálogo de fuentes OFL) y los primeros **style packs** (Prism Pro, Focus, Stack, Lift, Orbit, Impact II: solo tipografía y bloques de color); la **fase 2** suma layouts/marcos y transiciones; la **fase 3** suma matte de la persona, una herramienta de assets para el agente (búsqueda de stickers/iconos/texturas en una API con licencia clara + generación de PNGs con la API de imágenes de OpenAI + animación de PNGs por transformaciones; nada dibujado a mano ni modelos de SVG) y los estilos que dependen de ella (Paper II, Pop, Chalk, Sketch, Y2K, Lens, Align, Prime). Investigación: `research/asset-sourcing.md`.
