@@ -4,6 +4,7 @@ import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {focusSpans, hideUnder, projectCaptions, tierSpans, type Caption} from './captions';
 import {presetOf} from './captionPresets';
+import {packOf} from './stylePacks';
 import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
@@ -122,7 +123,8 @@ export const MultiClipVideo: React.FC<{
   audio?: {clean?: string; sfx?: boolean} | null;
 }> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null}) => {
   const {fps} = useVideoConfig();
-  const kit = resolveBrand(brand, projectAccent);
+  const pack = packOf(captionStyle);
+  const kit = resolveBrand(brand, projectAccent, pack);
   const accentColor = kit.accent;
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
@@ -202,7 +204,7 @@ export const MultiClipVideo: React.FC<{
 
       {/* B-roll overlay (above clips, below captions); it blurs with the footage during a focus pull */}
       <FocusPull spans={focus} blurPx={preset.focusPull}>
-        <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
+        <BrollLayer items={projectedBrolls} layouts={projectedGraphics} defaults={pack ? {arrive: pack.brollIn, leave: pack.brollOut} : undefined} />
       </FocusPull>
       {/* cover transitions: flashes, bands, discs, mosaics… over the cut */}
       <TransitionOverlay cuts={cuts} accent={accentColor} />

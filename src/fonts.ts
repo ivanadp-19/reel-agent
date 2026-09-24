@@ -13,6 +13,7 @@ import {loadFont as instrument} from '@remotion/google-fonts/InstrumentSerif';
 import {loadFont as caveat} from '@remotion/google-fonts/Caveat';
 import {loadFont as marker} from '@remotion/google-fonts/PermanentMarker';
 import {loadFont as kaushan} from '@remotion/google-fonts/KaushanScript';
+import {loadFont as pinyon} from '@remotion/google-fonts/PinyonScript';
 import {loadFont as courier} from '@remotion/google-fonts/CourierPrime';
 import {loadFont as spaceMono} from '@remotion/google-fonts/SpaceMono';
 import {loadFont as unbounded} from '@remotion/google-fonts/Unbounded';
@@ -40,6 +41,8 @@ const LOADERS = {
   'Permanent Marker': () => marker('normal', {weights: ['400'], ...S}).fontFamily,
   // brush script (the cyan key words of Captions.ai Prime)
   'Kaushan Script': () => kaushan('normal', {weights: ['400'], ...S}).fontFamily,
+  // calligraphic script (the "Momentum" / "Routine" titles of Elevate and Bloom)
+  'Pinyon Script': () => pinyon('normal', {weights: ['400'], ...S}).fontFamily,
   // mono
   'Courier Prime': () => { courier('italic', {weights: ['400', '700'], ...S}); return courier('normal', {weights: ['400', '700'], ...S}).fontFamily; },
   'Space Mono': () => spaceMono('normal', {weights: ['400', '700'], ...S}).fontFamily,
@@ -49,7 +52,7 @@ export type FontFamily = keyof typeof LOADERS;
 // heaviest weight each loader brings (a brand font used where a template wants "bold")
 export const HEAVIEST: Record<FontFamily, number> = {
   Inter: 800, Montserrat: 800, Poppins: 700, 'Bebas Neue': 400, Anton: 400, Oswald: 700, Unbounded: 900,
-  'Playfair Display': 700, 'Instrument Serif': 400, Caveat: 700, 'Permanent Marker': 400, 'Kaushan Script': 400, 'Courier Prime': 700, 'Space Mono': 700,
+  'Playfair Display': 700, 'Instrument Serif': 400, Caveat: 700, 'Permanent Marker': 400, 'Kaushan Script': 400, 'Pinyon Script': 400, 'Courier Prime': 700, 'Space Mono': 700,
 };
 export const FONT_FAMILIES = Object.keys(LOADERS) as FontFamily[];
 

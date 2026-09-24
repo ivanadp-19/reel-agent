@@ -21,7 +21,7 @@ type Face = {family: FontFamily; style: React.CSSProperties};
 const useFace = (name: unknown, fallback: FaceName = 'display'): Face => {
   const kit = useBrand();
   const key = (typeof name === 'string' && name in FACES ? name : fallback) as FaceName;
-  const f: {family: FontFamily; weight: number; italic?: boolean; spacing?: number} = key === 'display' && kit.display ? {family: kit.display, weight: HEAVIEST[kit.display]} : FACES[key];
+  const f: {family: FontFamily; weight: number; italic?: boolean; spacing?: number} = key === 'display' && kit.display ? {family: kit.display, weight: HEAVIEST[kit.display]} : key === 'script' && kit.script ? {family: kit.script, weight: HEAVIEST[kit.script]} : FACES[key];
   return {family: f.family, style: {fontFamily: fontFamily(f.family), fontWeight: f.weight, ...(f.italic ? {fontStyle: 'italic' as const} : {}), ...(f.spacing ? {letterSpacing: f.spacing} : {})}};
 };
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';

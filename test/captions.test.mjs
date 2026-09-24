@@ -109,3 +109,32 @@ test('hideUnder: a page before the closing card cannot hold into it once the pag
   assert.equal(shown[0].holdMaxMs, 5200); // (a cap earlier than the clip end is harmless)
   assert.equal(shown[1].endMs, 5000); // it ended before the card: its own end is kept
 });
+
+import {PACKS} from '../src/stylePacks.ts';
+import {PRESETS as ALL_PRESETS} from '../src/captionPresets.ts';
+import {ENTERS} from '../src/transitions.ts';
+import {FONT_FAMILIES} from '../src/fonts.ts';
+import {resolveBrand, DEFAULT_ACCENT} from '../src/brand.ts';
+
+test('the 20 style packs are complete and consistent', () => {
+  const ids = Object.keys(PACKS);
+  assert.equal(ids.length, 20);
+  for (const id of ids) {
+    const p = PACKS[id];
+    assert.ok(ALL_PRESETS[id], `${id} preset`);
+    assert.ok(ENTERS.includes(p.transition), `${id} transition`);
+    for (const c of [p.accent, p.dark, p.light]) assert.match(c, /^#[0-9A-Fa-f]{6}$/, `${id} ${c}`);
+    if (p.display) assert.ok(FONT_FAMILIES.includes(p.display), `${id} display`);
+    if (p.script) assert.ok(FONT_FAMILIES.includes(p.script), `${id} script`);
+    assert.ok(p.desc.length > 20);
+  }
+});
+
+test('resolveBrand: a brand kit wins, then a project accent that was set, then the pack palette', () => {
+  const pack = PACKS.prime;
+  assert.equal(resolveBrand(null, DEFAULT_ACCENT, pack).accent, pack.accent);
+  assert.equal(resolveBrand(null, DEFAULT_ACCENT, pack).script, 'Kaushan Script');
+  assert.equal(resolveBrand(null, '#123456', pack).accent, '#123456');
+  assert.equal(resolveBrand({colors: {accent: '#abcdef'}, fonts: {}}, '#123456', pack).accent, '#abcdef');
+  assert.equal(resolveBrand(null, DEFAULT_ACCENT).accent, DEFAULT_ACCENT);
+});

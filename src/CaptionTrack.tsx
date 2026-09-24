@@ -157,7 +157,9 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
       ? {background: preset.colors.container ?? 'rgba(0,0,0,0.72)', borderRadius: Math.round(fontSize * 0.5), padding: `${Math.round(fontSize * 0.22)}px ${Math.round(fontSize * 0.5)}px`}
       : preset.container === 'bar'
         ? {background: preset.colors.container ?? '#000', borderRadius: 4, padding: `${Math.round(fontSize * 0.12)}px ${Math.round(fontSize * 0.3)}px`}
-        : preset.container === 'glass'
+        : preset.container === 'comic'
+        ? {background: preset.colors.container ?? '#ffffff', border: '3px solid #111', boxShadow: '6px 8px 0 #111', borderRadius: Math.round(fontSize * 0.6), padding: `${Math.round(fontSize * 0.18)}px ${Math.round(fontSize * 0.5)}px`}
+      : preset.container === 'glass'
           ? {background: preset.colors.container ?? 'rgba(255,255,255,0.16)', backdropFilter: 'blur(22px)', WebkitBackdropFilter: 'blur(22px)', border: '1.5px solid rgba(255,255,255,0.32)', boxShadow: '0 10px 40px rgba(0,0,0,0.25)', borderRadius: Math.round(fontSize * 0.45), padding: `${Math.round(fontSize * 0.28)}px ${Math.round(fontSize * 0.5)}px`}
           : {};
 

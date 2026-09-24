@@ -24,7 +24,8 @@ const boxByMode: Record<BrollItem['mode'], React.CSSProperties> = {
 const CAROUSEL_STEP_MS = 2400; // a step every 2.4 s, taken in 2 frames with motion blur
 const CARD_EXIT_MS = 500; // it leaves upwards, accelerating (12 f at 24 fps)
 
-const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null}> = ({item, panel}) => {
+type Defaults = {arrive: BrollItem['arrive']; leave: BrollItem['leave']}; // the style pack's, for cues that do not say
+const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null; defaults?: Defaults}> = ({item, panel, defaults}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const fade = interpolate(frame, [0, Math.round(fps * 0.18)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
@@ -47,9 +48,10 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const exitT = card ? Math.min(1, Math.max(0, 1 - (dur - 1 - frame) / ms(fps, CARD_EXIT_MS))) : 0;
   const cardY = card ? (1 - cardLanding(frame, fps)) * 900 - exitT * exitT * 1500 : 0;
   // the box's own arrival and exit (src/motion.ts): dx/dy in % of the box, then scale
-  const inFx = brollIn(item.arrive ?? 'cut', frame, fps);
-  const outFx = brollOut(item.leave ?? 'cut', dur - 1 - frame, fps);
-  const boxed = (item.arrive && item.arrive !== 'cut') || (item.leave && item.leave !== 'cut');
+  const arriveK = item.arrive ?? defaults?.arrive ?? 'cut', leaveK = item.leave ?? defaults?.leave ?? 'cut';
+  const inFx = brollIn(arriveK, frame, fps);
+  const outFx = brollOut(leaveK, dur - 1 - frame, fps);
+  const boxed = arriveK !== 'cut' || leaveK !== 'cut';
   const move = [
     inFx.dx + outFx.dx || inFx.dy + outFx.dy ? `translate(${(inFx.dx + outFx.dx).toFixed(1)}%, ${(inFx.dy + outFx.dy).toFixed(1)}%)` : '',
     scale * inFx.scale * outFx.scale === 1 ? '' : `scale(${(scale * inFx.scale * outFx.scale).toFixed(3)})`,
@@ -91,7 +93,7 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   );
 };
 
-export const BrollLayer: React.FC<{items: BrollItem[]; layouts?: Graphic[]}> = ({items, layouts = []}) => {
+export const BrollLayer: React.FC<{items: BrollItem[]; layouts?: Graphic[]; defaults?: Defaults}> = ({items, layouts = [], defaults}) => {
   const {fps} = useVideoConfig();
   const active = useActiveLayout(layouts);
   const panel = active ? layoutBoxes(active.props).panel : null;
@@ -103,7 +105,7 @@ export const BrollLayer: React.FC<{items: BrollItem[]; layouts?: Graphic[]}> = (
         const dur = Math.max(1, Math.round(((b.endMs - b.startMs) / 1000) * fps));
         return (
           <Sequence key={b.id} from={from} durationInFrames={dur} layout="none" name={`broll: ${b.query ?? b.id}`}>
-            <One item={b} panel={panel} />
+            <One item={b} panel={panel} defaults={defaults} />
           </Sequence>
         );
       })}

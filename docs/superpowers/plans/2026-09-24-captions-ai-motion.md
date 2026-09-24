@@ -300,7 +300,7 @@ Todas son funciones puras en `transitions.ts` que devuelven, además de `Fx`, un
 
 ---
 
-## Fase 4 — Layouts, B-roll y decoración (3 días)
+## Fase 4 — Layouts, B-roll y decoración (3 días) — HECHA 2026-09-24 (salvo `tear`, que espera una textura)
 
 ### Task 4.1: entradas de layout y B-roll
 - `slideUp` con ease-out para splits (7–15 f; Elevate/Impact/Form/Focus) y salida `slideDown` con motion blur vertical 5 f.
@@ -320,7 +320,7 @@ Todas son funciones puras en `transitions.ts` que devuelven, además de `Fx`, un
 
 ---
 
-## Fase 5 — Style packs y gate subjetivo (1 día)
+## Fase 5 — Style packs y gate subjetivo (1 día) — HECHA 2026-09-24 (el gate subjetivo es de Felipe)
 
 ### Task 5.1: `src/stylePacks.ts`
 ```ts

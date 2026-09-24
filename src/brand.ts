@@ -26,17 +26,22 @@ export const brandSchema = z.object({
 export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: FontFamily; body?: FontFamily}; logo?: string};
 
 // what the renderer uses: every value resolved, `branded` = a kit is active
-export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: FontFamily; body?: FontFamily; logo?: string};
+export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: FontFamily; body?: FontFamily; script?: FontFamily; logo?: string};
+// what a style pack brings when the project has no brand kit (src/stylePacks.ts)
+export type PackKit = {accent: string; dark: string; light: string; display?: FontFamily; script?: FontFamily};
 
 export const DEFAULT_ACCENT = '#FFB020';
-export function resolveBrand(brand: Brand | null | undefined, accentColor?: string): Kit {
+// a brand kit wins; else the project's own accent when it was set (not the default); else the pack's palette
+export function resolveBrand(brand: Brand | null | undefined, accentColor?: string, pack?: PackKit): Kit {
+  const projectAccent = accentColor && accentColor !== DEFAULT_ACCENT ? accentColor : undefined;
   return {
     branded: !!brand,
-    accent: brand?.colors.accent ?? accentColor ?? DEFAULT_ACCENT,
-    dark: brand?.colors.dark ?? '#0b0b0d',
-    light: brand?.colors.light ?? '#f3f3f0',
-    display: brand?.fonts?.display,
+    accent: brand?.colors.accent ?? projectAccent ?? pack?.accent ?? accentColor ?? DEFAULT_ACCENT,
+    dark: brand?.colors.dark ?? pack?.dark ?? '#0b0b0d',
+    light: brand?.colors.light ?? pack?.light ?? '#f3f3f0',
+    display: brand?.fonts?.display ?? pack?.display,
     body: brand?.fonts?.body,
+    script: pack?.script,
     logo: brand?.logo,
   };
 }

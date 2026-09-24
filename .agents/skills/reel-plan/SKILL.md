@@ -27,20 +27,34 @@ COLOR: look (clean by default) and why.
 LENGTH: expected duration after cuts; if the material is short, say so — never pad with slow motion.
 ```
 
-## Choosing the caption pack
+## Choosing the style pack
+
+One pack per reel (`set_caption_style`). It sets captions, palette, faces, the cut family, how
+B-roll comes and goes, and the frame the style lives in; `set_transitions type: pack` and
+plain `add_broll` follow it.
 
 | Brief / footage | Pack |
 |---|---|
-| Real estate, lifestyle, premium, calm presenter, B-roll heavy | `prism` — build-up, key words arrive as a ghost with a shine, the hero blurs the footage; B-roll cues in `mode: card`, cuts with `whipDiag` |
-| Tech, product, opinion with claims | `stack` (big key words, red pill hero) or `focus` (blue blocks, white hero) |
-| B2B, SaaS, corporate | `lift` (mint pills, large clean sans) |
-| Fintech, apps, iOS feel | `evo` (bold italic in frosted glass, 1–3 words) |
-| Motivational, dark studio, energy | `prime` (script key words) or `impact` (condensed cyan) |
-| Editorial, interviews, fashion | `orbit` (serif in a blue pill) |
+| Real estate, lifestyle, premium, calm presenter, B-roll heavy | `prism` — metallic key words, focus pull, diagonal whips, B-roll cards |
+| Opinion, claims, "you need to know" | `focus` (blue highlight box, stacked bands) or `stack` (red pill, white flashes, drop titles) |
+| B2B, SaaS, product demo | `lift` (mint box, faceted wipes, serif titles) |
+| Fintech, apps, iOS feel | `evo` (frosted glass, rounded frame on a gradient, pops) |
+| Motivational, dark studio, energy | `prime` (neon script, spin flashes, carousel) or `impact` (condensed cyan, punch + glitch) |
+| Editorial interviews, community, brand blue | `orbit` (serif pill, discs, orbiting ring) |
+| Film-poster editorial, advice, memoir | `elevate` (serif captions, calligraphic title written letter by letter) |
+| Education, explainer, collage | `paper` (paper boxes, typewriter labels, stickers that unfold) or `sketch` (handwritten, marker-masked title) |
+| Photography, gear, camera talk | `lens` (viewfinder inset, mono bar, light leaks) |
+| Light editorial realty, architecture | `vista` (serif fades, block wipes, giant word behind) |
+| Gen-Z, fashion haul, comic energy | `pop` (comic pills, stamp starburst, cards on graph paper) |
+| Retro internet, nostalgia | `y2k` (yellow sans, Mac OS windows with trails, clock wipes) |
+| Sport, fitness, discipline | `form` (bold italic key words, orange blinds, particle dissolves) |
+| Skincare, beauty, wellness | `bloom` (thin sans, breathing arch, product card, soft close) |
+| Teaching, notes, blackboard | `chalk` (handwritten, yellow tags, scribbled outline, torn photos) |
+| Fashion lookbook, boutique | `linen` (peach serif box, diagonal beige bands) |
+| Documentary, history, archive | `align` (mono on white, tiles by scale, decoding labels) |
 | Mexican real-estate walk-throughs like the reference reels | `palabra`, `caja` or `tracked` |
 
-A brand kit with a caption font moves the sans packs onto that font; display
-packs (`impact`, `prime`, `orbit`) keep their own face. Pick one pack per reel.
+A brand kit or a project accent overrides the pack's palette; display packs keep their faces.
 
 Then continue with `reel-edit` from the cut step. When you depart from the
 plan, say so in the final message.
