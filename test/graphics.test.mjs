@@ -125,5 +125,6 @@ test('end-card: defaults, full frame; captions under it are hidden, a page runni
 test('location-tag accepts text as an alias of place', async () => {
   const {parseProps: pp} = await import('../src/graphicTemplates.ts');
   assert.equal(pp('location-tag', {text: 'Norte de Mérida'}).place, 'Norte de Mérida');
+  assert.equal(pp('location-tag', {label: 'Mérida', sub: 'Yucatán'}).place, 'Mérida');
   assert.equal(pp('location-tag', {place: 'Mérida', text: 'ignored'}).place, 'Mérida');
 });
