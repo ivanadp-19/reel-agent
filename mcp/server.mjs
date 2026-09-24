@@ -27,6 +27,7 @@ import {renderProof} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
+import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -54,7 +55,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null;
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null;
   return p;
 }
 async function save(id, p) {
@@ -106,7 +107,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -542,6 +543,23 @@ server.registerTool('generate_asset', {description: 'LAST RESORT: generate an im
   return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
 });
 
+server.registerTool('set_grade', {description: `Color for the whole reel: a bounded automatic correction per source (measured on its lit frames: stretches flat footage, nudges exposure and color cast, lifts dull saturation — never restyles) plus one look. Looks: ${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}. intensity 0–1 (0.8 default). Look at the result with caption_proof (frame_at shows the raw source). Needs the backend the first time a source is analyzed.`, inputSchema: {project_id: pid, look: z.enum(Object.keys(LOOKS)).default(DEFAULT_LOOK), intensity: z.number().min(0).max(1).default(0.8), auto: z.boolean().default(true).describe('the per-source correction; false = look only')}}, async ({project_id, look, intensity, auto}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  let bySrc = {}, notes = [];
+  if (auto) {
+    await runJob('/api/grade', {clips: p.clips});
+    const r = readPublic('grade.json');
+    bySrc = r.bySrc ?? {};
+    for (const [src, g] of Object.entries(bySrc)) {
+      const s = r.stats[src];
+      notes.push(`${path.basename(src)}: tones ${Math.round(s.yLow)}–${Math.round(s.yHigh)} → contrast ×${g.slope[0]}, saturation ×${g.saturation}${g.intercept.some((i, c) => Math.abs(i - g.intercept[1]) > 0.004) ? ', color cast corrected' : ''}`);
+    }
+  }
+  p.grade = {look, intensity, auto, bySrc};
+  await save(project_id, p);
+  return text(`Color: look ${look} at ${intensity}${auto ? `, automatic correction per source:\n  ${notes.join('\n  ') || 'nothing measurable'}` : ' (no automatic correction)'}`);
+});
+
 server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic or caption page marked behind=true, so they render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
   const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes);
@@ -620,7 +638,7 @@ const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level ===
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand});
+const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);

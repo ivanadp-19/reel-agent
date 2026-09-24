@@ -63,6 +63,7 @@ const JOBS = {
   '/api/trim-silence': {route: '/api/trim-silence', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
   '/api/transcribe': {route: '/api/transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
   '/api/matte': {route: '/api/matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
+  '/api/grade': {route: '/api/grade', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
 };
 
 // Turn a stderr tail into one line a user can act on.

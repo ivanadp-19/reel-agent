@@ -5,11 +5,12 @@ import type {PresetId} from '../src/captionPresets';
 import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
+import type {ProjectGrade} from '../src/grade';
 import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -39,6 +40,7 @@ type EditorState = {
   offMic: OffMic;
   hiddenWids: string[]; // transcript words whose caption pages were deleted — never re-paged
   brand: Brand | null; // client kit (set by the agent with set_brand); read-only in the editor for now
+  grade: ProjectGrade | null; // color (set_grade); read-only in the editor for now
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -129,6 +131,7 @@ export const useEditor = create<EditorState>((set) => ({
   offMic: 'mark',
   hiddenWids: [],
   brand: null,
+  grade: null,
   past: [],
   future: [],
 
@@ -152,6 +155,7 @@ export const useEditor = create<EditorState>((set) => ({
         offMic: p.offMic ?? 'mark',
         hiddenWids: p.hiddenWids ?? [],
         brand: p.brand ?? null,
+        grade: p.grade ?? null,
         past: [],
         future: [],
       };

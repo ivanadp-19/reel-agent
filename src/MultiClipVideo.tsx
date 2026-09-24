@@ -9,6 +9,7 @@ import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
+import {gradeFor, type ProjectGrade} from './grade';
 
 // Music layer: start offset, volume, optional end fade-out, and optional
 // auto-ducking — the music dips while someone is speaking (speech = caption spans).
@@ -55,7 +56,8 @@ export const MultiClipVideo: React.FC<{
   mattes?: Matte[];
   accentColor?: string;
   brand?: Brand | null;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null}) => {
+  grade?: ProjectGrade | null;
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null}) => {
   const {fps} = useVideoConfig();
   const kit = resolveBrand(brand, projectAccent);
   const accentColor = kit.accent;
@@ -87,13 +89,13 @@ export const MultiClipVideo: React.FC<{
           premountFor={Math.round(fps)}
           name={clip.label ?? clip.id}
         >
-          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} />
+          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} />
         </Sequence>
       ))}
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
       <CaptionTrack captions={projectedCaptions} captionStyle={captionStyle} behind />
-      <PersonLayer mattes={mattes} clips={clips} />
+      <PersonLayer mattes={mattes} clips={clips} grade={grade} />
       </LayoutStage>
 
       {/* B-roll overlay (above clips, below captions) */}
