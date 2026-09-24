@@ -42,6 +42,51 @@ export const TEMPLATES = {
     y: 18,
     schema: z.object({label: short(20), number: short(6)}),
   },
+  // one giant word (the topic) at the top; repeat = a tiled word wall with one line filled
+  'big-word': {
+    desc: 'one giant word (the topic); font display|condensed|script|serif; color text|accent|outline; repeat=true tiles it as a word wall (Prime/Form/Chalk)',
+    defaultMs: 2600,
+    y: 8,
+    schema: z.object({
+      text: short(16),
+      font: z.enum(['display', 'condensed', 'script', 'serif']).default('display'),
+      color: z.enum(['text', 'accent', 'outline']).default('text'),
+      size: z.enum(['lg', 'xl', 'xxl']).default('xl'),
+      repeat: z.boolean().default(false),
+      upper: z.boolean().default(true),
+    }),
+  },
+  // full-frame solid card with staggered lines (Orbit blue cards, Impact grid cards)
+  'kinetic-card': {
+    desc: 'full-frame solid card that COVERS the video (cutaway) with 1–4 staggered lines; bg accent|dark|light; grid=true adds graph-paper lines (Impact II)',
+    defaultMs: 2200,
+    y: 0,
+    schema: z.object({
+      lines: z.array(z.object({text: short(22), dim: z.boolean().default(false)})).min(1).max(4),
+      bg: z.enum(['accent', 'dark', 'light']).default('accent'),
+      font: z.enum(['condensed', 'display', 'serif']).default('condensed'),
+      grid: z.boolean().default(false),
+    }),
+  },
+  // outlined title that fills with the accent color left to right (Stack)
+  'fill-title': {
+    desc: 'outlined title that fills with the accent color from left to right (Stack)',
+    defaultMs: 2400,
+    y: 8,
+    schema: z.object({text: short(16), font: z.enum(['condensed', 'display']).default('condensed')}),
+  },
+  // editorial title: small pill tag, script/serif-italic title, spaced-caps subtitle (Elevate, Bloom)
+  'script-title': {
+    desc: 'editorial title card: pill tag above, script or serif-italic title, spaced-caps subtitle (Elevate/Bloom)',
+    defaultMs: 3000,
+    y: 14,
+    schema: z.object({
+      title: short(22),
+      sub: z.string().trim().max(40).default(''),
+      tag: z.string().trim().max(16).default(''),
+      font: z.enum(['script', 'serif-italic']).default('script'),
+    }),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',

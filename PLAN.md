@@ -95,14 +95,14 @@ Spikes pendientes (cada uno con informe go/no-go):
 
 ### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
 
-Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images); selector de estilo y tiers en el editor.
+Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images); selector de estilo y tiers en el editor.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.
 - Paginado en módulo compartido (`src/`), usado por el pipeline y por `annotate_captions` (re-paginar sin perder anotaciones, por `wordId`).
 - Captions v2: `reveal: 'build'` (las palabras aparecen y se quedan), karaoke (`upcoming: dim`), tratamientos de énfasis por tier (`weight`, `italic`, `font`, `color`, `scale`, `pill`, `block`, `underline`), contenedores de página (`none`/`pill`/`bar`/`glass`), posición flotante, catálogo de fuentes OFL (geométricas, condensadas, serif, script, manuscrita, mono, wide).
 - Style packs = preset + templates + paleta: primero Prism Pro, Focus, Stack, Lift, Orbit, Impact II.
-- Templates de título adicionales: `big-word`, `word-wall`, `fill-title`, `oversized`, `script-title`, `chapter-caps`, `kinetic-card`, `starburst`.
+- Templates de título pendientes: `oversized` (letras recortadas fuera de cuadro), `chapter-caps` (versalitas espaciadas), `starburst` (burbuja cómic).
 - Templates de titulares/etiquetas: `hook-stack`, `label-2tone`, `stat`, `chapter`, `location-tag`, `price`; track `graphics[]` anclado a fuente/palabra (`projectGraphics` clonado de `projectBrolls`).
 - Brand kit (`brand.json` por proyecto: logo, colores, fuentes OFL).
 - Herramientas MCP: `annotate_captions`, `set_caption_style`, `add_graphic`, `edit_graphic`, `delete_graphics`, `caption_proof`.

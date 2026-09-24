@@ -1,10 +1,17 @@
 import React from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {loadFont} from '@remotion/google-fonts/Montserrat';
 import {TEMPLATES, type Graphic} from './graphicTemplates';
+import {fontFamily} from './fonts';
 
-const {fontFamily} = loadFont('normal', {weights: ['600', '800'], subsets: ['latin', 'latin-ext']});
-const FONT = `${fontFamily}, system-ui, sans-serif`;
+const FONT = fontFamily('Montserrat');
+// named faces the templates pick from (all in src/fonts.ts)
+const FACE = {
+  display: () => ({fontFamily: fontFamily('Montserrat'), fontWeight: 800}),
+  condensed: () => ({fontFamily: fontFamily('Anton'), fontWeight: 400, letterSpacing: 1}),
+  script: () => ({fontFamily: fontFamily('Caveat'), fontWeight: 700}),
+  serif: () => ({fontFamily: fontFamily('Playfair Display'), fontWeight: 700}),
+  'serif-italic': () => ({fontFamily: fontFamily('Instrument Serif'), fontWeight: 400, fontStyle: 'italic' as const}),
+};
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
 
 const outCubic = Easing.out(Easing.cubic);
@@ -82,6 +89,78 @@ const Chapter: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   );
 };
 
+// one giant word at the top, or a tiled word wall with the middle row filled
+const BIG = {lg: 150, xl: 210, xxl: 270};
+const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 10);
+  const size = BIG[props.size as keyof typeof BIG] ?? BIG.xl;
+  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.display();
+  const fill = props.color === 'accent' ? accent : '#fff';
+  const text = props.upper ? String(props.text).toUpperCase() : props.text;
+  const outline: React.CSSProperties = {color: 'transparent', WebkitTextStroke: `2px ${fill}`, opacity: 0.55};
+  if (!props.repeat) {
+    return <div style={{fontSize: size, lineHeight: 0.95, whiteSpace: 'nowrap', ...face, ...(props.color === 'outline' ? {...outline, opacity: 0.9} : {color: fill}), ...blurIn(a)}}>{text}</div>;
+  }
+  // wall: 5 rows, offset horizontally, the middle one filled
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', overflow: 'hidden', width: '100%'}}>
+      {[-2, -1, 0, 1, 2].map((r) => (
+        <div key={r} style={{fontSize: size * 0.8, lineHeight: 0.9, whiteSpace: 'nowrap', transform: `translateX(${r * 60}px)`, ...face, ...(r === 0 ? {color: fill} : outline), opacity: (r === 0 ? 1 : 0.5) * interpolate(a, [0, 1], [0, 1]), filter: `blur(${(1 - a) * 8}px)`}}>
+          {`${text}  ${text}  ${text}`}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// full-frame solid card with staggered lines; `grid` draws graph paper
+const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const bg = props.bg === 'dark' ? '#0b0b0d' : props.bg === 'light' ? '#f3f3f0' : accent;
+  const fg = props.bg === 'light' ? '#111' : '#fff';
+  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.condensed();
+  return (
+    <div style={{position: 'absolute', inset: 0, background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '0 60px', textAlign: 'center', ...(props.grid ? {backgroundImage: `linear-gradient(${fg}22 1px, transparent 1px), linear-gradient(90deg, ${fg}22 1px, transparent 1px)`, backgroundSize: '96px 96px'} : {})}}>
+      {props.lines.map((l: any, i: number) => (
+        <CardLine key={i} i={i} text={l.text} color={l.dim ? `${fg}99` : fg} face={face} />
+      ))}
+    </div>
+  );
+};
+const CardLine: React.FC<{i: number; text: string; color: string; face: React.CSSProperties}> = ({i, text, color, face}) => {
+  const a = useReveal(2 + i * 4, 8);
+  return <div style={{fontSize: 118, lineHeight: 1, textTransform: 'uppercase', color, ...face, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
+};
+
+// outlined title that fills with the accent color left → right
+const FillTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 6);
+  const fill = useReveal(6, 22);
+  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.condensed();
+  const text = String(props.text).toUpperCase();
+  const style: React.CSSProperties = {fontSize: 200, lineHeight: 1, whiteSpace: 'nowrap', ...face};
+  return (
+    <div style={{position: 'relative', display: 'inline-block', opacity: a}}>
+      <div style={{...style, color: 'transparent', WebkitTextStroke: '3px rgba(255,255,255,0.6)'}}>{text}</div>
+      <div style={{...style, position: 'absolute', inset: 0, color: accent, clipPath: `inset(0 ${(1 - fill) * 100}% 0 0)`}}>{text}</div>
+    </div>
+  );
+};
+
+// editorial title card: pill tag, script or serif-italic title, spaced-caps subtitle
+const ScriptTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 8);
+  const b = useReveal(4, 10);
+  const c = useReveal(9, 8);
+  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.script();
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
+      {props.tag ? <div style={{fontSize: 30, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: '#fff', border: '2px solid rgba(255,255,255,0.8)', borderRadius: 999, padding: '6px 22px', opacity: a, textShadow: 'none'}}>{props.tag}</div> : null}
+      <div style={{fontSize: 150, lineHeight: 1, color: '#fff', ...face, ...blurIn(b)}}>{props.title}</div>
+      {props.sub ? <div style={{fontSize: 34, fontWeight: 600, letterSpacing: 5, textTransform: 'uppercase', color: accent, opacity: c}}>{props.sub}</div> : null}
+    </div>
+  );
+};
+
 // an image asset with a simple motion: pop in, then wiggle / float / spin
 const Sticker: React.FC<{props: any}> = ({props}) => {
   const frame = useCurrentFrame();
@@ -109,7 +188,7 @@ const Sticker: React.FC<{props: any}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, sticker: Sticker};
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, sticker: Sticker};
 
 const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({g, accent, durationInFrames}) => {
   const frame = useCurrentFrame();
@@ -118,6 +197,14 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   const fadeOut = outF > 0 ? interpolate(frame, [durationInFrames - outF, durationInFrames], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
   const Comp = COMPONENTS[g.template];
   if (!Comp) return null;
+  if (g.template === 'kinetic-card') {
+    // covers the whole frame (a cutaway), no text-block positioning
+    return (
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', inset: 0, fontFamily: FONT, opacity: fadeOut, pointerEvents: 'none'}}>
+        <Comp props={g.props} accent={accent} />
+      </div>
+    );
+  }
   if (g.template === 'sticker') {
     // positioned by its center, not as a text block
     return (
