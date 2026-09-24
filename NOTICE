@@ -1,0 +1,9 @@
+reel-agent
+Copyright 2026 the reel-agent contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project started as a fork of AutoBroll
+(https://github.com/andriidrok1/autobroll, commit 9122e89, 2026-09-16),
+Copyright (c) 2026 Andrii Drok, licensed under the MIT License.
+The original license text is kept in LICENSE.autobroll.

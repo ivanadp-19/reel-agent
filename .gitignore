@@ -1,0 +1,30 @@
+# secrets — never commit
+.env
+
+# deps / build
+node_modules/
+out/
+build/
+.venv
+whisper.cpp/
+
+# ALL user media + generated data live in public/ (clips, projects with speech
+# transcripts, music, waveforms, exports) — personal, never committed
+public/*
+!public/.gitkeep
+
+# pipeline temp files
+.captions-tmp/
+.props-*.json
+.clips-*.json
+.broll-*.json
+.arrange-*.json
+.trim-*.json
+.upload-*
+
+# IDE
+.idea/
+
+# local agent settings / downloaded models
+.claude/settings.local.json
+.models/
