@@ -3,6 +3,7 @@ import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVid
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {hideUnder, projectCaptions, type Caption} from './captions';
+import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
 import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
@@ -67,8 +68,8 @@ export const MultiClipVideo: React.FC<{
   const projectedCaptions = projectCaptions(captions, clips, fps);
   const projectedBrolls = projectBrolls(brolls, clips, fps);
   const projectedGraphics = projectGraphics(graphics, clips, fps);
-  // no captions over a closing card (the voice goes on; the card carries the message)
-  const shownCaptions = hideUnder(projectedCaptions, projectedGraphics.filter((g) => g.template === 'end-card'));
+  // captions step around text graphics, and none over a closing card (the voice goes on; the card carries the message)
+  const shownCaptions = hideUnder(avoidGraphics(projectedCaptions, projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
 
   // OffthreadVideo is built for rendering (frame-accurate, but stutters/freezes
   // in the live Player). Use native <Video> in preview for smooth playback,

@@ -20,7 +20,7 @@ test('flags safe zones, glue endings, missing mattes and caption/graphic overlap
     mattes: [],
   };
   const c = codes(validateProject(p));
-  for (const want of ['safe-top', 'glue', 'overlap-graphic', 'matte']) assert.ok(c.includes(want), `missing ${want} in ${c}`);
+  for (const want of ['safe-top', 'glue', 'matte']) assert.ok(c.includes(want), `missing ${want} in ${c}`); // c1 steps below the stat instead of overlapping it
 });
 
 test('too many tier-2 words is a warning', () => {
@@ -38,4 +38,21 @@ test('a stacked hook behind the head is flagged when the head hides most of it; 
   const codes = (g) => vp({clips: [clip], captions: [], graphics: [g], mattes: [{src: 'clips/a.mp4', startMs: 0, endMs: 10000}]}, 30, face).map((i) => i.code);
   assert.ok(codes(hook).includes('behind-hidden'));
   assert.ok(!codes(word).includes('behind-hidden'));
+});
+
+test('a caption under the hook moves just below it; with no room it stays and validate reports it', async () => {
+  const {avoidGraphics, validateProject: vp} = await import('../src/validate.ts');
+  const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10};
+  const hook = {id: 'g0', src: 'clips/a.mp4', startMs: 0, endMs: 2500, template: 'hook-stack', yPct: 45, props: {lines: [{text: 'THE BIGGEST', size: 'lg', accent: false}, {text: 'LIE ABOUT MONEY', size: 'lg', accent: true}], upper: false}};
+  const cap = (id, a, b, topPct = 50) => ({id, src: 'clips/a.mp4', words: [{text: 'the', startMs: a, endMs: a + 200}, {text: 'media', startMs: a + 250, endMs: b}], startMs: a, endMs: b, topPct});
+  const [moved, later] = avoidGraphics([cap('c0', 500, 1500), cap('c1', 3000, 4000)], [hook], 'focus');
+  assert.ok(moved.pin && moved.topPct > 58 && moved.topPct < 75, JSON.stringify(moved));
+  assert.equal(later.topPct, 50);
+  const codes = (h) => vp({clips: [clip], captions: [cap('c0', 500, 1500)], graphics: [h]}, 30).map((i) => i.code);
+  assert.ok(!codes(hook).includes('overlap-graphic'));
+  // a 4-line hook at 30–67 % and a huge caption (21 % tall): no room above or below
+  const tall = {...hook, yPct: 30, props: {lines: ['A', 'B', 'C', 'D'].map((text) => ({text, size: 'xl', accent: false})), upper: false}};
+  const huge = {...cap('c0', 500, 1500), scale: 4};
+  assert.equal(avoidGraphics([huge], [tall]).at(0).topPct, 50);
+  assert.ok(vp({clips: [clip], captions: [huge], graphics: [tall]}, 30).some((i) => i.code === 'overlap-graphic'));
 });

@@ -39,7 +39,7 @@ function graphicHeightPx(g: Graphic): number | null {
   const p: any = g.props;
   switch (g.template) {
     case 'hook-stack': return p.lines.reduce((n: number, l: any) => n + (SIZES[l.size] ?? 130), 0) * 0.98;
-    case 'label-2tone': return 72 * 1.05 * (p.bottom ? 2 : 1);
+    case 'label-2tone': return 72 * 1.05 * (p.bottom ? 2 : 1) + (p.plate === 'none' ? 0 : 36);
     case 'stat': return 170 + (p.label ? 54 : 0);
     case 'chapter': return 40 + 200;
     case 'big-word': return p.repeat ? 5 * (BIG[p.size] ?? 210) * 0.72 : (BIG[p.size] ?? 210);
@@ -62,6 +62,28 @@ function graphicBand(g: Graphic): Band | null {
   return {top, bottom: top + (h / H) * 100};
 }
 const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
+
+// Captions step out of the way of a text graphic on screen at the same time
+// (run 6: the hook sat on the first caption). The page moves just under the
+// graphics it meets, or just above them, whichever stays inside the safe zone,
+// and is pinned there so floating presets keep it. With no room it stays put
+// and validate reports the overlap. caps/gfx: projected (timeline) items.
+export function avoidGraphics(caps: Caption[], gfx: Graphic[], style?: string): Caption[] {
+  const blockers = gfx.filter((g) => !g.behind && !CENTERED.has(g.template)).map((g) => ({g, band: graphicBand(g)})).filter((x): x is {g: Graphic; band: Band} => !!x.band);
+  if (!blockers.length) return caps;
+  return caps.map((c, i) => {
+    const band = captionBand(c, style, i);
+    const during = blockers.filter(({g}) => c.startMs < g.endMs && g.startMs < c.endMs);
+    const hits = during.filter((x) => overlap(band, x.band));
+    if (!hits.length) return c;
+    const h = band.bottom - band.top;
+    const free = (top: number) => top >= SAFE.topPct && top + h <= SAFE.bottomPct && !during.some((x) => overlap({top, bottom: top + h}, x.band));
+    const below = Math.max(...hits.map((x) => x.band.bottom)) + 2;
+    const above = Math.min(...hits.map((x) => x.band.top)) - 2 - h;
+    const top = free(below) ? below : free(above) ? above : null;
+    return top == null ? c : {...c, topPct: Math.round(top * 10) / 10, pin: true};
+  });
+}
 
 // face box per source file, fractions of the frame (from the captions job's YuNet pass)
 export type FaceBox = {found?: boolean; top: number; bottom: number; left?: number; right?: number};
@@ -95,8 +117,8 @@ const SINGLE_WORD = new Set(['big-word', 'oversized', 'fill-title']); // what ma
 
 export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
   const issues: Issue[] = [];
-  const caps = projectCaptions(p.captions, p.clips, fps);
   const gfx = projectGraphics(p.graphics ?? [], p.clips, fps);
+  const caps = avoidGraphics(projectCaptions(p.captions, p.clips, fps), gfx, p.captionStyle); // as rendered
   const totalMs = caps.length || gfx.length ? Math.max(...caps.map((c) => c.endMs), ...gfx.map((g) => g.endMs), 0) : 0;
 
   // --- captions ---
