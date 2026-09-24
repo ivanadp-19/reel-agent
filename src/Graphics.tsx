@@ -31,9 +31,10 @@ const outCubic = Easing.out(Easing.cubic);
 // how the graphic being drawn arrives and leaves (set by One from the graphic or the caption pack)
 type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number};
 const GfxContext = createContext<Gfx>({reveal: 'auto', out: 'auto', framesLeft: 1e6, seed: 1});
-// the template's own staggered entrance runs for 'auto' and 'blur' (its blur-in IS the catalog's 5–9 f blur-in);
-// any other reveal replaces it, so the template's parts are simply there
-const ownEntrance = (r: Reveal) => r === 'auto' || r === 'blur';
+// the template's own staggered entrance runs for 'auto' and 'blur' (its blur-in IS the catalog's 5–9 f blur-in)
+// and under the per-character reveals (Letters handles the title, the tag / subtitle still fade in after it);
+// a block reveal (drop, band, wipe…) replaces it, so the template's parts are simply there
+const ownEntrance = (r: Reveal) => r === 'auto' || r === 'blur' || TEXT_REVEALS.has(r);
 // 0→1 over `frames`, starting at `delay`
 const useReveal = (delay: number, frames: number) => {
   const f = useCurrentFrame();
