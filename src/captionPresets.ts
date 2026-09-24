@@ -10,6 +10,7 @@
 // key words 1.5–1.9× bigger; a page of one or two words renders larger still.
 
 import type {FontFamily} from './fonts.ts';
+import type {ArriveKind, LeaveKind} from './motion.ts';
 
 export type AnimIn = 'fade' | 'slideUp' | 'pop' | 'blur' | 'none';
 
@@ -49,8 +50,9 @@ export type Preset = {
   active: 'none' | 'color'; // mark the word being spoken (page reveal)
   position: 'anchored' | 'float'; // anchored = face-aware topPct; float = alternate corners
   pageIn: {type: AnimIn; ms: number};
-  pageOut: {ms: number}; // fade
-  wordIn: AnimIn; // build: how a plain word arrives at its onset (tier words always pop)
+  pageOut: LeaveKind; // how a page leaves (src/motion.ts; cut = it stays until the next page)
+  wordIn: ArriveKind; // build: how a plain word arrives at its onset (src/motion.ts)
+  keyIn: ArriveKind; // how a tier word arrives (at its onset in build mode, with the page otherwise)
   holdMs: number; // a page stays this long after its last word (never past the next page)
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
@@ -70,8 +72,9 @@ const base = {
   active: 'none',
   position: 'anchored',
   pageIn: {type: 'fade', ms: 120},
-  pageOut: {ms: 120},
+  pageOut: 'fade',
   wordIn: 'pop',
+  keyIn: 'pop',
   holdMs: 700,
   autoScale: false,
   focusPull: 0,
@@ -100,7 +103,6 @@ export const PRESETS: Record<string, Preset> = {
     desc: 'one word at a time, big, centered, no box (R1/R4)',
     font: {family: 'Montserrat', weight: 700, sizePx: 92, case: 'none', trackingPx: -1, lineHeight: 1.1},
     pageIn: {type: 'pop', ms: 160},
-    pageOut: {ms: 100},
     holdMs: 250, // word-at-a-time pages should not linger
     tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.18}},
     layout: {maxWords: 1, maxCharsLine: 18},
@@ -125,7 +127,6 @@ export const PRESETS: Record<string, Preset> = {
     desc: 'small spaced caps, a phrase at a time, blur-in (R3)',
     font: {family: 'Montserrat', weight: 600, sizePx: 42, case: 'upper', trackingPx: 6, lineHeight: 1.35},
     pageIn: {type: 'blur', ms: 220},
-    pageOut: {ms: 160},
     layout: {maxWords: 4, maxCharsLine: 22},
   },
   // ---- Captions.ai-like packs ----
@@ -133,13 +134,16 @@ export const PRESETS: Record<string, Preset> = {
     ...base,
     id: 'prism',
     label: 'Prism',
-    desc: 'clean sans built word by word in floating positions; key words 1.5× in bold italic with a metallic teal gradient, and a tier-2 word blurs the footage behind it (Captions.ai Prism Pro)',
+    desc: 'clean sans built word by word in floating positions; key words 1.5× in bold italic arrive as a ghost with a shine across a metallic gradient, and a tier-2 word blurs the footage behind it (Captions.ai Prism Pro)',
     font: {family: 'Inter', weight: 400, sizePx: 64, case: 'none', trackingPx: -0.5, lineHeight: 1.12},
-    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.4)', accent: '#9FD9DC', gradient: 'linear-gradient(100deg, #eef1f2 0%, #ffffff 30%, #a9dfe1 55%, #6c9ea1 100%)'},
+    // a long metallic ramp (gold → silver → white → teal → steel); each key word shows a different stretch of it
+    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.4)', accent: '#9FD9DC', gradient: 'linear-gradient(100deg, #cfae7a 0%, #f1e6d0 14%, #ffffff 32%, #b3e3e5 52%, #6c9ea1 72%, #e6ebec 88%, #a9dfe1 100%)'},
     reveal: 'build',
     position: 'float',
-    pageIn: {type: 'fade', ms: 120},
+    pageIn: {type: 'none', ms: 0}, // the page appears with its first word
+    pageOut: 'cut',
     wordIn: 'fade',
+    keyIn: 'ghost', // 40 % → 100 % while a shine crosses the gradient, no scale
     holdMs: 1200,
     autoScale: true,
     focusPull: 18,
@@ -155,7 +159,10 @@ export const PRESETS: Record<string, Preset> = {
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#3B5BFF', onAccent: '#ffffff'},
     reveal: 'build',
     upcoming: 'dim',
-    wordIn: 'fade',
+    pageIn: {type: 'none', ms: 0},
+    pageOut: 'cut',
+    wordIn: 'cut', // the 1-frame grey comes from `upcoming: dim`
+    keyIn: 'cut',
     tiers: {1: {weight: 700, block: true}, 2: {weight: 800, block: true, bg: '#ffffff', fg: '#111111', scale: 1.12}},
     layout: {maxWords: 5, maxCharsLine: 20},
   },
@@ -168,7 +175,10 @@ export const PRESETS: Record<string, Preset> = {
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#E63312', onAccent: '#ffffff'},
     reveal: 'build',
     upcoming: 'dim',
-    wordIn: 'pop',
+    pageIn: {type: 'none', ms: 0},
+    pageOut: 'cut',
+    wordIn: 'fade',
+    keyIn: 'pop', // the red pill pops
     tiers: {1: {weight: 800, scale: 1.5, color: 'text'}, 2: {weight: 800, scale: 1.6, pill: true}},
     layout: {maxWords: 6, maxCharsLine: 22},
   },
@@ -181,7 +191,10 @@ export const PRESETS: Record<string, Preset> = {
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#6FD3A5', onAccent: '#163B2E'},
     reveal: 'build',
     upcoming: 'dim',
-    wordIn: 'fade',
+    pageIn: {type: 'none', ms: 0},
+    pageOut: 'fade',
+    wordIn: 'cut',
+    keyIn: 'fade', // the mint box fades in over 2 f
     tiers: {1: {weight: 500, pill: true}, 2: {weight: 600, pill: true, scale: 1.12}},
     layout: {maxWords: 5, maxCharsLine: 18},
   },
@@ -197,8 +210,10 @@ export const PRESETS: Record<string, Preset> = {
     reveal: 'build',
     upcoming: 'dim',
     position: 'float',
-    pageIn: {type: 'fade', ms: 120},
-    wordIn: 'fade',
+    pageIn: {type: 'blur', ms: 70},
+    pageOut: 'cut',
+    wordIn: 'blur',
+    keyIn: 'blur',
     autoScale: true,
     tiers: {1: {weight: 800, scale: 1.15, color: 'text'}, 2: {weight: 800, scale: 1.35, color: 'text'}},
     layout: {maxWords: 3, maxCharsLine: 16},
@@ -211,8 +226,9 @@ export const PRESETS: Record<string, Preset> = {
     font: {family: 'Montserrat', weight: 800, sizePx: 74, case: 'none', trackingPx: -1, lineHeight: 1.15},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.5)', accent: '#7CEFF5'},
     shadow: '0 3px 0 rgba(0,0,0,0.25), 0 6px 24px rgba(0,0,0,0.5)',
-    pageIn: {type: 'pop', ms: 140},
-    pageOut: {ms: 100},
+    pageIn: {type: 'fade', ms: 80},
+    pageOut: 'cut',
+    keyIn: 'fade',
     tiers: {1: {font: 'Kaushan Script', weight: 400, scale: 1.7, glow: true}, 2: {font: 'Kaushan Script', weight: 400, scale: 2.1, glow: true}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },
@@ -225,6 +241,9 @@ export const PRESETS: Record<string, Preset> = {
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.7)', accent: '#ffffff', container: '#2456C7'},
     shadow: '',
     container: 'pill',
+    pageIn: {type: 'blur', ms: 125},
+    pageOut: 'cut',
+    keyIn: 'cut',
     tiers: {1: {italic: true, weight: 500, color: 'text'}, 2: {italic: true, weight: 500, color: 'text', scale: 1.15}},
     layout: {maxWords: 4, maxCharsLine: 22},
   },
@@ -236,8 +255,9 @@ export const PRESETS: Record<string, Preset> = {
     font: {family: 'Bebas Neue', weight: 400, sizePx: 88, case: 'upper', trackingPx: 2, lineHeight: 1},
     colors: {text: '#38C8F4', dim: 'rgba(56,200,244,0.5)', accent: '#ffffff'},
     shadow: `0 0 22px rgba(56,200,244,0.55), ${HARD}`,
-    pageIn: {type: 'pop', ms: 140},
-    pageOut: {ms: 80},
+    pageIn: {type: 'blur', ms: 100},
+    pageOut: 'cut',
+    keyIn: 'blur',
     tiers: {1: {scale: 1.25}, 2: {scale: 1.6}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },

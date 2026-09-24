@@ -1,7 +1,8 @@
 import React from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
-import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type AnimIn, type Preset, type TierStyle} from './captionPresets';
+import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
+import {arrive, leave, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily} from './fonts';
 import {legible, useBrand} from './brand';
 
@@ -11,25 +12,25 @@ const CLAMP = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const SANS = new Set<string>(['Inter', 'Montserrat', 'Poppins']);
 
 // one word, styled by its tier; in build mode it appears at its own onset
-const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: boolean; onsetFrame: number}> = ({w, preset, accent, active, onsetFrame}) => {
+const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; onsetFrame: number}> = ({w, index, preset, accent, active, onsetFrame}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const tier = (w.tier ?? 0) as 0 | 1 | 2;
   const t: TierStyle = preset.tiers[tier] ?? {};
   const build = preset.reveal === 'build';
   const spoken = frame >= onsetFrame;
-  // arrival: tier words pop in either mode; plain words follow the pack's wordIn (build only).
+  // arrival (src/motion.ts): tier words use the pack's keyIn, plain words its wordIn (build only).
   // In build mode a word arrives at its own onset; in page mode everything arrives with the page.
-  const anim: AnimIn = tier ? 'pop' : build ? preset.wordIn : 'none';
+  const kind: ArriveKind = tier ? preset.keyIn : build ? preset.wordIn : 'cut';
   const local = build ? frame - onsetFrame : frame;
-  const pop = anim === 'pop' ? spring({frame: local, fps, config: {damping: 12, stiffness: 220, mass: 0.6}}) : 1;
-  const a = anim === 'fade' || anim === 'slideUp' || anim === 'blur' ? interpolate(local, [0, Math.max(1, Math.round(fps * 0.12))], [0, 1], {...CLAMP, easing: Easing.out(Easing.cubic)}) : 1;
+  const m = arrive(kind, local, fps);
   // the tier's size is real layout (font-size) so the gap and the page box grow
   // with it; the transform only animates the arrival
-  const scale = anim === 'pop' ? interpolate(pop, [0, 1], [0.7, 1]) : 1;
-  const dy = anim === 'fade' || anim === 'slideUp' ? (1 - a) * 8 : 0; // a fade rises a touch (Prism)
+  const moving = m.scale !== 1 || m.dx !== 0 || m.dy !== 0;
   const boxed = !!(t.pill || t.block);
   const gradient = t.fill === 'gradient' && !!preset.colors.gradient && !boxed;
+  // the ramp is 2.6× the word: each key word starts at a different stretch of it, like one gradient laid across the page (Prism)
+  const phase = (index * 41) % 100;
   const color = boxed
     ? t.fg ?? preset.colors.onAccent ?? '#000'
     : tier && (t.color ?? 'accent') === 'accent'
@@ -40,11 +41,19 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
   // not spoken yet: hidden (space reserved) or dimmed (karaoke) — plain text either way
   const dimmed = build && !spoken && preset.upcoming === 'dim';
   const hidden = build && !spoken && preset.upcoming === 'hidden';
-  const opacity = hidden ? 0 : dimmed ? 1 : a;
+  const opacity = hidden ? 0 : dimmed ? 1 : m.opacity;
   const styled = !dimmed && !hidden;
   // the word's emoji pops in at the word's onset, as its own item beside it
-  const ePop = w.emoji ? spring({frame: local, fps, config: {damping: 10, stiffness: 200, mass: 0.6}}) : 0;
+  const ePop = w.emoji ? spring({frame: build ? frame - onsetFrame : frame, fps, config: {damping: 10, stiffness: 200, mass: 0.6}}) : 0;
   const glow = t.glow && styled ? `0 0 0.2em ${accent}, 0 0 0.6em ${accent}99, ${preset.shadow || '0 2px 10px rgba(0,0,0,0.5)'}` : undefined;
+  // chromatic split while an `rgb` arrival settles (Impact II)
+  const split = m.rgb > 0.3 ? `${m.rgb.toFixed(1)}px 0 rgba(255,0,90,0.8), ${(-m.rgb).toFixed(1)}px 0 rgba(0,220,255,0.8)` : undefined;
+  // a light band that sweeps the key word left→right while it arrives (Prism's shine)
+  const SHINE = 'linear-gradient(100deg, rgba(255,255,255,0) 35%, rgba(255,255,255,0.9) 50%, rgba(255,255,255,0) 65%)';
+  const layers = gradient && styled
+    ? {backgroundImage: `${SHINE}, ${preset.colors.gradient}`, backgroundSize: '300% 100%, 260% 100%', backgroundPosition: `${((1 - m.shine) * 100).toFixed(1)}% 0, ${phase}% 0`, backgroundRepeat: 'no-repeat'}
+    : null;
+  const filters = [m.blur > 0.2 ? `blur(${m.blur.toFixed(1)}px)` : '', gradient && styled ? 'drop-shadow(0 3px 6px rgba(0,0,0,0.5))' : ''].filter(Boolean).join(' ');
   return (
     <>
       <span
@@ -56,14 +65,16 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
           color: dimmed ? preset.colors.dim : gradient && styled ? 'transparent' : color,
           opacity,
           fontSize: t.scale && t.scale !== 1 ? `${t.scale}em` : undefined,
-          transform: scale === 1 && dy === 0 ? undefined : `translateY(${dy.toFixed(1)}px) scale(${scale})`,
+          transform: moving ? `translate(${m.dx.toFixed(1)}px, ${m.dy.toFixed(1)}px) scale(${m.scale.toFixed(3)})` : undefined,
           transformOrigin: 'center 70%',
           whiteSpace: 'pre',
-          ...(gradient && styled
-            // background-clip text: a text-shadow would paint over the gradient, so the shadow is a drop-shadow filter
-            ? {backgroundImage: preset.colors.gradient, WebkitBackgroundClip: 'text', backgroundClip: 'text', textShadow: 'none', filter: 'drop-shadow(0 3px 6px rgba(0,0,0,0.5))'}
+          filter: filters || undefined,
+          ...(layers
+            // background-clip text: a text-shadow would paint over the gradient, so the shadow is the drop-shadow filter above
+            ? {...layers, WebkitBackgroundClip: 'text', backgroundClip: 'text', textShadow: 'none'}
             : {}),
           ...(glow ? {textShadow: glow} : {}),
+          ...(split ? {textShadow: split} : {}),
           ...(boxed && styled
             ? {background: t.bg ?? accent, padding: '0.02em 0.28em', borderRadius: t.pill ? '0.35em' : '0.1em', textShadow: 'none', margin: '0.06em 0'}
             : {}),
@@ -88,9 +99,8 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   // entrance + exit. Guarded for very short pages (1–2 frames after autocut /
   // clip clamping): interpolate() needs strictly increasing ranges.
   const inF = Math.max(1, Math.min(Math.round((fps * preset.pageIn.ms) / 1000), Math.floor(durationInFrames / 2)));
-  const outStart = Math.max(inF + 1, durationInFrames - Math.round((fps * preset.pageOut.ms) / 1000));
   const a = interpolate(frame, [0, inF], [0, 1], {...CLAMP, easing: Easing.out(Easing.cubic)});
-  const disappear = outStart >= durationInFrames ? 1 : interpolate(frame, [outStart, durationInFrames], [1, 0], CLAMP);
+  const ex = leave(preset.pageOut, durationInFrames - 1 - frame, fps); // cut = opaque until the last frame
   const pop = preset.pageIn.type === 'pop' ? spring({frame, fps, config: {damping: 12, stiffness: 210, mass: 0.6}}) : 1;
   const transform = [
     preset.pageIn.type === 'slideUp' ? `translateY(${(1 - a) * 14}px)` : '',
@@ -117,9 +127,9 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         display: 'flex',
         justifyContent: float ? float.align : 'center',
         padding: '0 70px',
-        opacity: a * disappear,
-        transform: transform || undefined,
-        filter: preset.pageIn.type === 'blur' ? `blur(${(1 - a) * 10}px)` : undefined,
+        opacity: a * ex.opacity,
+        transform: [transform, ex.dy ? `translateY(${ex.dy.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
+        filter: [preset.pageIn.type === 'blur' && a < 1 ? `blur(${((1 - a) * 10).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
       }}
     >
       <div
@@ -145,6 +155,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
           <Word
             key={i}
             w={w}
+            index={i}
             preset={preset}
             accent={accent}
             active={absMs >= w.startMs && absMs <= w.endMs}
