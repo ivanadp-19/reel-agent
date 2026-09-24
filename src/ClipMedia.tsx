@@ -4,8 +4,6 @@ import {sampleTransform, type Clip} from './timeline';
 import type {Grade} from './grade';
 import {toneColor, transitionFx} from './transitions';
 
-// a left→right ramp the dissolve adds to its grain, so the outgoing clip goes first on the left
-const RAMP = 'data:image/svg+xml;utf8,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='256' height='1' preserveAspectRatio='none'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='#000'/><stop offset='1' stop-color='#fff'/></linearGradient></defs><rect width='256' height='1' fill='url(#g)'/></svg>");
 
 // the cut into this clip and out of it: `clip` is the placed clip (the matte layer
 // passes the footage clip), offset = frames between the clip start and this Sequence
@@ -44,7 +42,8 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
   // Form's particles: the clip dissolves left → right through a seeded grain; the fringe of the front is
   // displaced by the same grain so it scatters like dust. th = the value below which a pixel is gone.
   const did = `dissolve-${clip.id.replace(/[^\w-]/g, '_')}`;
-  const dissolve = exit?.type === 'dissolve' ? {th: -0.05 + 1.6 * exit.t, disp: 6 + 50 * exit.t, seed: exit.seed ?? 1} : null;
+  // the front sits where a blurred white flood (starting at x) fades out; it sweeps left → right with t
+  const dissolve = exit?.type === 'dissolve' ? {x: -25 + 145 * exit.t, disp: 6 + 50 * exit.t, seed: exit.seed ?? 1} : null;
   const fly = exit ? ease((exit.t - 0.12) / 0.88) : 0; // tiles pause a beat, then fly
   const tiles = exit?.type === 'split' ? [[0, 0, -1, -1], [50, 0, 1, -1], [0, 50, -1, 1], [50, 50, 1, 1]] : null; // left%, top%, fly direction
   return (
@@ -64,14 +63,18 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
             </filter>
           ) : null}
           {dissolve ? (
-            <filter id={did} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <filter id={did} x={0} y={0} width={1} height={1} colorInterpolationFilters="sRGB">
               <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves={3} seed={dissolve.seed} result="raw" />
               <feColorMatrix in="raw" type="matrix" values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1" result="noise" />
-              <feImage href={RAMP} x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="ramp" />
+              <feFlood floodColor="#000" result="bg" />
+              {/* primitive regions in px: a % here would resolve against the 0×0 svg, not the clip */}
+              <feFlood floodColor="#fff" x={Math.round((dissolve.x / 100) * 1080)} y={0} width={3240} height={1920} result="white" />
+              <feGaussianBlur in="white" stdDeviation="140 0" result="soft" />
+              <feComposite in="soft" in2="bg" operator="over" result="ramp" />
               <feComposite in="noise" in2="ramp" operator="arithmetic" k1={0} k2={0.5} k3={1} k4={0} result="v" />
-              <feColorMatrix in="v" type="matrix" values={`0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 ${(-dissolve.th).toFixed(3)}`} result="keepRaw" />
+              <feColorMatrix in="v" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 -0.8" result="keepRaw" />
               <feComponentTransfer in="keepRaw" result="keep"><feFuncA type="linear" slope={400} intercept={0} /></feComponentTransfer>
-              <feColorMatrix in="v" type="matrix" values={`0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 ${(-(dissolve.th + 0.15)).toFixed(3)}`} result="coreRaw" />
+              <feColorMatrix in="v" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 -0.95" result="coreRaw" />
               <feComponentTransfer in="coreRaw" result="core"><feFuncA type="linear" slope={400} intercept={0} /></feComponentTransfer>
               <feComposite in="keep" in2="core" operator="out" result="fringe" />
               <feDisplacementMap in="SourceGraphic" in2="raw" scale={dissolve.disp} xChannelSelector="R" yChannelSelector="G" result="shaken" />
