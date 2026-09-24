@@ -18,7 +18,9 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
 import {applyAutocut, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, projectCaptions} from '../src/captions.ts';
+import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
+import {isGlue, reapplyTiers} from '../src/paging.ts';
+import {PRESETS} from '../src/captionPresets.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -44,7 +46,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto';
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption);
   return p;
 }
 async function save(id, p) {
@@ -90,18 +92,18 @@ function toAbs(p, clipId, srcMs, clamp = false) {
   return (pc.startMs + (srcMs - inMs) / (pc.clip.speed ?? 1)) / 1000;
 }
 const f1 = (n) => (Math.round(n * 10) / 10).toFixed(1);
-const capText = (c) => c.words.map((w) => (w.accent ? `*${w.text}*` : w.text)).join(' ');
+const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.tier ? `*${w.text}*` : w.text)).join(' ');
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
     const extra = [c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
-  out.push('', 'CAPTIONS (timeline time; *word* = accent):');
+  out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
   const caps = projectCaptions(p.captions, p.clips, FPS);
   for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
   const hidden = p.captions.filter((c) => !caps.some((x) => x.id === c.id)).length;
@@ -142,7 +144,7 @@ function retext(cap, text) {
   if (!words.length) throw new Error('empty caption text');
   const span = cap.endMs - cap.startMs;
   const step = span / words.length;
-  return {...cap, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), accent: false}))};
+  return {...cap, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: 0}))};
 }
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
@@ -250,7 +252,7 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   const p = load(project_id); const i = p.captions.findIndex((c) => c.id === caption_id); if (i < 0) throw new Error(`no caption ${caption_id}`);
   let cap = p.captions[i];
   if (t != null) cap = retext(cap, t);
-  if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, accent: set.has(norm(w.text))}))}; }
+  if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
   if (top_pct != null) cap.topPct = top_pct; if (scale != null) cap.scale = scale;
   p.captions[i] = cap; await save(project_id, p);
   return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.scale ? ` scale ${cap.scale}` : ''}`);
@@ -341,6 +343,37 @@ server.registerTool('set_language', {description: 'Set the transcription languag
   const p = load(project_id); p.lang = lang; await save(project_id, p); return text(`Language: ${lang}`);
 });
 
+server.registerTool('set_caption_style', {description: `Caption preset for the whole project: ${Object.values(PRESETS).map((x) => `${x.id} = ${x.desc}`).join('; ')}. Re-pages the generated captions for the new preset, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
+  const p = load(project_id); p.captionStyle = style;
+  if (p.clips.length && p.captions.length) {
+    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style});
+    const fresh = readPublic('captions.multi.json');
+    // pages without word ids are hand-made and stay — unless NO page has ids
+    // (a project from before word ids), in which case everything is re-paged
+    const legacy = !p.captions.some((c) => c.words.some((w) => w.wid));
+    p.captions = [...(legacy ? [] : p.captions.filter((c) => !c.words.some((w) => w.wid))), ...reapplyTiers(p.captions, Array.isArray(fresh) ? fresh : [])];
+  }
+  await save(project_id, p);
+  return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
+});
+
+server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = accent color — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = big emphasis — rare, at most one per 10 s. Never on function words. Returns what was applied plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2)})).min(1)}}, async ({project_id, items}) => {
+  const p = load(project_id);
+  const want = new Map(items.map((x) => [x.wid, x.tier]));
+  const applied = []; const warn = [];
+  for (const c of p.captions) for (const w of c.words) if (w.wid && want.has(w.wid)) {
+    const tier = want.get(w.wid);
+    if (tier && isGlue(w.text)) warn.push(`${w.wid} "${w.text}": emphasis on a function word`);
+    w.tier = tier; applied.push(w.wid); want.delete(w.wid);
+  }
+  for (const wid of want.keys()) warn.push(`${wid}: no caption word with that id (generate captions first, or it was cut away)`);
+  const t2 = p.captions.flatMap((c) => c.words).filter((w) => w.tier === 2).length;
+  const dur = totalSec(p.clips);
+  if (t2 > Math.max(1, dur / 10)) warn.push(`${t2} tier-2 words in ${f1(dur)}s — aim for at most one per 10 s`);
+  await save(project_id, p);
+  return text(`Applied ${applied.length} annotation(s).${warn.length ? '\nWARN ' + warn.join('\nWARN ') : ''}\n\n${summary(project_id, p)}`);
+});
+
 server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline step on the project, exactly like the editor buttons, and apply the result. autocut = remove silence/pauses (splits clips into segments); captions = WhisperX words → caption pages + face-aware placement (keeps existing captions on clips that already have them). Ordering takes, emphasis and B-roll are YOUR job: use get_transcript, reorder_clips/delete_clips, edit_caption, search_stock/add_broll. Needs the backend (npm start).', inputSchema: {project_id: pid, step: z.enum(['autocut', 'captions'])}}, async ({project_id, step}) => {
   let p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const lang = p.lang ?? 'auto';
@@ -350,14 +383,14 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang}); const fresh = readPublic('captions.multi.json');
+  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle}); const fresh = readPublic('captions.multi.json');
   const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, accentColor: p.accentColor, draft});
+  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)`);
 });

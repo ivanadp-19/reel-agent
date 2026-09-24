@@ -73,9 +73,10 @@ export const MultiClipVideo: React.FC<{
   clips?: Clip[];
   music?: Music;
   captions?: Caption[];
+  captionStyle?: string;
   brolls?: BrollItem[];
   accentColor?: string;
-}> = ({clips = [], music = null, captions = [], brolls = [], accentColor}) => {
+}> = ({clips = [], music = null, captions = [], brolls = [], accentColor, captionStyle}) => {
   const {fps} = useVideoConfig();
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
@@ -112,7 +113,7 @@ export const MultiClipVideo: React.FC<{
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}
 
       {/* captions, always on top */}
-      <CaptionTrack captions={projectedCaptions} accentColor={accentColor} />
+      <CaptionTrack captions={projectedCaptions} accentColor={accentColor} captionStyle={captionStyle} />
     </AbsoluteFill>
   );
 };

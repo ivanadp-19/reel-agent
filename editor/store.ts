@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import type {Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
+import type {PresetId} from '../src/captionPresets';
 import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
@@ -21,6 +22,7 @@ type EditorState = {
   brolls: BrollItem[];
   brollAssets: BrollAsset[];
   accentColor: string;
+  captionStyle: PresetId;
   selectedId: string | null;
   selectedClipId: string | null;
   currentFrame: number;
@@ -31,7 +33,7 @@ type EditorState = {
   past: Snapshot[];
   future: Snapshot[];
 
-  init: (meta: Meta, captions: Caption[], accentColor?: string, clips?: Clip[], music?: Music, brolls?: BrollItem[], brollAssets?: BrollAsset[], lang?: Lang) => void;
+  init: (meta: Meta, captions: Caption[], accentColor?: string, clips?: Clip[], music?: Music, brolls?: BrollItem[], brollAssets?: BrollAsset[], lang?: Lang, captionStyle?: PresetId) => void;
   addBrollAsset: (asset: BrollAsset) => void;
   removeBrollAsset: (id: string) => void;
   select: (id: string | null) => void;
@@ -61,6 +63,7 @@ type EditorState = {
   setClipSpeed: (id: string, speed: number) => void;
   setMusic: (music: Music) => void;
   setAccentColor: (color: string) => void;
+  setCaptionStyle: (style: PresetId) => void;
   setCaptions: (captions: Caption[]) => void;
   setProjectInfo: (id: string, name: string) => void;
   setProjectName: (name: string) => void;
@@ -102,6 +105,7 @@ export const useEditor = create<EditorState>((set) => ({
   brolls: [],
   brollAssets: [],
   accentColor: '#FFB020',
+  captionStyle: 'palabra',
   selectedId: null,
   selectedClipId: null,
   currentFrame: 0,
@@ -109,7 +113,7 @@ export const useEditor = create<EditorState>((set) => ({
   past: [],
   future: [],
 
-  init: (meta, captions, accentColor, clips = [], music = null, brolls = [], brollAssets = [], lang = 'auto') =>
+  init: (meta, captions, accentColor, clips = [], music = null, brolls = [], brollAssets = [], lang = 'auto', captionStyle = 'palabra') =>
     set((s) => ({
       meta: withMeta(meta, clips),
       projectId: null, // caller assigns via setProjectInfo — prevents autosaving a cleared state into the old project
@@ -121,6 +125,7 @@ export const useEditor = create<EditorState>((set) => ({
       brollAssets,
       accentColor: accentColor ?? s.accentColor,
       lang,
+      captionStyle,
       past: [],
       future: [],
     })),
@@ -140,13 +145,13 @@ export const useEditor = create<EditorState>((set) => ({
       captions: mapCap(s.captions, id, (c) => {
         const tokens = text.trim().split(/\s+/).filter(Boolean);
         if (!tokens.length) return c;
-        const accented = new Set(c.words.filter((w) => w.accent).map((w) => w.text.toLowerCase()));
+        const tiers = new Map(c.words.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
         const per = (c.endMs - c.startMs) / tokens.length;
         const words = tokens.map((t, i) => ({
           text: t,
           startMs: Math.round(c.startMs + i * per),
           endMs: Math.round(c.startMs + (i + 1) * per),
-          accent: accented.has(t.toLowerCase()),
+          tier: tiers.get(t.toLowerCase()) ?? 0,
         }));
         return {...c, words};
       }),
@@ -156,7 +161,7 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => ({
       captions: mapCap(s.captions, id, (c) => ({
         ...c,
-        words: c.words.map((w, i) => (i === wi ? {...w, accent: !w.accent} : w)),
+        words: c.words.map((w, i) => (i === wi ? {...w, tier: ((w.tier ?? 0) + 1) % 3} : w)),
       })),
     })),
 
@@ -287,6 +292,7 @@ export const useEditor = create<EditorState>((set) => ({
       return {...(structural ? withHistory(s) : {}), music};
     }),
   setAccentColor: (accentColor) => set({accentColor}),
+  setCaptionStyle: (captionStyle) => set({captionStyle}),
   setCaptions: (captions) => set({captions, selectedId: null}),
   setProjectInfo: (projectId, projectName) => set({projectId, projectName}),
   setProjectName: (projectName) => set({projectName}),

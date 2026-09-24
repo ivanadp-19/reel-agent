@@ -2,7 +2,9 @@ import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'reac
 import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
-import {projectCaptions, mergeCaptions} from '../src/captions';
+import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
+import {reapplyTiers} from '../src/paging';
+import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
@@ -62,7 +64,7 @@ const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -83,8 +85,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   // per-frame currentFrame updates — otherwise the Player re-syncs the video
   // every frame and stutters/repeats a fraction of a second.
   const inputProps = useMemo(
-    () => ({clips, music, captions, brolls, accentColor}),
-    [clips, music, captions, brolls, accentColor],
+    () => ({clips, music, captions, brolls, accentColor, captionStyle}),
+    [clips, music, captions, brolls, accentColor, captionStyle],
   );
 
   // (project load + Start/Editor routing live in App.tsx)
@@ -98,7 +100,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, brollAssets, accentColor, lang, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, brollAssets, accentColor, lang, captionStyle, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -108,7 +110,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, brollAssets, accentColor, lang]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, brollAssets, accentColor, lang, captionStyle]);
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
@@ -123,7 +125,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         if (p.updatedAt <= lastSeenUpdate.current) return;
         lastSeenUpdate.current = p.updatedAt;
         const st = useEditor.getState();
-        st.init(META_RELOAD, p.captions ?? [], p.accentColor, p.clips ?? [], p.music ?? null, p.brolls ?? [], p.brollAssets ?? [], p.lang ?? 'auto');
+        st.init(META_RELOAD, (p.captions ?? []).map(normalizeCaption), p.accentColor, p.clips ?? [], p.music ?? null, p.brolls ?? [], p.brollAssets ?? [], p.lang ?? 'auto', p.captionStyle ?? 'palabra');
         st.setProjectInfo(projectId, p.name || 'Untitled project');
         notify('Project updated from outside (agent)', 'ok');
       } catch { /* backend hiccup — try again next tick */ }
@@ -204,7 +206,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
-      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, accentColor, draft})}).then((x) => x.json());
+      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, accentColor, captionStyle, draft})}).then((x) => x.json());
       pollJob(
         '/api/render', r.jobId,
         (s) => setExp({status: 'running', progress: s.progress ?? 0}),
@@ -222,17 +224,21 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     }
   };
 
-  const generateCaptions = async () => {
+  // replace = re-page everything for a new style (word tiers carried over by word id)
+  const generateCaptions = async (replace = false, style: PresetId = captionStyle) => {
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style})}).then((x) => x.json());
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
         async () => {
           const fresh = await fetch(`/captions.multi.json?_=${Date.now()}`).then((x) => x.json()).catch(() => []);
-          const {captions: merged, added} = mergeCaptions(captions, Array.isArray(fresh) ? fresh : [], clips);
+          const freshPages = Array.isArray(fresh) ? fresh : [];
+          const {captions: merged, added} = replace
+            ? {captions: [...captions.filter((c) => !c.words.some((w) => w.wid)), ...reapplyTiers(captions, freshPages)], added: freshPages.length}
+            : mergeCaptions(captions, freshPages, clips);
           pushHistory();
           setCaptions(merged);
           setGenerating(false);
@@ -545,7 +551,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
 
         <Inspector
           playerRef={playerRef}
-          onGenerate={generateCaptions}
+          onGenerate={() => generateCaptions(false)}
+          onStyleChange={(s) => { setCaptionStyle(s); if (captions.length) generateCaptions(true, s); }}
           generating={generating}
           progressLabel={genLabel}
         />

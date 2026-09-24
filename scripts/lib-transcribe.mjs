@@ -154,11 +154,12 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
     }
     const inMs = clip.inSec * 1000;
     const outMs = clip.outSec * 1000;
-    for (const w of words) {
-      if (w.endMs <= inMs || w.startMs >= outMs) continue;
+    words.forEach((w, wi) => {
+      if (w.endMs <= inMs || w.startMs >= outMs) return;
       const s = Math.max(w.startMs, inMs) - inMs + offsetMs;
       const e = Math.min(w.endMs, outMs) - inMs + offsetMs;
       out.push({
+        wid: `${sourceKey(clip)}:${wi}`, // stable word id
         word: w.word,
         startMs: Math.round(s), // absolute timeline (current cut)
         endMs: Math.round(e),
@@ -167,7 +168,7 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,
       });
-    }
+    });
     offsetMs += (clip.outSec - clip.inSec) * 1000;
   });
   // persist for reuse (e.g. B-roll detection without re-running)

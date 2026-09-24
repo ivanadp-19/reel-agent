@@ -77,3 +77,7 @@ El video de prueba del usuario (`pruebaeditoria.mp4`) sale **plano y lavado**, a
 6. **Brand kit por cliente:** logo, colores de acento y fuentes. Todos los templates lo leen.
 7. **Look de color por defecto: "real estate limpio".** Exposición y balance automáticos para material plano, más una LUT luminosa.
 8. **Después (fase 4+):** etiquetas ancladas en 3D a la pared, que requieren tracking planar con OpenCV.
+
+## Captions.ai (landing, 2026-09-24)
+
+Estilos de ejemplo que muestra su landing: **Prism Pro** (frase ligera con las palabras clave en bold y más grandes: "Focusing **Only** on the **Price**"; titular "Real / estate" con pesos mixtos), **Paper II** (tipografía recortada tipo papel y collage), **Prime** (palabra gigante "LEARN" detrás de la cabeza + frase con una palabra en script/itálica), **Elevate** (script "Lessons" + versalitas pequeñas). Confirma el modelo de tiers (peso/tamaño por palabra) y el texto detrás de la persona. `prism` entra como cuarto preset.

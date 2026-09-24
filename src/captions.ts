@@ -6,7 +6,13 @@
 
 import {placeClips, type Clip} from './timeline.ts';
 
-export type CaptionWord = {text: string; startMs: number; endMs: number; accent: boolean};
+export type CaptionWord = {
+  wid?: string; // `${source}:${index}` from the transcript; absent on hand-typed words
+  text: string;
+  startMs: number;
+  endMs: number;
+  tier?: number; // 0 plain · 1 accent color · 2 big emphasis (see captionPresets)
+};
 export type Caption = {
   id: string;
   src: string; // staticFile-relative source path, e.g. "clips/IMG_0227.mp4"
@@ -19,6 +25,17 @@ export type Caption = {
   clipId?: string; // the clip this projected page sits on
   holdMaxMs?: number; // clip's end — the visual hold must not bleed into the next clip
 };
+
+// older projects stored accent:boolean — map it onto tier 1
+export function normalizeCaption(c: Caption): Caption {
+  return {
+    ...c,
+    words: c.words.map((word) => {
+      const {accent, ...w} = word as CaptionWord & {accent?: boolean};
+      return {...w, tier: w.tier ?? (accent ? 1 : 0)};
+    }),
+  };
+}
 
 // Source-relative captions → absolute timeline pages. A page whose words span a
 // cut becomes one page per clip; a source placed twice shows its captions twice.

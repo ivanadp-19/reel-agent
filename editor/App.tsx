@@ -1,5 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {useEditor} from './store';
+import {normalizeCaption} from '../src/captions';
 import {Editor} from './Editor';
 import {Start, type ProjectMeta} from './Start';
 
@@ -25,7 +26,7 @@ export const App: React.FC = () => {
   const openProject = async (id: string) => {
     try {
       const p = await fetch('/api/projects/' + id).then((r) => r.json());
-      init(META0, p.captions ?? [], p.accentColor, p.clips ?? [], p.music ?? null, p.brolls ?? [], p.brollAssets ?? [], p.lang ?? 'auto');
+      init(META0, (p.captions ?? []).map(normalizeCaption), p.accentColor, p.clips ?? [], p.music ?? null, p.brolls ?? [], p.brollAssets ?? [], p.lang ?? 'auto', p.captionStyle ?? 'palabra');
       setProjectInfo(id, p.name || 'Untitled project');
       setView('editor');
     } catch {

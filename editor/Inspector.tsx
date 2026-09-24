@@ -4,6 +4,7 @@ import {useEditor} from './store';
 import {clipDurationSec} from '../src/timeline';
 import {projectCaptions} from '../src/captions';
 import {projectBrolls} from '../src/Broll';
+import {PRESETS, type PresetId} from '../src/captionPresets';
 
 type Tab = 'Captions' | 'B-roll' | 'Styles' | 'Settings';
 
@@ -15,9 +16,10 @@ export const Inspector: React.FC<{
   onGenerate: () => void;
   generating?: boolean;
   progressLabel?: string;
-}> = ({playerRef, onGenerate, generating, progressLabel}) => {
+  onStyleChange: (style: PresetId) => void;
+}> = ({playerRef, onGenerate, generating, progressLabel, onStyleChange}) => {
   const {
-    meta, captions, clips, music, brolls, accentColor, selectedId, selectedClipId,
+    meta, captions, clips, music, brolls, accentColor, captionStyle, selectedId, selectedClipId,
     select, selectClip, setText, setTopPct, toggleAccent, pushHistory,
     deleteClip, moveClip, setMusic, setAccentColor, setBrollMode, swapBroll, removeBroll,
     setClipVolume, toggleClipMute, setClipSpeed,
@@ -168,18 +170,18 @@ export const Inspector: React.FC<{
                             onChange={(e) => setTopPct(c.id, Number(e.target.value))}
                             className="w-full mt-1 mb-3 accent-primary"
                           />
-                          <label className="text-[11px] text-on-surface-variant">Accents (click a word)</label>
+                          <label className="text-[11px] text-on-surface-variant">Emphasis (click a word: accent → big → off)</label>
                           <div className="flex flex-wrap gap-1.5 mt-1.5">
                             {c.words.map((w, i) => (
                               <button
                                 key={i}
                                 onClick={() => { pushHistory(); toggleAccent(c.id, i); }}
-                                style={w.accent ? {background: accentColor, borderColor: accentColor, color: '#000'} : undefined}
+                                style={w.tier ? {background: accentColor, borderColor: accentColor, color: '#000'} : undefined}
                                 className={`px-2 py-1 rounded text-[12px] border ${
-                                  w.accent ? 'font-bold' : 'border-outline-variant/40 bg-surface-container-lowest text-on-surface-variant'
+                                  w.tier ? 'font-bold' : 'border-outline-variant/40 bg-surface-container-lowest text-on-surface-variant'
                                 }`}
                               >
-                                {w.text}
+                                {w.text}{w.tier === 2 ? ' ↑' : ''}
                               </button>
                             ))}
                           </div>
@@ -241,6 +243,19 @@ export const Inspector: React.FC<{
 
         {tab === 'Styles' && (
           <div>
+            <label className="text-label-bold font-label-bold uppercase text-on-surface-variant">Caption style</label>
+            <div className="grid grid-cols-2 gap-2 mt-3 mb-5">
+              {Object.values(PRESETS).map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => onStyleChange(p.id)}
+                  title={p.desc}
+                  className={`py-2 rounded-lg border text-body-md font-bold ${captionStyle === p.id ? 'border-primary text-primary bg-primary-container/20' : 'border-outline-variant/40 text-on-surface-variant hover:border-primary/30'}`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
             <label className="text-label-bold font-label-bold uppercase text-on-surface-variant">Accent color</label>
             <div className="flex flex-wrap gap-2 mt-3">
               {ACCENT_SWATCHES.map((c) => (
