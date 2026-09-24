@@ -151,6 +151,18 @@ export const TEMPLATES = {
     y: 30,
     schema: z.object({value: short(14), label: z.string().trim().max(20).default(''), note: z.string().trim().max(32).default(''), countUp: z.boolean().default(true)}),
   },
+  // closing card over the last line: brand logo, a title, a call-to-action pill, the handle
+  'end-card': {
+    desc: 'full-frame closing card (covers the video) with the brand logo (set_brand), a title, a CTA pill and the handle — over the last sentence; bg dark|accent|light',
+    defaultMs: 2600,
+    y: 0,
+    schema: z.object({
+      title: short(40),
+      cta: z.string().trim().max(24).default('Follow for more'),
+      handle: z.string().trim().max(30).default(''),
+      bg: z.enum(['dark', 'accent', 'light']).default('dark'),
+    }),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',
@@ -170,6 +182,8 @@ export type TemplateId = keyof typeof TEMPLATES;
 
 // decor sits by its center (x/y) and may share the screen with a text graphic
 export const CENTERED = new Set<string>(['sticker', 'starburst']);
+// cards that cover the whole frame (cutaways, closing card)
+export const FULL_FRAME = new Set<string>(['kinetic-card', 'end-card']);
 export const STAR_PX: Record<string, number> = {sm: 230, md: 310, lg: 400}; // starburst diameter
 // oversized: the font size that makes the word ~1.3× the 1080 px frame width
 export const OVERSIZED_FAMILY: Record<string, FontFamily> = {condensed: 'Anton', display: 'Montserrat', serif: 'Playfair Display'};

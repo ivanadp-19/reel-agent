@@ -1,6 +1,6 @@
 import React from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, type Graphic} from './graphicTemplates';
+import {CENTERED, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic} from './graphicTemplates';
 import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
 import {fitSize, textWidthEm} from './textFit';
@@ -283,6 +283,30 @@ const Price: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   );
 };
 
+// closing card: canvas slides up, logo pops, title blurs in, the CTA pill pulses once
+const EndCard: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const kit = useBrand();
+  const face = useFace('display');
+  const bg = props.bg === 'accent' ? kit.accent : props.bg === 'light' ? kit.light : kit.dark;
+  const fg = ink(bg);
+  const card = useReveal(0, 10);
+  const logo = spring({frame: frame - 6, fps, config: {damping: 11, stiffness: 180, mass: 0.7}});
+  const title = useReveal(10, 10);
+  const cta = spring({frame: frame - 18, fps, config: {damping: 8, stiffness: 160, mass: 0.8}});
+  const pillBg = props.bg === 'accent' ? fg : kit.accent;
+  return (
+    <div style={{position: 'absolute', inset: 0, background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 44, padding: '0 90px', textAlign: 'center', textShadow: 'none', opacity: card, transform: `translateY(${(1 - card) * 80}px)`}}>
+      {kit.logo ? <Img src={staticFile(kit.logo)} style={{maxWidth: 360, maxHeight: 220, objectFit: 'contain', opacity: Math.min(1, logo * 1.5), transform: `scale(${interpolate(logo, [0, 1], [0.6, 1])})`}} /> : null}
+      {/* the title gets two lines of room before it shrinks */}
+      <div style={{...face.style, fontSize: fitSize(props.title, 104, face.family, 1700, 60), lineHeight: 1.05, color: fg, maxWidth: 900, ...blurIn(title)}}>{props.title}</div>
+      {props.cta ? <div style={{fontSize: 44, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase', color: ink(pillBg), background: pillBg, borderRadius: 999, padding: '22px 56px', opacity: Math.min(1, cta * 1.5), transform: `scale(${interpolate(cta, [0, 1], [0.5, 1])})`}}>{props.cta}</div> : null}
+      {props.handle ? <div style={{fontSize: 38, fontWeight: 600, color: fg, opacity: 0.8 * title}}>{props.handle}</div> : null}
+    </div>
+  );
+};
+
 // an image asset with a simple motion: pop in, then wiggle / float / spin
 const Sticker: React.FC<{props: any}> = ({props}) => {
   const frame = useCurrentFrame();
@@ -310,7 +334,7 @@ const Sticker: React.FC<{props: any}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, sticker: Sticker};
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
 
 const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({g, accent, durationInFrames}) => {
   const frame = useCurrentFrame();
@@ -323,7 +347,7 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   // footage); fills (cards, bars, pins, bursts) take the exact kit color themselves
   accent = legible(accent);
   if (!Comp) return null;
-  if (g.template === 'kinetic-card') {
+  if (FULL_FRAME.has(g.template)) {
     // covers the whole frame (a cutaway), no text-block positioning
     return (
       <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', inset: 0, fontFamily: FONT, opacity: fadeOut, pointerEvents: 'none'}}>

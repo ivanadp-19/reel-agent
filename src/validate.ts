@@ -126,6 +126,11 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
       if (o.startMs < g.endMs && g.startMs < o.endMs) issues.push({level: 'warn', code: 'overlap-graphics', msg: `graphics ${g.id} and ${o.id} are on screen at the same time`, ref: g.id});
     }
   }
+  // a closing card covers the video: captions drawn over it read as clutter
+  for (const g of gfx.filter((x) => x.template === 'end-card')) {
+    const over = caps.filter((c) => c.startMs < g.endMs && g.startMs < c.endMs).map((c) => c.id);
+    if (over.length) issues.push({level: 'warn', code: 'end-card-captions', msg: `captions ${over.join(', ')} show over the end card ${g.id} — delete_captions them unless the line should stay readable`, ref: g.id});
+  }
   // behind graphics need a matte
   for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes, p.clips)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
   // hook: something in the first 3 s
