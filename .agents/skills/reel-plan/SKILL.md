@@ -31,7 +31,7 @@ LENGTH: expected duration after cuts; if the material is short, say so — never
 
 | Brief / footage | Pack |
 |---|---|
-| Real estate, lifestyle, premium, calm presenter, B-roll heavy | `prism` — build-up, gradient key words, the hero blurs the footage |
+| Real estate, lifestyle, premium, calm presenter, B-roll heavy | `prism` — build-up, key words arrive as a ghost with a shine, the hero blurs the footage; B-roll cues in `mode: card`, cuts with `whipDiag` |
 | Tech, product, opinion with claims | `stack` (big key words, red pill hero) or `focus` (blue blocks, white hero) |
 | B2B, SaaS, corporate | `lift` (mint pills, large clean sans) |
 | Fintech, apps, iOS feel | `evo` (bold italic in frosted glass, 1–3 words) |
