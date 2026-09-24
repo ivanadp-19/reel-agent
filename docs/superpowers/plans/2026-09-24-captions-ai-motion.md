@@ -41,7 +41,7 @@
 
 ---
 
-## Fase 0 — Ver el movimiento (media jornada)
+## Fase 0 — Ver el movimiento (media jornada) — HECHA 2026-09-24
 
 ### Task 0.1: `motion_proof`, la tira que el agente puede mirar
 
@@ -94,7 +94,7 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
 
 ---
 
-## Fase 1 — Prism Pro al 100 % (1–2 días)
+## Fase 1 — Prism Pro al 100 % (1–2 días) — HECHA 2026-09-24
 
 ### Task 1.1: `src/motion.ts` — llegadas y salidas puras
 
@@ -240,7 +240,7 @@ export function leave(kind: LeaveKind, framesLeft: number, fps: number) {
 
 ---
 
-## Fase 2 — Paquete de transiciones (2–3 días)
+## Fase 2 — Paquete de transiciones (2–3 días) — HECHA 2026-09-24 (salvo `tear`, que espera una textura de papel de la librería de assets)
 
 Todas son funciones puras en `transitions.ts` que devuelven, además de `Fx`, una **máscara** (`clip-path` CSS) o un **flash**; `ClipMedia` y `MultiClipVideo` solo pintan. Cada tarea: test de la función (valores en frame 0, medio y final), gate visual contra el preview indicado, commit.
 

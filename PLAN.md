@@ -71,7 +71,7 @@ Por eso:
 
 ## 4b. Los 20 estilos de Captions.ai
 
-**Movimiento (2026-09-24):** cada movimiento de los 20 previews está descrito frame a frame en `research/captions-ai-motion.md` (Parte 1 por estilo, Parte 2 vocabulario de primitivas y reglas de tiempo comunes), y el plan de implementación por fases y tareas está en `docs/superpowers/plans/2026-09-24-captions-ai-motion.md` (Fase 0 `motion_proof` → Fase 1 Prism al 100 % → transiciones → títulos → layouts → 20 style packs).
+**Movimiento (2026-09-24):** cada movimiento de los 20 previews está descrito frame a frame en `research/captions-ai-motion.md` (Parte 1 por estilo, Parte 2 vocabulario de primitivas y reglas de tiempo comunes), y el plan de implementación por fases y tareas está en `docs/superpowers/plans/2026-09-24-captions-ai-motion.md` (Fase 0 `motion_proof` → Fase 1 Prism al 100 % → transiciones → títulos → layouts → 20 style packs). Hechas el 2026-09-24: Fase 0, Fase 1 (`reports/motion-fase1-2026-09-24.md`) y Fase 2, el paquete de 15 transiciones con su gate frame a frame (`reports/motion-fase2-2026-09-24.md`).
 
 El usuario quiere poder **imitar cada uno de los 20 estilos** de AI Edit de Captions.ai. Análisis completo en `research/captions-ai-styles.md`. Conclusión: casi todos se construyen con el mismo vocabulario: captions que se van construyendo palabra a palabra (build-up), 1–2 palabras con tratamiento de énfasis (bold/itálica/otra fuente/color/píldora/bloque), un título grande al inicio, layouts de tarjeta/split, transiciones con blur y una paleta fija. Lo que los diferencia son fuentes, contenedores, marcos, texturas y stickers.
 

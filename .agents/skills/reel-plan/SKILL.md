@@ -22,7 +22,7 @@ BEATS:
 CUTS: retakes, off-mic lines, meta talk, fillers you expect find_cut_candidates to show; which take you keep.
 CAPTIONS: pack + why (table below); key words per sentence (ids, 1–2 each, meaning words only); emoji (a few, concrete nouns / feelings).
 B-ROLL: mentions that want footage (ids) → library tag or stock query; black stretches that must be covered.
-MUSIC / SFX / TRANSITIONS: yes or no; where a whip / zoom marks a change of topic or place.
+MUSIC / SFX / TRANSITIONS: yes or no; where a cut marks a change of topic or place and which kind (the pack's family: prism → whipDiag, focus → bands, lift → polyWipe, stack → flash, prime → spin, impact → rgbFlash, orbit → disc, evo → crossBlur).
 COLOR: look (clean by default) and why.
 LENGTH: expected duration after cuts; if the material is short, say so — never pad with slow motion.
 ```

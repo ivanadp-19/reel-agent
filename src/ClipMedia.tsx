@@ -35,7 +35,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
   const exitStyle: React.CSSProperties | null = exit?.type === 'card'
     ? {transform: `translateX(${-125 * ease((exit.t - 0.3) / 0.7)}%) scale(${1 - 0.42 * ease(exit.t * 1.6)})`, borderRadius: 48 * ease(exit.t * 2), overflow: 'hidden', boxShadow: `0 30px 80px rgba(0,0,0,${0.5 * exit.t})`, transformOrigin: 'center'}
     : exit?.type === 'fade' ? {opacity: 1 - exit.t, filter: `blur(${(30 * exit.t).toFixed(1)}px)`}
-    : exit?.type === 'shrink' ? {transform: `scale(${(1 - 0.15 * ease(exit.t * 2)).toFixed(3)})`, transformOrigin: 'center', boxShadow: `0 20px 60px rgba(0,0,0,${0.4 * exit.t})`}
+    : exit?.type === 'shrink' ? {filter: `brightness(${(1 - 0.35 * ease(exit.t * 2)).toFixed(3)})`} // the card lands on it: it only dims (a shrink would show black edges without a canvas)
     : exit?.type === 'mask' ? {clipPath: exit.clipPath}
     : null;
   const fly = exit ? ease((exit.t - 0.12) / 0.88) : 0; // tiles pause a beat, then fly

@@ -52,14 +52,14 @@ export function transitionFx(clip: Clip, frame: number, durFrames: number, next?
   if (next?.enter === 'whipDiag' && frame >= durFrames - WHIPD_OUT) { const t = clamp01((frame - (durFrames - WHIPD_OUT) + 1) / WHIPD_OUT); blur = Math.max(blur, WHIPD_BLUR * t); angle = WHIPD_ANGLE; }
   // the pack: incoming side. Reveal / over kinds run during the pre-roll (negative frames) and are done at the cut.
   if (k === 'crossBlur') { const n = overlapOf(k, fps); const t = clamp01((frame + n) / n); blur = 30 * (1 - t); }
-  if (k === 'spin') { const n = fr(fps, 167); const t = ease(clamp01((frame + 1) / n)); spin = 8 * (1 - t); blur = 20 * (1 - t); }
+  if (k === 'spin') { const n = fr(fps, 167); const t = ease(clamp01((frame + 1) / n)); spin = 14 * (1 - t); blur = 22 * (1 - t); scale = 1 + 0.1 * (1 - t); }
   if (k === 'rgbFlash') { const n = fr(fps, 167); const t = ease(clamp01((frame + 1) / n)); rgb = 6 * (1 - t); blur = 20 * (1 - t); }
   if (k === 'blinds') { const n = fr(fps, 210); const t = ease(clamp01((frame + 1) / n)); blur = 18 * (1 - t); angle = 0; }
   if (k === 'cardDrop') { const n = overlapOf(k, fps); drop = ease(clamp01((frame + n) / n)); }
   if (dx) scale = Math.max(scale, 1 + (2 * Math.abs(dx)) / 100); // cover the edge it moves away from
   if (blur && angle == null && k !== 'crossBlur' && k !== 'spin' && k !== 'rgbFlash') scale = Math.max(scale, 1 + blur * 0.012); // a blurred edge turns see-through: push it off frame
   // outgoing side of the pack: spin / rgbFlash smear the last frames before the flash
-  if (next?.enter === 'spin') { const n = fr(fps, 167); if (frame >= durFrames - n) { const t = clamp01((frame - (durFrames - n) + 1) / n); spin = -8 * t; blur = Math.max(blur, 20 * t); } }
+  if (next?.enter === 'spin') { const n = fr(fps, 167); if (frame >= durFrames - n) { const t = clamp01((frame - (durFrames - n) + 1) / n); spin = -14 * t; blur = Math.max(blur, 22 * t); scale = Math.max(scale, 1 + 0.1 * t); } }
   if (next?.enter === 'rgbFlash') { const n = fr(fps, 125); if (frame >= durFrames - n) { const t = clamp01((frame - (durFrames - n) + 1) / n); rgb = 6 * t; blur = Math.max(blur, 20 * t); } }
   const fx: Fx = {scale, dx, blur};
   if (angle != null) fx.angle = angle;
@@ -124,7 +124,7 @@ export type Tone = 'accent' | 'deep' | 'dark' | 'white' | 'light';
 export type Shape = {clip?: string; tone?: Tone; gradient?: string; opacity?: number; screen?: boolean};
 export function coverShapes(kind: Enter, t: number, seed: number): Shape[] {
   switch (kind) {
-    case 'flash': return [{tone: 'white', opacity: t < 0.3 ? t / 0.3 : Math.max(0, 1 - (t - 0.3) / 0.7)}];
+    case 'flash': return [{tone: 'white', opacity: t < 0.2 ? t / 0.2 : t < 0.45 ? 1 : Math.max(0, 1 - (t - 0.45) / 0.55)}]; // 2 frames at full white, then a fade
     case 'spin': return [{tone: 'white', opacity: bump(t, 0.5, 0.2)}];
     case 'rgbFlash': return [{tone: 'white', opacity: bump(t, 0.5, 0.12)}];
     case 'bands': { // three full-height bands stacked, sliding through the frame (up, or down on odd seeds)
