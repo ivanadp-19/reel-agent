@@ -20,7 +20,7 @@ const PUBLIC = path.join(ROOT, 'public');
 
 const progress = (pct, label) => console.log(`PROGRESS:${pct}:${label}`);
 
-const {clips, lang = 'auto', style} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const {clips, lang = 'auto', style, offMic = 'mark'} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (!clips?.length) {
   console.error('no clips');
   process.exit(1);
@@ -91,7 +91,7 @@ function detectFaces(clips) {
 // --- run ---
 progress(2, 'Starting');
 const words = assembleWords(clips, (idx, total, clip) =>
-  progress(5 + Math.round((idx / total) * 80), clip.batch ? clip.label : `Transcribing ${clip.label ?? clip.id} (${idx + 1}/${total})`), lang,
+  progress(5 + Math.round((idx / total) * 80), clip.batch ? clip.label : `Transcribing ${clip.label ?? clip.id} (${idx + 1}/${total})`), lang, offMic,
 );
 progress(88, 'Finding faces');
 const faces = detectFaces(clips);

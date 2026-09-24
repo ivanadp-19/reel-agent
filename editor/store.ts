@@ -8,8 +8,10 @@ import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDura
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]};
 export type Lang = 'auto' | 'es' | 'en';
+// a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
+export type OffMic = 'mark' | 'cut' | 'off';
 
 const HISTORY_LIMIT = 100;
 
@@ -33,6 +35,8 @@ type EditorState = {
   selectedClipId: string | null;
   currentFrame: number;
   lang: Lang; // transcription language for this project
+  offMic: OffMic;
+  hiddenWids: string[]; // transcript words whose caption pages were deleted — never re-paged
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -59,6 +63,7 @@ type EditorState = {
   applyAutocut: (plan: {id: string; segments: {inSec: number; outSec: number}[]}[]) => void;
   removeClips: (ids: string[]) => void;
   setLang: (lang: Lang) => void;
+  setOffMic: (offMic: OffMic) => void;
   selectClip: (id: string | null) => void;
   deleteClip: (id: string) => void;
   moveClip: (id: string, dir: -1 | 1) => void;
@@ -118,6 +123,8 @@ export const useEditor = create<EditorState>((set) => ({
   selectedClipId: null,
   currentFrame: 0,
   lang: 'auto',
+  offMic: 'mark',
+  hiddenWids: [],
   past: [],
   future: [],
 
@@ -138,6 +145,8 @@ export const useEditor = create<EditorState>((set) => ({
         accentColor: p.accentColor ?? s.accentColor,
         lang: p.lang ?? 'auto',
         captionStyle: p.captionStyle ?? 'palabra',
+        offMic: p.offMic ?? 'mark',
+        hiddenWids: p.hiddenWids ?? [],
         past: [],
         future: [],
       };
@@ -147,7 +156,7 @@ export const useEditor = create<EditorState>((set) => ({
   select: (id) => set({selectedId: id, selectedClipId: null}),
   setCurrentFrame: (f) => set({currentFrame: f}),
 
-  setTopPct: (id, topPct) => set((s) => ({captions: mapCap(s.captions, id, (c) => ({...c, topPct}))})),
+  setTopPct: (id, topPct) => set((s) => ({captions: mapCap(s.captions, id, (c) => ({...c, topPct, pin: true}))})),
   setCaptionScale: (id, scale) => set((s) => ({captions: mapCap(s.captions, id, (c) => ({...c, scale}))})),
   setBrollScale: (id, scale) => set((s) => ({brolls: s.brolls.map((b) => (b.id === id ? {...b, scale} : b))})),
 
@@ -243,6 +252,7 @@ export const useEditor = create<EditorState>((set) => ({
       return {...withHistory(s), clips, meta: withMeta(s.meta, clips), selectedClipId: del.has(s.selectedClipId ?? '') ? null : s.selectedClipId};
     }),
   setLang: (lang) => set({lang}),
+  setOffMic: (offMic) => set({offMic}),
   selectClip: (id) => set({selectedClipId: id, selectedId: null}),
 
   deleteClip: (id) =>

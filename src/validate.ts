@@ -25,7 +25,7 @@ function captionBand(c: Caption, style?: string): Band {
   const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
   const scale = c.scale ?? 1;
   const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
-  const top = p.position === 'float' ? 12 : c.topPct;
+  const top = p.position === 'float' && !c.pin ? 12 : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};
 }
 

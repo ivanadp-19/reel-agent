@@ -17,11 +17,11 @@ import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/timeline.ts';
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {TEMPLATES, isTemplate, matteSpans, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
+import {TEMPLATES, describeSchema, isTemplate, matteSpans, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
@@ -50,7 +50,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= [];
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= [];
   return p;
 }
 async function save(id, p) {
@@ -100,7 +100,7 @@ const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.ti
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -109,7 +109,7 @@ function summary(id, p) {
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
   const caps = projectCaptions(p.captions, p.clips, FPS);
-  for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
+  for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.pin ? ' pinned' : ''}${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
   const hidden = p.captions.filter((c) => !caps.some((x) => x.id === c.id)).length;
   if (hidden) out.push(`  (+${hidden} captions on trimmed-away parts, not shown)`);
   out.push('', 'B-ROLL:');
@@ -147,13 +147,17 @@ const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8
 
 const renumber = (items, prefix) => items.map((x, i) => ({...x, id: `${prefix}${i}`}));
 
-// retime new words evenly across the old page span
+// New text for a page. Same word count → each word keeps its id, timing and
+// tier (a spelling fix stays anchored); otherwise the words are re-timed evenly.
+// Either way the page is now hand-edited: `covers` remembers the transcript
+// words it stands for, so re-paging never duplicates it.
 function retext(cap, text) {
   const words = text.split(/\s+/).filter(Boolean);
   if (!words.length) throw new Error('empty caption text');
-  const span = cap.endMs - cap.startMs;
-  const step = span / words.length;
-  return {...cap, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: 0}))};
+  const covers = [...new Set([...(cap.covers ?? []), ...cap.words.map((w) => w.wid).filter(Boolean)])];
+  if (words.length === cap.words.length) return {...cap, covers, words: cap.words.map((w, i) => ({...w, text: words[i]}))};
+  const step = (cap.endMs - cap.startMs) / words.length;
+  return {...cap, covers, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: 0}))};
 }
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
@@ -245,12 +249,32 @@ server.registerTool('delete_clips', {description: 'Remove clips from the timelin
   await save(project_id, p); return text(summary(project_id, p));
 });
 
-server.registerTool('split_clip', {description: 'Split the clip under a timeline time into two (like pressing S at the playhead). To cut a moment out: split twice, then delete_clips the middle piece.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds')}}, async ({project_id, at_sec}) => {
-  const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
+server.registerTool('split_clip', {description: 'Split a clip in two: at a timeline time (at_sec, like pressing S at the playhead) or in the pause right before a word (before_wid). To REMOVE words use cut_words instead — it snaps the boundaries for you.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds').optional(), before_wid: z.string().optional().describe('word id from get_transcript')}}, async ({project_id, at_sec, before_wid}) => {
+  const p = load(project_id);
+  let clip, sourceSec;
+  if (before_wid) { const w = await wordAt(p, before_wid); clip = w.clip; sourceSec = (w.prev ? Math.max(w.prev.endMs + 40, w.word.startMs - SNAP_MS) : w.word.startMs - 100) / 1000; }
+  else if (at_sec != null) ({clip, sourceSec} = locate(p, at_sec));
+  else throw new Error('give at_sec or before_wid');
   if (sourceSec - clip.inSec < 0.2 || clip.outSec - sourceSec < 0.2) throw new Error('too close to the clip edge (min 0.2 s each side)');
   const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error('could not split');
   p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); // captions follow their source on their own
-  await save(project_id, p); return text(`Split ${clip.id} at ${f1(at_sec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
+  await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
+});
+
+const SNAP_MS = 150; // how far into the neighbouring pause a word cut reaches
+server.registerTool('cut_words', {description: 'Remove a stretch of speech by word id: from_wid … to_wid (inclusive, same clip) leave the timeline, with the cut points snapped into the pauses around them so no syllable is clipped. Use it for retakes, fillers, stumbles and [off-mic] lines. Re-read get_transcript afterwards (clip ids change).', inputSchema: {project_id: pid, from_wid: z.string().describe('first word to remove, "<source>:<i>"'), to_wid: z.string().optional().describe('last word to remove; defaults to from_wid')}}, async ({project_id, from_wid, to_wid}) => {
+  const p = load(project_id);
+  const a = await wordAt(p, from_wid); const b = to_wid ? await wordAt(p, to_wid) : a;
+  if (a.entry.clipId !== b.entry.clipId) throw new Error(`${from_wid} and ${to_wid} sit on different clips (${a.entry.clipId}, ${b.entry.clipId}) — cut them in two calls`);
+  if (b.k < a.k) throw new Error('to_wid comes before from_wid');
+  const clip = a.clip; const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
+  const startMs = a.prev ? Math.min(a.word.startMs, Math.max(a.prev.endMs + 40, a.word.startMs - SNAP_MS)) : inMs;
+  const endMs = b.next ? Math.max(b.word.endMs, Math.min(b.next.startMs - 40, b.word.endMs + SNAP_MS)) : outMs;
+  const r = cutRange(p.clips, clip.id, startMs / 1000, endMs / 1000); if (!r) throw new Error('nothing to cut');
+  p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap);
+  await save(project_id, p);
+  const cut = a.entry.words.slice(a.k, b.k + 1).map((w) => w.word).join(' ');
+  return text(`Cut "${cut}" — ${f1((endMs - startMs) / 1000)}s of ${path.basename(clip.src)} (${f1(startMs / 1000)}–${f1(endMs / 1000)}) from ${clip.id}${r.removed.length ? `; gone: ${r.removed.join(', ')}` : ''}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan keyframes. t = source-time seconds; scale 1 = none; x/y = pan in px of the 1080x1920 frame. Empty list removes the animation. Two keyframes = smooth move between them.', inputSchema: {project_id: pid, clip_id: z.string(), keyframes: z.array(z.object({t: z.number(), scale: z.number().min(0.5).max(4), x: z.number().default(0), y: z.number().default(0)}))}}, async ({project_id, clip_id, keyframes}) => {
@@ -264,24 +288,27 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   let cap = p.captions[i];
   if (t != null) cap = retext(cap, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
-  if (top_pct != null) cap.topPct = top_pct; if (scale != null) cap.scale = scale;
+  if (top_pct != null) { cap.topPct = top_pct; cap.pin = true; } if (scale != null) cap.scale = scale;
   p.captions[i] = cap; await save(project_id, p);
-  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.scale ? ` scale ${cap.scale}` : ''}`);
+  const floats = PRESETS[p.captionStyle]?.position === 'float';
+  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}`);
 });
 
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   const startMs = Math.round(sourceSec * 1000); const endMs = Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000);
   let cap = retext({id: 'x', src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
-  if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, accent: set.has(norm(w.text))})); }
+  if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? 1 : 0})); }
   p.captions = renumber([...p.captions, cap], 'c'); await save(project_id, p);
   return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${p.captions.at(-1).id})`);
 });
 
-server.registerTool('delete_captions', {description: 'Delete caption pages by id.', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
+server.registerTool('delete_captions', {description: 'Delete caption pages by id. Their words stay uncaptioned even after set_caption_style or regenerating (to change wording use edit_caption instead).', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
   const p = load(project_id); const gone = new Set(caption_ids); const before = p.captions.length;
+  const wids = p.captions.filter((c) => gone.has(c.id)).flatMap((c) => c.words.map((w) => w.wid).filter(Boolean));
+  p.hiddenWids = [...new Set([...p.hiddenWids, ...wids])];
   p.captions = p.captions.filter((c) => !gone.has(c.id)); await save(project_id, p);
-  return text(`Deleted ${before - p.captions.length} caption(s); ${p.captions.length} left (ids unchanged)`);
+  return text(`Deleted ${before - p.captions.length} caption(s); ${p.captions.length} left (ids unchanged)${wids.length ? `; ${wids.length} words now stay uncaptioned` : ''}`);
 });
 
 server.registerTool('search_stock', {description: 'Search Pexels for portrait stock video/photos to use as B-roll. Returns URLs for add_broll / edit_broll.', inputSchema: {query: z.string(), kind: z.enum(['video', 'image']).default('video'), count: z.number().min(1).max(10).default(5)}}, async ({query, kind, count}) => {
@@ -327,27 +354,65 @@ server.registerTool('set_music', {description: 'Set or remove the music track. f
 
 // words of every clip (trim window), source-relative; `${source}:${i}` is a stable word id
 async function transcript(p) {
-  await runJob('/api/transcribe', {clips: p.clips, lang: p.lang ?? 'auto'});
+  await runJob('/api/transcribe', {clips: p.clips, lang: p.lang ?? 'auto', offMic: p.offMic});
   return readPublic('transcript.json');
 }
+// a transcript word by id → the clip whose trim window holds it, with its neighbours on that clip
+async function wordAt(p, wid) {
+  const [source, i] = String(wid).split(':');
+  const tr = await transcript(p);
+  const t = tr.filter((x) => x.source === source).find((x) => x.words.some((w) => String(w.i) === i));
+  if (!t) throw new Error(`no word ${wid} on the timeline (see get_transcript)`);
+  const k = t.words.findIndex((w) => String(w.i) === i);
+  return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
+}
+// off-mic words still inside the cut (from the last transcript run), per clip
+function offMicIssues(p) {
+  if (p.offMic === 'off') return [];
+  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
+  const bySource = new Map();
+  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
+  const out = [];
+  for (const c of p.clips) {
+    const source = path.basename(c.src).replace(/\.[^.]+$/, '');
+    const off = [...(bySource.get(source)?.values() ?? [])].filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).sort((a, b) => a.i - b.i);
+    if (!off.length) continue;
+    // contiguous runs of word indices → one cut_words call each
+    const runs = [];
+    for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) r.to = w.i; else runs.push({from: w.i, to: w.i, text: []}); runs[runs.length - 1].text.push(w.word); }
+    out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
+  }
+  return out;
+}
 
-server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps. Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const tr = await transcript(p);
   const out = [];
+  let offCount = 0;
   for (const pc of place(p.clips)) {
     const t = tr.find((x) => x.clipId === pc.clip.id);
     out.push(`clip ${pc.clip.id} (source ${t?.source ?? path.basename(pc.clip.src)}, @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s):`);
     if (!t?.words.length) { out.push('  (no speech)'); continue; }
     const toks = [];
+    let inOff = false;
     t.words.forEach((w, k) => {
       const prev = t.words[k - 1];
+      if (inOff && !w.off) { toks.push(']'); inOff = false; }
       if (prev && w.startMs - prev.endMs > 400) toks.push(`[pause ${f1((w.startMs - prev.endMs) / 1000)}s]`);
+      if (!inOff && w.off) { toks.push('[off-mic:'); inOff = true; }
       toks.push(`${w.i}:${w.word}`);
+      if (w.off) offCount++;
     });
+    if (inOff) toks.push(']');
     out.push('  ' + toks.join(' '));
   }
+  if (offCount) out.unshift(`${offCount} words are [off-mic: …]: a quieter second voice away from the microphone (someone behind the camera feeding lines), NOT the presenter, who usually repeats the line right after. Keep the presenter's take; cut_words the off-mic one unless the brief says otherwise.${p.offMic === 'cut' ? ' (off-mic mode "cut": autocut removes them for you.)' : ''}`, '');
   return text(out.join('\n'));
+});
+
+server.registerTool('set_off_mic', {description: 'How to treat a quieter second voice away from the mic (a director feeding lines from behind the camera). mark = flag those words as [off-mic: …] in get_transcript and let you decide (default); cut = autocut and captions drop them automatically; off = no detection (one-voice clips, or a presenter who whispers on purpose).', inputSchema: {project_id: pid, mode: z.enum(['mark', 'cut', 'off'])}}, async ({project_id, mode}) => {
+  const p = load(project_id); p.offMic = mode; await save(project_id, p); return text(`Off-mic voice: ${mode}`);
 });
 
 server.registerTool('set_language', {description: 'Set the transcription language of the project: es, en, or auto (detect per clip). Transcripts are cached per language.', inputSchema: {project_id: pid, lang: z.enum(['auto', 'es', 'en'])}}, async ({project_id, lang}) => {
@@ -355,20 +420,11 @@ server.registerTool('set_language', {description: 'Set the transcription languag
 });
 
 // ---------- motion graphics ----------
-const TEMPLATE_HELP = Object.entries(TEMPLATES).map(([id, t]) => `${id} = ${t.desc}; props ${JSON.stringify(Object.fromEntries(Object.entries(t.schema.shape).map(([k, v]) => [k, v.description ?? (v.def?.type ?? 'value')])))}`).join('\n');
+const TEMPLATE_HELP = Object.entries(TEMPLATES).map(([id, t]) => `${id} = ${t.desc}; props ${describeSchema(t.schema)}`).join('\n');
 const nextId = (items, prefix) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
 // where a graphic goes: a word id (start of that word) or a timeline second
 async function anchorFor(p, {at_wid, at_sec}) {
-  if (at_wid) {
-    const [source, i] = at_wid.split(':');
-    const tr = await transcript(p);
-    // the source may be split over several clips; the word lives in one of them
-    const t = tr.filter((x) => x.source === source).find((x) => x.words.some((w) => String(w.i) === i));
-    const w = t?.words.find((x) => String(x.i) === i);
-    if (!w) throw new Error(`no word ${at_wid} (see get_transcript)`);
-    const clip = p.clips.find((c) => c.id === t.clipId);
-    return {src: clip.src, startMs: w.startMs};
-  }
+  if (at_wid) { const {clip, word} = await wordAt(p, at_wid); return {src: clip.src, startMs: word.startMs}; }
   if (at_sec == null) throw new Error('give at_wid or at_sec');
   const {clip, sourceSec} = locate(p, at_sec);
   return {src: clip.src, startMs: Math.round(sourceSec * 1000)};
@@ -437,12 +493,13 @@ server.registerTool('delete_graphics', {description: 'Delete graphics by id.', i
 server.registerTool('set_caption_style', {description: `Caption preset for the whole project: ${Object.values(PRESETS).map((x) => `${x.id} = ${x.desc}`).join('; ')}. Re-pages the generated captions for the new preset, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); p.captionStyle = style;
   if (p.clips.length && p.captions.length) {
-    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style});
+    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic});
     const fresh = readPublic('captions.multi.json');
-    // pages without word ids are hand-made and stay — unless NO page has ids
-    // (a project from before word ids), in which case everything is re-paged
+    // generated pages are re-paged; hand-made ones, deleted words and tiers survive
+    // (a project from before word ids has no way to tell: everything is re-paged)
     const legacy = !p.captions.some((c) => c.words.some((w) => w.wid));
-    p.captions = [...(legacy ? [] : p.captions.filter((c) => !c.words.some((w) => w.wid))), ...reapplyTiers(p.captions, Array.isArray(fresh) ? fresh : [])];
+    const merged = mergeCaptions(legacy ? [] : p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true});
+    p.captions = reapplyTiers(p.captions, merged.captions);
   }
   await save(project_id, p);
   return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
@@ -469,13 +526,13 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
   let p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const lang = p.lang ?? 'auto';
   if (step === 'autocut') {
-    await runJob('/api/trim-silence', {clips: p.clips, lang}); const {plan} = readPublic('trim-silence.json');
+    await runJob('/api/trim-silence', {clips: p.clips, lang, offMic: p.offMic}); const {plan} = readPublic('trim-silence.json');
     if (!Array.isArray(plan) || !plan.length) return text('Nothing to cut');
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
-    return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments\n\n${summary(project_id, p)}`);
+    return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle}); const fresh = readPublic('captions.multi.json');
-  const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips); p.captions = captions; await save(project_id, p);
+  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic}); const fresh = readPublic('captions.multi.json');
+  const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 
@@ -485,7 +542,7 @@ const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captio
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
-  return text(issuesText(validateProject(p, FPS)));
+  return text(issuesText([...validateProject(p, FPS), ...offMicIssues(p)]));
 });
 
 server.registerTool('caption_proof', {description: 'LOOK at the result without a full render: renders up to 8 stills of the current project (default: spread over the pages with emphasis and every graphic) and returns them as one contact sheet plus the validate report. Use it after annotating captions or adding graphics; fix what looks wrong and call again.', inputSchema: {project_id: pid, at_secs: z.array(sec('timeline time')).max(8).optional().describe('times to look at; omit to pick automatically')}}, async ({project_id, at_secs}) => {
@@ -504,7 +561,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
   return {content: [
-    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(validateProject(p, FPS))}`},
+    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText([...validateProject(p, FPS), ...offMicIssues(p)])}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });

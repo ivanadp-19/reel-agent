@@ -64,7 +64,7 @@ const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -100,7 +100,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -229,7 +229,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic})}).then((x) => x.json());
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
@@ -257,7 +257,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setTrimming(true);
     setTrimLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang, offMic})}).then((x) => x.json());
       pollJob(
         '/api/trim-silence', jobId,
         (s) => setTrimLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
@@ -457,6 +457,16 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
             <option value="auto">Auto</option>
             <option value="es">Español</option>
             <option value="en">English</option>
+          </select>
+          <select
+            value={offMic}
+            onChange={(e) => setOffMic(e.target.value as typeof offMic)}
+            title="Off-mic voice (someone behind the camera feeding lines, quieter than the presenter): mark it in the transcript, cut it with Autocut, or ignore it"
+            className="bg-transparent px-2 py-1.5 rounded-lg border border-outline-variant text-on-surface-variant text-body-md font-bold"
+          >
+            <option value="mark">Off-mic: mark</option>
+            <option value="cut">Off-mic: cut</option>
+            <option value="off">Off-mic: off</option>
           </select>
           <button
             onClick={trimSilence}

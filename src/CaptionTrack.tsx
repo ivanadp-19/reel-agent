@@ -80,7 +80,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
     preset.pageIn.type === 'pop' ? `scale(${interpolate(pop, [0, 1], [0.85, 1])})` : '',
   ].filter(Boolean).join(' ');
 
-  const float = preset.position === 'float' ? FLOAT[index % FLOAT.length] : null;
+  const float = preset.position === 'float' && !caption.pin ? FLOAT[index % FLOAT.length] : null;
   const containerStyle: React.CSSProperties =
     preset.container === 'pill'
       ? {background: preset.colors.container ?? 'rgba(0,0,0,0.72)', borderRadius: Math.round(fontSize * 0.5), padding: `${Math.round(fontSize * 0.22)}px ${Math.round(fontSize * 0.5)}px`}

@@ -9,6 +9,8 @@ import {z} from 'zod';
 import {placeClips, type Clip} from './timeline.ts';
 
 const short = (max: number) => z.string().trim().min(1).max(max);
+// a line of a stack: {text, …} — a bare string is accepted too
+const lineOf = <T extends z.ZodRawShape>(shape: T) => z.preprocess((v) => (typeof v === 'string' ? {text: v} : v), z.object(shape));
 
 export const TEMPLATES = {
   // giant stacked headline for the hook: lines of mixed sizes, revealed one by one
@@ -17,7 +19,7 @@ export const TEMPLATES = {
     defaultMs: 2800,
     y: 16,
     schema: z.object({
-      lines: z.array(z.object({text: short(22), size: z.enum(['sm', 'md', 'lg', 'xl']).default('lg'), accent: z.boolean().default(false)})).min(1).max(4),
+      lines: z.array(lineOf({text: short(22), size: z.enum(['sm', 'md', 'lg', 'xl']).default('lg'), accent: z.boolean().default(false)})).min(1).max(4),
       upper: z.boolean().default(false),
     }),
   },
@@ -62,7 +64,7 @@ export const TEMPLATES = {
     defaultMs: 2200,
     y: 0,
     schema: z.object({
-      lines: z.array(z.object({text: short(22), dim: z.boolean().default(false)})).min(1).max(4),
+      lines: z.array(lineOf({text: short(22), dim: z.boolean().default(false)})).min(1).max(4),
       bg: z.enum(['accent', 'dark', 'light']).default('accent'),
       font: z.enum(['condensed', 'display', 'serif']).default('condensed'),
       grid: z.boolean().default(false),
@@ -131,6 +133,26 @@ export type Graphic = {
   // projected only:
   clipId?: string;
 };
+
+// compact, human-readable shape of a props schema for the tool help:
+// "{text: string ≤16 chars, size: lg|xl|xxl (default "xl"), …}"
+export function describeSchema(schema: z.ZodType): string {
+  const d: any = (schema as any).def;
+  const note = schema.description ? ` — ${schema.description}` : '';
+  const check = (name: string, key: string) => d.checks?.find((c: any) => c._zod.def.check === name)?._zod.def[key];
+  switch (d.type) {
+    case 'default': return `${describeSchema(d.innerType)} (default ${JSON.stringify(d.defaultValue)})${note}`;
+    case 'optional': return `${describeSchema(d.innerType)}?${note}`;
+    case 'pipe': return describeSchema(d.out) + note;
+    case 'string': { const max = check('max_length', 'maximum'); return `string${max ? ` ≤${max} chars` : ''}${note}`; }
+    case 'enum': return Object.keys(d.entries).join('|') + note;
+    case 'number': { const min = check('greater_than', 'value'), max = check('less_than', 'value'); return `number${min != null || max != null ? ` ${min ?? ''}–${max ?? ''}` : ''}${note}`; }
+    case 'boolean': return 'true|false' + note;
+    case 'array': { const min = check('min_length', 'minimum'), max = check('max_length', 'maximum'); return `[${describeSchema(d.element)}]${min != null || max != null ? ` ×${min ?? ''}–${max ?? ''}` : ''}${note}`; }
+    case 'object': return `{${Object.entries(d.shape).map(([k, v]) => `${k}: ${describeSchema(v as z.ZodType)}`).join(', ')}}${note}`;
+    default: return String(d.type) + note;
+  }
+}
 
 // validate + fill defaults; throws a readable message on bad props
 export function parseProps(template: TemplateId, props: unknown): Record<string, unknown> {

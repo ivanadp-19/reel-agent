@@ -129,6 +129,7 @@ export const fluentPngUrl = (name) => {
   return `https://cdn.jsdelivr.net/gh/microsoft/fluentui-emoji@main/assets/${encodeURIComponent(folder)}/3D/${words.join('_')}_3d.png`;
 };
 
+const SEARCH_STOP = new Set(['the', 'and', 'with', 'for', 'from', 'una', 'uno', 'los', 'las', 'del', 'con', 'para', 'por', 'que']);
 async function iconifyQuery(query, prefixes, limit) {
   const url = `https://api.iconify.design/search?query=${encodeURIComponent(query)}&limit=${Math.min(64, limit * 4)}&prefixes=${prefixes.join(',')}`;
   return (await fetchPublic(url)).json();
@@ -138,6 +139,16 @@ async function searchIconify(query, kind, style, limit) {
   const styled = style ? STYLE_SETS[style] ?? [] : [];
   let d = styled.length ? await iconifyQuery(query, styled, limit) : {icons: []};
   if (!d.icons?.length) d = await iconifyQuery(query, SETS[kind] ?? SETS.sticker, limit);
+  // Iconify ANDs the words of a query: "credit card money" finds nothing while each word does
+  if (!d.icons?.length) {
+    const words = query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3 && !SEARCH_STOP.has(w));
+    if (words.length > 1) {
+      const sets = [...new Set([...styled, ...(SETS[kind] ?? SETS.sticker)])];
+      const icons = new Set();
+      for (const w of words) for (const ic of (await iconifyQuery(w, sets, limit)).icons ?? []) icons.add(ic);
+      d = {icons: [...icons]};
+    }
+  }
   const cols = await iconifyCollections();
   const out = [];
   const seen = new Set(); // several sets share emoji names → one 3D PNG each

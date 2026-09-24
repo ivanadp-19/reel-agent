@@ -18,7 +18,7 @@ const TRAIL_PAD = 0.3; // s after the very last word
 const INNER_PAD = 0.08; // s of breath kept on either side of an internal cut
 const MIN_LEN = 0.35; // drop segments shorter than this
 
-const {clips, lang = 'auto'} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const {clips, lang = 'auto', offMic = 'mark'} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (!clips?.length) { console.error('no clips'); process.exit(1); }
 
 progress(2, 'Starting');
@@ -28,11 +28,12 @@ clips.forEach((clip, i) => {
   progress(5 + Math.round((i / clips.length) * 92), `Analyzing ${clip.label ?? clip.id} (${i + 1}/${clips.length})`);
   let words;
   try {
-    words = transcribeClip(clip, lang);
+    words = transcribeClip(clip, lang, offMic);
   } catch (e) {
     console.error(`SKIP ${clip.id}: ${String(e).slice(0, 120)}`);
     return;
   }
+  if (offMic === 'cut') words = words.filter((w) => !w.off); // off-camera voice = silence
   if (!words.length) return; // no speech → leave untouched (likely B-roll)
 
   const dur = clip.sourceDurationSec ?? clip.outSec;

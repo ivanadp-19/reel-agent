@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {DROP_DB, flagOffMic, loudnessFromPcm} from '../src/speech.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -59,6 +60,20 @@ function runWhisperx(wavs, outDir, device, lang) {
 // (+ language): autocut segments and re-arranged copies never re-transcribe.
 export const sourceKey = (clip) => path.basename(clip.src).replace(/\.[^.]+$/, '');
 const cacheFile = (clip, lang) => path.join(TRANSCRIPTS, `${sourceKey(clip)}.${lang}.json`);
+
+// Loudness sidecar per source (20 ms windows): tells the presenter's takes from
+// a quieter voice off camera (a director feeding lines). See src/speech.ts.
+function loudnessFor(clip) {
+  const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.loud.json`);
+  if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
+  const ff = spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(PUBLIC, clip.src), '-vn', '-f', 'f32le', '-ac', '1', '-ar', '16000', '-'], {cwd: ROOT, maxBuffer: 1 << 29});
+  if (ff.status !== 0 || !ff.stdout?.length) return null;
+  const pcm = new Float32Array(ff.stdout.buffer.slice(ff.stdout.byteOffset, ff.stdout.byteOffset + (ff.stdout.length & ~3)));
+  const loud = loudnessFromPcm(pcm, 16000, 50);
+  fs.mkdirSync(TRANSCRIPTS, {recursive: true});
+  fs.writeFileSync(f, JSON.stringify(loud));
+  return loud;
+}
 
 function parseWhisperxJson(file) {
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -127,16 +142,21 @@ export function transcribeClips(clips, onBatch, lang = 'auto') {
 }
 
 // Words for one clip (source-relative times). Uses the cache; transcribes on miss.
-export function transcribeClip(clip, lang = 'auto') {
+// offMic: 'mark' | 'cut' | 'off' — unless off, words of a quieter second voice
+// come back with {off: true} (callers decide whether to skip them; indices stay).
+export function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
   const cache = cacheFile(clip, lang);
   if (!fs.existsSync(cache)) transcribeClips([clip], undefined, lang);
   if (!fs.existsSync(cache)) throw new Error(`transcription failed for ${clip.id}`);
-  return JSON.parse(fs.readFileSync(cache, 'utf8'));
+  const words = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  if (offMic === 'off') return words;
+  const loud = loudnessFor(clip);
+  return loud ? flagOffMic(words, loud, +(process.env.REEL_OFFMIC_DB || DROP_DB)) : words;
 }
 
 // Assemble all clips' words onto the timeline, honoring trim (in/out) and order.
 // onProgress(idx, total, clip) is called before each clip is transcribed.
-export function assembleWords(clips, onProgress, lang = 'auto') {
+export function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark') {
   // one whisperx run for everything not cached yet
   transcribeClips(clips, (label) => onProgress?.(0, clips.length, {id: label, label, batch: true}), lang);
   const out = [];
@@ -145,7 +165,7 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
     onProgress?.(idx, clips.length, clip);
     let words;
     try {
-      words = transcribeClip(clip, lang);
+      words = transcribeClip(clip, lang, offMic);
     } catch (e) {
       // one bad clip shouldn't kill the whole job — skip it, keep its slot
       console.error(`SKIP clip ${clip.id}: ${String(e).slice(0, 160)}`);
@@ -156,6 +176,7 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
     const outMs = clip.outSec * 1000;
     words.forEach((w, wi) => {
       if (w.endMs <= inMs || w.startMs >= outMs) return;
+      if (offMic === 'cut' && w.off) return; // the off-camera voice gets no captions
       const s = Math.max(w.startMs, inMs) - inMs + offsetMs;
       const e = Math.min(w.endMs, outMs) - inMs + offsetMs;
       out.push({
@@ -167,6 +188,7 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
         src: clip.src, // source file the word belongs to
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,
+        ...(w.off ? {off: true} : {}),
       });
     });
     offsetMs += (clip.outSec - clip.inSec) * 1000;

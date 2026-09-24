@@ -102,7 +102,7 @@ export function reanchor<T extends {clipId?: string; startMs: number}>(items: T[
 export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {clips: Clip[]; newId: string; remap: SegmentRemap} | null {
   const clip = clips.find((c) => c.id === clipId);
   if (!clip || splitSrc - clip.inSec < 0.2 || clip.outSec - splitSrc < 0.2) return null;
-  const newId = `${clip.id}-s${Date.now().toString(36)}`;
+  const newId = uniqId(clips.map((c) => c.id), clip.id.replace(/(-s\d+)+$/, ''), 's');
   const kfs = clip.transform;
   let aK = kfs?.filter((k) => k.t < splitSrc);
   let bK = kfs?.filter((k) => k.t >= splitSrc);
@@ -118,6 +118,40 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
     {origId: clip.id, segId: newId, inMs: splitSrc * 1000, outMs: clip.outSec * 1000},
   ];
   return {clips: clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c])), newId, remap};
+}
+
+// short unique ids for pieces: base-s1, base-s2… (never base-s1-s3-s7 after repeated splits)
+export function uniqId(taken: Iterable<string>, base: string, tag: string): string {
+  const set = new Set(taken);
+  let n = 1;
+  while (set.has(`${base}-${tag}${n}`)) n++;
+  return `${base}-${tag}${n}`;
+}
+
+// Remove a source range [aSec, bSec] from a clip: a trim when it touches an
+// edge (pieces under 0.2 s fold into the cut), otherwise split twice and drop
+// the middle. Callers snap the range into pauses (see cut_words).
+export function cutRange(clips: Clip[], clipId: string, aSec: number, bSec: number): {clips: Clip[]; remap: SegmentRemap; removed: string[]} | null {
+  const clip = clips.find((c) => c.id === clipId);
+  if (!clip) return null;
+  const EDGE = 0.2;
+  let a = Math.max(clip.inSec, aSec);
+  let b = Math.min(clip.outSec, bSec);
+  if (b <= a) return null;
+  if (a - clip.inSec < EDGE) a = clip.inSec;
+  if (clip.outSec - b < EDGE) b = clip.outSec;
+  if (a === clip.inSec && b === clip.outSec) return {clips: clips.filter((c) => c.id !== clipId), remap: [], removed: [clipId]};
+  const seg = (c: Clip) => ({origId: clipId, segId: c.id, inMs: c.inSec * 1000, outMs: c.outSec * 1000});
+  if (a === clip.inSec || b === clip.outSec) {
+    const t = a === clip.inSec ? {...clip, inSec: b} : {...clip, outSec: a};
+    return {clips: clips.map((c) => (c.id === clipId ? t : c)), remap: [seg(t)], removed: []};
+  }
+  const first = splitClip(clips, clipId, a);
+  if (!first) return null;
+  const second = splitClip(first.clips, first.newId, b);
+  if (!second) return null;
+  const kept = second.clips.filter((c) => c.id !== first.newId);
+  return {clips: kept, remap: kept.filter((c) => c.id === clipId || c.id === second.newId).map(seg), removed: [first.newId]};
 }
 
 // Autocut: replace clips with their speech segments (ends + internal pauses removed).

@@ -28,3 +28,17 @@ test('matteSpans pads and merges behind-graphics per source, ignores front graph
   const spans = matteSpans([g('a', 'clips/x.mp4', 1000, 2000, true), g('b', 'clips/x.mp4', 2100, 3000, true), g('c', 'clips/x.mp4', 8000, 9000, true), g('d', 'clips/x.mp4', 4000, 5000, false), g('e', 'clips/y.mp4', 0, 500, true)], 300);
   assert.deepEqual(spans, [{src: 'clips/x.mp4', startMs: 700, endMs: 3300}, {src: 'clips/x.mp4', startMs: 7700, endMs: 9300}, {src: 'clips/y.mp4', startMs: 0, endMs: 800}]);
 });
+
+import {parseProps as parse2, describeSchema, TEMPLATES as T2} from '../src/graphicTemplates.ts';
+
+test('hook-stack lines accept bare strings', () => {
+  const p = parse2('hook-stack', {lines: ['THE BIGGEST LIE', {text: 'ABOUT MONEY', accent: true}]});
+  assert.deepEqual(p.lines.map((l) => [l.text, l.size, l.accent]), [['THE BIGGEST LIE', 'lg', false], ['ABOUT MONEY', 'lg', true]]);
+});
+
+test('the props help spells out enum options and length limits', () => {
+  const h = describeSchema(T2['big-word'].schema);
+  assert.match(h, /size: lg\|xl\|xxl/);
+  assert.match(h, /text: string ≤16 chars/);
+  assert.match(describeSchema(T2['hook-stack'].schema), /lines: \[\{text: string ≤22 chars/);
+});

@@ -163,6 +163,7 @@ Etiquetas ancladas en 3D a la pared (tracking planar), sidecar de HyperFrames (r
 
 ## 7. Preguntas abiertas
 
+- **Voz fuera de micrófono (directora dictando líneas).** Hoy se detecta por volumen (`src/speech.ts`: tomas ≥ 7 dB bajo el nivel de la presentadora) y por proyecto se marca, corta o ignora. Falla cuando la presentadora habla bajito (IMG_1778 a 122 s). La señal que lo rescataría es la boca (MediaPipe FaceLandmarker, jawOpen), pero mediapipe 1.0.1 revienta en macOS con `graph_service.h:139 Check failed: service_ Service is unavailable` en todos los modos; probar mediapipe 0.10.x en un venv aparte o esperar el fix. Diarización pyannote (viene con whisperx) es la otra vía, pero pide token de HF y aceptar modelos gated.
 1. ¿HyperFrames/GSAP como sidecar opcional más adelante, o solo Remotion? (Se decide tras la comparativa visual.)
 2. Capturas de un borrador gris en Reels para calibrar las safe zones reales.
 3. Export de `pruebaeditoria.mp4` desde Captions.ai o Submagic, como referencia de la comparativa.
