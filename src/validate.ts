@@ -127,7 +127,7 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
     }
   }
   // behind graphics need a matte
-  for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
+  for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes, p.clips)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
   // hook: something in the first 3 s
   if (totalMs > 5000 && !gfx.some((g) => g.startMs < 3000 && g.template !== 'layout') && !caps.some((c) => c.startMs < 1500)) issues.push({level: 'warn', code: 'hook', msg: 'nothing on screen in the first 3 s — reels need a hook'});
   return issues;

@@ -25,7 +25,7 @@ test('a graphic follows its source through an autocut and keeps its duration acr
 test('matteSpans pads and merges behind-graphics per source, ignores front graphics', async () => {
   const {matteSpans} = await import('../src/graphicTemplates.ts');
   const g = (id, src, s, e, behind) => ({id, src, startMs: s, endMs: e, template: 'big-word', props: {}, behind});
-  const spans = matteSpans([g('a', 'clips/x.mp4', 1000, 2000, true), g('b', 'clips/x.mp4', 2100, 3000, true), g('c', 'clips/x.mp4', 8000, 9000, true), g('d', 'clips/x.mp4', 4000, 5000, false), g('e', 'clips/y.mp4', 0, 500, true)], 300);
+  const spans = matteSpans([g('a', 'clips/x.mp4', 1000, 2000, true), g('b', 'clips/x.mp4', 2100, 3000, true), g('c', 'clips/x.mp4', 8000, 9000, true), g('d', 'clips/x.mp4', 4000, 5000, false), g('e', 'clips/y.mp4', 0, 500, true)], {padMs: 300});
   assert.deepEqual(spans, [{src: 'clips/x.mp4', startMs: 700, endMs: 3300}, {src: 'clips/x.mp4', startMs: 7700, endMs: 9300}, {src: 'clips/y.mp4', startMs: 0, endMs: 800}]);
 });
 
@@ -46,14 +46,17 @@ test('the props help spells out enum options and length limits', () => {
 import {projectGraphics as project2} from '../src/graphicTemplates.ts';
 import {validateProject as validate2} from '../src/validate.ts';
 
-test('a graphic keeps its full duration across a cut; a behind-graphic is clipped to its clip', () => {
+test('a graphic keeps its full duration across a cut, behind or not; its matte covers every piece under it', async () => {
   const a = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 2, sourceDurationSec: 10};
   const b = {id: 'b', src: 'clips/a.mp4', inSec: 5, outSec: 10, sourceDurationSec: 10};
   const label = {id: 'g0', src: 'clips/a.mp4', startMs: 1500, endMs: 3700, template: 'label-2tone', props: {top: 'x'}};
   const [p] = project2([label], [a, b], 30);
   assert.equal(p.startMs, 1500); assert.equal(p.endMs, 3700); assert.equal(p.clipId, 'a');
   const [q] = project2([{...label, behind: true}], [a, b], 30);
-  assert.equal(q.endMs, 2000);
+  assert.equal(q.endMs, 3700); // runs across the cut like any graphic (run 4: "truncated to 0.5 s")
+  const {matteSpans} = await import('../src/graphicTemplates.ts');
+  // 1.5–2 s on clip a (source 1.5–2), then 2–3.7 s on clip b (source 5–6.7), each padded 300 ms
+  assert.deepEqual(matteSpans([{...label, behind: true}], {clips: [a, b]}), [{src: 'clips/a.mp4', startMs: 1200, endMs: 2300}, {src: 'clips/a.mp4', startMs: 4700, endMs: 7000}]);
   assert.equal(project2([{...label, startMs: 1500, endMs: 6000}], [a, b], 30).length, 1); // anchored once, not again on clip b
 });
 

@@ -222,19 +222,33 @@ export type Behind = {src: string; startMs: number; endMs: number; behind?: bool
 export type Span = {src: string; startMs: number; endMs: number};
 
 // the behind-spans no matte covers yet (what prepare_mattes must compute)
-export const spansWithoutMatte = (items: Behind[], mattes: Span[] = []): Span[] =>
-  matteSpans(items).filter((s) => !mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+export const spansWithoutMatte = (items: Behind[], mattes: Span[] = [], clips?: Clip[]): Span[] =>
+  matteSpans(items, {clips}).filter((s) => !mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
 
-// the source spans that need a person matte: every `behind` item, padded and merged per source
-export function matteSpans(items: Behind[], padMs = 300): Span[] {
-  const bySrc = new Map<string, {startMs: number; endMs: number}[]>();
-  for (const g of items) {
-    if (!g.behind) continue;
-    const list = bySrc.get(g.src) ?? [];
-    list.push({startMs: Math.max(0, g.startMs - padMs), endMs: g.endMs + padMs});
-    bySrc.set(g.src, list);
+// The source spans that need a person matte, padded and merged per source. A
+// caption page needs its own words; a graphic runs across cuts (see
+// projectGraphics), so with `clips` it needs every piece of footage under it.
+export function matteSpans(items: Behind[], {clips, padMs = 300, fps = 30}: {clips?: Clip[]; padMs?: number; fps?: number} = {}): Span[] {
+  const raw: Span[] = [];
+  for (const it of items) {
+    if (!it.behind) continue;
+    if (!clips || !('template' in it)) { raw.push({src: it.src, startMs: it.startMs, endMs: it.endMs}); continue; }
+    const [pg] = projectGraphics([it as Graphic], clips, fps);
+    if (!pg) continue;
+    for (const pc of placeClips(clips, fps)) {
+      const a = Math.max(pg.startMs, pc.startMs), b = Math.min(pg.endMs, pc.endMs);
+      if (b <= a) continue;
+      const speed = pc.clip.speed ?? 1, inMs = pc.clip.inSec * 1000;
+      raw.push({src: pc.clip.src, startMs: inMs + (a - pc.startMs) * speed, endMs: inMs + (b - pc.startMs) * speed});
+    }
   }
-  const out: {src: string; startMs: number; endMs: number}[] = [];
+  const bySrc = new Map<string, {startMs: number; endMs: number}[]>();
+  for (const s of raw) {
+    const list = bySrc.get(s.src) ?? [];
+    list.push({startMs: Math.max(0, Math.round(s.startMs - padMs)), endMs: Math.round(s.endMs + padMs)});
+    bySrc.set(s.src, list);
+  }
+  const out: Span[] = [];
   for (const [src, list] of bySrc) {
     list.sort((a, b) => a.startMs - b.startMs);
     let cur = {...list[0]};
@@ -249,24 +263,14 @@ export function matteSpans(items: Behind[], padMs = 300): Span[] {
 
 // source-relative spans → absolute timeline spans. A graphic starts where its
 // anchor word lands and stays on screen for its whole duration ACROSS cuts (an
-// autocut split under a label must not make it vanish). Behind-graphics are
-// the exception: they need a matte of their exact source span, so they are
-// clipped to the clip(s) that contain them, one placement per clip.
+// autocut split under a label must not make it vanish). Behind-graphics too:
+// matteSpans() cuts the presenter out of every piece of footage under them.
 export function projectGraphics(items: Graphic[], clips: Clip[], fps: number): Graphic[] {
   const placed = placeClips(clips, fps);
   const totalMs = placed.length ? placed[placed.length - 1].endMs : 0;
   const out: Graphic[] = [];
   for (const g of items) {
     const hits = placed.filter((pc) => pc.clip.src === g.src && g.endMs > pc.clip.inSec * 1000 && g.startMs < pc.clip.outSec * 1000);
-    if (g.behind) {
-      for (const pc of hits) {
-        const inMs = pc.clip.inSec * 1000;
-        const speed = pc.clip.speed ?? 1;
-        const toAbs = (ms: number) => pc.startMs + (ms - inMs) / speed;
-        out.push({...g, clipId: pc.clip.id, startMs: toAbs(Math.max(g.startMs, inMs)), endMs: toAbs(Math.min(g.endMs, pc.clip.outSec * 1000))});
-      }
-      continue;
-    }
     const anchor = hits.find((pc) => g.startMs >= pc.clip.inSec * 1000) ?? hits[0];
     if (!anchor) continue;
     const inMs = anchor.clip.inSec * 1000;

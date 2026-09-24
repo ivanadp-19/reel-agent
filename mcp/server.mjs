@@ -129,7 +129,7 @@ function summary(id, p) {
   out.push('', 'GRAPHICS (timeline time):');
   for (const g of projectGraphics(p.graphics ?? [], p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.behind ? ' (behind the presenter)' : ''}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
   if (!p.graphics?.length) out.push('  none');
-  const need = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes);
+  const need = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes, p.clips);
   if (need.length) out.push(`  ⚠ ${need.length} behind-span(s) have no person matte yet — call prepare_mattes`);
   if (p.brollAssets.length) out.push('', `OWN FOOTAGE (for B-roll): ${p.brollAssets.map((a) => `${a.id} (${a.kind}, ${a.label})`).join(', ')}`);
   return out.join('\n');
@@ -377,7 +377,7 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   if (behind != null) { if (behind) cap.behind = true; else delete cap.behind; }
   p.captions[i] = cap; await save(project_id, p);
   const floats = PRESETS[p.captionStyle]?.position === 'float';
-  const needMatte = cap.behind && spansWithoutMatte([cap], p.mattes).length;
+  const needMatte = cap.behind && spansWithoutMatte([cap], p.mattes, p.clips).length;
   return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
 });
 
@@ -573,7 +573,7 @@ server.registerTool('set_grade', {description: `Color for the whole reel: a boun
 
 server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic or caption page marked behind=true, so they render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
-  const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes);
+  const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes, p.clips);
   if (!spans.length) return text('Nothing to matte: every behind-span already has a matte (or no graphic is marked behind).');
   await runJob('/api/matte', {spans});
   const done = readPublic('mattes.json');
