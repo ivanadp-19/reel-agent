@@ -21,6 +21,7 @@ import {applyAutocut, placeClips, reanchor, splitClip} from '../src/timeline.ts'
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
+import {TEMPLATES, isTemplate, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -46,7 +47,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption);
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= [];
   return p;
 }
 async function save(id, p) {
@@ -115,6 +116,9 @@ function summary(id, p) {
     out.push(`  ${b.id}  @${at == null ? '?' : f1(at)}–${end == null ? '?' : f1(end)}s  ${b.mode} ${b.kind}${b.scale && b.scale !== 1 ? ` scale ${b.scale}` : ''}  ${b.query ? `"${b.query}"` : ''} ${b.source ?? ''} ${/^https?:/.test(b.src) ? '' : path.basename(b.src)}`.replace(/\s+/g, ' '));
   }
   if (!p.brolls.length) out.push('  none');
+  out.push('', 'GRAPHICS (timeline time):');
+  for (const g of projectGraphics(p.graphics, p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
+  if (!p.graphics.length) out.push('  none');
   if (p.brollAssets.length) out.push('', `OWN FOOTAGE (for B-roll): ${p.brollAssets.map((a) => `${a.id} (${a.kind}, ${a.label})`).join(', ')}`);
   return out.join('\n');
 }
@@ -230,7 +234,7 @@ server.registerTool('set_clip', {description: 'Per-clip playback: speed (0.25–
 
 server.registerTool('delete_clips', {description: 'Remove clips from the timeline (their captions/B-roll go with them).', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {
   const p = load(project_id); const gone = new Set(clip_ids);
-  p.clips = p.clips.filter((c) => !gone.has(c.id)); p.captions = p.captions.filter((c) => p.clips.some((k) => k.src === c.src)); p.brolls = p.brolls.filter((b) => !b.clipId || !gone.has(b.clipId));
+  p.clips = p.clips.filter((c) => !gone.has(c.id)); p.captions = p.captions.filter((c) => p.clips.some((k) => k.src === c.src)); p.graphics = p.graphics.filter((g) => p.clips.some((k) => k.src === g.src)); p.brolls = p.brolls.filter((b) => !b.clipId || !gone.has(b.clipId));
   await save(project_id, p); return text(summary(project_id, p));
 });
 
@@ -343,6 +347,49 @@ server.registerTool('set_language', {description: 'Set the transcription languag
   const p = load(project_id); p.lang = lang; await save(project_id, p); return text(`Language: ${lang}`);
 });
 
+// ---------- motion graphics ----------
+const TEMPLATE_HELP = Object.entries(TEMPLATES).map(([id, t]) => `${id} = ${t.desc}; props ${JSON.stringify(Object.fromEntries(Object.entries(t.schema.shape).map(([k, v]) => [k, v.description ?? (v.def?.type ?? 'value')])))}`).join('\n');
+const nextId = (items, prefix) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
+// where a graphic goes: a word id (start of that word) or a timeline second
+async function anchorFor(p, {at_wid, at_sec}) {
+  if (at_wid) {
+    const [source, i] = at_wid.split(':');
+    const tr = await transcript(p);
+    // the source may be split over several clips; the word lives in one of them
+    const t = tr.filter((x) => x.source === source).find((x) => x.words.some((w) => String(w.i) === i));
+    const w = t?.words.find((x) => String(x.i) === i);
+    if (!w) throw new Error(`no word ${at_wid} (see get_transcript)`);
+    const clip = p.clips.find((c) => c.id === t.clipId);
+    return {src: clip.src, startMs: w.startMs};
+  }
+  if (at_sec == null) throw new Error('give at_wid or at_sec');
+  const {clip, sourceSec} = locate(p, at_sec);
+  return {src: clip.src, startMs: Math.round(sourceSec * 1000)};
+}
+
+server.registerTool('add_graphic', {description: `Add a motion-graphics overlay (headline, label, stat, chapter) anchored to the footage. Templates:\n${TEMPLATE_HELP}\nAnchor with at_wid (word id from get_transcript, the graphic starts when that word starts) or at_sec. Keep the hook headline in the first 3 s; labels on room/feature mentions; ≤ 1 graphic on screen at a time.`, inputSchema: {project_id: pid, template: z.enum(Object.keys(TEMPLATES)), props: z.record(z.string(), z.any()), at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional().describe('block top, % of frame height; template default when omitted')}}, async ({project_id, template, props, at_wid, at_sec, duration_sec, y_pct}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  const clean = parseProps(template, props);
+  const {src, startMs} = await anchorFor(p, {at_wid, at_sec});
+  const g = {id: nextId(p.graphics, 'g'), src, startMs, endMs: startMs + Math.round((duration_sec ? duration_sec * 1000 : TEMPLATES[template].defaultMs)), template, props: clean};
+  if (y_pct != null) g.yPct = y_pct;
+  p.graphics.push(g); await save(project_id, p);
+  return text(`Added ${g.id} ${template}\n\n${summary(project_id, p)}`);
+});
+
+server.registerTool('edit_graphic', {description: 'Change a graphic: props (validated for its template), timing (seconds, timeline), y position.', inputSchema: {project_id: pid, graphic_id: z.string(), props: z.record(z.string(), z.any()).optional(), start_sec: sec('new timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional()}}, async ({project_id, graphic_id, props, start_sec, duration_sec, y_pct}) => {
+  const p = load(project_id); const g = p.graphics.find((x) => x.id === graphic_id); if (!g) throw new Error(`no graphic ${graphic_id}`);
+  if (props) g.props = parseProps(g.template, {...g.props, ...props});
+  if (start_sec != null) { const a = await anchorFor(p, {at_sec: start_sec}); const len = g.endMs - g.startMs; g.src = a.src; g.startMs = a.startMs; g.endMs = a.startMs + len; }
+  if (duration_sec != null) g.endMs = g.startMs + Math.round(duration_sec * 1000);
+  if (y_pct != null) g.yPct = y_pct;
+  await save(project_id, p); return text(`${graphic_id}: ${g.template} ${JSON.stringify(g.props)}`);
+});
+
+server.registerTool('delete_graphics', {description: 'Delete graphics by id.', inputSchema: {project_id: pid, graphic_ids: z.array(z.string()).min(1)}}, async ({project_id, graphic_ids}) => {
+  const p = load(project_id); const gone = new Set(graphic_ids); p.graphics = p.graphics.filter((g) => !gone.has(g.id)); await save(project_id, p); return text(`Deleted ${graphic_ids.join(', ')}`);
+});
+
 server.registerTool('set_caption_style', {description: `Caption preset for the whole project: ${Object.values(PRESETS).map((x) => `${x.id} = ${x.desc}`).join('; ')}. Re-pages the generated captions for the new preset, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); p.captionStyle = style;
   if (p.clips.length && p.captions.length) {
@@ -390,7 +437,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
+  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)`);
 });

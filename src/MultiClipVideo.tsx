@@ -3,6 +3,8 @@ import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVid
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {projectCaptions, type Caption} from './captions';
+import {GraphicsLayer} from './Graphics';
+import {projectGraphics, type Graphic} from './graphicTemplates';
 import {placeClips, sampleTransform, totalDurationFrames, type Clip, type Music} from './timeline';
 
 // one clip's media with its keyframed zoom/pan transform applied
@@ -75,14 +77,16 @@ export const MultiClipVideo: React.FC<{
   captions?: Caption[];
   captionStyle?: string;
   brolls?: BrollItem[];
+  graphics?: Graphic[];
   accentColor?: string;
-}> = ({clips = [], music = null, captions = [], brolls = [], accentColor, captionStyle}) => {
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], accentColor = '#FFB020', captionStyle}) => {
   const {fps} = useVideoConfig();
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
   // captions + b-roll are anchored to clips (source-relative) → project to absolute
   const projectedCaptions = projectCaptions(captions, clips, fps);
   const projectedBrolls = projectBrolls(brolls, clips, fps);
+  const projectedGraphics = projectGraphics(graphics, clips, fps);
 
   // OffthreadVideo is built for rendering (frame-accurate, but stutters/freezes
   // in the live Player). Use native <Video> in preview for smooth playback,
@@ -108,6 +112,9 @@ export const MultiClipVideo: React.FC<{
 
       {/* B-roll overlay (above clips, below captions) */}
       <BrollLayer items={projectedBrolls} />
+
+      {/* motion graphics: headlines, labels, stats */}
+      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />
 
       {/* music */}
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}

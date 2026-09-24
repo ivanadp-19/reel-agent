@@ -18,7 +18,7 @@ export const App: React.FC = () => {
 
   // start with an empty project so the Start screen's uploads can compute meta
   useEffect(() => {
-    init(META0, [], undefined, [], null, []);
+    init(META0);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -26,7 +26,7 @@ export const App: React.FC = () => {
   const openProject = async (id: string) => {
     try {
       const p = await fetch('/api/projects/' + id).then((r) => r.json());
-      init(META0, (p.captions ?? []).map(normalizeCaption), p.accentColor, p.clips ?? [], p.music ?? null, p.brolls ?? [], p.brollAssets ?? [], p.lang ?? 'auto', p.captionStyle ?? 'palabra');
+      init(META0, {...p, captions: (p.captions ?? []).map(normalizeCaption)});
       setProjectInfo(id, p.name || 'Untitled project');
       setView('editor');
     } catch {
@@ -41,7 +41,7 @@ export const App: React.FC = () => {
   };
 
   const backToStart = () => {
-    init(META0, [], undefined, [], null, []); // clear for a fresh start
+    init(META0); // clear for a fresh start
     refresh();
     setView('start');
   };

@@ -4,6 +4,7 @@ import {useEditor} from './store';
 import {placeClips, clipDurationSec} from '../src/timeline';
 import {projectCaptions} from '../src/captions';
 import {projectBrolls} from '../src/Broll';
+import {projectGraphics} from '../src/graphicTemplates';
 
 // Unified multi-track timeline (Obsidian Edit design): Captions / Video / Audio
 // share one ruler, playhead, horizontal scroll and zoom.
@@ -48,7 +49,7 @@ const slicePeaks = (w: WaveData | undefined, inSec: number, outSec: number): num
 
 export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> = ({playerRef}) => {
   const {
-    meta, captions, clips, music, brolls, selectedId, selectedClipId, currentFrame,
+    meta, captions, clips, music, brolls, graphics, selectedId, selectedClipId, currentFrame,
     select, selectClip, deleteClip, moveClipTo, trimClip, splitClipAtFrame, pushHistory,
   } = useEditor();
   const [pxPerSec, setPxPerSec] = useState(70);
@@ -86,6 +87,7 @@ export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> 
   // captions + b-roll are clip-anchored → project for display (follow trims/reorders)
   const projCaps = projectCaptions(captions, clips, fps);
   const projBrolls = projectBrolls(brolls, clips, fps);
+  const projGfx = projectGraphics(graphics, clips, fps);
 
   // scrub the playhead: click anywhere on empty timeline + drag. Clip/caption/
   // b-roll blocks stopPropagation, so they don't trigger scrubbing.
@@ -201,7 +203,7 @@ export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> 
         {/* label column */}
         <div className="flex flex-col border-r border-outline-variant bg-surface-container-lowest z-10 shrink-0" style={{width: LABELS_W}}>
           <div className="h-6 border-b border-outline-variant/30" />
-          {['Captions', 'Video', 'B-roll', 'Audio'].map((l) => (
+          {['Captions', 'Video', 'B-roll', 'Graphics', 'Audio'].map((l) => (
             <div key={l} className="flex items-center px-4 border-b border-outline-variant/30" style={{height: TRACK_H}}>
               <span className="text-[10px] font-label-bold uppercase tracking-wider text-on-surface-variant">{l}</span>
             </div>
@@ -328,6 +330,22 @@ export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> 
                   </div>
                 );
               })}
+            </Track>
+
+            {/* Graphics track (source-anchored; edited by the agent for now) */}
+            <Track>
+              {projGfx.map((g) => (
+                <div
+                  key={`${g.id}@${g.startMs}`}
+                  onPointerDown={(e) => { e.stopPropagation(); seekMs(g.startMs + 20); }}
+                  title={`${g.template}: ${JSON.stringify(g.props)}`}
+                  className="absolute top-2 h-8 rounded px-2 flex items-center overflow-hidden cursor-pointer bg-primary-container/40 border border-primary/40"
+                  style={{left: g.startMs * pxPerMs, width: Math.max(20, (g.endMs - g.startMs) * pxPerMs)}}
+                >
+                  <span className="material-symbols-outlined text-[12px] text-on-primary-container mr-1 pointer-events-none">title</span>
+                  <span className="text-[10px] truncate text-on-primary-container pointer-events-none">{g.template}</span>
+                </div>
+              ))}
             </Track>
 
             {/* Audio track (music, with waveform) */}

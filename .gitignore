@@ -28,3 +28,6 @@ public/*
 # local agent settings / downloaded models
 .claude/settings.local.json
 .models/
+
+# reference videos for style study (copyrighted, never commit)
+.refs/

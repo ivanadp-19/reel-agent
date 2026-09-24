@@ -2,9 +2,12 @@ import {create} from 'zustand';
 import type {Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
 import type {PresetId} from '../src/captionPresets';
+import type {Graphic} from '../src/graphicTemplates';
 import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
+// what a project file holds (besides name/timestamps)
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId};
 export type Lang = 'auto' | 'es' | 'en';
 
 const HISTORY_LIMIT = 100;
@@ -20,6 +23,7 @@ type EditorState = {
   clips: Clip[];
   music: Music;
   brolls: BrollItem[];
+  graphics: Graphic[];
   brollAssets: BrollAsset[];
   accentColor: string;
   captionStyle: PresetId;
@@ -33,7 +37,7 @@ type EditorState = {
   past: Snapshot[];
   future: Snapshot[];
 
-  init: (meta: Meta, captions: Caption[], accentColor?: string, clips?: Clip[], music?: Music, brolls?: BrollItem[], brollAssets?: BrollAsset[], lang?: Lang, captionStyle?: PresetId) => void;
+  init: (meta: Meta, p?: Partial<ProjectData>) => void;
   addBrollAsset: (asset: BrollAsset) => void;
   removeBrollAsset: (id: string) => void;
   select: (id: string | null) => void;
@@ -103,6 +107,7 @@ export const useEditor = create<EditorState>((set) => ({
   clips: [],
   music: null,
   brolls: [],
+  graphics: [],
   brollAssets: [],
   accentColor: '#FFB020',
   captionStyle: 'palabra',
@@ -113,22 +118,26 @@ export const useEditor = create<EditorState>((set) => ({
   past: [],
   future: [],
 
-  init: (meta, captions, accentColor, clips = [], music = null, brolls = [], brollAssets = [], lang = 'auto', captionStyle = 'palabra') =>
-    set((s) => ({
-      meta: withMeta(meta, clips),
-      projectId: null, // caller assigns via setProjectInfo — prevents autosaving a cleared state into the old project
-      projectName: 'Untitled project',
-      captions,
-      clips,
-      music,
-      brolls,
-      brollAssets,
-      accentColor: accentColor ?? s.accentColor,
-      lang,
-      captionStyle,
-      past: [],
-      future: [],
-    })),
+  init: (meta, p = {}) =>
+    set((s) => {
+      const clips = p.clips ?? [];
+      return {
+        meta: withMeta(meta, clips),
+        projectId: null, // caller assigns via setProjectInfo — prevents autosaving a cleared state into the old project
+        projectName: 'Untitled project',
+        captions: p.captions ?? [],
+        clips,
+        music: p.music ?? null,
+        brolls: p.brolls ?? [],
+        graphics: p.graphics ?? [],
+        brollAssets: p.brollAssets ?? [],
+        accentColor: p.accentColor ?? s.accentColor,
+        lang: p.lang ?? 'auto',
+        captionStyle: p.captionStyle ?? 'palabra',
+        past: [],
+        future: [],
+      };
+    }),
   addBrollAsset: (asset) => set((s) => ({brollAssets: [...s.brollAssets, asset]})),
   removeBrollAsset: (id) => set((s) => ({brollAssets: s.brollAssets.filter((a) => a.id !== id)})),
   select: (id) => set({selectedId: id, selectedClipId: null}),
