@@ -95,20 +95,20 @@ Spikes pendientes (cada uno con informe go/no-go):
 
 ### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
 
-Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images, librería local con `list_assets`); layouts (`layout`: marco redondeado/arco/círculo/phone sobre lienzo, split con B-roll); **matte de la persona** (MediaPipe selfie segmenter, ~30 fps en CPU, WebM VP9 con alfa) con gráficos `behind=true` y `prepare_mattes`, adelantado desde la fase 3; selector de estilo y tiers en el editor; `validate` (safe zones, glue, timing, densidad de énfasis, solapes, mattes faltantes, hook) y `caption_proof` (contact sheet de stills en ~4–9 s para que el agente se revise); skill `reel-edit` con el flujo completo para Claude Code y Codex.
+Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images, librería local con `list_assets`); layouts (`layout`: marco redondeado/arco/círculo/phone sobre lienzo, split con B-roll); **matte de la persona** (MediaPipe selfie segmenter, ~30 fps en CPU, WebM VP9 con alfa) con gráficos `behind=true` y `prepare_mattes`, adelantado desde la fase 3; selector de estilo y tiers en el editor; **brand kit** por proyecto (`set_brand`: acento/oscuro/claro, fuente de titulares y de captions del catálogo OFL, logo; kits reutilizables en `public/brands/`; captions, templates y lienzos lo leen); **captions detrás de la persona** (`edit_caption behind`) y **emoji por palabra** (`annotate_captions emoji`, Noto Color Emoji OFL, también en el Inspector con clic derecho); templates `oversized`, `chapter-caps`, `starburst`, `location-tag`, `price`; texto que se encoge para caber en el cuadro; slots flotantes debajo de la franja superior de Reels; `validate` (safe zones, glue, timing, densidad de énfasis, solapes, mattes faltantes, hook) y `caption_proof` (contact sheet de stills en ~4–9 s para que el agente se revise); skill `reel-edit` con el flujo completo para Claude Code y Codex.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.
 - Paginado en módulo compartido (`src/`), usado por el pipeline y por `annotate_captions` (re-paginar sin perder anotaciones, por `wordId`).
 - Captions v2: `reveal: 'build'` (las palabras aparecen y se quedan), karaoke (`upcoming: dim`), tratamientos de énfasis por tier (`weight`, `italic`, `font`, `color`, `scale`, `pill`, `block`, `underline`), contenedores de página (`none`/`pill`/`bar`/`glass`), posición flotante, catálogo de fuentes OFL (geométricas, condensadas, serif, script, manuscrita, mono, wide).
 - Style packs = preset + templates + paleta: primero Prism Pro, Focus, Stack, Lift, Orbit, Impact II.
-- Templates de título pendientes: `oversized` (letras recortadas fuera de cuadro), `chapter-caps` (versalitas espaciadas), `starburst` (burbuja cómic).
+- Templates de título: `oversized`, `chapter-caps`, `starburst` hechos.
 - Templates de titulares/etiquetas: `hook-stack`, `label-2tone`, `stat`, `chapter`, `location-tag`, `price`; track `graphics[]` anclado a fuente/palabra (`projectGraphics` clonado de `projectBrolls`).
-- Brand kit (`brand.json` por proyecto: logo, colores, fuentes OFL).
+- Brand kit: hecho (`brand` en el proyecto, kits en `public/brands/<slug>.json`, `set_brand`).
 - Herramientas MCP: `annotate_captions`, `set_caption_style`, `add_graphic`, `edit_graphic`, `delete_graphics`, `caption_proof`.
 - Validador: hecho salvo contraste real (las safe zones siguen siendo estimadas hasta tener capturas de Reels).
 - `caption_proof`: hecho.
-- UI mínima de pulido: preset, tier, emoji por palabra en el Inspector.
+- UI mínima de pulido: preset, tier y emoji por palabra en el Inspector (hecho).
 
 Criterios de aceptación:
 - Tests del validador y del paginado pasan.
@@ -163,7 +163,7 @@ Etiquetas ancladas en 3D a la pared (tracking planar), sidecar de HyperFrames (r
 
 ## 7. Preguntas abiertas
 
-- **Voz fuera de micrófono (directora dictando líneas).** Hoy se detecta por volumen (`src/speech.ts`: tomas ≥ 7 dB bajo el nivel de la presentadora) y por proyecto se marca, corta o ignora. Falla cuando la presentadora habla bajito (IMG_1778 a 122 s). La señal que lo rescataría es la boca (MediaPipe FaceLandmarker, jawOpen), pero mediapipe 1.0.1 revienta en macOS con `graph_service.h:139 Check failed: service_ Service is unavailable` en todos los modos; probar mediapipe 0.10.x en un venv aparte o esperar el fix. Diarización pyannote (viene con whisperx) es la otra vía, pero pide token de HF y aceptar modelos gated.
+- **Voz fuera de micrófono (directora dictando líneas).** Hoy se detecta por volumen (`src/speech.ts`: las tomas se separan en dos grupos de nivel; cuenta como segunda voz si quedan ≥ 6 dB por debajo y suman ≥ 15 % del habla) y por proyecto se marca, corta o ignora. Falla cuando la presentadora habla bajito (IMG_1778 a 122 s). La señal que lo rescataría es la boca (MediaPipe FaceLandmarker, jawOpen), pero mediapipe 1.0.1 revienta en macOS con `graph_service.h:139 Check failed: service_ Service is unavailable` en todos los modos; probar mediapipe 0.10.x en un venv aparte o esperar el fix. Diarización pyannote (viene con whisperx) es la otra vía, pero pide token de HF y aceptar modelos gated.
 1. ¿HyperFrames/GSAP como sidecar opcional más adelante, o solo Remotion? (Se decide tras la comparativa visual.)
 2. Capturas de un borrador gris en Reels para calibrar las safe zones reales.
 3. Export de `pruebaeditoria.mp4` desde Captions.ai o Submagic, como referencia de la comparativa.
