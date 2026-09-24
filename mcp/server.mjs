@@ -142,8 +142,11 @@ async function runJob(route, body, maxSec = 1800) {
   const {jobId, error} = await fetch(`${API}${route}`, {method: 'POST', body: JSON.stringify(body)}).then((r) => r.json());
   if (!jobId) throw new Error(error || `${route} did not start`);
   const t0 = Date.now();
+  let misses = 0; // a busy backend may miss a poll or two; only a run of failures is fatal
   for (;;) {
-    const s = await fetch(`${API}${route}/${jobId}`).then((r) => r.json());
+    let s;
+    try { s = await fetch(`${API}${route}/${jobId}`).then((r) => r.json()); misses = 0; }
+    catch (e) { if (++misses >= 8) throw new Error(`lost the backend while waiting for ${route}: ${e.message}`); await new Promise((r) => setTimeout(r, 2000)); continue; }
     if (s.status === 'done') return s;
     if (s.status === 'error') throw new Error(s.error || `${route} failed`);
     if (s.status === 'unknown') throw new Error('job vanished (backend restarted?)');

@@ -5,11 +5,22 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {bundle} from '@remotion/bundler';
 import {renderStill, selectComposition} from '@remotion/renderer';
+import {linkPublic, sweepDead} from '../scripts/public-links.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
+const TMP = path.join(ROOT, '.captions-tmp');
+// one bundle per MCP process, in its own dir with public/ as symlinks; removed on exit
+const WORK = path.join(TMP, `proof-bundle-${process.pid}`);
 let bundled = null;
 async function getBundle() {
-  if (!bundled) bundled = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: path.join(ROOT, 'public')});
+  if (!bundled) {
+    sweepDead(TMP, 'proof-bundle-');
+    const links = linkPublic(path.join(ROOT, 'public'), path.join(WORK, 'public-links'));
+    bundled = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
+    const clean = () => fs.rmSync(WORK, {recursive: true, force: true});
+    process.once('exit', clean);
+    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { clean(); process.exit(0); });
+  }
   return bundled;
 }
 

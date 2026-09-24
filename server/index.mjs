@@ -13,9 +13,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import {normalizeLoudness, qc, qcText} from '../scripts/qc.mjs';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
+import {linkPublic} from '../scripts/public-links.mjs';
 
 // HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
 // through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
@@ -491,6 +491,8 @@ const server = createServer(async (req, res) => {
     }
     const id = String(Date.now());
     const propsFile = path.join(ROOT, `.props-${id}.json`);
+    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
     const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
     const outFile = path.join(EXPORTS, outName);
     fs.writeFileSync(propsFile, raw);
@@ -504,7 +506,7 @@ const server = createServer(async (req, res) => {
     const concurrency = Math.max(2, Math.min(16, os.cpus().length - 2));
     const cacheBytes = Math.min(4e9, Math.max(5e8, Math.floor(os.totalmem() / 4)));
     const args = [
-      'remotion', 'render', 'MultiClip', outFile, `--props=${propsFile}`,
+      'remotion', 'render', 'MultiClip', outFile, `--props=${propsFile}`, `--public-dir=${links}`,
       `--concurrency=${concurrency}`,
       `--x264-preset=${draft ? 'ultrafast' : 'veryfast'}`,
       `--offthreadvideo-cache-size-in-bytes=${cacheBytes}`,
@@ -522,20 +524,25 @@ const server = createServer(async (req, res) => {
     child.stderr.on('data', onProgress);
     child.on('close', (code) => {
       fs.rmSync(propsFile, {force: true});
+      fs.rmSync(links, {recursive: true, force: true});
       if (code === 0 && draft) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`};
       else if (code === 0) {
-        // final: two-pass loudness to −14 LUFS, then the QC gate. A render that
-        // fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
-        // ponytail: runs synchronously (~3 s per minute of video) on the backend thread
+        // final: two-pass loudness to −14 LUFS, then the QC gate, in a child
+        // process (a few seconds of ffmpeg must not block this event loop). A render
+        // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
         renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
-        const ln = normalizeLoudness(outFile);
-        const report = qc(outFile, {expectSec});
-        if (ln.ok && report.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: qcText(report)};
-        else {
+        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec)], {cwd: ROOT});
+        let out = '';
+        fin.stdout.on('data', (d) => (out += d));
+        fin.stderr.on('data', (d) => process.stderr.write(d));
+        fin.on('close', () => {
+          let r;
+          try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+          if (r.ok) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text}; return; }
           const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-          fs.renameSync(outFile, path.join(EXPORTS, failed));
-          renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[ln.ok ? '' : ln.error, ...report.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: qcText(report)};
-        }
+          try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
+          renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text};
+        });
       } else {
         const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
         console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);

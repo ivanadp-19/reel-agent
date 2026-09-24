@@ -73,8 +73,20 @@ export function qc(file, {expectSec, draft = false} = {}) {
 
 export const qcText = (r) => r.checks.map((c) => `${c.ok ? '✓' : c.blocking ? '✗' : '!'} ${c.name}: ${c.value}${c.ok ? '' : ` (want ${c.want})`}`).join('\n');
 
+// CLI:
+//   node scripts/qc.mjs <file.mp4> [expectSec]              → report, exit 1 on failure
+//   node scripts/qc.mjs --finalize <file.mp4> <expectSec>   → normalize, then QC; JSON on stdout
+//     (the backend runs this as a child process so its event loop never blocks)
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [file, expect] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  if (args[0] === '--finalize') {
+    const [, file, expect] = args;
+    const ln = normalizeLoudness(path.resolve(file));
+    const report = qc(path.resolve(file), {expectSec: expect ? +expect : undefined});
+    console.log(JSON.stringify({ok: ln.ok && report.ok, error: ln.ok ? null : ln.error, checks: report.checks, text: qcText(report)}));
+    process.exit(0);
+  }
+  const [file, expect] = args;
   const r = qc(path.resolve(file), {expectSec: expect ? +expect : undefined, draft: /-draft\.mp4$/.test(file)});
   console.log(qcText(r));
   process.exit(r.ok ? 0 : 1);
