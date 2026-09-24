@@ -26,7 +26,20 @@ Objetivo: Fase 3 del plan `docs/superpowers/plans/2026-09-24-captions-ai-motion.
 | life marquee | Stack | el `oversized` en contorno se desplaza ~17 px/f | el preview lo lleva detrás de la persona recortada (`behind: true` + matte) (`cmp-p3-marquee.jpg`) |
 | reveal slideBlur | Prime | "GROWTH" entra desde la derecha con motion blur y se asienta en ~6 f | sin el muro de contorno detrás (`big-word repeat` + `drift`, aparte) (`cmp-p3-slideBlur.jpg`) |
 | camera punch | Orbit | "FRIENDS" baja desde el borde superior en 5 f mientras el metraje empuja a 1.4× en 8 f | — (`cmp-p3-punch.jpg`) |
-ROWS_PENDING
+| reveal wipe | Lift | la tarjeta entra con un barrido inclinado desde la izquierda en 5 f con el título dentro | la tarjeta del preview es verde oscuro con un polígono menta: paleta y lienzo de pack (Fase 5) (`cmp-p3-wipe.jpg`) |
+| neon-frame | Prime | el marco se dibuja en 3 f, inclinado, y oscila con una copia 4 f detrás | el brillo del preview es más ancho y cian: paleta de pack (`cmp-p3-neon.jpg`) |
+| outline-rect | Evo | el contorno fino se dibuja desde el borde derecho en ~11 f y sigue expandiéndose | el degradado azul→violeta del preview es el acento del pack (`cmp-p3-outline.jpg`) |
+| scribble ellipse | Sketch | la elipse doble se traza en ~6 f alrededor del punto | el trazo del preview es más grueso y beige; `color: light` lo deja crema (`cmp-p3-scribble.jpg`) |
+| starburst stamp | Pop | aterriza 1.25→1 en 3 f y se queda quieto | rosa y con decoración escalonada alrededor en el preview: pack + stickers (`cmp-p3-stamp.jpg`) |
+| frame-light | Prime | un segmento de luz recorre el borde, una vuelta cada ~700 ms | — (`cmp-p3-light.jpg`) |
+
+Nota del gate: la primera pasada de seis casos (tarjeta, neón, contorno, garabato, sello, luz) salió vacía o mal porque el script escribió los props sin pasarlos por `parseProps`, así que los defaults (anchos, vueltas, el `text` de las líneas) no existían; el agente nunca pasa por ahí porque `add_graphic` valida siempre. Se corrigió el script y se repitieron.
+
+## Lo que queda para las fases siguientes
+
+- **Paleta y caras por pack** (Fase 5): casi todas las diferencias restantes son de color (cian de Prime, verde de Lift, rosa de Pop) o de fuente (script de pincel para Prime, título bicolor de Stack), no de movimiento.
+- **Velocidad del typewriter**: Lens teclea a ~125 ms por letra y Align/Paper II a ~30 ms; hoy es una sola cadencia. Un knob `speed` en `reveal` cuando un pack lo pida.
+- **Decoración escalonada** (stickers que llegan uno tras otro) y el **lienzo de cuadrícula** de Pop: Fase 4.
 
 ## Archivos
 
