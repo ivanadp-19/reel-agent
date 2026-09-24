@@ -31,3 +31,6 @@ public/*
 
 # reference videos for style study (copyrighted, never commit)
 .refs/
+
+# per-run secret between the backend and the MCP server
+.backend-token

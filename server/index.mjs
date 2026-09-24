@@ -12,6 +12,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 
 // run a command async, resolve {code, stdout, stderr}
 const run = (cmd, args, opts = {}) =>
@@ -31,6 +32,12 @@ const EXPORTS = path.join(PUBLIC, 'exports');
 const PROJECTS_DIR = path.join(PUBLIC, 'projects');
 fs.mkdirSync(EXPORTS, {recursive: true});
 fs.mkdirSync(PROJECTS_DIR, {recursive: true});
+
+// Per-run secret for calls that touch the local filesystem by path (the MCP
+// server reads it from .backend-token). Other local pages/processes cannot
+// make the backend ingest arbitrary files without it.
+const TOKEN = crypto.randomBytes(16).toString('hex');
+fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 
 const renders = {}; // jobId -> {status, progress, file, error}
 const captionJobs = {}; // jobId -> {status, progress, label, error}
@@ -338,9 +345,14 @@ const server = createServer(async (req, res) => {
     let n = 2;
     while (fs.existsSync(path.join(clipsDir, `${id}.mp4`))) id = `${base}-${n++}`;
 
-    // a local file path (same machine, e.g. from the MCP server) skips the upload
+    // a local file path (same machine, from the MCP server) skips the upload —
+    // only with the run token, and only video files
     const local = url.searchParams.get('path');
-    const tmp = local && fs.existsSync(local) ? local : path.join(ROOT, `.upload-${id}.bin`);
+    if (local) {
+      if (req.headers['x-reel-token'] !== TOKEN) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
+    }
+    const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);
     const cleanup = () => { if (tmp !== local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
     const ingest = async () => {
       try {
