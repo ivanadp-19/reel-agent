@@ -47,6 +47,13 @@ The end-to-end editing flow (cut → captions → emphasis → hook and labels �
 assets → framing → validate → caption_proof → render) is the `reel-edit` skill:
 `.agents/skills/reel-edit/SKILL.md` (`.claude/skills` links to the same folder).
 
+## Headless runners
+
+- `scripts/claude-edit.sh <project> "<brief>"` — Claude Code with only `mcp__reel__*`, Read and Skill
+- `scripts/codex-edit.sh <project> "<brief>"` — Codex CLI with the user's config ignored, the reel server pre-approved and a read-only shell sandbox
+
+Both take the same brief; `scripts/run-report.mjs` measures a run from its JSONL log.
+
 ## Commands
 
 - `npm run setup` — checks tools, creates the WhisperX venv, seeds `.env`

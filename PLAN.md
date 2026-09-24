@@ -88,7 +88,7 @@ Hecho:
 - Verificado con `pruebaeditoria.mp4` (es-MX): transcripción correcta, 31 páginas, cara al 57 %, corte a mitad de frase correcto en el render.
 
 Spikes pendientes (cada uno con informe go/no-go):
-1. **Paridad de Codex**: `codex exec --sandbox read-only` + MCP: escribir proyecto, render, imagen de `frame_at`, shell bloqueado. Alternativa: `codex app-server` + `dynamicTools`. *Requiere instalar Codex en la máquina.*
+1. **Paridad de Codex**: runner hecho (`scripts/codex-edit.sh`); ver el resultado de la corrida de paridad en `reports/`.
 2. **Comparativa visual de captions**: renderizar el mismo clip de 10 s con tscaps, una receta de open-edit, pycaps `hype` y los kits nativos de Remotion (`remotion-captions-kit`, `remotion-captioneer`, `remotion-captions-themes`, `captioncat`); ver los previews de HyperFrames; comparar contra un export de Captions.ai/Submagic. *Requiere ese export.* Decide qué presets se portan y si HyperFrames entra.
 3. **Muletillas en español**: 3 clips reales, % de "eh/este/mmm" que WhisperX conserva vs conteo manual; plan B = energía de voz sin palabra alineada en huecos < 600 ms.
 4. **Benchmark de render**: línea base tomada; medir de nuevo con bold-pop + blur/glow y fijar el ratio máximo aceptable.
@@ -139,7 +139,7 @@ Entregables:
 - Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`).
 - Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
 - `end-card` hecho (logo del brand kit, título, CTA, handle).
-- Runner headless con selector de cerebro; registro del MCP en `~/.claude.json` y en el `config.toml` de Codex; skills para ambos.
+- Runners headless: `scripts/claude-edit.sh` y `scripts/codex-edit.sh` (Codex ignora el config del usuario, pre-aprueba solo el servidor `reel` con `default_tools_approval_mode=approve` y corre con sandbox read-only: un `touch` en el repo queda bloqueado, verificado). No hace falta tocar `~/.codex/config.toml`. La skill `.agents/skills/reel-edit` sirve a los dos.
 - Crítica visual completa (contact sheet del render) con ≤ 3 rondas.
 
 Criterios:

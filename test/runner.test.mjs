@@ -29,3 +29,10 @@ test('the reel MCP server has no shell, file-write or network-fetch tool', async
     assert.deepEqual(pathTools, ['add_broll', 'add_broll_assets', 'add_clips', 'set_brand', 'set_music']);
   } finally { await client.close(); }
 });
+
+test('the Codex runner ignores the user config, pre-approves only the reel server and keeps the shell read-only', () => {
+  const sh = fs.readFileSync('scripts/codex-edit.sh', 'utf8');
+  for (const flag of ['--ignore-user-config', '-s read-only', '--ephemeral', `approval_policy="never"`, `mcp_servers.reel.default_tools_approval_mode="approve"`]) assert.ok(sh.includes(flag), flag);
+  assert.doesNotMatch(sh, /approve-for-me|danger-full-access|workspace-write|dangerously/);
+  assert.equal((sh.match(/mcp_servers\.(\w+)\.command/g) ?? []).length, 1);
+});
