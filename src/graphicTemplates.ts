@@ -159,7 +159,7 @@ export const TEMPLATES = {
     y: 0,
     schema: z.object({
       title: short(40),
-      cta: z.string().trim().max(24).default('Follow for more'),
+      cta: z.string().trim().max(36).default('Follow for more'),
       handle: z.string().trim().max(30).default(''),
       bg: z.enum(['dark', 'accent', 'light']).default('dark'),
     }),
