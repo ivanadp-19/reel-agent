@@ -13,8 +13,9 @@ whisper.cpp/
 public/*
 !public/.gitkeep
 
-# pipeline temp files
+# pipeline temp files (the backend writes every job's input as .<job>-<id>.json in the root and removes it when the job ends)
 .captions-tmp/
+.*-[0-9]*.json
 .props-*.json
 .clips-*.json
 .broll-*.json
