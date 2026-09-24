@@ -25,6 +25,8 @@ import {TEMPLATES, describeSchema, isTemplate, matteSpans, parseProps, projectGr
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
+import {brandSchema} from '../src/brand.ts';
+import {FONT_FAMILIES} from '../src/fonts.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -50,7 +52,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= [];
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null;
   return p;
 }
 async function save(id, p) {
@@ -100,7 +102,7 @@ const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.ti
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -204,7 +206,47 @@ server.registerTool('duplicate_project', {description: 'Copy a project under a n
 
 server.registerTool('rename_project', {description: 'Rename a project.', inputSchema: {project_id: pid, name: z.string()}}, async ({project_id, name}) => { const p = load(project_id); p.name = name; await save(project_id, p); return text(`Renamed to "${name}"`); });
 
-server.registerTool('set_accent_color', {description: 'Set the caption accent (highlight) color, hex like #FFB020.', inputSchema: {project_id: pid, color: z.string().regex(/^#[0-9a-fA-F]{6}$/)}}, async ({project_id, color}) => { const p = load(project_id); p.accentColor = color; await save(project_id, p); return text(`Accent color ${color}`); });
+server.registerTool('set_accent_color', {description: 'Set the caption accent (highlight) color, hex like #FFB020 (also the brand kit accent when the project has one — see set_brand).', inputSchema: {project_id: pid, color: z.string().regex(/^#[0-9a-fA-F]{6}$/)}}, async ({project_id, color}) => { const p = load(project_id); p.accentColor = color; if (p.brand) p.brand.colors.accent = color; await save(project_id, p); return text(`Accent color ${color}`); });
+
+// ---------- brand kit ----------
+const BRANDS = path.join(PUBLIC, 'brands');
+const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
+const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts (OFL catalog): ${FONT_FAMILIES.join(', ')}. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.enum(FONT_FAMILIES).optional(), caption_font: z.enum(FONT_FAMILIES).optional(), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, logo, name, from, save_as, clear}) => {
+  const p = load(project_id);
+  if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
+  let b;
+  if (from) {
+    const f = path.join(BRANDS, `${slug(from)}.json`);
+    if (!fs.existsSync(f)) throw new Error(`no saved kit "${from}"${savedBrands().length ? ` — saved: ${savedBrands().join(', ')}` : ' (none saved yet)'}`);
+    b = JSON.parse(fs.readFileSync(f, 'utf8'));
+  } else b = structuredClone(p.brand ?? {colors: {accent: p.accentColor}, fonts: {}});
+  b.fonts ??= {};
+  if (name) b.name = name;
+  if (accent) b.colors.accent = accent; if (dark) b.colors.dark = dark; if (light) b.colors.light = light;
+  if (display_font) b.fonts.display = display_font; if (caption_font) b.fonts.body = caption_font;
+  if (logo) {
+    if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
+    if (path.isAbsolute(logo)) {
+      if (!fs.existsSync(logo)) throw new Error(`file not found: ${logo}`);
+      const dir = path.join(BRANDS, 'logos'); fs.mkdirSync(dir, {recursive: true});
+      const dest = path.join(dir, path.basename(logo).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(logo, dest);
+      b.logo = path.relative(PUBLIC, dest);
+    } else {
+      const abs = path.resolve(PUBLIC, logo);
+      if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${logo}`);
+      b.logo = path.relative(PUBLIC, abs);
+    }
+  }
+  const r = brandSchema.safeParse(b);
+  if (!r.success) throw new Error(`brand: ${r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}`);
+  p.brand = r.data; p.accentColor = r.data.colors.accent;
+  let saved = '';
+  if (save_as) { fs.mkdirSync(BRANDS, {recursive: true}); fs.writeFileSync(path.join(BRANDS, `${slug(save_as)}.json`), JSON.stringify({...r.data, name: r.data.name ?? save_as}, null, 2)); saved = ` — saved as "${slug(save_as)}"`; }
+  await save(project_id, p);
+  return text(`Brand kit: ${JSON.stringify(p.brand)}${saved}`);
+});
 
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {
   await needBackend();
@@ -542,7 +584,7 @@ const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level ===
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle});
+const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
@@ -572,7 +614,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
+  const r = await runJob('/api/render', {...projectProps(p), draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)`);
 });

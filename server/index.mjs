@@ -224,7 +224,9 @@ const server = createServer(async (req, res) => {
       // is rejected instead of silently overwriting the other's work
       if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return json(res, 409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt});
       const now = new Date().toISOString();
-      const saved = {...incoming, createdAt: prev.createdAt || now, updatedAt: now};
+      // merge: a writer that does not know a field (an older editor, a new
+      // project setting) must not wipe it; clearing is done with null / []
+      const saved = {...prev, ...incoming, createdAt: prev.createdAt || now, updatedAt: now};
       fs.writeFileSync(file, JSON.stringify(saved, null, 2));
       return json(res, 200, {ok: true, updatedAt: now});
     }

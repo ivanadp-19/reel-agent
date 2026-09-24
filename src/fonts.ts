@@ -42,6 +42,11 @@ const LOADERS = {
 };
 
 export type FontFamily = keyof typeof LOADERS;
+// heaviest weight each loader brings (a brand font used where a template wants "bold")
+export const HEAVIEST: Record<FontFamily, number> = {
+  Inter: 800, Montserrat: 800, Poppins: 700, 'Bebas Neue': 400, Anton: 400, Oswald: 700, Unbounded: 900,
+  'Playfair Display': 700, 'Instrument Serif': 400, Caveat: 700, 'Permanent Marker': 400, 'Courier Prime': 700, 'Space Mono': 700,
+};
 export const FONT_FAMILIES = Object.keys(LOADERS) as FontFamily[];
 
 const loaded = new Map<FontFamily, string>();

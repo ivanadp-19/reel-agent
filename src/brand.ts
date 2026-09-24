@@ -1,0 +1,45 @@
+// Brand kit: a client's palette, fonts and logo. Stored on the project
+// (`brand`), reusable across projects as public/brands/<slug>.json. Caption
+// presets, graphics templates and layout canvases read it through
+// BrandContext, so one kit restyles everything without touching the presets.
+
+import {createContext, useContext} from 'react';
+import {z} from 'zod';
+import {FONT_FAMILIES, type FontFamily} from './fonts.ts';
+
+const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'hex color like #FFB020');
+const family = z.enum(FONT_FAMILIES as [FontFamily, ...FontFamily[]]);
+
+export const brandSchema = z.object({
+  name: z.string().trim().max(40).optional(),
+  colors: z.object({
+    accent: hex.describe('highlight color: caption emphasis, accent lines, accent canvases'),
+    dark: hex.optional().describe('dark canvas / card background (default #0b0b0d)'),
+    light: hex.optional().describe('light canvas / card background (default #f3f3f0)'),
+  }),
+  fonts: z.object({
+    display: family.optional().describe('headline font (graphics templates)'),
+    body: family.optional().describe('caption font (overrides the preset family)'),
+  }).default({}),
+  logo: z.string().optional().describe('image under public/, e.g. brands/acme.png'),
+});
+export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: FontFamily; body?: FontFamily}; logo?: string};
+
+// what the renderer uses: every value resolved, `branded` = a kit is active
+export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: FontFamily; body?: FontFamily; logo?: string};
+
+export const DEFAULT_ACCENT = '#FFB020';
+export function resolveBrand(brand: Brand | null | undefined, accentColor?: string): Kit {
+  return {
+    branded: !!brand,
+    accent: brand?.colors.accent ?? accentColor ?? DEFAULT_ACCENT,
+    dark: brand?.colors.dark ?? '#0b0b0d',
+    light: brand?.colors.light ?? '#f3f3f0',
+    display: brand?.fonts?.display,
+    body: brand?.fonts?.body,
+    logo: brand?.logo,
+  };
+}
+
+export const BrandContext = createContext<Kit>(resolveBrand(null));
+export const useBrand = () => useContext(BrandContext);

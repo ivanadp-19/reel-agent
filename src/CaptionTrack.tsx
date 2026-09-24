@@ -3,10 +3,9 @@ import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} 
 import type {Caption, CaptionWord} from './captions';
 import {presetOf, type Preset, type TierStyle} from './captionPresets';
 import {fontFamily} from './fonts';
+import {useBrand} from './brand';
 
 export type {Caption} from './captions';
-
-const FALLBACK_ACCENT = '#FFB020';
 
 // one word, styled by its tier; in build mode it appears at its own onset
 const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: boolean; onsetFrame: number}> = ({w, preset, accent, active, onsetFrame}) => {
@@ -139,13 +138,19 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   );
 };
 
-// every page = its own Sequence; the page holds until the next one (max hold, never past its clip)
-export const CaptionTrack: React.FC<{captions: Caption[]; accentColor?: string; captionStyle?: string}> = ({captions, accentColor, captionStyle}) => {
+// every page = its own Sequence; the page holds until the next one (max hold, never past its clip).
+// Rendered twice: behind=true draws only the pages marked behind (under the
+// presenter's matte), the default draws the rest on top. Timing and float
+// positions come from the full list either way.
+export const CaptionTrack: React.FC<{captions: Caption[]; captionStyle?: string; behind?: boolean}> = ({captions, captionStyle, behind = false}) => {
   const {fps} = useVideoConfig();
-  const preset = presetOf(captionStyle);
+  const kit = useBrand();
+  const base = presetOf(captionStyle);
+  // a brand kit overrides the pack's accent and (when it names one) its font;
+  // without a kit the pack's own palette wins over the project accent
+  const preset = kit.body ? {...base, font: {...base.font, family: kit.body}} : base;
   if (!captions?.length) return null;
-  // the pack's own palette wins; otherwise the project's accent (brand kit comes later)
-  const accent = preset.colors.accent ?? accentColor ?? FALLBACK_ACCENT;
+  const accent = kit.branded ? kit.accent : (preset.colors.accent ?? kit.accent);
   const hold = preset.layout.maxWords <= 1 ? 250 : 700; // word-at-a-time pages should not linger
   return (
     <>

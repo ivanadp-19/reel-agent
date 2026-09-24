@@ -8,6 +8,7 @@ import {projectGraphics, type Graphic} from './graphicTemplates';
 import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
+import {BrandContext, resolveBrand, type Brand} from './brand';
 
 // Music layer: start offset, volume, optional end fade-out, and optional
 // auto-ducking — the music dips while someone is speaking (speech = caption spans).
@@ -53,8 +54,11 @@ export const MultiClipVideo: React.FC<{
   graphics?: Graphic[];
   mattes?: Matte[];
   accentColor?: string;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor = '#FFB020', captionStyle}) => {
+  brand?: Brand | null;
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null}) => {
   const {fps} = useVideoConfig();
+  const kit = resolveBrand(brand, projectAccent);
+  const accentColor = kit.accent;
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
   // captions + b-roll are anchored to clips (source-relative) → project to absolute
@@ -68,6 +72,7 @@ export const MultiClipVideo: React.FC<{
   const Clip = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
 
   return (
+    <BrandContext.Provider value={kit}>
     <AbsoluteFill style={{backgroundColor: 'black'}}>
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
@@ -100,7 +105,8 @@ export const MultiClipVideo: React.FC<{
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}
 
       {/* captions, always on top */}
-      <CaptionTrack captions={projectedCaptions} accentColor={accentColor} captionStyle={captionStyle} />
+      <CaptionTrack captions={projectedCaptions} captionStyle={captionStyle} />
     </AbsoluteFill>
+    </BrandContext.Provider>
   );
 };

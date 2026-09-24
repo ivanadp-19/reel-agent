@@ -1,20 +1,28 @@
 import React from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
 import {TEMPLATES, type Graphic} from './graphicTemplates';
-import {fontFamily} from './fonts';
+import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
+import {useBrand} from './brand';
+import {fitSize} from './textFit';
 
-const FONT = fontFamily('Montserrat');
-// named faces the templates pick from (all in src/fonts.ts)
-const FACE = {
-  display: () => ({fontFamily: fontFamily('Montserrat'), fontWeight: 800}),
-  condensed: () => ({fontFamily: fontFamily('Anton'), fontWeight: 400, letterSpacing: 1}),
-  script: () => ({fontFamily: fontFamily('Caveat'), fontWeight: 700}),
-  serif: () => ({fontFamily: fontFamily('Playfair Display'), fontWeight: 700}),
-  'serif-italic': () => ({fontFamily: fontFamily('Instrument Serif'), fontWeight: 400, fontStyle: 'italic' as const}),
+// named faces the templates pick from (all in src/fonts.ts); a brand kit's
+// headline font replaces `display`
+type FaceName = 'display' | 'condensed' | 'script' | 'serif' | 'serif-italic';
+const FACES: Record<FaceName, {family: FontFamily; weight: number; italic?: boolean; spacing?: number}> = {
+  display: {family: 'Montserrat', weight: 800},
+  condensed: {family: 'Anton', weight: 400, spacing: 1},
+  script: {family: 'Caveat', weight: 700},
+  serif: {family: 'Playfair Display', weight: 700},
+  'serif-italic': {family: 'Instrument Serif', weight: 400, italic: true},
+};
+type Face = {family: FontFamily; style: React.CSSProperties};
+const useFace = (name: unknown, fallback: FaceName = 'display'): Face => {
+  const kit = useBrand();
+  const key = (typeof name === 'string' && name in FACES ? name : fallback) as FaceName;
+  const f: {family: FontFamily; weight: number; italic?: boolean; spacing?: number} = key === 'display' && kit.display ? {family: kit.display, weight: HEAVIEST[kit.display]} : FACES[key];
+  return {family: f.family, style: {fontFamily: fontFamily(f.family), fontWeight: f.weight, ...(f.italic ? {fontStyle: 'italic' as const} : {}), ...(f.spacing ? {letterSpacing: f.spacing} : {})}};
 };
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
-// which named face a style object came from (for width estimates)
-const faceName = (style: React.CSSProperties): keyof typeof FACE => (Object.keys(FACE) as (keyof typeof FACE)[]).find((k) => FACE[k]().fontFamily === style.fontFamily && (FACE[k]() as any).fontStyle === (style as any).fontStyle) ?? 'display';
 
 const outCubic = Easing.out(Easing.cubic);
 // 0→1 over `frames`, starting at `delay`
@@ -25,16 +33,7 @@ const useReveal = (delay: number, frames: number) => {
 // blur-in: unfocused and slightly low → sharp and in place
 const blurIn = (a: number): React.CSSProperties => ({opacity: a, filter: `blur(${(1 - a) * 12}px)`, transform: `translateY(${(1 - a) * 22}px)`});
 
-// Text never runs off the frame: shrink the font so the line fits `maxWidth`.
-// Widths are estimated from average glyph advances per face (em, upper/lower);
-// a little generous on purpose. ponytail: table, not measurement — tune here.
-const ADVANCE: Record<keyof typeof FACE, [number, number]> = {display: [0.8, 0.62], condensed: [0.47, 0.42], script: [0.58, 0.47], serif: [0.78, 0.58], 'serif-italic': [0.55, 0.44]};
-export function fitSize(text: string, base: number, face: keyof typeof FACE = 'display', maxWidth = 960, minSize = 0): number {
-  const [up, lo] = ADVANCE[face] ?? ADVANCE.display;
-  const em = [...String(text)].reduce((n, ch) => n + (ch === ' ' ? 0.3 : /[.,:;'|!]/.test(ch) ? 0.3 : /[IJLijl1]/.test(ch) ? up * 0.5 : /\d/.test(ch) ? 0.62 : ch === ch.toUpperCase() && ch !== ch.toLowerCase() ? up : lo), 0);
-  const width = em * base;
-  return width <= maxWidth ? base : Math.max(minSize, Math.floor((base * maxWidth) / width));
-}
+// line widths: src/textFit.ts
 
 const SIZES = {sm: 60, md: 90, lg: 130, xl: 180};
 
@@ -47,9 +46,10 @@ const HookStack: React.FC<{props: any; accent: string}> = ({props, accent}) => (
 );
 const Line: React.FC<{i: number; l: any; upper: boolean; accent: string}> = ({i, l, upper, accent}) => {
   const a = useReveal(i * 4, 9);
+  const face = useFace('display');
   const base = SIZES[l.size as keyof typeof SIZES] ?? SIZES.lg;
   return (
-    <div style={{fontSize: fitSize(upper ? String(l.text).toUpperCase() : l.text, base), fontWeight: 800, color: l.accent ? accent : '#fff', textTransform: upper ? 'uppercase' : undefined, letterSpacing: -1, whiteSpace: 'nowrap', ...blurIn(a)}}>
+    <div style={{...face.style, fontSize: fitSize(upper ? String(l.text).toUpperCase() : l.text, base, face.family), color: l.accent ? accent : '#fff', textTransform: upper ? 'uppercase' : undefined, letterSpacing: -1, whiteSpace: 'nowrap', ...blurIn(a)}}>
       {l.text}
     </div>
   );
@@ -58,8 +58,9 @@ const Line: React.FC<{i: number; l: any; upper: boolean; accent: string}> = ({i,
 const Label2Tone: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 8);
   const b = useReveal(3, 8);
+  const face = useFace('display');
   // a long line shrinks (down to 52 px) before it is allowed to wrap
-  const line = (text: string): React.CSSProperties => ({fontSize: fitSize(text, 72, 'display', 940, 52), fontWeight: 800, lineHeight: 1.05, letterSpacing: -0.5, textAlign: 'center'});
+  const line = (text: string): React.CSSProperties => ({...face.style, fontSize: fitSize(text, 72, face.family, 940, 52), lineHeight: 1.05, letterSpacing: -0.5, textAlign: 'center'});
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
       <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}>{props.top}</div>
@@ -83,9 +84,10 @@ const Stat: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 10);
   const c = useReveal(0, 18);
   const b = useReveal(6, 8);
+  const face = useFace('display');
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
-      <div style={{fontSize: 170, fontWeight: 800, lineHeight: 1, color: 'rgba(255,255,255,0.96)', letterSpacing: -3, ...blurIn(a)}}>{props.countUp ? countUp(props.value, c) : props.value}</div>
+      <div style={{...face.style, fontSize: fitSize(props.value, 170, face.family, 960), lineHeight: 1, color: 'rgba(255,255,255,0.96)', letterSpacing: -3, whiteSpace: 'nowrap', ...blurIn(a)}}>{props.countUp ? countUp(props.value, c) : props.value}</div>
       {props.label ? <div style={{fontSize: 44, fontWeight: 600, color: accent, textTransform: 'uppercase', letterSpacing: 4, marginTop: 10, ...blurIn(b)}}>{props.label}</div> : null}
     </div>
   );
@@ -96,10 +98,11 @@ const Chapter: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const {fps} = useVideoConfig();
   const pop = spring({frame, fps, config: {damping: 11, stiffness: 190, mass: 0.7}});
   const a = useReveal(4, 8);
+  const face = useFace('display');
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
       <div style={{fontSize: 40, fontWeight: 600, color: accent, textTransform: 'uppercase', letterSpacing: 6, ...blurIn(a)}}>{props.label}</div>
-      <div style={{fontSize: 200, fontWeight: 800, lineHeight: 1, color: '#fff', letterSpacing: -4, opacity: pop, transform: `scale(${interpolate(pop, [0, 1], [0.6, 1])})`}}>{props.number}</div>
+      <div style={{...face.style, fontSize: 200, lineHeight: 1, color: '#fff', letterSpacing: -4, opacity: pop, transform: `scale(${interpolate(pop, [0, 1], [0.6, 1])})`}}>{props.number}</div>
     </div>
   );
 };
@@ -108,10 +111,10 @@ const Chapter: React.FC<{props: any; accent: string}> = ({props, accent}) => {
 const BIG = {lg: 150, xl: 210, xxl: 270};
 const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 10);
-  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.display();
+  const {family, style: face} = useFace(props.font);
   const fill = props.color === 'accent' ? accent : '#fff';
   const text = props.upper ? String(props.text).toUpperCase() : props.text;
-  const size = fitSize(text, BIG[props.size as keyof typeof BIG] ?? BIG.xl, props.font in FACE ? props.font : 'display', 1000);
+  const size = fitSize(text, BIG[props.size as keyof typeof BIG] ?? BIG.xl, family, 1000);
   const outline: React.CSSProperties = {color: 'transparent', WebkitTextStroke: `2px ${fill}`, opacity: 0.55};
   if (!props.repeat) {
     return <div style={{fontSize: size, lineHeight: 0.95, whiteSpace: 'nowrap', ...face, ...(props.color === 'outline' ? {...outline, opacity: 0.9} : {color: fill}), ...blurIn(a)}}>{text}</div>;
@@ -130,9 +133,10 @@ const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
 
 // full-frame solid card with staggered lines; `grid` draws graph paper
 const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) => {
-  const bg = props.bg === 'dark' ? '#0b0b0d' : props.bg === 'light' ? '#f3f3f0' : accent;
+  const kit = useBrand();
+  const bg = props.bg === 'dark' ? kit.dark : props.bg === 'light' ? kit.light : accent;
   const fg = props.bg === 'light' ? '#111' : '#fff';
-  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.condensed();
+  const face = useFace(props.font, 'condensed');
   return (
     <div style={{position: 'absolute', inset: 0, background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '0 60px', textAlign: 'center', ...(props.grid ? {backgroundImage: `linear-gradient(${fg}22 1px, transparent 1px), linear-gradient(90deg, ${fg}22 1px, transparent 1px)`, backgroundSize: '96px 96px'} : {})}}>
       {props.lines.map((l: any, i: number) => (
@@ -141,18 +145,18 @@ const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) =>
     </div>
   );
 };
-const CardLine: React.FC<{i: number; text: string; color: string; face: React.CSSProperties}> = ({i, text, color, face}) => {
+const CardLine: React.FC<{i: number; text: string; color: string; face: Face}> = ({i, text, color, face}) => {
   const a = useReveal(2 + i * 4, 8);
-  return <div style={{fontSize: fitSize(String(text).toUpperCase(), 118, faceName(face), 940), lineHeight: 1, textTransform: 'uppercase', whiteSpace: 'nowrap', color, ...face, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
+  return <div style={{fontSize: fitSize(String(text).toUpperCase(), 118, face.family, 940), lineHeight: 1, textTransform: 'uppercase', whiteSpace: 'nowrap', color, ...face.style, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
 };
 
 // outlined title that fills with the accent color left → right
 const FillTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 6);
   const fill = useReveal(6, 22);
-  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.condensed();
+  const face = useFace(props.font, 'condensed');
   const text = String(props.text).toUpperCase();
-  const style: React.CSSProperties = {fontSize: fitSize(text, 200, faceName(face), 1000), lineHeight: 1, whiteSpace: 'nowrap', ...face};
+  const style: React.CSSProperties = {fontSize: fitSize(text, 200, face.family, 1000), lineHeight: 1, whiteSpace: 'nowrap', ...face.style};
   return (
     <div style={{position: 'relative', display: 'inline-block', opacity: a}}>
       <div style={{...style, color: 'transparent', WebkitTextStroke: '3px rgba(255,255,255,0.6)'}}>{text}</div>
@@ -166,11 +170,11 @@ const ScriptTitle: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   const a = useReveal(0, 8);
   const b = useReveal(4, 10);
   const c = useReveal(9, 8);
-  const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.script();
+  const face = useFace(props.font, 'script');
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
       {props.tag ? <div style={{fontSize: 30, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: '#fff', border: '2px solid rgba(255,255,255,0.8)', borderRadius: 999, padding: '6px 22px', opacity: a, textShadow: 'none'}}>{props.tag}</div> : null}
-      <div style={{fontSize: fitSize(props.title, 150, faceName(face), 960), lineHeight: 1, whiteSpace: 'nowrap', color: '#fff', ...face, ...blurIn(b)}}>{props.title}</div>
+      <div style={{fontSize: fitSize(props.title, 150, face.family, 960), lineHeight: 1, whiteSpace: 'nowrap', color: '#fff', ...face.style, ...blurIn(b)}}>{props.title}</div>
       {props.sub ? <div style={{fontSize: 34, fontWeight: 600, letterSpacing: 5, textTransform: 'uppercase', color: accent, opacity: c}}>{props.sub}</div> : null}
     </div>
   );
@@ -211,6 +215,7 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   const outF = Math.min(Math.round(fps * 0.15), Math.floor(durationInFrames / 3));
   const fadeOut = outF > 0 ? interpolate(frame, [durationInFrames - outF, durationInFrames], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
   const Comp = COMPONENTS[g.template];
+  const FONT = useFace('display').style.fontFamily;
   if (!Comp) return null;
   if (g.template === 'kinetic-card') {
     // covers the whole frame (a cutaway), no text-block positioning
@@ -264,6 +269,7 @@ const BORDER: Record<string, string> = {none: 'none', thin: '3px solid rgba(255,
 export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; children: React.ReactNode}> = ({items, accentColor, children}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
+  const kit = useBrand();
   const active = useActiveLayout(items);
   if (!active) return <>{children}</>;
   const p: any = active.props;
@@ -273,8 +279,8 @@ export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; child
   const a = interpolate(frame - startF, [0, 8], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic});
   const box = {top: video.top * a, left: video.left * a, width: 100 - (100 - video.width) * a, height: 100 - (100 - video.height) * a};
   const canvas =
-    p.canvas === 'dark' ? '#0b0b0d'
-    : p.canvas === 'light' ? '#f3f3f0'
+    p.canvas === 'dark' ? kit.dark
+    : p.canvas === 'light' ? kit.light
     : p.canvas === 'gradient' ? `linear-gradient(160deg, ${accentColor} 0%, #ffffff 140%)`
     : accentColor;
   return (
