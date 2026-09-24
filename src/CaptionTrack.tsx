@@ -1,8 +1,8 @@
-import React from 'react';
+import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
-import {arrive, leave, type ArriveKind} from './motion';
+import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily} from './fonts';
 import {legible, useBrand} from './brand';
 
@@ -12,7 +12,7 @@ const CLAMP = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const SANS = new Set<string>(['Inter', 'Montserrat', 'Poppins']);
 
 // one word, styled by its tier; in build mode it appears at its own onset
-const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; onsetFrame: number}> = ({w, index, preset, accent, active, onsetFrame}) => {
+const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; underBox: boolean; onsetFrame: number}> = ({w, index, preset, accent, active, underBox, onsetFrame}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const tier = (w.tier ?? 0) as 0 | 1 | 2;
@@ -27,11 +27,12 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
   // the tier's size is real layout (font-size) so the gap and the page box grow
   // with it; the transform only animates the arrival
   const moving = m.scale !== 1 || m.dx !== 0 || m.dy !== 0;
-  const boxed = !!(t.pill || t.block);
+  const karaoke = preset.active === 'box-slide' || preset.active === 'box-jump'; // the page draws one travelling box; words never paint their own
+  const boxed = !karaoke && !!(t.pill || t.block);
   const gradient = t.fill === 'gradient' && !!preset.colors.gradient && !boxed;
   // the ramp is 2.6× the word: each key word starts at a different stretch of it, like one gradient laid across the page (Prism)
   const phase = (index * 41) % 100;
-  const color = boxed
+  const color = boxed || underBox
     ? t.fg ?? preset.colors.onAccent ?? '#000'
     : tier && (t.color ?? 'accent') === 'accent'
       ? legible(accent) // accent as text; pills/blocks below keep the exact color
@@ -57,8 +58,11 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
   return (
     <>
       <span
+        data-w={index}
         style={{
           display: 'inline-block',
+          position: 'relative',
+          zIndex: 1,
           fontWeight: t.weight ?? preset.font.weight,
           fontStyle: t.italic || preset.font.italic ? 'italic' : undefined,
           fontFamily: t.font ? fontFamily(t.font) : undefined,
@@ -108,6 +112,46 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   ].filter(Boolean).join(' ');
 
   const float = preset.position === 'float' && !caption.pin ? FLOAT[index % FLOAT.length] : null;
+
+  // karaoke box (Focus slides it, Lift/Stack jump it): one box behind the last
+  // spoken word. Word boxes come from the DOM (offset*, which ignores the
+  // arrival transforms) — no layout is re-implemented here. Measured after
+  // every render but stored only when they change, so the one re-render
+  // happens when the web font lands and the lines re-wrap.
+  const karaoke = preset.active === 'box-slide' || preset.active === 'box-jump';
+  const host = useRef<HTMLDivElement>(null);
+  const [rects, setRects] = useState<string>(''); // JSON of the boxes: a string compares for free
+  useLayoutEffect(() => {
+    if (!karaoke || !host.current) return;
+    const next = JSON.stringify(Array.from(host.current.querySelectorAll<HTMLElement>('[data-w]')).map((el) => [el.offsetLeft, el.offsetTop, el.offsetWidth, el.offsetHeight]));
+    if (next !== rects) setRects(next);
+  });
+  const boxes: number[][] = rects ? JSON.parse(rects) : [];
+  const onset = (i: number) => Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
+  let spokenIdx = -1;
+  caption.words.forEach((w, i) => { if (frame >= onset(i)) spokenIdx = i; });
+  const lastEndMs = spokenIdx >= 0 ? caption.words[spokenIdx].endMs : 0;
+  const boxOff = spokenIdx >= 0 && spokenIdx === caption.words.length - 1 && absMs > lastEndMs + 300; // Lift: switches off ~0.3 s after the last word
+  const boxTier = spokenIdx >= 0 ? ((caption.words[spokenIdx].tier ?? 0) as 0 | 1 | 2) : 0;
+  const boxStyle: TierStyle = boxTier ? preset.tiers[boxTier] ?? {} : {};
+  let box: React.CSSProperties | null = null;
+  if (karaoke && spokenIdx >= 0 && boxes[spokenIdx]) {
+    const R = (b: number[]) => ({left: b[0], top: b[1], width: b[2], height: b[3]});
+    const cur = R(boxes[spokenIdx]);
+    const prev = preset.active === 'box-slide' && spokenIdx > 0 ? R(boxes[spokenIdx - 1]) : cur;
+    const local = frame - onset(spokenIdx);
+    const at = (a: number, b: number) => boxTravel(a, b, local, fps);
+    const padX = fontSize * 0.28, padY = fontSize * 0.02;
+    const fadeIn = preset.active === 'box-jump' ? interpolate(local, [0, ms(fps, 80)], [0, 1], CLAMP) : 1;
+    const rounded = preset.tiers[1]?.block ? fontSize * 0.1 : fontSize * 0.35;
+    box = {
+      position: 'absolute', zIndex: 0,
+      left: at(prev.left, cur.left) - padX, top: at(prev.top, cur.top) - padY,
+      width: at(prev.width, cur.width) + 2 * padX, height: at(prev.height, cur.height) + 2 * padY,
+      background: boxStyle.bg ?? accent, borderRadius: rounded,
+      opacity: boxOff ? 0 : fadeIn,
+    };
+  }
   const containerStyle: React.CSSProperties =
     preset.container === 'pill'
       ? {background: preset.colors.container ?? 'rgba(0,0,0,0.72)', borderRadius: Math.round(fontSize * 0.5), padding: `${Math.round(fontSize * 0.22)}px ${Math.round(fontSize * 0.5)}px`}
@@ -133,8 +177,10 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
       }}
     >
       <div
+        ref={host}
         data-ab={`cap:${caption.id}`}
         style={{
+          position: 'relative',
           display: 'flex',
           justifyContent: float ? float.align : 'center',
           flexWrap: 'wrap',
@@ -151,6 +197,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
           ...containerStyle,
         }}
       >
+        {box ? <div style={box} /> : null}
         {caption.words.map((w, i) => (
           <Word
             key={i}
@@ -159,7 +206,8 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
             preset={preset}
             accent={accent}
             active={absMs >= w.startMs && absMs <= w.endMs}
-            onsetFrame={Math.round(((w.startMs - caption.startMs) / 1000) * fps)}
+            underBox={!!box && i === spokenIdx && !boxOff}
+            onsetFrame={onset(i)}
           />
         ))}
       </div>

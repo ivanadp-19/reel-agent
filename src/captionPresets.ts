@@ -47,7 +47,7 @@ export type Preset = {
   container: 'none' | 'pill' | 'bar' | 'glass';
   reveal: 'page' | 'build'; // build = words appear at their onset and stay
   upcoming: 'hidden' | 'dim'; // build only: words not yet spoken
-  active: 'none' | 'color'; // mark the word being spoken (page reveal)
+  active: 'none' | 'color' | 'box-slide' | 'box-jump'; // the spoken word: color, or a karaoke box that slides to it (Focus, 80 ms) or jumps by fade (Lift, Stack)
   position: 'anchored' | 'float'; // anchored = face-aware topPct; float = alternate corners
   pageIn: {type: AnimIn; ms: number};
   pageOut: LeaveKind; // how a page leaves (src/motion.ts; cut = it stays until the next page)
@@ -154,48 +154,51 @@ export const PRESETS: Record<string, Preset> = {
     ...base,
     id: 'focus',
     label: 'Focus',
-    desc: 'bold white sans, words dim until spoken, key words on a royal-blue block, tier 2 on a white block (Captions.ai Focus)',
+    desc: 'bold white sans, words dim until spoken, a royal-blue box slides word to word as they are said, tier 2 gets it in white (Captions.ai Focus)',
     font: {family: 'Inter', weight: 700, sizePx: 68, case: 'none', trackingPx: -0.5, lineHeight: 1.25},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#3B5BFF', onAccent: '#ffffff'},
     reveal: 'build',
     upcoming: 'dim',
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
+    active: 'box-slide', // one blue box travels word to word; a tier-2 word gets it in white with black text
     wordIn: 'cut', // the 1-frame grey comes from `upcoming: dim`
     keyIn: 'cut',
-    tiers: {1: {weight: 700, block: true}, 2: {weight: 800, block: true, bg: '#ffffff', fg: '#111111', scale: 1.12}},
+    tiers: {1: {weight: 700}, 2: {weight: 800, bg: '#ffffff', fg: '#111111', scale: 1.12}},
     layout: {maxWords: 5, maxCharsLine: 20},
   },
   stack: {
     ...base,
     id: 'stack',
     label: 'Stack',
-    desc: 'bold rounded sans, words dim until spoken; key words 1.5× bigger, tier 2 in a red pill (Captions.ai Stack)',
+    desc: 'bold rounded sans, words dim until spoken, a red pill jumps to each word as it is said; key words 1.5× bigger (Captions.ai Stack)',
     font: {family: 'Poppins', weight: 700, sizePx: 62, case: 'none', trackingPx: -0.5, lineHeight: 1.15},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#E63312', onAccent: '#ffffff'},
     reveal: 'build',
     upcoming: 'dim',
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
+    active: 'box-jump', // the red pill jumps to each spoken word
     wordIn: 'fade',
-    keyIn: 'pop', // the red pill pops
-    tiers: {1: {weight: 800, scale: 1.5, color: 'text'}, 2: {weight: 800, scale: 1.6, pill: true}},
+    keyIn: 'pop',
+    tiers: {1: {weight: 800, scale: 1.5, color: 'text'}, 2: {weight: 800, scale: 1.6, color: 'text'}},
     layout: {maxWords: 6, maxCharsLine: 22},
   },
   lift: {
     ...base,
     id: 'lift',
     label: 'Lift',
-    desc: 'large medium-weight sans, words dim until spoken, key words in a mint pill with dark text (Captions.ai Lift)',
+    desc: 'large medium-weight sans, words dim until spoken, a mint pill with dark text jumps to each word as it is said (Captions.ai Lift)',
     font: {family: 'Inter', weight: 500, sizePx: 84, case: 'none', trackingPx: -1, lineHeight: 1.15},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#6FD3A5', onAccent: '#163B2E'},
     reveal: 'build',
     upcoming: 'dim',
     pageIn: {type: 'none', ms: 0},
     pageOut: 'fade',
+    active: 'box-jump', // the mint box fades from word to word and switches off ~0.3 s after the last one
     wordIn: 'cut',
-    keyIn: 'fade', // the mint box fades in over 2 f
-    tiers: {1: {weight: 500, pill: true}, 2: {weight: 600, pill: true, scale: 1.12}},
+    keyIn: 'cut',
+    tiers: {1: {weight: 500}, 2: {weight: 600, scale: 1.12}},
     layout: {maxWords: 5, maxCharsLine: 18},
   },
   evo: {
