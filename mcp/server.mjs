@@ -23,6 +23,8 @@ import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {TEMPLATES, isTemplate, matteSpans, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
+import {renderProof} from './proof.mjs';
+import {validateProject} from '../src/validate.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -473,6 +475,36 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
   await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle}); const fresh = readPublic('captions.multi.json');
   const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
+});
+
+// ---------- verification ----------
+const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
+const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle});
+
+server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  const p = load(project_id);
+  return text(issuesText(validateProject(p, FPS)));
+});
+
+server.registerTool('caption_proof', {description: 'LOOK at the result without a full render: renders up to 8 stills of the current project (default: spread over the pages with emphasis and every graphic) and returns them as one contact sheet plus the validate report. Use it after annotating captions or adding graphics; fix what looks wrong and call again.', inputSchema: {project_id: pid, at_secs: z.array(sec('timeline time')).max(8).optional().describe('times to look at; omit to pick automatically')}}, async ({project_id, at_secs}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  let times = at_secs;
+  if (!times?.length) {
+    const caps = projectCaptions(p.captions, p.clips, FPS);
+    const gfx = projectGraphics(p.graphics, p.clips, FPS).filter((g) => g.template !== 'layout');
+    const picks = [...gfx.map((g) => (g.startMs + Math.min(1200, (g.endMs - g.startMs) * 0.6)) / 1000), ...caps.filter((c) => c.words.some((w) => w.tier)).map((c) => (c.startMs + (c.endMs - c.startMs) * 0.7) / 1000)];
+    const total = totalSec(p.clips);
+    if (!picks.length) picks.push(...[0.15, 0.4, 0.65, 0.9].map((f) => f * total));
+    times = [...new Set(picks.map((t) => Math.round(t * 10) / 10))].sort((a, b) => a - b).slice(0, 8);
+  }
+  const outDir = path.join(ROOT, '.captions-tmp', `proof-${Date.now()}`);
+  const {sheet, cols} = await renderProof(projectProps(p), times, outDir);
+  const data = fs.readFileSync(sheet).toString('base64');
+  fs.rmSync(outDir, {recursive: true, force: true});
+  return {content: [
+    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(validateProject(p, FPS))}`},
+    {type: 'image', data, mimeType: 'image/jpeg'},
+  ]};
 });
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {

@@ -95,7 +95,7 @@ Spikes pendientes (cada uno con informe go/no-go):
 
 ### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
 
-Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images, librería local con `list_assets`); layouts (`layout`: marco redondeado/arco/círculo/phone sobre lienzo, split con B-roll); **matte de la persona** (MediaPipe selfie segmenter, ~30 fps en CPU, WebM VP9 con alfa) con gráficos `behind=true` y `prepare_mattes`, adelantado desde la fase 3; selector de estilo y tiers en el editor.
+Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images, librería local con `list_assets`); layouts (`layout`: marco redondeado/arco/círculo/phone sobre lienzo, split con B-roll); **matte de la persona** (MediaPipe selfie segmenter, ~30 fps en CPU, WebM VP9 con alfa) con gráficos `behind=true` y `prepare_mattes`, adelantado desde la fase 3; selector de estilo y tiers en el editor; `validate` (safe zones, glue, timing, densidad de énfasis, solapes, mattes faltantes, hook) y `caption_proof` (contact sheet de stills en ~4–9 s para que el agente se revise); skill `reel-edit` con el flujo completo para Claude Code y Codex.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.
@@ -106,8 +106,8 @@ Entregables:
 - Templates de titulares/etiquetas: `hook-stack`, `label-2tone`, `stat`, `chapter`, `location-tag`, `price`; track `graphics[]` anclado a fuente/palabra (`projectGraphics` clonado de `projectBrolls`).
 - Brand kit (`brand.json` por proyecto: logo, colores, fuentes OFL).
 - Herramientas MCP: `annotate_captions`, `set_caption_style`, `add_graphic`, `edit_graphic`, `delete_graphics`, `caption_proof`.
-- Validador determinista: safe zone de Reels (calibrada con capturas reales), contraste ≥ 4.5:1 (o 3:1 con stroke/caja), ninguna página termina en glue, timing ±80 ms, sin solapes caption/gráfico.
-- `caption_proof`: render de stills en las páginas marcadas y contact sheet para el agente.
+- Validador: hecho salvo contraste real (las safe zones siguen siendo estimadas hasta tener capturas de Reels).
+- `caption_proof`: hecho.
 - UI mínima de pulido: preset, tier, emoji por palabra en el Inspector.
 
 Criterios de aceptación:
