@@ -8,13 +8,15 @@ export type BrollItem = {
   startMs: number;
   endMs: number;
   kind: 'video' | 'image';
-  mode: 'fullscreen' | 'inset' | 'top' | 'card'; // card = Prism's square card rising over the blurred footage
+  mode: 'fullscreen' | 'inset' | 'top' | 'card' | 'carousel'; // card = Prism's square card rising over the blurred footage; carousel = Prime's three foreshortened panels in the lower half that step along
   src: string;
   source?: 'own' | 'pexels';
   query?: string;
   alternatives?: string[];
   scale?: number; // size multiplier (1 = default), set via the on-preview slider
   enter?: import('./transitions.ts').Enter; // how the cue comes in (src/transitions.ts); cover kinds draw over the cut, reveal kinds act as a cut
+  arrive?: import('./motion.ts').BrollIn; // how the cue's box arrives: slideUp (Elevate/Impact/Form/Focus), popFrom (Evo), slideRight (Y2K/Chalk); cut = fade
+  leave?: import('./motion.ts').BrollOut; // how it leaves: slideDown (Impact/Elevate), shrink (Evo), fall (Chalk); cut = fade
 };
 
 // the creator's own B-roll source (pool the generator can pick from)

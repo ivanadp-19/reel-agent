@@ -85,3 +85,49 @@ test('life: grow reaches 1.3× after 1.2 s, marquee runs ~408 px/s, oscillate st
   for (const f of [0, 7, 19, 40]) assert.ok(Math.abs(lifeFx('oscillate', f, 30).rotate) <= 3.001);
   assert.deepEqual(lifeFx('none', 12, 30), {scale: 1, dx: 0, rotate: 0});
 });
+
+// ---- Phase 4: layouts, B-roll and decoration ----
+import {layoutIn, layoutOut, brollIn, brollOut, LAYOUT_IN_MS, BROLL_IN_MS, unfold, windowTrail} from '../src/motion.ts';
+
+test('layout entries: frameIn shrinks in 300 ms, tile settles in 330 ms, capsule in 330 ms; scale is 0→1 progress', () => {
+  assert.equal(layoutIn('frameIn', 0, 30), 0);
+  assert.equal(layoutIn('frameIn', ms(30, LAYOUT_IN_MS.frameIn), 30), 1);
+  assert.ok(layoutIn('tile', 3, 30) > 0.3 && layoutIn('tile', 3, 30) < 1); // ease-out: past a third by the third frame
+  assert.equal(layoutIn('cut', 0, 30), 1);
+});
+
+test('layout exits: 4 f back to full frame (frameIn), 2 f cut-shrink (tile), given frames left', () => {
+  assert.equal(layoutOut('frameIn', 100, 30), 1);
+  assert.equal(layoutOut('frameIn', 0, 30), 0);
+  assert.ok(layoutOut('tile', 1, 30) < 1);
+});
+
+test('B-roll entries: slideUp rises 7–15 f with a strong ease-out, popFrom scales from 0 in 11 f, slideRight enters from the right', () => {
+  const s0 = brollIn('slideUp', 0, 30), s4 = brollIn('slideUp', 4, 30), sEnd = brollIn('slideUp', ms(30, BROLL_IN_MS.slideUp), 30);
+  assert.ok(s0.dy > 90 && s4.dy < 45 && sEnd.dy === 0 && sEnd.scale === 1); // 2/3 of the way in the first third
+  const p0 = brollIn('popFrom', 0, 30);
+  assert.ok(p0.scale < 0.05 && brollIn('popFrom', 11, 30).scale === 1);
+  assert.ok(brollIn('slideRight', 0, 30).dx > 90 && brollIn('slideRight', ms(30, BROLL_IN_MS.slideRight), 30).dx === 0);
+  assert.deepEqual(brollIn('cut', 0, 30), {dx: 0, dy: 0, scale: 1, blur: 0});
+});
+
+test('B-roll exits: slideDown leaves through the bottom with motion blur in 5 f, shrink goes to 0 in 9 f', () => {
+  assert.equal(brollOut('slideDown', 100, 30).dy, 0);
+  const o = brollOut('slideDown', 1, 30);
+  assert.ok(o.dy > 50 && o.blur > 0);
+  assert.ok(brollOut('shrink', 0, 30).scale < 0.05 && brollOut('shrink', 100, 30).scale === 1);
+});
+
+test('unfold: a crumpled ball travels out and scales 0.15→1 in 10–12 f; reversed in 4 f', () => {
+  const u0 = unfold(0, 30, false), u1 = unfold(12, 30, false);
+  assert.ok(u0.scale <= 0.16 && u0.travel === 0);
+  assert.ok(u1.scale === 1 && u1.travel === 1);
+  assert.ok(unfold(2, 30, true).scale < 1); // leaving: shrinks back toward the head
+});
+
+test('windowTrail: 4 trailing copies while a window slides in, gone by 8 frames after it lands', () => {
+  const t = windowTrail(3, 30, 10);
+  assert.equal(t.copies.length, 4);
+  assert.ok(t.copies[0].offset > 0 && t.copies[0].opacity < 1);
+  assert.equal(windowTrail(10 + ms(30, 333) + 1, 30, 10).copies.length, 0);
+});

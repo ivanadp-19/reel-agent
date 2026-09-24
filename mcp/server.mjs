@@ -21,7 +21,7 @@ import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/ti
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
+import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
@@ -441,7 +441,7 @@ server.registerTool('search_stock', {description: 'Search Pexels for portrait st
   return text(rows.length ? rows.map((r, i) => `${i + 1}. ${r.src}${r.duration ? `  ${r.duration}s ${r.size}` : r.alt ? `  "${r.alt}"` : ''}`).join('\n') : 'nothing found');
 });
 
-server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec, starting at a word (at_wid, from get_transcript — preferred) or a timeline time (at_sec). What to show: asset_id from the own library (broll_library / suggest_broll), or src = Pexels URL (from search_stock), a path inside public/ (e.g. "broll/x.mp4"), or an absolute file path (copied in). mode: fullscreen | top (upper 45%) | inset (small card top-right) | card (Prism: a square card that rises and settles over the blurred footage, then leaves upwards — pair it with the prism captions). Rules: start on the mention, 0.5–8 s, one insert per ~9 s, never over the hook or the closing line — suggest_broll already applies them.', inputSchema: {project_id: pid, at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.3).max(8), asset_id: z.string().optional().describe('id from broll_library'), src: z.string().optional(), kind: z.enum(['video', 'image']).optional(), mode: z.enum(['fullscreen', 'top', 'inset', 'card']).default('inset'), label: z.string().optional()}}, async ({project_id, at_wid, at_sec, duration_sec, asset_id, src, kind, mode, label}) => {
+server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec, starting at a word (at_wid, from get_transcript — preferred) or a timeline time (at_sec). What to show: asset_id from the own library (broll_library / suggest_broll), or src = Pexels URL (from search_stock), a path inside public/ (e.g. "broll/x.mp4"), or an absolute file path (copied in). mode: fullscreen | top (upper 45%) | inset (small card top-right) | card (Prism: a square card that rises and settles over the blurred footage, then leaves upwards — pair it with the prism captions) | carousel (Prime: three foreshortened panels in the lower half that step along every 2.4 s). arrive / leave = how its box comes and goes: slideUp + slideDown (Elevate, Impact, Form, Focus), popFrom + shrink (Evo), slideRight + fall (Y2K, Chalk); cut = a plain fade. Rules: start on the mention, 0.5–8 s, one insert per ~9 s, never over the hook or the closing line — suggest_broll already applies them.', inputSchema: {project_id: pid, at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.3).max(8), asset_id: z.string().optional().describe('id from broll_library'), src: z.string().optional(), kind: z.enum(['video', 'image']).optional(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).default('inset'), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), label: z.string().optional()}}, async ({project_id, at_wid, at_sec, duration_sec, asset_id, src, kind, mode, label, arrive, leave}) => {
   const p = load(project_id);
   let clip, sourceSec;
   if (at_wid) { const w = await wordAt(p, at_wid); clip = w.clip; sourceSec = Math.max(clip.inSec, w.word.startMs / 1000 - 0.3); }
@@ -459,7 +459,7 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
   } else if (!/^https?:/.test(src) && !fs.existsSync(path.join(PUBLIC, src))) throw new Error(`not found in public/: ${src}`);
   if (/^https?:/.test(s)) source = 'pexels';
   if (!kind) kind = /\.(jpe?g|png|webp)(\?|$)/i.test(s) ? 'image' : 'video';
-  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {})};
+  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
   p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
   const abs = toAbs(p, clip.id, b.startMs) ?? 0;
   return text(`Added B-roll ${p.brolls.at(-1).id} on ${clip.id} @${f1(abs)}–${f1(abs + (b.endMs - b.startMs) / 1000 / (clip.speed ?? 1))}s (${mode} ${kind}${asset_id ? `, library ${asset_id}` : ''})`);
@@ -524,9 +524,10 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   return text(`${out.length} suggestion(s) (COVER = black footage that must be covered):\n${lines.join('\n')}\n\nApply with add_broll {asset_id, at_wid, duration_sec, mode: 'fullscreen' for covers}.`);
 });
 
-server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec}) => {
+server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
   if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = src; b.source = /^https?:/.test(src) ? 'pexels' : 'own'; }
+  if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
   await save(project_id, p); return text(`${broll_id}: ${b.mode} ${b.kind}${b.scale ? ` scale ${b.scale}` : ''} @${f1(toAbs(p, b.clipId, b.startMs, true) ?? 0)}–${f1(toAbs(p, b.clipId, b.endMs, true) ?? 0)}s`);
@@ -689,7 +690,8 @@ server.registerTool('add_graphic', {description: `Add a motion-graphics overlay 
   if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
   const warn = validateProject(p, FPS, facesOf(p)).filter((i) => i.ref === g.id);
-  return text(`Added ${g.id} ${template}${behind ? ' (behind the presenter — run prepare_mattes before rendering)' : ''}${warn.length ? '\n' + issuesText(warn) : ''}\n\n${summary(project_id, p)}`);
+  const wantsMatte = behind || MATTE_TEMPLATES.has(template) || (template === 'layout' && clean.cutout);
+  return text(`Added ${g.id} ${template}${wantsMatte ? ' (needs the person matte — run prepare_mattes before rendering)' : ''}${warn.length ? '\n' + issuesText(warn) : ''}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('search_asset', {description: 'Find decorative assets with clean licenses: icons and emoji (Iconify: Fluent Emoji, Noto, Lucide, Phosphor…), stickers and illustrations (Iconify hand-drawn sets + Openverse CC0/CC-BY). Files are downloaded under public/assets/ so you can use them with add_graphic template=sticker. Returns license and, when required, the credit line to keep.', inputSchema: {query: z.string().min(1), kind: z.enum(['icon', 'emoji', 'sticker', 'illustration']).default('sticker'), style: z.enum(['flat', '3d', 'hand-drawn', 'outline']).optional(), limit: z.number().int().min(1).max(12).default(6)}}, async ({query, kind, style, limit}) => {

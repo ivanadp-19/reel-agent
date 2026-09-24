@@ -155,7 +155,7 @@ export const MultiClipVideo: React.FC<{
     <AbsoluteFill style={{backgroundColor: 'black'}}>
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
-      <LayoutStage items={projectedGraphics} accentColor={accentColor}>
+      <LayoutStage items={projectedGraphics} accentColor={accentColor} footage={
       <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening} punch={punch} pulses={pulses} zooms={zooms}>
       {/* a clip entered with a reveal shows under the outgoing one: it starts its overlap early, drawn first, with its own incoming effect */}
       {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
@@ -193,10 +193,11 @@ export const MultiClipVideo: React.FC<{
         );
       })}
       </FocusPull>
+      }>
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind titles={preset.titles} />
       <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} behind />
-      <PersonLayer mattes={mattes} clips={clips} grade={grade} />
+      <PersonLayer mattes={mattes} clips={clips} grade={grade} outlines={projectedGraphics.filter((g) => g.template === 'person-outline')} accent={accentColor} />
       </LayoutStage>
 
       {/* B-roll overlay (above clips, below captions); it blurs with the footage during a focus pull */}

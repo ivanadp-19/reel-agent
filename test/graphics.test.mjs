@@ -143,3 +143,26 @@ test('phase 3 templates parse with defaults and describe themselves', () => {
   assert.ok(C4.has('neon-frame') && C4.has('scribble') && DECOR_FULL.has('frame-light'));
   assert.ok(REVEAL_KINDS.includes('letters') && OUT_KINDS.includes('band') && LIFE_KINDS.includes('marquee'));
 });
+
+import {parseProps as parse5, matteSpans as ms5, CENTERED as C5, DECOR_FULL as D5, MATTE_TEMPLATES} from '../src/graphicTemplates.ts';
+
+test('phase 4 templates: layout enter / cutout / window / grid, ornament, rules, person-outline, sticker unfold', () => {
+  const lay = parse5('layout', {shape: 'window', canvas: 'grid', enter: 'slide'});
+  assert.equal(lay.enter, 'slide'); assert.equal(lay.cutout, false);
+  assert.equal(parse5('layout', {}).enter, 'frameIn');
+  assert.throws(() => parse5('layout', {enter: 'bounce'}));
+  assert.equal(parse5('ornament', {}).glyph, '✳');
+  assert.equal(parse5('rules', {orientation: 'vertical'}).widthPx, 2);
+  assert.equal(parse5('person-outline', {}).boil, true);
+  const st = parse5('sticker', {src: 'assets/x.png', anim: 'unfold', xPct: 20});
+  assert.equal(st.fromXPct, 50); assert.equal(st.fromYPct, 38);
+  assert.ok(C5.has('ornament') && D5.has('rules') && D5.has('person-outline') && MATTE_TEMPLATES.has('person-outline'));
+});
+
+test('a person-outline graphic and a cutout layout need a matte for their span, like behind graphics', () => {
+  const g = (template, props, behind = false) => ({id: 'g', src: 's', startMs: 1000, endMs: 3000, template, props, behind});
+  assert.deepEqual(ms5([g('person-outline', {color: 'accent', widthPx: 6, boil: true})]).map((x) => [x.startMs, x.endMs]), [[700, 3300]]);
+  assert.deepEqual(ms5([g('layout', {cutout: true})]).map((x) => [x.startMs, x.endMs]), [[700, 3300]]);
+  assert.deepEqual(ms5([g('layout', {cutout: false})]), []);
+  assert.deepEqual(ms5([g('stat', {value: '1'})]), []);
+});

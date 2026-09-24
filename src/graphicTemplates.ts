@@ -94,15 +94,17 @@ export const TEMPLATES = {
   // presenter framing for a span: the base video goes into a shaped frame over a canvas,
   // optionally splitting the frame with the B-roll panel (Orbit, Focus, Lift, Evo, Bloom, Lens)
   layout: {
-    desc: 'frame the presenter for a span: shape rounded|arch|circle|phone|none, canvas accent|dark|light|gradient, inset % margin, border none|thin|glass|accent, split none|broll-bottom|broll-top (B-roll cues in that span fill the other panel)',
+    desc: 'frame the presenter for a span: shape rounded|arch|circle|phone|window (Mac OS classic chrome, Y2K)|none, canvas accent|dark|light|gradient|grid (graph paper, Pop)|paper (cream), inset % margin, border none|thin|glass|accent, split none|broll-bottom|broll-top (B-roll cues in that span fill the other panel); enter = how it arrives; cutout = the footage disappears and the canvas shows behind the cut-out presenter (Stack)',
     defaultMs: 4000,
     y: 0,
     schema: z.object({
-      shape: z.enum(['rounded', 'arch', 'circle', 'phone', 'none']).default('rounded'),
-      canvas: z.enum(['accent', 'dark', 'light', 'gradient']).default('accent'),
+      shape: z.enum(['rounded', 'arch', 'circle', 'phone', 'window', 'none']).default('rounded'),
+      canvas: z.enum(['accent', 'dark', 'light', 'gradient', 'grid', 'paper']).default('accent'),
       inset: z.number().min(0).max(30).default(7),
       border: z.enum(['none', 'thin', 'glass', 'accent']).default('none'),
       split: z.enum(['none', 'broll-bottom', 'broll-top']).default('none'),
+      enter: z.enum(['cut', 'frameIn', 'tile', 'capsule', 'inset', 'slide']).default('frameIn').describe('how the frame arrives: frameIn = the video shrinks into it (Evo, Stack); tile = settles into a split tile (Align); capsule = the mask scales down (Bloom); inset = small margin (Align); slide = in from the right with a trail of copies (Y2K windows); cut'),
+      cutout: z.boolean().default(false).describe('hide the footage so the canvas shows behind the cut-out presenter (Stack red); needs prepare_mattes'),
     }),
   },
   // one word far wider than the frame, cropped by both edges, drifting sideways
@@ -200,6 +202,27 @@ export const TEMPLATES = {
     y: 0,
     schema: z.object({inset: z.number().min(0).max(30).default(10), laps: z.number().min(0.5).max(6).default(2)}),
   },
+  // a typographic ornament (Elevate's ✳, a dot, a dash): static, placed by its center
+  ornament: {
+    desc: 'a typographic ornament — ✳ ✦ ✧ · — ★ — static, placed by its center (x_pct/y_pct), size in px (Elevate)',
+    defaultMs: 3000,
+    y: 50,
+    schema: z.object({glyph: z.enum(['✳', '✦', '✧', '·', '—', '★', '✿']).default('✳'), size: z.number().min(20).max(200).default(60), color: z.enum(['light', 'accent', 'dark']).default('light'), xPct: z.number().min(0).max(100).default(50)}),
+  },
+  // thin static rules along the edges (Form's orange margins, Elevate's thin line)
+  rules: {
+    desc: 'thin static lines: vertical = 2 lines down the left and right margins (Form), horizontal = one line across at y_pct (Elevate); inset in % of the frame, width in px',
+    defaultMs: 4000,
+    y: 92,
+    schema: z.object({orientation: z.enum(['vertical', 'horizontal']).default('horizontal'), inset: z.number().min(0).max(30).default(6), widthPx: z.number().min(1).max(12).default(2), lengthPct: z.number().min(10).max(100).default(70), color: z.enum(['light', 'accent']).default('light')}),
+  },
+  // Chalk: a hand-drawn-looking outline around the presenter's silhouette (needs the matte; boil redraws it each frame)
+  'person-outline': {
+    desc: 'a scribbled outline around the presenter\'s silhouette (Chalk): color accent|light, width in px, boil=true jitters it every frame; needs prepare_mattes for its span',
+    defaultMs: 3000,
+    y: 0,
+    schema: z.object({color: z.enum(['accent', 'light']).default('accent'), widthPx: z.number().min(2).max(14).default(6), boil: z.boolean().default(true)}),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',
@@ -207,10 +230,12 @@ export const TEMPLATES = {
     y: 50,
     schema: z.object({
       src: short(200).describe('path under public/, e.g. assets/gen/sticker-ab12.png'),
-      anim: z.enum(['pop', 'wiggle', 'float', 'spin', 'none']).default('pop'),
+      anim: z.enum(['pop', 'wiggle', 'float', 'spin', 'unfold', 'none']).default('pop').describe('unfold = arrives as a crumpled ball from (from_x_pct, from_y_pct) and unfolds into place in 10–12 f, folds back to leave (Paper II)'),
       widthPct: z.number().min(5).max(90).default(28).describe('width as % of frame width'),
       xPct: z.number().min(0).max(100).default(50).describe('center x, % of frame width'),
       rotate: z.number().min(-45).max(45).default(0),
+      fromXPct: z.number().min(0).max(100).default(50).describe('unfold only: where the ball starts (the head), % of frame width'),
+      fromYPct: z.number().min(0).max(100).default(38).describe('unfold only: where the ball starts, % of frame height'),
     }),
   },
 } as const;
@@ -218,11 +243,13 @@ export const TEMPLATES = {
 export type TemplateId = keyof typeof TEMPLATES;
 
 // decor sits by its center (x/y) and may share the screen with a text graphic
-export const CENTERED = new Set<string>(['sticker', 'starburst', 'neon-frame', 'scribble']);
+export const CENTERED = new Set<string>(['sticker', 'starburst', 'neon-frame', 'scribble', 'ornament']);
 // cards that cover the whole frame (cutaways, closing card)
 export const FULL_FRAME = new Set<string>(['kinetic-card', 'end-card']);
 // full-frame decoration that does not cover the video (drawn edge to edge, see-through)
-export const DECOR_FULL = new Set<string>(['outline-rect', 'frame-light']);
+export const DECOR_FULL = new Set<string>(['outline-rect', 'frame-light', 'rules', 'person-outline']);
+// graphics that are drawn by another layer (the person outline lives with the matte) and need a matte
+export const MATTE_TEMPLATES = new Set<string>(['person-outline']);
 
 // how a graphic arrives, leaves and lives (src/motion.ts); 'auto' = the template's own entrance / a short fade out
 export const REVEAL_KINDS = ['auto', 'blur', 'fade', 'letters', 'typewriter', 'shuffle', 'tracking', 'drop', 'slideBlur', 'slideDown', 'band', 'wipe'] as const;
@@ -296,7 +323,7 @@ export const spansWithoutMatte = (items: Behind[], mattes: Span[] = [], clips?: 
 export function matteSpans(items: Behind[], {clips, padMs = 300, fps = 30}: {clips?: Clip[]; padMs?: number; fps?: number} = {}): Span[] {
   const raw: Span[] = [];
   for (const it of items) {
-    if (!it.behind) continue;
+    if (!it.behind && !MATTE_TEMPLATES.has((it as Graphic).template ?? '') && !((it as Graphic).template === 'layout' && (it as Graphic).props?.cutout)) continue;
     if (!clips || !('template' in it)) { raw.push({src: it.src, startMs: it.startMs, endMs: it.endMs}); continue; }
     const [pg] = projectGraphics([it as Graphic], clips, fps);
     if (!pg) continue;

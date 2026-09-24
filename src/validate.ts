@@ -49,7 +49,8 @@ function graphicHeightPx(g: Graphic): number | null {
     case 'band-title': return 150;
     case 'neon-frame': return ((p.heightPct ?? 34) / 100) * H;
     case 'scribble': return ((p.heightPct ?? 16) / 100) * H;
-    case 'outline-rect': case 'frame-light': return 1; // see-through decoration, no band of its own
+    case 'outline-rect': case 'frame-light': case 'rules': case 'person-outline': return 1; // see-through decoration, no band of its own
+    case 'ornament': return (p.size ?? 60) * 1.2;
     case 'oversized': return oversizedPx(p.text, p.font) * 0.9;
     case 'chapter-caps': return 60 + (p.sub ? 50 : 0);
     case 'starburst': return STAR_PX[p.size] ?? STAR_PX.md;

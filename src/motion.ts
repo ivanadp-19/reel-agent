@@ -107,3 +107,61 @@ export function lifeFx(kind: LifeKind, frame: number, fps: number): {scale: numb
     default: return {scale: 1, dx: 0, rotate: 0};
   }
 }
+
+// ---- layouts and B-roll (research/captions-ai-motion.md, Parte 2 D) ----
+// how a layout (the presenter's frame) arrives: frameIn = the video shrinks into its frame (Evo 8–9 f,
+// Stack 2–3 f); tile = it settles into a split tile over ~10 f (Align); capsule = a mask that scales
+// down to size in 8 f (Bloom); inset = 0.85 in 6 f (Align); cut = it is simply there
+export type LayoutIn = 'cut' | 'frameIn' | 'tile' | 'capsule' | 'inset' | 'slide'; // slide = the framed video slides in from the right edge (Y2K windows, 10 f)
+export const LAYOUT_IN_MS: Record<LayoutIn, number> = {cut: 0, frameIn: 300, tile: 330, capsule: 330, inset: 200, slide: 420};
+export const layoutIn = (kind: LayoutIn, frame: number, fps: number) => (kind === 'cut' ? 1 : interpolate(frame, [0, ms(fps, LAYOUT_IN_MS[kind])], [0, 1], {...CLAMP, easing: OUT}));
+// …and leaves (1 = fully framed, 0 = back to full bleed): frameIn returns in 4 f, tile in 4 f, capsule expands in 6 f
+const LAYOUT_OUT_MS: Record<LayoutIn, number> = {cut: 0, frameIn: 130, tile: 130, capsule: 200, inset: 130, slide: 250};
+export const layoutOut = (kind: LayoutIn, framesLeft: number, fps: number) => (kind === 'cut' ? 1 : interpolate(framesLeft, [0, ms(fps, LAYOUT_OUT_MS[kind])], [0, 1], CLAMP));
+
+// how a B-roll cue arrives: slideUp = rises from the bottom edge, 7–15 f with a strong ease-out (Elevate,
+// Impact, Form, Focus); popFrom = scales from a point in 11 f (Evo); slideRight = in from the right edge
+// in 10 f (Y2K windows, Chalk photo); cut = fade (the old default)
+export type BrollIn = 'cut' | 'slideUp' | 'popFrom' | 'slideRight';
+export const BROLL_IN_MS: Record<BrollIn, number> = {cut: 0, slideUp: 400, popFrom: 370, slideRight: 420};
+export type BrollFx = {dx: number; dy: number; scale: number; blur: number}; // dx/dy in % of the cue's own box
+export function brollIn(kind: BrollIn, frame: number, fps: number): BrollFx {
+  const a = kind === 'cut' ? 1 : interpolate(frame, [0, ms(fps, BROLL_IN_MS[kind])], [0, 1], {...CLAMP, easing: Easing.out(Easing.quad)});
+  const strong = kind === 'cut' ? 1 : interpolate(frame, [0, ms(fps, BROLL_IN_MS[kind])], [0, 1], {...CLAMP, easing: OUT}); // 2/3 of the way in the first third
+  switch (kind) {
+    case 'slideUp': return {dx: 0, dy: (1 - strong) * 120, scale: 1, blur: 0};
+    case 'popFrom': return {dx: 0, dy: 0, scale: a, blur: 0};
+    case 'slideRight': return {dx: (1 - strong) * 120, dy: 0, scale: 1, blur: 0};
+    default: return {dx: 0, dy: 0, scale: 1, blur: 0};
+  }
+}
+// …and leaves: slideDown = through the bottom edge with motion blur, 5 f (Impact, Elevate 13 f); shrink =
+// to 0 in 9 f (Evo); fall = drops out with blur in 5 f (Chalk photo); cut = fade
+export type BrollOut = 'cut' | 'slideDown' | 'shrink' | 'fall';
+const BROLL_OUT_MS: Record<BrollOut, number> = {cut: 0, slideDown: 210, shrink: 300, fall: 210};
+export function brollOut(kind: BrollOut, framesLeft: number, fps: number): BrollFx {
+  if (kind === 'cut') return {dx: 0, dy: 0, scale: 1, blur: 0};
+  const k = 1 - interpolate(framesLeft, [0, ms(fps, BROLL_OUT_MS[kind])], [0, 1], CLAMP); // 0 = far from the end, 1 = gone
+  const acc = k * k; // ease-in: it accelerates away
+  switch (kind) {
+    case 'slideDown': return {dx: 0, dy: acc * 120, scale: 1, blur: k * 12};
+    case 'fall': return {dx: 0, dy: acc * 130, scale: 1, blur: k * 16};
+    case 'shrink': return {dx: 0, dy: 0, scale: 1 - acc, blur: 0};
+  }
+}
+
+// Paper II's stickers: a crumpled ball beside the head travels out (travel 0→1 of its distance) while it
+// scales 0.15→1 and unfolds, 10–12 f ease-out; leaving, it shrinks back toward the head in 4 f
+export function unfold(frame: number, fps: number, leaving: boolean): {travel: number; scale: number} {
+  if (!leaving) { const a = interpolate(frame, [0, ms(fps, 400)], [0, 1], {...CLAMP, easing: OUT}); return {travel: a, scale: 0.15 + 0.85 * a}; }
+  const k = interpolate(frame, [0, ms(fps, 170)], [1, 0], CLAMP); // frame = frames since the exit began
+  return {travel: k, scale: 0.15 + 0.85 * k};
+}
+
+// Y2K's windows: while a window slides in (over `slideFrames`) it leaves 4 copies trailing behind it,
+// each a step further back and fainter; they are gathered up over ~333 ms after it lands
+export function windowTrail(frame: number, fps: number, slideFrames: number): {copies: {offset: number; opacity: number}[]} {
+  const gather = interpolate(frame, [slideFrames, slideFrames + ms(fps, 333)], [1, 0], CLAMP); // 1 while sliding, 0 once gathered
+  if (gather <= 0) return {copies: []};
+  return {copies: [1, 2, 3, 4].map((i) => ({offset: i * 40 * gather, opacity: (1 - i * 0.18) * gather}))};
+}

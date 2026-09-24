@@ -1,7 +1,7 @@
 import React, {createContext, useContext} from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
 import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
-import {TEXT_REVEALS, arrive, leave, lifeFx, ms, revealText, scrambleChar, type ArriveKind, type LeaveKind, type TextReveal} from './motion';
+import {TEXT_REVEALS, arrive, layoutIn, layoutOut, leave, lifeFx, ms, revealText, scrambleChar, unfold, windowTrail, type ArriveKind, type LayoutIn, type LeaveKind, type TextReveal} from './motion';
 import {seedOf} from './transitions';
 import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
@@ -29,7 +29,7 @@ const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
 const outCubic = Easing.out(Easing.cubic);
 
 // how the graphic being drawn arrives and leaves (set by One from the graphic or the caption pack)
-type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number};
+type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number; yPct?: number};
 const GfxContext = createContext<Gfx>({reveal: 'auto', out: 'auto', framesLeft: 1e6, seed: 1});
 // the template's own staggered entrance runs for 'auto' and 'blur' (its blur-in IS the catalog's 5–9 f blur-in)
 // and under the per-character reveals (Letters handles the title, the tag / subtitle still fade in after it);
@@ -371,21 +371,47 @@ const Sticker: React.FC<{props: any}> = ({props}) => {
     : props.anim === 'float' ? `translateY(${Math.sin(t * 2.2) * 12}px)`
     : props.anim === 'spin' ? `rotate(${t * 60}deg)`
     : '';
-  const scale = props.anim === 'none' ? 1 : interpolate(pop, [0, 1], [0.3, 1]);
+  // unfold (Paper II): a crumpled ball beside the head travels to its place while it scales up, spins level and sharpens;
+  // over the last 4 frames it folds back toward the head
+  const g = useContext(GfxContext);
+  const outF = ms(fps, 170);
+  const leaving = props.anim === 'unfold' && g.framesLeft < outF;
+  const u = props.anim === 'unfold' ? unfold(leaving ? outF - g.framesLeft : frame, fps, leaving) : null;
+  const {height} = useVideoConfig();
+  const travel = u ? {x: ((props.fromXPct - props.xPct) / 100) * width * (1 - u.travel), y: ((props.fromYPct - (g.yPct ?? 50)) / 100) * height * (1 - u.travel)} : null;
+  const scale = props.anim === 'none' ? 1 : u ? u.scale : interpolate(pop, [0, 1], [0.3, 1]);
   const src = /^https?:\/\//.test(props.src) ? props.src : staticFile(props.src);
   return (
     <Img
       src={src}
       style={{
         width: (width * props.widthPct) / 100,
-        transform: `rotate(${props.rotate}deg) scale(${scale}) ${motion}`,
+        transform: `${travel ? `translate(${travel.x.toFixed(1)}px, ${travel.y.toFixed(1)}px) ` : ''}rotate(${props.rotate + (u ? -40 * (1 - u.travel) : 0)}deg) scale(${scale}) ${motion}`,
         transformOrigin: 'center',
-        opacity: props.anim === 'none' ? 1 : pop,
-        filter: 'drop-shadow(0 6px 18px rgba(0,0,0,0.35))',
+        opacity: props.anim === 'none' || u ? 1 : pop,
+        filter: `drop-shadow(0 6px 18px rgba(0,0,0,0.35))${u && u.travel < 1 ? ` blur(${(6 * (1 - u.travel)).toFixed(1)}px) contrast(${(1 + 0.6 * (1 - u.travel)).toFixed(2)})` : ''}`,
       }}
     />
   );
 };
+
+// a typographic ornament, static
+const Ornament: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const kit = useBrand();
+  const color = props.color === 'accent' ? kit.accent : props.color === 'dark' ? kit.dark : '#ffffff';
+  return <div style={{fontSize: props.size, lineHeight: 1, color, textShadow: '0 2px 12px rgba(0,0,0,0.35)'}}>{props.glyph}</div>;
+};
+
+// thin static rules along the margins (Form) or one across the frame (Elevate)
+const Rules: React.FC<{props: any; accent: string}> = ({props}) => {
+  const kit = useBrand();
+  const color = props.color === 'accent' ? kit.accent : 'rgba(255,255,255,0.75)';
+  const inset = `${props.inset}%`;
+  if (props.orientation === 'vertical') return <>{[inset, `calc(100% - ${inset})`].map((x) => <div key={x} style={{position: 'absolute', top: 0, bottom: 0, left: x, width: props.widthPx, marginLeft: -props.widthPx / 2, background: color}} />)}</>;
+  return <div style={{position: 'absolute', left: `${(100 - props.lengthPct) / 2}%`, width: `${props.lengthPct}%`, top: '50%', height: props.widthPx, background: color}} />;
+};
+// the person outline is drawn by the matte layer (src/Person.tsx); here it takes no space
+const PersonOutlineStub: React.FC<{props: any; accent: string}> = () => null;
 
 // Focus: a full-width accent band with bold white capitals (rises with reveal 'band', drops with out 'band')
 const BandTitle: React.FC<{props: any; accent: string}> = ({props}) => {
@@ -476,7 +502,7 @@ const FrameLight: React.FC<{props: any; accent: string}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'band-title': BandTitle, 'neon-frame': NeonFrame, scribble: Scribble, 'outline-rect': OutlineRect, 'frame-light': FrameLight, 'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {ornament: Ornament, rules: Rules, 'person-outline': PersonOutlineStub, 'band-title': BandTitle, 'neon-frame': NeonFrame, scribble: Scribble, 'outline-rect': OutlineRect, 'frame-light': FrameLight, 'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
 
 export type Titles = {reveal: Reveal; out: Out}; // the caption pack's defaults for graphics that set neither
 
@@ -508,7 +534,7 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; title
     pointerEvents: 'none',
   };
   const move = moving ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${scale.toFixed(3)}) rotate(${life.rotate.toFixed(2)}deg)` : '';
-  const ctx: Gfx = {reveal, out, framesLeft, seed: seedOf(g.id)};
+  const ctx: Gfx = {reveal, out, framesLeft, seed: seedOf(g.id), yPct: g.yPct ?? TEMPLATES[g.template].y};
   let node: React.ReactNode;
   if (FULL_FRAME.has(g.template) || DECOR_FULL.has(g.template)) {
     // covers the whole frame (a cutaway) or decorates it edge to edge: no text-block positioning
@@ -556,31 +582,51 @@ export const layoutBoxes = (props: any): {video: Box; panel: Box | null} => {
   return {video: full, panel: null};
 };
 
-const SHAPE_RADIUS: Record<string, string> = {rounded: '36px', arch: '50% 50% 28px 28px / 42% 42% 28px 28px', circle: '50%', phone: '64px', none: '0'};
+const SHAPE_RADIUS: Record<string, string> = {rounded: '36px', arch: '50% 50% 28px 28px / 42% 42% 28px 28px', circle: '50%', phone: '64px', window: '10px', none: '0'};
 const BORDER: Record<string, string> = {none: 'none', thin: '3px solid rgba(255,255,255,0.85)', glass: '1.5px solid rgba(255,255,255,0.35)', accent: '6px solid var(--accent)'};
+const WINDOW_BAR = 44; // px, Mac OS classic title bar
 
-// wraps the clip layer: canvas behind, the clips inside a shaped, inset frame
-export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; children: React.ReactNode}> = ({items, accentColor, children}) => {
+// wraps the clip layer: canvas behind, the clips inside a shaped, inset frame. `footage` is the clip layer
+// (hidden by a cutout layout so the canvas shows behind the cut-out presenter); `children` are the layers
+// drawn over it inside the frame (behind-graphics, behind-captions, the person matte)
+export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; footage: React.ReactNode; children: React.ReactNode}> = ({items, accentColor, footage, children}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const kit = useBrand();
   const active = useActiveLayout(items);
-  if (!active) return <>{children}</>;
+  if (!active) return <>{footage}{children}</>;
   const p: any = active.props;
   const {video} = layoutBoxes(p);
-  // ease the frame in from full-bleed over ~8 frames at the layout start
+  const kind: LayoutIn = p.enter ?? 'frameIn';
   const startF = Math.round((active.startMs / 1000) * fps);
-  const a = interpolate(frame - startF, [0, 8], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic});
+  const endF = Math.round((active.endMs / 1000) * fps);
+  // a = 0 full-bleed → 1 framed; the entry eases per kind, the exit returns over its own frames
+  const a = kind === 'slide' ? 1 : layoutIn(kind, frame - startF, fps) * layoutOut(kind, endF - 1 - frame, fps);
   const box = {top: video.top * a, left: video.left * a, width: 100 - (100 - video.width) * a, height: 100 - (100 - video.height) * a};
+  // slide (Y2K): the framed video comes in from the right edge with trailing copies, and leaves the same way
+  const slideIn = kind === 'slide' ? layoutIn('slide', frame - startF, fps) : 1;
+  const slideOut = kind === 'slide' ? layoutOut('slide', endF - 1 - frame, fps) : 1;
+  const dx = kind === 'slide' ? (1 - slideIn) * 120 + (1 - slideOut) * -120 : 0;
+  const trail = kind === 'slide' ? windowTrail(frame - startF, fps, ms(fps, 420)) : {copies: []};
+  const grid = p.canvas === 'grid';
   const canvas =
     p.canvas === 'dark' ? kit.dark
-    : p.canvas === 'light' ? kit.light
+    : p.canvas === 'light' || grid ? kit.light
+    : p.canvas === 'paper' ? '#F1E9D8'
     : p.canvas === 'gradient' ? `linear-gradient(160deg, ${accentColor} 0%, #ffffff 140%)`
     : accentColor;
+  // cutout (Stack): the footage fades out over 2 f at the start and back over 4–5 f at the end; the canvas shows behind the matte
+  const cut = p.cutout ? Math.min(interpolate(frame - startF, [0, 2], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}), interpolate(endF - 1 - frame, [0, 4], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})) : 0;
+  const win = p.shape === 'window';
+  const frameStyle: React.CSSProperties = {position: 'absolute', top: `${box.top}%`, left: `${box.left}%`, width: `${box.width}%`, height: `${box.height}%`, overflow: 'hidden', borderRadius: SHAPE_RADIUS[p.shape] ?? '0', border: win ? '2px solid #1c1c1c' : BORDER[p.border] ?? 'none', boxSizing: 'border-box', boxShadow: p.canvas === 'light' || grid ? '0 20px 60px rgba(0,0,0,0.18)' : '0 24px 70px rgba(0,0,0,0.45)', transform: dx ? `translateX(${dx.toFixed(1)}%)` : undefined};
   return (
-    <div style={{position: 'absolute', inset: 0, background: canvas, ['--accent' as any]: accentColor}}>
-      <div style={{position: 'absolute', top: `${box.top}%`, left: `${box.left}%`, width: `${box.width}%`, height: `${box.height}%`, overflow: 'hidden', borderRadius: SHAPE_RADIUS[p.shape] ?? '0', border: BORDER[p.border] ?? 'none', boxSizing: 'border-box', boxShadow: p.canvas === 'light' ? '0 20px 60px rgba(0,0,0,0.18)' : '0 24px 70px rgba(0,0,0,0.45)'}}>
-        <div style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}>{children}</div>
+    <div style={{position: 'absolute', inset: 0, background: canvas, ['--accent' as any]: accentColor, ...(grid ? {backgroundImage: `linear-gradient(rgba(0,0,0,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.08) 1px, transparent 1px)`, backgroundSize: '72px 72px'} : {})}}>
+      {p.cutout ? <div style={{position: 'absolute', inset: 0, opacity: 1 - cut}}>{footage}</div> : null}
+      {/* Y2K: the copies a dragged window leaves behind */}
+      {trail.copies.map((c, i) => <div key={i} style={{...frameStyle, transform: `translate(${(dx + c.offset * 0.09).toFixed(1)}%, ${(c.offset * 0.05).toFixed(1)}%)`, background: '#d8d8d8', opacity: c.opacity, boxShadow: 'none'}} />)}
+      <div style={frameStyle}>
+        {win ? <div style={{position: 'absolute', top: 0, left: 0, right: 0, height: WINDOW_BAR, background: 'linear-gradient(#f4f4f4, #d9d9d9)', borderBottom: '2px solid #1c1c1c', zIndex: 2, display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 16}}>{['#ff5f57', '#febc2e', '#28c840'].map((c) => <div key={c} style={{width: 16, height: 16, borderRadius: '50%', background: c, border: '1px solid rgba(0,0,0,0.35)'}} />)}<div style={{marginLeft: 'auto', marginRight: 14, fontSize: 22, color: '#222'}}>▲</div></div> : null}
+        <div style={{position: 'absolute', inset: win ? `${WINDOW_BAR}px 0 0 0` : 0}}>{p.cutout ? null : footage}{children}</div>
       </div>
     </div>
   );
