@@ -129,7 +129,7 @@ function summary(id, p) {
   for (const b of p.brolls) {
     const at = b.clipId ? toAbs(p, b.clipId, b.startMs) : b.startMs / 1000;
     const end = b.clipId ? toAbs(p, b.clipId, b.endMs, true) : b.endMs / 1000;
-    out.push(`  ${b.id}  @${at == null ? '?' : f1(at)}–${end == null ? '?' : f1(end)}s  ${b.mode} ${b.kind}${b.scale && b.scale !== 1 ? ` scale ${b.scale}` : ''}  ${b.query ? `"${b.query}"` : ''} ${b.source ?? ''} ${/^https?:/.test(b.src) ? '' : path.basename(b.src)}`.replace(/\s+/g, ' '));
+    out.push(`  ${b.id}  @${at == null ? '?' : f1(at)}–${end == null ? '?' : f1(end)}s  ${b.mode} ${b.kind}${b.enter && b.enter !== 'cut' ? ` enters with ${b.enter}` : ''}${b.scale && b.scale !== 1 ? ` scale ${b.scale}` : ''}  ${b.query ? `"${b.query}"` : ''} ${b.source ?? ''} ${/^https?:/.test(b.src) ? '' : path.basename(b.src)}`.replace(/\s+/g, ' '));
   }
   if (!p.brolls.length) out.push('  none');
   out.push('', 'GRAPHICS (timeline time):');
@@ -371,17 +371,19 @@ server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, b
   return text(`${cands.length} candidates:\n${lines.join('\n')}\n\nAll of them as cut_words ranges (remove the ones to keep):\n${JSON.stringify(cands.map((c) => (c.to === c.from ? {from_wid: c.from} : {from_wid: c.from, to_wid: c.to})))}`);
 });
 
-server.registerTool('set_transitions', {description: 'How each clip starts (the cut from the previous clip): cut = plain; punch = the whole clip sits 12 % closer — hides a jump cut inside a take (alternate them); zoom = quick eased push-in with a short blur — a beat of emphasis; whip = motion-blurred slide out of the previous clip and into this one; card = the previous clip shrinks into a card and slides off, revealing this one; split = the previous clip breaks into 2×2 tiles flying to the corners. whip/card/split mark a change of topic or place — one or two per reel. pattern punch-alternate punches every other jump cut inside each take; items set single clips by id (get_project). Set them after cutting: pieces made by later cuts start plain. set_audio sfx=true adds a whoosh to whip/zoom/card/split.', inputSchema: {project_id: pid, pattern: z.enum(['punch-alternate', 'none']).optional(), items: z.array(z.object({clip_id: z.string(), type: z.enum(ENTERS)})).optional()}}, async ({project_id, pattern, items}) => {
+server.registerTool('set_transitions', {description: 'How each clip — or B-roll cue — starts (the cut from what was on screen): cut = plain; punch = the whole clip sits 12 % closer — hides a jump cut inside a take (alternate them); zoom = quick eased push-in with a short blur — a beat of emphasis; whip = motion-blurred slide out of the previous clip and into this one; card = the previous clip shrinks into a card and slides off, revealing this one; split = the previous clip breaks into 2×2 tiles flying to the corners. whip/card/split mark a change of topic or place — one or two per reel. pattern punch-alternate punches every other jump cut inside each take; items set single clips by id (get_project). Set them after cutting: pieces made by later cuts start plain. set_audio sfx=true adds a whoosh to whip/zoom/card/split.', inputSchema: {project_id: pid, pattern: z.enum(['punch-alternate', 'none']).optional(), items: z.array(z.object({clip_id: z.string(), type: z.enum(ENTERS)})).optional()}}, async ({project_id, pattern, items}) => {
   const p = load(project_id);
   if (!pattern && !items?.length) throw new Error('give a pattern or items');
   if (pattern === 'none') p.clips = p.clips.map(({enter, ...c}) => c);
   if (pattern === 'punch-alternate') p.clips = punchAlternate(p.clips);
   for (const it of items ?? []) {
-    const c = p.clips.find((x) => x.id === it.clip_id); if (!c) throw new Error(`no clip ${it.clip_id}`);
+    const c = p.clips.find((x) => x.id === it.clip_id) ?? p.brolls.find((x) => x.id === it.clip_id);
+    if (!c) throw new Error(`no clip or B-roll cue ${it.clip_id}`);
+    if ('kind' in c && (it.type === 'card' || it.type === 'split')) throw new Error(`${it.clip_id} is a B-roll cue: it can enter with punch, zoom or whip (card/split are for clips)`);
     if (it.type === 'cut') delete c.enter; else c.enter = it.type;
   }
   await save(project_id, p);
-  const set = p.clips.filter((c) => c.enter && c.enter !== 'cut');
+  const set = [...p.clips, ...p.brolls].filter((c) => c.enter && c.enter !== 'cut');
   return text(`Transitions: ${set.length ? set.map((c) => `${c.id} ${c.enter}`).join(', ') : 'all plain cuts'}`);
 });
 

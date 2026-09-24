@@ -125,8 +125,11 @@ export const MultiClipVideo: React.FC<{
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}
 
       {/* sound effects (synthesized, public/sfx): a whoosh on whip / zoom / card / split cuts, a pop on stickers */}
-      {audio?.sfx ? placed.filter(({clip}) => WHOOSH.has(clip.enter as Enter)).map(({clip, fromFrame}) => (
-        <Sequence key={`sfx-${clip.id}`} from={Math.max(0, fromFrame - (REVEALS.has(clip.enter as Enter) ? OVERLAP : 3))} durationInFrames={Math.round(fps * 0.6)} layout="none" name="sfx whoosh">
+      {audio?.sfx ? [
+        ...placed.filter(({clip}) => WHOOSH.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({key: clip.id, from: fromFrame - (REVEALS.has(clip.enter as Enter) ? OVERLAP : 3)})),
+        ...projectedBrolls.filter((b) => b.enter && WHOOSH.has(b.enter)).map((b) => ({key: b.id, from: Math.round((b.startMs / 1000) * fps) - 3})),
+      ].map(({key, from}) => (
+        <Sequence key={`sfx-${key}`} from={Math.max(0, from)} durationInFrames={Math.round(fps * 0.6)} layout="none" name="sfx whoosh">
           <Audio src={staticFile('sfx/whoosh.wav')} volume={0.32} />
         </Sequence>
       )) : null}

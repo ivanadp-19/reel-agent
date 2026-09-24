@@ -6,6 +6,7 @@ import type {Graphic} from './graphicTemplates';
 export {projectBrolls} from './brollModel';
 export type {BrollItem, BrollAsset} from './brollModel';
 import type {BrollItem} from './brollModel';
+import {transitionFx} from './transitions';
 
 // remote (Pexels) URLs load directly; local paths go through staticFile
 const resolveSrc = (s: string) => (/^https?:\/\//.test(s) ? s : staticFile(s));
@@ -27,16 +28,21 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const VideoComp = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
   const src = resolveSrc(item.src);
   const scale = item.scale ?? 1;
+  // entry transition (whip / zoom / punch) on the cue itself, like a clip's
+  const fx = item.enter && item.enter !== 'cut' ? transitionFx({id: item.id, src: item.src, inSec: 0, outSec: 0, sourceDurationSec: 0, enter: item.enter}, frame, 1e6) : null;
+  const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0);
   // scale around a sensible origin per mode (inset hugs its corner, others center)
   const origin = item.mode === 'inset' ? 'top right' : 'center';
 
   return (
-    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: fade, transform: scale === 1 ? undefined : `scale(${scale})`, transformOrigin: origin}}>
-      {item.kind === 'video' ? (
-        <VideoComp src={src} muted style={{width: '100%', height: '100%', objectFit: 'cover'}} />
-      ) : (
-        <Img src={src} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
-      )}
+    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: moving ? 1 : fade, transform: scale === 1 ? undefined : `scale(${scale})`, transformOrigin: origin}}>
+      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${fx.blur.toFixed(1)}px)` : undefined}}>
+        {item.kind === 'video' ? (
+          <VideoComp src={src} muted style={{width: '100%', height: '100%', objectFit: 'cover'}} />
+        ) : (
+          <Img src={src} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
+        )}
+      </div>
     </div>
   );
 };
