@@ -22,16 +22,28 @@ export function measureLoudness(file) {
   return {I: num(j.input_i), TP: num(j.input_tp), LRA: num(j.input_lra), thresh: num(j.input_thresh), offset: num(j.target_offset)};
 }
 
-// two passes: measure, then apply with the measured values (linear gain when possible)
+// Two passes: measure, then apply with the measured values (linear gain when
+// possible; a source that already clips makes loudnorm limit instead). The
+// encoded result is measured again: AAC overshoot and the limiter's own slack
+// can leave the true peak above the gate (pruebaeditoria: aim −1.5, got −0.7),
+// so the aim is lowered by the excess and the pass repeated, at most twice.
 export function normalizeLoudness(file) {
-  const m = measureLoudness(file);
-  if (!m || !Number.isFinite(m.I)) return {ok: false, error: m ? 'the audio is silent' : 'no audio stream'};
-  const tmp = file.replace(/\.mp4$/, '.loudnorm.mp4');
-  const af = `loudnorm=I=${TARGET.I}:TP=${TARGET.tpAim}:LRA=${TARGET.LRA}:measured_I=${m.I}:measured_TP=${m.TP}:measured_LRA=${m.LRA}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true`;
-  const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp]);
-  if (r.status !== 0) { fs.rmSync(tmp, {force: true}); return {ok: false, error: `loudnorm failed: ${r.stderr.trim().split('\n').pop()}`}; }
-  fs.renameSync(tmp, file);
-  return {ok: true, before: m};
+  const before = measureLoudness(file);
+  if (!before || !Number.isFinite(before.I)) return {ok: false, error: before ? 'the audio is silent' : 'no audio stream'};
+  let m = before, aim = TARGET.tpAim;
+  const passes = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tmp = file.replace(/\.mp4$/, '.loudnorm.mp4');
+    const af = `loudnorm=I=${TARGET.I}:TP=${aim.toFixed(1)}:LRA=${TARGET.LRA}:measured_I=${m.I}:measured_TP=${m.TP}:measured_LRA=${m.LRA}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true`;
+    const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp]);
+    if (r.status !== 0) { fs.rmSync(tmp, {force: true}); return {ok: false, error: `loudnorm failed: ${r.stderr.trim().split('\n').pop()}`}; }
+    fs.renameSync(tmp, file);
+    m = measureLoudness(file);
+    passes.push({aim, I: m.I, TP: m.TP});
+    if (m.TP <= TARGET.TP) break;
+    aim -= m.TP - TARGET.TP + 0.4;
+  }
+  return {ok: true, before, after: m, passes};
 }
 
 function probe(file) {
