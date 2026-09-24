@@ -69,6 +69,12 @@ Por eso:
 | Harness | Un MCP para los dos cerebros. `AGENTS.md` (+ `CLAUDE.md` = `@AGENTS.md`), skills en `.agents/skills` con symlink a `.claude/skills`. Runner: `claude -p --allowedTools mcp__reel__* --strict-mcp-config --permission-mode dontAsk` / `codex exec --json --sandbox read-only` (patrón `providers.js` de vibetube, MIT). Sin shell para el agente headless | MCP y AGENTS hechos; runner fase 3 |
 | Verificación | Automática (ffprobe, silencios, negro, safe zones, contraste) → preview 540×960 → contact sheet que el agente mira (`Read` en Claude, `view_image` en Codex), máximo 2–3 rondas | Fase 1 (captions) y 3 (completa) |
 
+## 4b. Los 20 estilos de Captions.ai
+
+El usuario quiere poder **imitar cada uno de los 20 estilos** de AI Edit de Captions.ai. Análisis completo en `research/captions-ai-styles.md`. Conclusión: casi todos se construyen con el mismo vocabulario: captions que se van construyendo palabra a palabra (build-up), 1–2 palabras con tratamiento de énfasis (bold/itálica/otra fuente/color/píldora/bloque), un título grande al inicio, layouts de tarjeta/split, transiciones con blur y una paleta fija. Lo que los diferencia son fuentes, contenedores, marcos, texturas y stickers.
+
+Eso reordena las fases: la **fase 1** incluye captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, catálogo de fuentes OFL) y los primeros **style packs** (Prism Pro, Focus, Stack, Lift, Orbit, Impact II: solo tipografía y bloques de color); la **fase 2** suma layouts/marcos y transiciones; la **fase 3** suma matte de la persona, stickers/trazos/texturas propios y los estilos que dependen de ellos (Paper II, Pop, Chalk, Sketch, Y2K, Lens, Align, Prime).
+
 ## 5. Fases
 
 ### Fase 0 — base (hecha salvo spikes)
@@ -87,12 +93,16 @@ Spikes pendientes (cada uno con informe go/no-go):
 3. **Muletillas en español**: 3 clips reales, % de "eh/este/mmm" que WhisperX conserva vs conteo manual; plan B = energía de voz sin palabra alineada en huecos < 600 ms.
 4. **Benchmark de render**: línea base tomada; medir de nuevo con bold-pop + blur/glow y fijar el ratio máximo aceptable.
 
-### Fase 1 — captions premium + titulares (≈ 2–3 semanas, camino crítico)
+### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
+
+Hecho hasta ahora: 4 presets (`palabra`, `caja`, `tracked`, `prism`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`, track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter` y `add_graphic`/`edit_graphic`/`delete_graphics`; selector de estilo y tiers en el editor.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.
 - Paginado en módulo compartido (`src/`), usado por el pipeline y por `annotate_captions` (re-paginar sin perder anotaciones, por `wordId`).
-- 3 presets como datos + librería de animación `f(frame)` (pop, blur-in, karaoke fill, slide) + stroke/caja/sombra.
+- Captions v2: `reveal: 'build'` (las palabras aparecen y se quedan), karaoke (`upcoming: dim`), tratamientos de énfasis por tier (`weight`, `italic`, `font`, `color`, `scale`, `pill`, `block`, `underline`), contenedores de página (`none`/`pill`/`bar`/`glass`), posición flotante, catálogo de fuentes OFL (geométricas, condensadas, serif, script, manuscrita, mono, wide).
+- Style packs = preset + templates + paleta: primero Prism Pro, Focus, Stack, Lift, Orbit, Impact II.
+- Templates de título adicionales: `big-word`, `word-wall`, `fill-title`, `oversized`, `script-title`, `chapter-caps`, `kinetic-card`, `starburst`.
 - Templates de titulares/etiquetas: `hook-stack`, `label-2tone`, `stat`, `chapter`, `location-tag`, `price`; track `graphics[]` anclado a fuente/palabra (`projectGraphics` clonado de `projectBrolls`).
 - Brand kit (`brand.json` por proyecto: logo, colores, fuentes OFL).
 - Herramientas MCP: `annotate_captions`, `set_caption_style`, `add_graphic`, `edit_graphic`, `delete_graphics`, `caption_proof`.
