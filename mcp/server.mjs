@@ -439,7 +439,8 @@ server.registerTool('add_graphic', {description: `Add a motion-graphics overlay 
   if (y_pct != null) g.yPct = y_pct;
   if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
-  return text(`Added ${g.id} ${template}${behind ? ' (behind the presenter — run prepare_mattes before rendering)' : ''}\n\n${summary(project_id, p)}`);
+  const warn = validateProject(p, FPS, facesOf(p)).filter((i) => i.ref === g.id);
+  return text(`Added ${g.id} ${template}${behind ? ' (behind the presenter — run prepare_mattes before rendering)' : ''}${warn.length ? '\n' + issuesText(warn) : ''}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('search_asset', {description: 'Find decorative assets with clean licenses: icons and emoji (Iconify: Fluent Emoji, Noto, Lucide, Phosphor…), stickers and illustrations (Iconify hand-drawn sets + Openverse CC0/CC-BY). Files are downloaded under public/assets/ so you can use them with add_graphic template=sticker. Returns license and, when required, the credit line to keep.', inputSchema: {query: z.string().min(1), kind: z.enum(['icon', 'emoji', 'sticker', 'illustration']).default('sticker'), style: z.enum(['flat', '3d', 'hand-drawn', 'outline']).optional(), limit: z.number().int().min(1).max(12).default(6)}}, async ({query, kind, style, limit}) => {
@@ -538,11 +539,14 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 // ---------- verification ----------
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
+// face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
+const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
+const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p)];
 const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
-  return text(issuesText([...validateProject(p, FPS), ...offMicIssues(p)]));
+  return text(issuesText(allIssues(p)));
 });
 
 server.registerTool('caption_proof', {description: 'LOOK at the result without a full render: renders up to 8 stills of the current project (default: spread over the pages with emphasis and every graphic) and returns them as one contact sheet plus the validate report. Use it after annotating captions or adding graphics; fix what looks wrong and call again.', inputSchema: {project_id: pid, at_secs: z.array(sec('timeline time')).max(8).optional().describe('times to look at; omit to pick automatically')}}, async ({project_id, at_secs}) => {
@@ -561,7 +565,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
   return {content: [
-    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText([...validateProject(p, FPS), ...offMicIssues(p)])}`},
+    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });

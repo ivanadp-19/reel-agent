@@ -13,6 +13,8 @@ const FACE = {
   'serif-italic': () => ({fontFamily: fontFamily('Instrument Serif'), fontWeight: 400, fontStyle: 'italic' as const}),
 };
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
+// which named face a style object came from (for width estimates)
+const faceName = (style: React.CSSProperties): keyof typeof FACE => (Object.keys(FACE) as (keyof typeof FACE)[]).find((k) => FACE[k]().fontFamily === style.fontFamily && (FACE[k]() as any).fontStyle === (style as any).fontStyle) ?? 'display';
 
 const outCubic = Easing.out(Easing.cubic);
 // 0→1 over `frames`, starting at `delay`
@@ -22,6 +24,17 @@ const useReveal = (delay: number, frames: number) => {
 };
 // blur-in: unfocused and slightly low → sharp and in place
 const blurIn = (a: number): React.CSSProperties => ({opacity: a, filter: `blur(${(1 - a) * 12}px)`, transform: `translateY(${(1 - a) * 22}px)`});
+
+// Text never runs off the frame: shrink the font so the line fits `maxWidth`.
+// Widths are estimated from average glyph advances per face (em, upper/lower);
+// a little generous on purpose. ponytail: table, not measurement — tune here.
+const ADVANCE: Record<keyof typeof FACE, [number, number]> = {display: [0.8, 0.62], condensed: [0.47, 0.42], script: [0.58, 0.47], serif: [0.78, 0.58], 'serif-italic': [0.55, 0.44]};
+export function fitSize(text: string, base: number, face: keyof typeof FACE = 'display', maxWidth = 960, minSize = 0): number {
+  const [up, lo] = ADVANCE[face] ?? ADVANCE.display;
+  const em = [...String(text)].reduce((n, ch) => n + (ch === ' ' ? 0.3 : /[.,:;'|!]/.test(ch) ? 0.3 : /[IJLijl1]/.test(ch) ? up * 0.5 : /\d/.test(ch) ? 0.62 : ch === ch.toUpperCase() && ch !== ch.toLowerCase() ? up : lo), 0);
+  const width = em * base;
+  return width <= maxWidth ? base : Math.max(minSize, Math.floor((base * maxWidth) / width));
+}
 
 const SIZES = {sm: 60, md: 90, lg: 130, xl: 180};
 
@@ -34,8 +47,9 @@ const HookStack: React.FC<{props: any; accent: string}> = ({props, accent}) => (
 );
 const Line: React.FC<{i: number; l: any; upper: boolean; accent: string}> = ({i, l, upper, accent}) => {
   const a = useReveal(i * 4, 9);
+  const base = SIZES[l.size as keyof typeof SIZES] ?? SIZES.lg;
   return (
-    <div style={{fontSize: SIZES[l.size as keyof typeof SIZES] ?? SIZES.lg, fontWeight: 800, color: l.accent ? accent : '#fff', textTransform: upper ? 'uppercase' : undefined, letterSpacing: -1, ...blurIn(a)}}>
+    <div style={{fontSize: fitSize(upper ? String(l.text).toUpperCase() : l.text, base), fontWeight: 800, color: l.accent ? accent : '#fff', textTransform: upper ? 'uppercase' : undefined, letterSpacing: -1, whiteSpace: 'nowrap', ...blurIn(a)}}>
       {l.text}
     </div>
   );
@@ -44,11 +58,12 @@ const Line: React.FC<{i: number; l: any; upper: boolean; accent: string}> = ({i,
 const Label2Tone: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 8);
   const b = useReveal(3, 8);
-  const line: React.CSSProperties = {fontSize: 72, fontWeight: 800, lineHeight: 1.05, letterSpacing: -0.5};
+  // a long line shrinks (down to 52 px) before it is allowed to wrap
+  const line = (text: string): React.CSSProperties => ({fontSize: fitSize(text, 72, 'display', 940, 52), fontWeight: 800, lineHeight: 1.05, letterSpacing: -0.5, textAlign: 'center'});
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
-      <div style={{...line, color: '#fff', ...blurIn(a)}}>{props.top}</div>
-      {props.bottom ? <div style={{...line, color: accent, ...blurIn(b)}}>{props.bottom}</div> : null}
+      <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}>{props.top}</div>
+      {props.bottom ? <div style={{...line(props.bottom), color: accent, ...blurIn(b)}}>{props.bottom}</div> : null}
     </div>
   );
 };
@@ -93,10 +108,10 @@ const Chapter: React.FC<{props: any; accent: string}> = ({props, accent}) => {
 const BIG = {lg: 150, xl: 210, xxl: 270};
 const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const a = useReveal(0, 10);
-  const size = BIG[props.size as keyof typeof BIG] ?? BIG.xl;
   const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.display();
   const fill = props.color === 'accent' ? accent : '#fff';
   const text = props.upper ? String(props.text).toUpperCase() : props.text;
+  const size = fitSize(text, BIG[props.size as keyof typeof BIG] ?? BIG.xl, props.font in FACE ? props.font : 'display', 1000);
   const outline: React.CSSProperties = {color: 'transparent', WebkitTextStroke: `2px ${fill}`, opacity: 0.55};
   if (!props.repeat) {
     return <div style={{fontSize: size, lineHeight: 0.95, whiteSpace: 'nowrap', ...face, ...(props.color === 'outline' ? {...outline, opacity: 0.9} : {color: fill}), ...blurIn(a)}}>{text}</div>;
@@ -128,7 +143,7 @@ const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) =>
 };
 const CardLine: React.FC<{i: number; text: string; color: string; face: React.CSSProperties}> = ({i, text, color, face}) => {
   const a = useReveal(2 + i * 4, 8);
-  return <div style={{fontSize: 118, lineHeight: 1, textTransform: 'uppercase', color, ...face, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
+  return <div style={{fontSize: fitSize(String(text).toUpperCase(), 118, faceName(face), 940), lineHeight: 1, textTransform: 'uppercase', whiteSpace: 'nowrap', color, ...face, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
 };
 
 // outlined title that fills with the accent color left → right
@@ -137,7 +152,7 @@ const FillTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const fill = useReveal(6, 22);
   const face = FACE[props.font as keyof typeof FACE]?.() ?? FACE.condensed();
   const text = String(props.text).toUpperCase();
-  const style: React.CSSProperties = {fontSize: 200, lineHeight: 1, whiteSpace: 'nowrap', ...face};
+  const style: React.CSSProperties = {fontSize: fitSize(text, 200, faceName(face), 1000), lineHeight: 1, whiteSpace: 'nowrap', ...face};
   return (
     <div style={{position: 'relative', display: 'inline-block', opacity: a}}>
       <div style={{...style, color: 'transparent', WebkitTextStroke: '3px rgba(255,255,255,0.6)'}}>{text}</div>
@@ -155,7 +170,7 @@ const ScriptTitle: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
       {props.tag ? <div style={{fontSize: 30, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: '#fff', border: '2px solid rgba(255,255,255,0.8)', borderRadius: 999, padding: '6px 22px', opacity: a, textShadow: 'none'}}>{props.tag}</div> : null}
-      <div style={{fontSize: 150, lineHeight: 1, color: '#fff', ...face, ...blurIn(b)}}>{props.title}</div>
+      <div style={{fontSize: fitSize(props.title, 150, faceName(face), 960), lineHeight: 1, whiteSpace: 'nowrap', color: '#fff', ...face, ...blurIn(b)}}>{props.title}</div>
       {props.sub ? <div style={{fontSize: 34, fontWeight: 600, letterSpacing: 5, textTransform: 'uppercase', color: accent, opacity: c}}>{props.sub}</div> : null}
     </div>
   );

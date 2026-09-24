@@ -12,13 +12,13 @@ test('parseProps fills defaults and rejects bad props with a readable message', 
   assert.throws(() => parseProps('hook-stack', {lines: []}), /lines/);
 });
 
-test('a graphic follows its source through an autocut and is clipped at the cut', () => {
+test('a graphic follows its source through an autocut and keeps its duration across the cut', () => {
   const g = {id: 'g0', src: 'clips/a.mp4', startMs: 1000, endMs: 3000, template: 'stat', props: {value: '104 m²'}};
   const r = applyAutocut([clip], [{id: 'a', segments: [{inSec: 0, outSec: 2}, {inSec: 4, outSec: 10}]}]);
   const proj = projectGraphics([g], r.clips, 30);
-  assert.equal(proj.length, 1); // the 2–4 s part is gone, the graphic is cut short at 2 s
+  assert.equal(proj.length, 1); // anchored once, on the segment that holds its start
   assert.equal(proj[0].startMs, 1000);
-  assert.equal(proj[0].endMs, 2000);
+  assert.equal(proj[0].endMs, 3000); // 2 s on screen, running over the cut at 2 s
 });
 
 
@@ -41,4 +41,28 @@ test('the props help spells out enum options and length limits', () => {
   assert.match(h, /size: lg\|xl\|xxl/);
   assert.match(h, /text: string ≤16 chars/);
   assert.match(describeSchema(T2['hook-stack'].schema), /lines: \[\{text: string ≤22 chars/);
+});
+
+import {projectGraphics as project2} from '../src/graphicTemplates.ts';
+import {validateProject as validate2} from '../src/validate.ts';
+
+test('a graphic keeps its full duration across a cut; a behind-graphic is clipped to its clip', () => {
+  const a = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 2, sourceDurationSec: 10};
+  const b = {id: 'b', src: 'clips/a.mp4', inSec: 5, outSec: 10, sourceDurationSec: 10};
+  const label = {id: 'g0', src: 'clips/a.mp4', startMs: 1500, endMs: 3700, template: 'label-2tone', props: {top: 'x'}};
+  const [p] = project2([label], [a, b], 30);
+  assert.equal(p.startMs, 1500); assert.equal(p.endMs, 3700); assert.equal(p.clipId, 'a');
+  const [q] = project2([{...label, behind: true}], [a, b], 30);
+  assert.equal(q.endMs, 2000);
+  assert.equal(project2([{...label, startMs: 1500, endMs: 6000}], [a, b], 30).length, 1); // anchored once, not again on clip b
+});
+
+test('validate warns when a text graphic sits on the presenter face', () => {
+  const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10};
+  const hook = {id: 'g0', src: 'clips/a.mp4', startMs: 100, endMs: 2900, template: 'hook-stack', props: {lines: [{text: 'A', size: 'lg', accent: false}], upper: false}};
+  const faces = {'clips/a.mp4': {found: true, top: 0.14, bottom: 0.38}};
+  const codes = (g, y) => validate2({clips: [clip], captions: [], graphics: [{...g, ...(y != null ? {yPct: y} : {})}]}, 30, faces).map((i) => i.code);
+  assert.ok(codes(hook).includes('face'));
+  assert.ok(!codes(hook, 45).includes('face'));
+  assert.ok(!codes({...hook, behind: true}).includes('face'));
 });

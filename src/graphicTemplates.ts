@@ -183,20 +183,33 @@ export function matteSpans(items: Graphic[], padMs = 300): {src: string; startMs
   return out;
 }
 
-// source-relative spans → absolute timeline spans, one per placement of the source
+// source-relative spans → absolute timeline spans. A graphic starts where its
+// anchor word lands and stays on screen for its whole duration ACROSS cuts (an
+// autocut split under a label must not make it vanish). Behind-graphics are
+// the exception: they need a matte of their exact source span, so they are
+// clipped to the clip(s) that contain them, one placement per clip.
 export function projectGraphics(items: Graphic[], clips: Clip[], fps: number): Graphic[] {
   const placed = placeClips(clips, fps);
+  const totalMs = placed.length ? placed[placed.length - 1].endMs : 0;
   const out: Graphic[] = [];
   for (const g of items) {
-    for (const pc of placed) {
-      if (pc.clip.src !== g.src) continue;
-      const inMs = pc.clip.inSec * 1000;
-      const outMs = pc.clip.outSec * 1000;
-      if (g.endMs <= inMs || g.startMs >= outMs) continue;
-      const speed = pc.clip.speed ?? 1;
-      const toAbs = (ms: number) => pc.startMs + (ms - inMs) / speed;
-      out.push({...g, clipId: pc.clip.id, startMs: toAbs(Math.max(g.startMs, inMs)), endMs: toAbs(Math.min(g.endMs, outMs))});
+    const hits = placed.filter((pc) => pc.clip.src === g.src && g.endMs > pc.clip.inSec * 1000 && g.startMs < pc.clip.outSec * 1000);
+    if (g.behind) {
+      for (const pc of hits) {
+        const inMs = pc.clip.inSec * 1000;
+        const speed = pc.clip.speed ?? 1;
+        const toAbs = (ms: number) => pc.startMs + (ms - inMs) / speed;
+        out.push({...g, clipId: pc.clip.id, startMs: toAbs(Math.max(g.startMs, inMs)), endMs: toAbs(Math.min(g.endMs, pc.clip.outSec * 1000))});
+      }
+      continue;
     }
+    const anchor = hits.find((pc) => g.startMs >= pc.clip.inSec * 1000) ?? hits[0];
+    if (!anchor) continue;
+    const inMs = anchor.clip.inSec * 1000;
+    const speed = anchor.clip.speed ?? 1;
+    const from = Math.max(g.startMs, inMs);
+    const startMs = anchor.startMs + (from - inMs) / speed;
+    out.push({...g, clipId: anchor.clip.id, startMs, endMs: Math.min(totalMs, startMs + (g.endMs - from) / speed)});
   }
   return out.sort((a, b) => a.startMs - b.startMs);
 }

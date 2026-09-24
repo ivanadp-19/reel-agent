@@ -56,7 +56,10 @@ function graphicBand(g: Graphic): Band | null {
 }
 const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
 
-export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string}, fps = 30): Issue[] {
+// face box per source file, fractions of the frame (from the captions job's YuNet pass)
+export type FaceBox = {found?: boolean; top: number; bottom: number};
+
+export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
   const issues: Issue[] = [];
   const caps = projectCaptions(p.captions, p.clips, fps);
   const gfx = projectGraphics(p.graphics ?? [], p.clips, fps);
@@ -89,6 +92,17 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
     const band = graphicBand(g);
     if (band) {
       if (band.top < SAFE.topPct && !g.behind) issues.push({level: 'warn', code: 'safe-top', msg: `graphic ${g.id} (${g.template}) starts at ${band.top.toFixed(0)}% — inside the top UI band`, ref: g.id});
+      // text over the presenter's face (behind-graphics and stickers are fine there)
+      const face = faces[g.src];
+      if (face && face.found !== false && !g.behind && g.template !== 'sticker') {
+        const fb = {top: face.top * 100 - 2, bottom: face.bottom * 100 + 2};
+        if (overlap(band, fb)) {
+          const h = band.bottom - band.top;
+          const below = Math.ceil(fb.bottom + 1), above = Math.floor(fb.top - 1 - h);
+          const hint = below + h <= SAFE.bottomPct ? `y_pct ≥ ${below}` : above >= SAFE.topPct ? `y_pct ≤ ${above}` : 'shorter text or behind: true';
+          issues.push({level: 'warn', code: 'face', msg: `graphic ${g.id} (${g.template}, ${band.top.toFixed(0)}–${band.bottom.toFixed(0)}%) covers the presenter's face (${fb.top.toFixed(0)}–${fb.bottom.toFixed(0)}%) — move it: ${hint}`, ref: g.id});
+        }
+      }
       if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `graphic ${g.id} (${g.template}) reaches ${band.bottom.toFixed(0)}% — under the bottom UI strip`, ref: g.id});
       for (const c of caps) {
         if (c.startMs < g.endMs && g.startMs < c.endMs && overlap(captionBand(c, p.captionStyle), band) && g.template !== 'sticker') {
