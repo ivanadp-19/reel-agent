@@ -18,19 +18,16 @@ export const RemotionRoot: React.FC = () => {
       defaultProps={{clips: [], music: null, captions: [], brolls: [], accentColor: '#FFB020'}}
       calculateMetadata={async ({props}) => {
         const fps = 30;
+        // Files on disk are ONLY a Studio convenience: a render request always
+        // carries its arrays (an empty one means "none", never "read the disk").
         const p = props as {clips?: unknown; music?: unknown; captions?: unknown; brolls?: unknown};
-        const tl =
-          Array.isArray(p.clips) && p.clips.length
-            ? {clips: p.clips, music: p.music ?? null}
-            : await fetch(staticFile('timeline.json')).then((r) => r.json()).catch(() => ({clips: [], music: null}));
-        const captions =
-          Array.isArray(p.captions) && p.captions.length
-            ? p.captions
-            : await fetch(staticFile('captions.multi.json')).then((r) => r.json()).catch(() => []);
-        const brolls =
-          Array.isArray(p.brolls) && p.brolls.length
-            ? p.brolls
-            : await fetch(staticFile('broll.json')).then((r) => r.json()).catch(() => []);
+        const fromDisk = async (file: string, fallback: unknown) => {
+          const j = await fetch(staticFile(file)).then((r) => r.json()).catch(() => fallback);
+          return Array.isArray(j) || (j && typeof j === 'object') ? j : fallback;
+        };
+        const tl = Array.isArray(p.clips) ? {clips: p.clips, music: p.music ?? null} : await fromDisk('timeline.json', {clips: [], music: null});
+        const captions = Array.isArray(p.captions) ? p.captions : await fromDisk('captions.multi.json', []);
+        const brolls = Array.isArray(p.brolls) ? p.brolls : await fromDisk('broll.json', []);
         return {
           fps,
           width: 1080,

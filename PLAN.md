@@ -414,6 +414,8 @@ También hecho:
 Pendiente de la fase 0:
 - Spikes: paridad de Codex con MCP (Codex no está instalado en esta Mac), comparativa visual de captions, muletillas en español (medir contra conteo manual), benchmark de render.
 
+Benchmark de render (M-series, 48 s, 1 clip, 31 captions, sin B-roll): draft 540×960 en 60 s, final 1080×1920 en 65 s. Es la línea base para medir el coste de los presets premium (stroke, blur, glow).
+
 Notas de la máquina de desarrollo:
 - WhisperX `medium` en CPU tarda ~3.5 min por 48 s de audio (int8, sin GPU). Candidatos para el benchmark: whisper.cpp con Metal, parakeet-mlx.
 - El ffmpeg de Homebrew no trae `drawtext`, `subtitles`/libass, `zscale` ni `libplacebo`.
