@@ -3,11 +3,15 @@
 // 6–10 dB quieter. Pure loudness statistics — no ML, no fs — so it works on any
 // clip with audio. Whole takes are flagged (runs split at pauses / sentence
 // ends), and nothing is flagged when the clip has one voice at one level.
-// ponytail: loudness only; a lip-motion signal would rescue soft on-camera takes
-// (MediaPipe FaceLandmarker crashes on macOS with mediapipe 1.0.1 — see PLAN.md).
+// With speaker diarization (scripts/diarize.py, pyannote, needs HF_TOKEN) the decision is made
+// per SPEAKER instead of per take: the diarizer says who each stretch belongs to, the loudness says
+// which of those voices is away from the mic — so a presenter's own soft sentence stays hers, and a
+// director who says more words than the presenter is still the off-mic one. Loudness alone remains
+// the fallback when there is no diarization.
 
 export type Loudness = {fps: number; db: number[]}; // dBFS per window
-export type SpokenWord = {word: string; startMs: number; endMs: number; off?: boolean};
+export type SpokenWord = {word: string; startMs: number; endMs: number; off?: boolean; speaker?: string};
+export type Turn = [startSec: number, endSec: number, label: string]; // a diarizer's speaker turn
 
 export const DROP_DB = 6; // the two voices must sit at least this far apart
 const MIN_SHARE = 0.15; // …and the quiet one must be a real share of the speech, not one soft aside
@@ -101,4 +105,44 @@ export function flagOffMic<T extends SpokenWord>(words: T[], loud: Loudness, dro
   const off = new Set<T>();
   runs.forEach((r, i) => { if (isOff[i]) for (const w of r.run) off.add(w); });
   return words.map((w) => (off.has(w) ? {...w, off: true} : w));
+}
+
+// give every word the speaker whose turn it overlaps most; labels become spk1, spk2… in order of first
+// appearance (stable across runs of the same audio). A word no turn touches keeps no speaker.
+export function assignSpeakers<T extends SpokenWord>(words: T[], turns: Turn[]): T[] {
+  if (!turns?.length) return words;
+  const names = new Map<string, string>();
+  return words.map((w) => {
+    let best: string | null = null, bo = 0;
+    for (const [s, e, label] of turns) {
+      const o = Math.min(w.endMs, e * 1000) - Math.max(w.startMs, s * 1000);
+      if (o > bo) { bo = o; best = label; }
+    }
+    if (best == null) return w;
+    if (!names.has(best)) names.set(best, `spk${names.size + 1}`);
+    return {...w, speaker: names.get(best)!};
+  });
+}
+
+// the speakers whose median level sits dropDb under the loudest speaker (empty with one speaker, or
+// when every voice is at the same level)
+export function offMicSpeakers<T extends SpokenWord>(words: T[], loud: Loudness, dropDb = DROP_DB): string[] {
+  if (!loud?.db?.length) return [];
+  const by = new Map<string, number[]>();
+  for (const w of words) {
+    if (!w.speaker || w.endMs - w.startMs < MIN_WORD_MS) continue;
+    const d = wordDb(w, loud);
+    if (Number.isFinite(d)) by.set(w.speaker, [...(by.get(w.speaker) ?? []), d]);
+  }
+  if (by.size < 2) return [];
+  const level = [...by].map(([spk, ds]) => [spk, median(ds)] as const);
+  const top = Math.max(...level.map(([, d]) => d));
+  return level.filter(([, d]) => top - d >= dropDb).map(([spk]) => spk);
+}
+
+// off-mic by speaker when the words carry speakers and one voice is clearly quieter; else by take
+export function flagOffMicBySpeaker<T extends SpokenWord>(words: T[], loud: Loudness, dropDb = DROP_DB): T[] {
+  const off = new Set(offMicSpeakers(words, loud, dropDb));
+  if (!off.size) return words.some((w) => w.speaker) ? words : flagOffMic(words, loud, dropDb);
+  return words.map((w) => (w.speaker && off.has(w.speaker) ? {...w, off: true} : w));
 }

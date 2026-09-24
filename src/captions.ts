@@ -13,6 +13,7 @@ export type CaptionWord = {
   endMs: number;
   tier?: number; // 0 plain · 1 accent color · 2 big emphasis (see captionPresets)
   emoji?: string; // one emoji that pops in right after the word
+  speaker?: string; // spk1, spk2… who says it (diarization); presets may color or place pages per speaker later
 };
 export type Caption = {
   id: string;

@@ -632,7 +632,7 @@ function offMicIssues(p) {
   return out;
 }
 
-server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const tr = await transcript(p);
   const out = [];
@@ -642,11 +642,13 @@ server.registerTool('get_transcript', {description: 'Word-level transcript of ev
     out.push(`clip ${pc.clip.id} (source ${t?.source ?? path.basename(pc.clip.src)}, @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s):`);
     if (!t?.words.length) { out.push('  (no speech)'); continue; }
     const toks = [];
-    let inOff = false;
+    let inOff = false, spk = null;
+    const multi = new Set(t.words.map((w) => w.speaker).filter(Boolean)).size > 1;
     t.words.forEach((w, k) => {
       const prev = t.words[k - 1];
       if (inOff && !w.off) { toks.push(']'); inOff = false; }
       if (prev && w.startMs - prev.endMs > 400) toks.push(`[pause ${f1((w.startMs - prev.endMs) / 1000)}s]`);
+      if (multi && w.speaker && w.speaker !== spk) { toks.push(`[${w.speaker}]`); spk = w.speaker; }
       if (!inOff && w.off) { toks.push('[off-mic:'); inOff = true; }
       toks.push(`${w.i}:${w.word}`);
       if (w.off) offCount++;
@@ -658,7 +660,7 @@ server.registerTool('get_transcript', {description: 'Word-level transcript of ev
   return text(out.join('\n'));
 });
 
-server.registerTool('set_off_mic', {description: 'How to treat a quieter second voice away from the mic (a director feeding lines from behind the camera). mark = flag those words as [off-mic: …] in get_transcript and let you decide (default); cut = autocut and captions drop them automatically; off = no detection (one-voice clips, or a presenter who whispers on purpose).', inputSchema: {project_id: pid, mode: z.enum(['mark', 'cut', 'off'])}}, async ({project_id, mode}) => {
+server.registerTool('set_off_mic', {description: 'How to treat a quieter second voice away from the mic (a director feeding lines from behind the camera). With diarization (HF_TOKEN) the voice is identified by speaker and only its words are flagged; without it, by loudness per take. mark = flag those words as [off-mic: …] in get_transcript and let you decide (default); cut = autocut and captions drop them automatically; off = no detection (one-voice clips, or a presenter who whispers on purpose).', inputSchema: {project_id: pid, mode: z.enum(['mark', 'cut', 'off'])}}, async ({project_id, mode}) => {
   const p = load(project_id); p.offMic = mode; await save(project_id, p); return text(`Off-mic voice: ${mode}`);
 });
 

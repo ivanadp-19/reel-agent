@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {DROP_DB, flagOffMic, loudnessFromPcm} from '../src/speech.ts';
+import {DROP_DB, assignSpeakers, flagOffMicBySpeaker, loudnessFromPcm} from '../src/speech.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -73,6 +73,29 @@ function loudnessFor(clip) {
   fs.mkdirSync(TRANSCRIPTS, {recursive: true});
   fs.writeFileSync(f, JSON.stringify(loud));
   return loud;
+}
+
+// Speaker sidecar per source (who is talking): pyannote through scripts/diarize.py, only when HF_TOKEN
+// is set (the model is gated). Cached next to the transcript; a failure is logged once and the
+// loudness-only detection carries on. REEL_DIARIZE=0 turns it off.
+function speakersFor(clip) {
+  if (!process.env.HF_TOKEN || process.env.REEL_DIARIZE === '0') return null;
+  const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.spk.json`);
+  if (fs.existsSync(f)) { const d = JSON.parse(fs.readFileSync(f, 'utf8')); return d.turns ?? null; }
+  const wav = path.join(TMP, `${sourceKey(clip)}.16k.wav`);
+  if (!fs.existsSync(wav)) {
+    const ff = spawnSync('ffmpeg', ['-y', '-v', 'error', '-i', path.join(PUBLIC, clip.src), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav], {cwd: ROOT});
+    if (ff.status !== 0) return null;
+  }
+  fs.mkdirSync(TRANSCRIPTS, {recursive: true});
+  const r = spawnSync('.venv/bin/python', ['scripts/diarize.py', wav, f], {cwd: ROOT, env: process.env, maxBuffer: 1 << 24});
+  if (r.status !== 0 || !fs.existsSync(f)) {
+    const tail = (r.stderr?.toString() || '').trim().split('\n').filter((l) => l && !/warn/i.test(l)).slice(-2).join(' | ');
+    console.error(`diarization failed for ${sourceKey(clip)} (loudness only): ${tail.slice(-240)}`);
+    fs.writeFileSync(f, JSON.stringify({speakers: [], turns: null, error: tail.slice(-240)})); // do not retry every call
+    return null;
+  }
+  return JSON.parse(fs.readFileSync(f, 'utf8')).turns ?? null;
 }
 
 function parseWhisperxJson(file) {
@@ -171,10 +194,12 @@ export function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
   const cache = cacheFile(clip, lang);
   if (!fs.existsSync(cache)) transcribeClips([clip], undefined, lang);
   if (!fs.existsSync(cache)) throw new Error(`transcription failed for ${clip.id}`);
-  const words = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  let words = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  const turns = speakersFor(clip);
+  if (turns) words = assignSpeakers(words, turns);
   if (offMic === 'off') return words;
   const loud = loudnessFor(clip);
-  return loud ? flagOffMic(words, loud, +(process.env.REEL_OFFMIC_DB || DROP_DB)) : words;
+  return loud ? flagOffMicBySpeaker(words, loud, +(process.env.REEL_OFFMIC_DB || DROP_DB)) : words;
 }
 
 // Assemble all clips' words onto the timeline, honoring trim (in/out) and order.
@@ -212,6 +237,7 @@ export function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark')
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,
         ...(w.off ? {off: true} : {}),
+        ...(w.speaker ? {speaker: w.speaker} : {}),
       });
     });
     offsetMs += (clip.outSec - clip.inSec) * 1000;
