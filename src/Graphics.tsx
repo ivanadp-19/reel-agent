@@ -61,10 +61,15 @@ const Label2Tone: React.FC<{props: any; accent: string}> = ({props, accent}) => 
   const face = useFace('display');
   // a long line shrinks (down to 52 px) before it is allowed to wrap
   const line = (text: string): React.CSSProperties => ({...face.style, fontSize: fitSize(text, 72, face.family, 940, 52), lineHeight: 1.05, letterSpacing: -0.5, textAlign: 'center'});
+  // glass plate: a soft dark backing that fades in with the first line (run 6:
+  // the accent line fought a floral blouse); 'none' keeps the bare text
+  const plate: React.CSSProperties = props.plate === 'none' ? {} : {background: 'rgba(8,10,14,0.42)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', borderRadius: 26, padding: '16px 36px 20px', boxShadow: '0 10px 40px rgba(0,0,0,0.25)', opacity: a};
   return (
-    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
-      <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}>{props.top}</div>
-      {props.bottom ? <div style={{...line(props.bottom), color: accent, ...blurIn(b)}}>{props.bottom}</div> : null}
+    <div style={{display: 'flex', justifyContent: 'center'}}>
+      <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', ...plate}}>
+        <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}>{props.top}</div>
+        {props.bottom ? <div style={{...line(props.bottom), color: accent, ...blurIn(b)}}>{props.bottom}</div> : null}
+      </div>
     </div>
   );
 };

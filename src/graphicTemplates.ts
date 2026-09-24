@@ -27,10 +27,10 @@ export const TEMPLATES = {
   },
   // two-tone label: white line over an accent line ("Mérida / Yucatán", "Doble / lavabo")
   'label-2tone': {
-    desc: 'two-line label, white over accent — room names, locations, features',
+    desc: 'two-line label, white over accent — room names, locations, features; plate glass (default, a soft dark backing that keeps it readable over busy footage) or none',
     defaultMs: 2200,
     y: 62,
-    schema: z.object({top: short(26), bottom: z.string().trim().max(26).default('')}),
+    schema: z.object({top: short(26), bottom: z.string().trim().max(26).default(''), plate: z.enum(['glass', 'none']).default('glass')}),
   },
   // big figure with a caption: "104 m²", "+75%", "$2.5M"
   stat: {
