@@ -28,7 +28,7 @@ import {validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
-import {ENTERS, punchAlternate} from '../src/transitions.ts';
+import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
 import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
@@ -371,7 +371,7 @@ server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, b
   return text(`${cands.length} candidates:\n${lines.join('\n')}\n\nAll of them as cut_words ranges (remove the ones to keep):\n${JSON.stringify(cands.map((c) => (c.to === c.from ? {from_wid: c.from} : {from_wid: c.from, to_wid: c.to})))}`);
 });
 
-server.registerTool('set_transitions', {description: 'How each clip starts (the cut from the previous clip): cut = plain; punch = the whole clip sits 12 % closer — hides a jump cut inside a take (alternate them); zoom = quick eased push-in with a short blur — a beat of emphasis; whip = motion-blurred slide out of the previous clip and into this one — between topics, sparingly. pattern punch-alternate punches every other jump cut inside each take; items set single clips by id (get_project). Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, pattern: z.enum(['punch-alternate', 'none']).optional(), items: z.array(z.object({clip_id: z.string(), type: z.enum(ENTERS)})).optional()}}, async ({project_id, pattern, items}) => {
+server.registerTool('set_transitions', {description: 'How each clip starts (the cut from the previous clip): cut = plain; punch = the whole clip sits 12 % closer — hides a jump cut inside a take (alternate them); zoom = quick eased push-in with a short blur — a beat of emphasis; whip = motion-blurred slide out of the previous clip and into this one; card = the previous clip shrinks into a card and slides off, revealing this one; split = the previous clip breaks into 2×2 tiles flying to the corners. whip/card/split mark a change of topic or place — one or two per reel. pattern punch-alternate punches every other jump cut inside each take; items set single clips by id (get_project). Set them after cutting: pieces made by later cuts start plain. set_audio sfx=true adds a whoosh to whip/zoom/card/split.', inputSchema: {project_id: pid, pattern: z.enum(['punch-alternate', 'none']).optional(), items: z.array(z.object({clip_id: z.string(), type: z.enum(ENTERS)})).optional()}}, async ({project_id, pattern, items}) => {
   const p = load(project_id);
   if (!pattern && !items?.length) throw new Error('give a pattern or items');
   if (pattern === 'none') p.clips = p.clips.map(({enter, ...c}) => c);
@@ -546,8 +546,23 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
   return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}`);
 });
 
-server.registerTool('set_audio', {description: `Voice cleanup on the final render (drafts are untouched): ${Object.entries(CLEAN).map(([k, v]) => `${k} = ${v.desc}`).join('; ')}. Light is safe on phone recordings with room noise; strong can dull sibilants — check the final.`, inputSchema: {project_id: pid, clean: z.enum(Object.keys(CLEAN))}}, async ({project_id, clean}) => {
-  const p = load(project_id); p.audio = {...(p.audio ?? {}), clean}; await save(project_id, p); return text(`Voice cleanup: ${clean}`);
+server.registerTool('set_audio', {description: `Audio options. clean = voice cleanup on the final render (drafts are untouched): ${Object.entries(CLEAN).map(([k, v]) => `${k} = ${v.desc}`).join('; ')} — light is safe on phone recordings with room noise, strong can dull sibilants. sfx = sound effects (synthesized, license-free): a whoosh on whip/zoom/card/split cuts and a pop on stickers/starbursts; off by default.`, inputSchema: {project_id: pid, clean: z.enum(Object.keys(CLEAN)).optional(), sfx: z.boolean().optional()}}, async ({project_id, clean, sfx}) => {
+  const p = load(project_id); p.audio = {...(p.audio ?? {}), ...(clean != null ? {clean} : {}), ...(sfx != null ? {sfx} : {})}; await save(project_id, p);
+  return text(`Audio: voice cleanup ${p.audio.clean ?? 'off'}, sfx ${p.audio.sfx ? 'on' : 'off'}`);
+});
+
+server.registerTool('set_speed_ramp', {description: 'Speed ramp across a clip, as steps (Remotion plays a clip at one rate): the clip becomes 2–6 pieces whose speed eases from from_speed to to_speed, e.g. 1 → 2.5 to rush through a walk-through, 2 → 1 to land on a reveal. Captions and graphics follow their words. Pieces start plain (add transitions after).', inputSchema: {project_id: pid, clip_id: z.string(), from_speed: z.number().min(0.25).max(4), to_speed: z.number().min(0.25).max(4), steps: z.number().int().min(2).max(6).default(3)}}, async ({project_id, clip_id, from_speed, to_speed, steps}) => {
+  const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
+  const speeds = speedRamp(from_speed, to_speed, steps);
+  const span = c.outSec - c.inSec; if (span / speeds.length < 0.3) throw new Error(`${clip_id} is too short for ${speeds.length} pieces`);
+  let id = clip_id; const ids = [id];
+  for (let k = 1; k < speeds.length; k++) {
+    const r = splitClip(p.clips, id, c.inSec + (span * k) / speeds.length); if (!r) throw new Error('could not split');
+    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); id = r.newId; ids.push(id);
+  }
+  ids.forEach((pid2, k) => { const piece = p.clips.find((x) => x.id === pid2); piece.speed = speeds[k]; });
+  await save(project_id, p);
+  return text(`Speed ramp on ${clip_id}: ${ids.map((x, k) => `${x} ×${speeds[k]}`).join(' → ')}\n\n${summary(project_id, p)}`);
 });
 
 // words of every clip (trim window), source-relative; `${source}:${i}` is a stable word id

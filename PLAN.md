@@ -64,7 +64,7 @@ Por eso:
 | B-roll propio | El agente etiqueta cada asset (`frame_at` / contact sheet) y lo empareja con menciones del transcript; reglas de los editores expertos: arranca a ±1 s de la palabra, 0.5–8 s, ~9 s entre inserts, nunca sobre el hook ni el remate | Fase 3 |
 | B-roll stock | Pexels (`search_stock`, portrait), descarga solo desde pexels.com, atribución en UI. Sin índices ni copias masivas (términos) | Hecho como respaldo |
 | Motion graphics | Registry tipado (zod) de templates 9:16 en Remotion; `add_graphic({template, props, anchorWordId})`; zoom punches por keyframes | Fase 1 (titulares) y 3 (resto) |
-| Audio | Ducking; loudnorm dos pasadas a −14 LUFS / −1 dBTP y gate de QC en cada render final; limpieza opcional con `afftdn` (sin modelos externos); música CC0/CC BY desde Openverse con crédito. SFX pendiente | Hecho salvo SFX |
+| Audio | Ducking; loudnorm dos pasadas a −14 LUFS / −1 dBTP y gate de QC en cada render final; limpieza opcional con `afftdn` (sin modelos externos); música CC0/CC BY desde Openverse con crédito; SFX sintetizados (whoosh, thud, pop) | Hecho |
 | Render | Remotion 4.0.380 vía backend. Línea base: 48 s con 31 captions = 60 s draft / 65 s final en M-series | Hecho |
 | Harness | Un MCP para los dos cerebros. `AGENTS.md` (+ `CLAUDE.md` = `@AGENTS.md`), skills en `.agents/skills` con symlink a `.claude/skills`. Runner: `claude -p --allowedTools mcp__reel__* --strict-mcp-config --permission-mode dontAsk` / `codex exec --json --sandbox read-only` (patrón `providers.js` de vibetube, MIT). Sin shell para el agente headless | MCP y AGENTS hechos; runner fase 3 |
 | Verificación | Automática (ffprobe, silencios, negro, safe zones, contraste) → preview 540×960 → contact sheet que el agente mira (`Read` en Claude, `view_image` en Codex), máximo 2–3 rondas | Fase 1 (captions) y 3 (completa) |
@@ -136,7 +136,7 @@ Criterios:
 
 Entregables:
 - Biblioteca de B-roll propio: hecho (`add_broll_assets` + contact sheet, `tag_broll_asset`, `broll_library`, `suggest_broll` con las reglas de colocación y cobertura del negro; Pexels de respaldo vía `search_stock`).
-- Transiciones: punch-in, zoom y whip blur hechos (`set_transitions`, patrón `punch-alternate`); faltan speed ramp, split 2×2, card zoom-out y golpes de SFX.
+- Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`).
 - Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
 - `end-card` hecho (logo del brand kit, título, CTA, handle).
 - Runner headless con selector de cerebro; registro del MCP en `~/.claude.json` y en el `config.toml` de Codex; skills para ambos.

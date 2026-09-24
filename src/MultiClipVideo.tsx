@@ -11,6 +11,7 @@ import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
 import {gradeFor, type ProjectGrade} from './grade';
+import {OVERLAP, REVEALS, WHOOSH, type Enter} from './transitions';
 
 // Music layer: start offset, volume, optional end fade-out, and optional
 // auto-ducking — the music dips while someone is speaking (speech = caption spans).
@@ -58,7 +59,8 @@ export const MultiClipVideo: React.FC<{
   accentColor?: string;
   brand?: Brand | null;
   grade?: ProjectGrade | null;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null}) => {
+  audio?: {clean?: string; sfx?: boolean} | null;
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null}) => {
   const {fps} = useVideoConfig();
   const kit = resolveBrand(brand, projectAccent);
   const accentColor = kit.accent;
@@ -82,6 +84,17 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
+      {/* a clip entered with a card / split reveal shows under the outgoing one: it starts OVERLAP frames early, drawn first */}
+      {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
+        const early = Math.min(OVERLAP, fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
+        if (early <= 0) return null;
+        const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), enter: undefined, muted: true};
+        return (
+          <Sequence key={`${clip.id}-pre`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (under the reveal)`}>
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} />
+          </Sequence>
+        );
+      })}
       {placed.map(({clip, fromFrame, durFrames}, i) => (
         <Sequence
           key={clip.id}
@@ -109,6 +122,18 @@ export const MultiClipVideo: React.FC<{
 
       {/* music */}
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}
+
+      {/* sound effects (synthesized, public/sfx): a whoosh on whip / zoom / card / split cuts, a pop on stickers */}
+      {audio?.sfx ? placed.filter(({clip}) => WHOOSH.has(clip.enter as Enter)).map(({clip, fromFrame}) => (
+        <Sequence key={`sfx-${clip.id}`} from={Math.max(0, fromFrame - (REVEALS.has(clip.enter as Enter) ? OVERLAP : 3))} durationInFrames={Math.round(fps * 0.6)} layout="none" name="sfx whoosh">
+          <Audio src={staticFile('sfx/whoosh.wav')} volume={0.32} />
+        </Sequence>
+      )) : null}
+      {audio?.sfx ? projectedGraphics.filter((g) => g.template === 'sticker' || g.template === 'starburst').map((g) => (
+        <Sequence key={`sfx-${g.id}`} from={Math.round((g.startMs / 1000) * fps)} durationInFrames={Math.round(fps * 0.2)} layout="none" name="sfx pop">
+          <Audio src={staticFile('sfx/pop.wav')} volume={0.4} />
+        </Sequence>
+      )) : null}
 
       {/* captions, always on top */}
       <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} />

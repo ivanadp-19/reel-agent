@@ -6,6 +6,7 @@ import {spawnSync} from 'node:child_process';
 import {bundle} from '@remotion/bundler';
 import {renderStill, selectComposition} from '@remotion/renderer';
 import {linkPublic, sweepDead} from '../scripts/public-links.mjs';
+import {ensureSfx} from '../scripts/sfx.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const TMP = path.join(ROOT, '.captions-tmp');
@@ -15,6 +16,7 @@ let bundled = null;
 async function getBundle() {
   if (!bundled) {
     sweepDead(TMP, 'proof-bundle-');
+    ensureSfx(); // the composition references public/sfx/*.wav
     const links = linkPublic(path.join(ROOT, 'public'), path.join(WORK, 'public-links'));
     bundled = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
     const clean = () => fs.rmSync(WORK, {recursive: true, force: true});

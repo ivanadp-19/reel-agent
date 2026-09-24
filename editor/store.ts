@@ -10,7 +10,7 @@ import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDura
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: {clean?: string; sfx?: boolean} | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -41,6 +41,7 @@ type EditorState = {
   hiddenWids: string[]; // transcript words whose caption pages were deleted — never re-paged
   brand: Brand | null; // client kit (set by the agent with set_brand); read-only in the editor for now
   grade: ProjectGrade | null; // color (set_grade); read-only in the editor for now
+  audio: {clean?: string; sfx?: boolean} | null; // voice cleanup + sfx (set_audio); read-only in the editor for now
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -132,6 +133,7 @@ export const useEditor = create<EditorState>((set) => ({
   hiddenWids: [],
   brand: null,
   grade: null,
+  audio: null,
   past: [],
   future: [],
 
@@ -156,6 +158,7 @@ export const useEditor = create<EditorState>((set) => ({
         hiddenWids: p.hiddenWids ?? [],
         brand: p.brand ?? null,
         grade: p.grade ?? null,
+        audio: p.audio ?? null,
         past: [],
         future: [],
       };

@@ -24,3 +24,16 @@ test('punch-alternate: every other jump cut in a take, reset on a new source', (
   const r = punchAlternate([c('a'), c('b'), c('c'), c('d', 't'), c('e', 't')]);
   assert.deepEqual(r.map((x) => x.enter), [undefined, 'punch', 'cut', undefined, 'punch']);
 });
+
+test('card / split: the outgoing clip reports an exit over its last frames, a stepped ramp eases between speeds', async () => {
+  const {transitionFx, speedRamp, OVERLAP} = await import('../src/transitions.ts');
+  const a = c('a'), b = c('b', 's', 'card');
+  assert.equal(transitionFx(a, 60 - OVERLAP - 1, 60, b).exit, undefined);
+  const x = transitionFx(a, 59, 60, b).exit;
+  assert.ok(x && x.type === 'card' && x.t > 0.99, JSON.stringify(x));
+  assert.equal(transitionFx(a, 56, 60, c('b', 's', 'split')).exit.type, 'split');
+  assert.deepEqual(speedRamp(1, 2.5, 3).length, 3);
+  const r = speedRamp(1, 2.5, 3);
+  assert.ok(r[0] > 1 && r[1] > r[0] && r[2] === 2.5, JSON.stringify(r));
+  assert.deepEqual(speedRamp(2, 1, 2).at(-1), 1);
+});

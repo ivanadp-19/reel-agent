@@ -20,6 +20,15 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
   const fid = `grade-${clip.id.replace(/[^\w-]/g, '_')}`;
   const fx = transition ? transitionFx(transition.clip, frame + transition.offset, transition.durFrames, transition.next) : null;
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0);
+  // outgoing reveal: card = shrink to a rounded card sliding off left; split = four tiles flying to the corners
+  const exit = fx?.exit;
+  const ease = (t: number) => 1 - (1 - Math.min(1, Math.max(0, t))) ** 3;
+  // card: shrink first, then slide off left — the card is still on screen half-way through
+  const exitStyle: React.CSSProperties | null = exit?.type === 'card'
+    ? {transform: `translateX(${-125 * ease((exit.t - 0.3) / 0.7)}%) scale(${1 - 0.42 * ease(exit.t * 1.6)})`, borderRadius: 48 * ease(exit.t * 2), overflow: 'hidden', boxShadow: `0 30px 80px rgba(0,0,0,${0.5 * exit.t})`, transformOrigin: 'center'}
+    : null;
+  const fly = exit ? ease((exit.t - 0.12) / 0.88) : 0; // tiles pause a beat, then fly
+  const tiles = exit?.type === 'split' ? [[0, 0, -1, -1], [50, 0, 1, -1], [0, 50, -1, 1], [50, 50, 1, 1]] : null; // left%, top%, fly direction
   return (
     <div
       data-ab={`clip:${clip.id}`}
@@ -36,7 +45,14 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
           </filter>
         </svg>
       ) : null}
-      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${fx.blur.toFixed(1)}px)` : undefined}}>
+      {tiles ? tiles.map(([l, t, fx2, fy]) => (
+        <div key={`${l}${t}`} style={{position: 'absolute', left: `${l}%`, top: `${t}%`, width: '50%', height: '50%', overflow: 'hidden', transform: `translate(${fx2 * 130 * fly}%, ${fy * 130 * fly}%) rotate(${fx2 * fy * 6 * fly}deg) scale(${1 - 0.15 * fly})`, boxShadow: '0 10px 40px rgba(0,0,0,0.45)'}}>
+          <div style={{position: 'absolute', left: `${-l * 2}%`, top: `${-t * 2}%`, width: '200%', height: '200%'}}>
+            <Comp src={staticFile(clip.src)} playbackRate={speed} trimBefore={trimBefore} trimAfter={trimBefore + Math.round(durFrames * speed)} muted style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}} />
+          </div>
+        </div>
+      )) : null}
+      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${fx.blur.toFixed(1)}px)` : undefined, ...(exitStyle ?? {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
       <Comp
         src={staticFile(clip.src)}
         playbackRate={speed}

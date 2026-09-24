@@ -4,11 +4,18 @@
 //   zoom  — eases 1.04 → 1.12 over the first 8 frames with a short blur
 //   whip  — the previous clip slides out left and this one slides in, motion-blurred (5 + 5 frames);
 //           both scale up while they move so the frame edge never shows black
+//   card  — the previous clip shrinks into a rounded card and slides off, revealing this one (8 frames)
+//   split — the previous clip breaks into 2×2 tiles that fly to the corners, revealing this one (8 frames)
+// card and split need the next clip under the outgoing one: the renderer
+// starts it OVERLAP frames early (see MultiClipVideo).
 import type {Clip} from './timeline.ts';
 
 export type Enter = NonNullable<Clip['enter']>;
-export const ENTERS: Enter[] = ['cut', 'punch', 'zoom', 'whip'];
-export type Fx = {scale: number; dx: number; blur: number}; // dx in % of the frame width, blur in px
+export const ENTERS: Enter[] = ['cut', 'punch', 'zoom', 'whip', 'card', 'split'];
+export type Fx = {scale: number; dx: number; blur: number; exit?: {type: 'card' | 'split'; t: number}}; // dx in % of the frame width, blur in px; exit t 0→1
+export const OVERLAP = 8; // frames the next clip shows under a card / split exit
+export const REVEALS = new Set<Enter>(['card', 'split']);
+export const WHOOSH = new Set<Enter>(['whip', 'zoom', 'card', 'split']);
 
 const PUNCH = 1.12, ZOOM_F = 8, WHIP_F = 5, WHIP_DX = 18, WHIP_BLUR = 18;
 const ease = (t: number) => 1 - (1 - t) ** 3;
@@ -23,7 +30,17 @@ export function transitionFx(clip: Clip, frame: number, durFrames: number, next?
   if (next?.enter === 'whip' && frame >= durFrames - WHIP_F) { const t = clamp01((frame - (durFrames - WHIP_F) + 1) / WHIP_F); dx = -WHIP_DX * t * t; blur = Math.max(blur, WHIP_BLUR * t); }
   if (dx) scale = Math.max(scale, 1 + (2 * Math.abs(dx)) / 100); // cover the edge it moves away from
   if (blur) scale = Math.max(scale, 1 + blur * 0.012); // a blurred edge turns see-through: push it off frame
+  if (next && REVEALS.has(next.enter as Enter) && frame >= durFrames - OVERLAP) {
+    return {scale, dx, blur, exit: {type: next.enter as 'card' | 'split', t: clamp01((frame - (durFrames - OVERLAP) + 1) / OVERLAP)}}; // linear; the renderer eases each stage
+  }
   return {scale, dx, blur};
+}
+
+// a stepped speed ramp: the clip becomes `steps` pieces whose speeds ease from
+// `from` to `to` (Remotion cannot change a video's rate inside one sequence)
+export function speedRamp(from: number, to: number, steps: number): number[] {
+  const n = Math.max(2, Math.min(6, Math.round(steps)));
+  return Array.from({length: n}, (_, i) => +(from + (to - from) * ease((i + 1) / n)).toFixed(2));
 }
 
 // punch in on every other jump cut inside the same take (a new source resets it)

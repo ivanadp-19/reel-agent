@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
+import {ensureSfx} from '../scripts/sfx.mjs';
 
 // HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
 // through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
@@ -578,4 +579,5 @@ const server = createServer(async (req, res) => {
 process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
+try { ensureSfx(); } catch (e) { console.error('sfx:', e.message); }
 server.listen(3333, '127.0.0.1', () => console.log('editor backend → http://127.0.0.1:3333'));

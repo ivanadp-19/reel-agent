@@ -17,7 +17,7 @@ export type Clip = {
   volume?: number; // clip audio gain, 1 = original
   muted?: boolean; // hard-mute the clip's own audio
   speed?: number; // playback rate (0.25..4), 1 = normal; timeline duration = source/speed
-  enter?: 'cut' | 'punch' | 'zoom' | 'whip'; // transition from the previous clip (src/transitions.ts)
+  enter?: 'cut' | 'punch' | 'zoom' | 'whip' | 'card' | 'split'; // transition from the previous clip (src/transitions.ts)
 };
 
 const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
