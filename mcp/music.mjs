@@ -12,14 +12,23 @@ const INDEX = path.join(MUSIC, 'library.json');
 export const loadMusicLibrary = () => { try { return JSON.parse(fs.readFileSync(INDEX, 'utf8')); } catch { return []; } };
 const saveMusicLibrary = (lib) => { fs.mkdirSync(MUSIC, {recursive: true}); fs.writeFileSync(INDEX, JSON.stringify(lib, null, 2)); };
 
-// rows: {id, title, creator, license, durationSec, url, page, source}
+// rows: {id, title, creator, license, durationSec, url, page, source}. Openverse
+// ANDs the words of a query, so a long mood description finds nothing: the query
+// is retried with fewer words, and short loops are accepted when nothing longer
+// exists (the renderer loops a track shorter than the reel).
 export async function searchMusic(query, {limit = 6, minSec = 20, maxSec = 600} = {}) {
-  const u = `https://api.openverse.org/v1/audio/?q=${encodeURIComponent(query)}&license=cc0,by&license_type=commercial&page_size=${Math.min(20, limit * 3)}`;
-  const d = await (await fetchPublic(u)).json();
-  return (d.results ?? [])
-    .filter((r) => r.url && r.duration && r.duration / 1000 >= minSec && r.duration / 1000 <= maxSec && /^https:\/\//.test(r.url))
-    .slice(0, limit)
-    .map((r) => ({id: `ov-${r.id}`, title: r.title ?? 'untitled', creator: r.creator ?? r.source ?? 'unknown', license: String(r.license).toUpperCase() + (r.license_version ? ` ${r.license_version}` : ''), durationSec: Math.round(r.duration / 1000), url: r.url, page: r.foreign_landing_url ?? '', source: r.source ?? 'openverse'}));
+  const row = (r) => ({id: `ov-${r.id}`, title: r.title ?? 'untitled', creator: r.creator ?? r.source ?? 'unknown', license: String(r.license).toUpperCase() + (r.license_version ? ` ${r.license_version}` : ''), durationSec: Math.round(r.duration / 1000), url: r.url, page: r.foreign_landing_url ?? '', source: r.source ?? 'openverse'});
+  const fetchRows = async (q) => {
+    const u = `https://api.openverse.org/v1/audio/?q=${encodeURIComponent(q)}&license=cc0,by&license_type=commercial&page_size=${Math.min(20, limit * 3)}`;
+    const d = await (await fetchPublic(u)).json();
+    return (d.results ?? []).filter((r) => r.url && r.duration && r.duration / 1000 <= maxSec && /^https:\/\//.test(r.url)).map(row);
+  };
+  const words = query.trim().split(/\s+/);
+  const tries = [words.join(' '), words.slice(0, 2).join(' '), words[0]].filter((q, i, a) => q && a.indexOf(q) === i);
+  let rows = [];
+  for (const q of tries) { rows = await fetchRows(q); if (rows.length) break; }
+  const long = rows.filter((r) => r.durationSec >= minSec);
+  return (long.length ? long : rows).slice(0, limit);
 }
 
 // credit line to keep with the reel (CC BY requires it; CC0 does not, but we keep it anyway)

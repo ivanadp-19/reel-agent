@@ -22,6 +22,7 @@ const MusicTrack: React.FC<{music: NonNullable<Music>; totalFrames: number; spee
   return (
     <Audio
       src={staticFile(music.src)}
+      loop // a track shorter than the reel starts over (loops from Openverse are 30–60 s)
       trimBefore={Math.round((music.startSec ?? 0) * fps)}
       volume={(f) => {
         let v =
