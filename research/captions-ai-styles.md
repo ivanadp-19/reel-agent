@@ -71,11 +71,11 @@ Esto es el "vocabulario" a implementar. Un **style pack** = preset de captions +
 - geométricas: bloques que suben, triángulos, slices verticales, wipe circular, bloques deslizantes.
 - texturizadas: mosaico de píxeles, papel rasgado, light leak, cascada de ventanas.
 
-### E. Decoración y texturas (assets propios, licencia limpia)
-- **Stickers SVG** dibujados por nosotros: estrellas, rayos, flores, flechas, asteriscos, caritas.
-- **Trazos a mano animados**: elipse, subrayado, tachado, borde garabateado (SVG path con `stroke-dashoffset`).
-- Texturas CC0: papel, grano, halftone, tiza, cinta adhesiva, cuadrícula.
-- UI: visor de cámara, chrome de ventana, cursor.
+### E. Decoración y texturas (buscadas o generadas, nunca dibujadas a mano)
+- **Stickers, doodles e iconos**: se **buscan** en APIs con licencia clara (Iconify, Openverse, OpenMoji/Fluent Emoji, packs CC0 de doodles, LottieFiles…) o se **generan** como PNG con fondo transparente con un modelo de imagen (gpt-image, Imagen, Recraft para vector) y se animan con transformaciones (pop, wiggle, float). Investigación en `research/asset-sourcing.md`.
+- **Trazos a mano animados**: los pocos que son geometría pura (elipse, subrayado, tachado) sí se generan por código (`stroke-dashoffset`); todo lo demás se busca o se genera.
+- **Texturas**: packs CC0 (papel, grano, halftone, tiza, cinta, cuadrícula) o generadas.
+- UI (visor de cámara, chrome de ventana, cursor): buscadas o generadas.
 
 ### F. Color y tratamiento de B-roll
 - Paleta por style pack (acento, fondo, texto).
@@ -89,12 +89,12 @@ Prime (texto detrás), Chalk (contorno dibujado), Stack (recorte sobre rojo), Vi
 | Nivel | Estilos | Qué falta |
 |---|---|---|
 | **A — con captions v2 + templates + layouts + transiciones** (fase 1–2) | Prism Pro, Impact II, Focus, Stack (sin recorte), Lift, Form, Evo, Orbit, Bloom, Linen, Elevate, Vista (sin título detrás) | build-up, tratamientos de énfasis, contenedores, más fuentes, marcos/splits, tarjetas de color, blur/glitch/geométricas |
-| **B — además assets y texturas** (fase 2–3) | Paper II, Pop, Chalk (sin contorno), Sketch, Y2K, Lens, Align | stickers SVG propios, trazos animados, texturas CC0, UI de cámara/ventanas |
+| **B — además assets y texturas** (fase 2–3) | Paper II, Pop, Chalk (sin contorno), Sketch, Y2K, Lens, Align | herramienta de búsqueda/generación de assets (stickers, doodles, texturas, UI) + animación de PNGs |
 | **C — además matte** (fase 3) | Prime, Chalk completo, Stack completo, Vista completo | segmentación de la persona (MediaPipe/BiRefNet/SAM 2) y composición por capas |
 
 ## Cambios al plan
 
 - La **fase 1** crece: captions v2 (`reveal: build`, karaoke, tratamientos de énfasis, contenedores, catálogo de fuentes OFL) y los templates de título B. Los 4 presets actuales se convierten en style packs: `palabra`, `caja`, `tracked`, `prism` + nuevos packs por estilo de Captions.ai (empezar por Prism Pro, Focus, Stack, Lift, Orbit, Impact II, que solo necesitan tipografía y bloques de color).
 - La **fase 2** suma layouts/marcos y transiciones (blur, glitch, geométricas), además de color.
-- La **fase 3** suma matte, stickers/trazos/texturas y los packs B y C.
+- La **fase 3** suma matte, la herramienta de assets (búsqueda + generación + animación de PNGs) y los packs B y C.
 - El agente elige el **style pack** (o el usuario en el editor) y anota tiers; el pack decide todo lo demás.
