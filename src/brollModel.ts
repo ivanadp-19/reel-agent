@@ -14,7 +14,7 @@ export type BrollItem = {
   query?: string;
   alternatives?: string[];
   scale?: number; // size multiplier (1 = default), set via the on-preview slider
-  enter?: 'cut' | 'punch' | 'zoom' | 'whip' | 'whipDiag'; // how the cue comes in (src/transitions.ts; card/split are for clips)
+  enter?: import('./transitions.ts').Enter; // how the cue comes in (src/transitions.ts); cover kinds draw over the cut, reveal kinds act as a cut
 };
 
 // the creator's own B-roll source (pool the generator can pick from)

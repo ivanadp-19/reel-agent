@@ -45,3 +45,58 @@ test('whipDiag: the outgoing clip smears along the diagonal, the incoming lands 
   assert.ok(in0.blur > 10 && in0.scale > 1.2 && in0.angle === 60);
   assert.deepEqual(transitionFx(c('b', 's', 'whipDiag'), 8, 60), {scale: 1, dx: 0, blur: 0});
 });
+
+// ---- Phase 2: the transition pack ----
+import {coverShapes, exitMask, overlapOf, DUR_MS, COVER, REVEALS, OVER, clipPoly} from '../src/transitions.ts';
+
+test('clipPoly keeps the half-plane a·x + b·y ≤ c: a square cut by x + y ≤ 100 is a triangle', () => {
+  const tri = clipPoly([[0, 0], [100, 0], [100, 100], [0, 100]], 1, 1, 100);
+  assert.equal(tri.length, 3);
+  assert.ok(tri.every(([x, y]) => x + y <= 100 + 1e-6));
+});
+
+test('cover shapes: nothing before, everything at the middle, nothing after', () => {
+  for (const kind of ['bands', 'clock', 'disc', 'blinds', 'mosaic']) {
+    const mid = coverShapes(kind, 0.5, 7);
+    assert.ok(mid.length > 0, `${kind} covers at t=0.5`);
+    const ends = [...coverShapes(kind, 0, 7), ...coverShapes(kind, 1, 7)].filter((s) => (s.opacity ?? 1) > 0.01);
+    // whatever is returned at the ends must not be drawn on screen: an empty list or an off-frame / zero-size shape
+    assert.ok(ends.every((s) => !s.clip || /polygon|inset|circle/.test(s.clip)), `${kind} shapes are clip paths`);
+  }
+  assert.equal(coverShapes('flash', 0.3, 1)[0].tone, 'white');
+  assert.ok(coverShapes('flash', 0.3, 1)[0].opacity > 0.99 && coverShapes('flash', 1, 1)[0].opacity < 0.01);
+  assert.equal(coverShapes('bands', 0.5, 0).length, 3);
+  assert.ok(coverShapes('mosaic', 0.5, 3).length >= 60);
+  assert.ok(coverShapes('lightLeak', 0.5, 0).every((s) => s.screen && s.gradient));
+});
+
+test('exit masks: the outgoing clip keeps everything at t=0 and nothing at t=1', () => {
+  for (const kind of ['polyWipe', 'diagWipe', 'particles', 'blocks']) {
+    const m0 = exitMask(kind, 0, 5), m1 = exitMask(kind, 1, 5);
+    assert.ok(m0 && m0.startsWith('polygon('), `${kind} at 0`);
+    assert.ok(m1 === null || m1.startsWith('polygon('), `${kind} at 1`);
+  }
+  // particles: the frontier is jagged (different x per row) and moves left → right
+  const a = exitMask('particles', 0.3, 5), b = exitMask('particles', 0.6, 5);
+  const xs = (m) => [...m.matchAll(/([\d.]+)% [\d.]+%/g)].map((r) => +r[1]);
+  assert.ok(new Set(xs(a)).size > 5);
+  assert.ok(Math.min(...xs(b)) > Math.min(...xs(a)));
+});
+
+test('overlaps: reveal and over kinds pre-start the incoming clip for their whole duration', () => {
+  assert.equal(overlapOf('crossBlur', 30), Math.round((30 * DUR_MS.crossBlur) / 1000));
+  assert.equal(overlapOf('flash', 30), 0);
+  assert.ok(REVEALS.has('particles') && OVER.has('cardDrop') && COVER.has('bands'));
+});
+
+test('crossBlur, spin, rgbFlash and cardDrop report their per-frame effects', () => {
+  const inFx = transitionFx(c('b', 's', 'crossBlur'), -3, 60, undefined, 30); // 3 frames before the cut, under the outgoing
+  assert.ok(inFx.blur > 5);
+  const out = transitionFx(c('a'), 59, 60, c('b', 's', 'crossBlur'), 30);
+  assert.equal(out.exit.type, 'fade'); assert.ok(out.exit.t > 0.8);
+  assert.ok(transitionFx(c('b', 's', 'spin'), 0, 60, undefined, 30).spin > 2);
+  assert.ok(transitionFx(c('b', 's', 'rgbFlash'), 0, 60, undefined, 30).rgb > 2);
+  assert.ok(transitionFx(c('b', 's', 'cardDrop'), -5, 60, undefined, 30).drop < 0.5);
+  assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'cardDrop'), 30).exit.type, 'shrink');
+  assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'particles'), 30).exit.type, 'mask');
+});
