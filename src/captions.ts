@@ -71,6 +71,18 @@ export function projectCaptions(captions: Caption[], clips: Clip[], fps: number)
   return out.sort((a, b) => a.startMs - b.startMs);
 }
 
+// Pages under a closing card (projected, timeline ms spans): pages that start
+// under it are not shown, a page running into it ends where the card starts.
+export function hideUnder(pages: Caption[], spans: {startMs: number; endMs: number}[]): Caption[] {
+  if (!spans.length) return pages;
+  return pages
+    .filter((c) => !spans.some((s) => c.startMs >= s.startMs && c.startMs < s.endMs))
+    .map((c) => {
+      const s = spans.find((x) => c.startMs < x.startMs && c.endMs > x.startMs);
+      return s ? {...c, endMs: s.startMs, holdMaxMs: Math.min(c.holdMaxMs ?? Infinity, s.startMs)} : c;
+    });
+}
+
 // Merge freshly generated pages into the existing ones. Kept: every existing
 // page (replace=false, "generate captions") or only the hand-made ones — typed
 // at a time, or retexted (`covers`) — (replace=true, "re-page for a new style").

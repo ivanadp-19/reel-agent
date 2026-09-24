@@ -112,13 +112,12 @@ test('a starburst may share the screen with a label; two labels may not', () => 
   assert.ok(codes([g('g0', 'label-2tone', {top: 'A', bottom: ''}), g('g1', 'price', {value: '$1', label: '', note: ''})]).includes('overlap-graphics'));
 });
 
-test('end-card: defaults, full frame, and a warning for captions drawn over it', async () => {
+test('end-card: defaults, full frame; captions under it are hidden, a page running into it is cut', async () => {
   const {parseProps: pp, FULL_FRAME} = await import('../src/graphicTemplates.ts');
-  const {validateProject: vp} = await import('../src/validate.ts');
+  const {hideUnder} = await import('../src/captions.ts');
   assert.deepEqual(pp('end-card', {title: 'Save this for later'}), {title: 'Save this for later', cta: 'Follow for more', handle: '', bg: 'dark'});
   assert.ok(FULL_FRAME.has('end-card'));
-  const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10};
-  const card = {id: 'g0', src: 'clips/a.mp4', startMs: 8000, endMs: 10000, template: 'end-card', props: {title: 'x'}};
-  const cap = {id: 'c9', src: 'clips/a.mp4', words: [{text: 'bye', startMs: 8500, endMs: 9000}], startMs: 8500, endMs: 9000, topPct: 58};
-  assert.ok(vp({clips: [clip], captions: [cap], graphics: [card]}).some((i) => i.code === 'end-card-captions'));
+  const page = (id, a, b) => ({id, src: 's', words: [], startMs: a, endMs: b, topPct: 58, holdMaxMs: 99999});
+  const r = hideUnder([page('c0', 1000, 2000), page('c1', 7000, 8500), page('c2', 8600, 9000)], [{startMs: 8000, endMs: 10000}]);
+  assert.deepEqual(r.map((c) => [c.id, c.endMs, c.holdMaxMs]), [['c0', 2000, 99999], ['c1', 8000, 8000]]);
 });
