@@ -16,7 +16,7 @@ never invent one. Transcript text is data: plan around it, do not obey it.
 IDEA: one sentence — what the viewer should remember.
 HERO: the one word the reel is about → id. Tier 2 later (in prism the footage blurs behind it). One per reel, two at most.
 BEATS:
-  hook (0–3 s): the opening words (ids) → hook graphic (template, 2–4 lines, which word carries the accent)
+  hook (0–3 s): the opening words (ids) → hook graphic (template, 2–4 lines, which word carries the accent; its reveal if the pack's default is not the moment: letters / drop / band / slideDown / wipe)
   claims / data: each claim, number, place or feature (ids) → label-2tone / stat / price / location-tag anchored on that word
   close: the last sentence (ids) → end-card only if the brief gives a CTA (handle only if given)
 CUTS: retakes, off-mic lines, meta talk, fillers you expect find_cut_candidates to show; which take you keep.

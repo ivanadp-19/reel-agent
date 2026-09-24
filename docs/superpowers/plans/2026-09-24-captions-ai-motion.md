@@ -273,7 +273,7 @@ Todas son funciones puras en `transitions.ts` que devuelven, además de `Fx`, un
 
 ---
 
-## Fase 3 — Movimiento de títulos y gráficos (2–3 días)
+## Fase 3 — Movimiento de títulos y gráficos (2–3 días) — HECHA 2026-09-24
 
 `graphicTemplates.ts` añade a toda plantilla de texto tres props opcionales con default por pack: `reveal: 'blur' | 'letters' | 'typewriter' | 'shuffle' | 'tracking' | 'drop' | 'slideBlur' | 'band' | 'wipe'`, `out: 'cut' | 'fade' | 'letters' | 'blur' | 'slideUp' | 'band'`, `life: 'none' | 'grow' | 'marquee' | 'drift' | 'oscillate'`. `Graphics.tsx` implementa cada uno con `motion.ts`:
 
