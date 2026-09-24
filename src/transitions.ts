@@ -20,15 +20,15 @@ import type {Clip} from './timeline.ts';
 export type Enter = 'cut' | 'punch' | 'zoom' | 'whip' | 'whipDiag' | 'card' | 'split'
   | 'flash' | 'crossBlur' | 'spin' | 'rgbFlash' | 'bands' | 'polyWipe' | 'clock' | 'mosaic' | 'disc' | 'blinds' | 'particles' | 'diagWipe' | 'blocks' | 'cardDrop' | 'lightLeak';
 export const ENTERS: Enter[] = ['cut', 'punch', 'zoom', 'whip', 'whipDiag', 'card', 'split', 'flash', 'crossBlur', 'spin', 'rgbFlash', 'bands', 'polyWipe', 'clock', 'mosaic', 'disc', 'blinds', 'particles', 'diagWipe', 'blocks', 'cardDrop', 'lightLeak'];
-export type Exit = {type: 'card' | 'split' | 'fade' | 'shrink' | 'mask'; t: number; clipPath?: string}; // t 0→1 over the overlap
-export type Fx = {scale: number; dx: number; blur: number; angle?: number; spin?: number; rgb?: number; drop?: number; exit?: Exit}; // dx % of width, blur px, angle deg of a smear, spin deg, rgb px of channel split, drop 0→1 of a card landing
+export type Exit = {type: 'card' | 'split' | 'fade' | 'shrink' | 'mask' | 'dissolve'; t: number; clipPath?: string; seed?: number}; // t 0→1 over the overlap; dissolve = Form's particles (an SVG grain filter, seeded)
+export type Fx = {scale: number; dx: number; blur: number; angle?: number; spin?: number; rgb?: number; drop?: number; exit?: Exit; enterMask?: string; canvas?: {clip: string; tone: Tone}; ring?: {cx: number; cy: number; r: number}}; // dx % of width, blur px, angle deg of a smear, spin deg, rgb px of channel split, drop 0→1 of a card landing; enterMask / canvas / ring = Orbit's disc (the incoming shows through a circle over a canvas, a ring orbits it; cx, cy in % of the frame, r in % of its width)
 export const OVERLAP = 8; // frames the next clip shows under a card / split exit (30 fps)
 export const REVEALS = new Set<Enter>(['card', 'split', 'crossBlur', 'polyWipe', 'diagWipe', 'particles', 'blocks']);
-export const OVER = new Set<Enter>(['cardDrop']);
-export const COVER = new Set<Enter>(['flash', 'spin', 'rgbFlash', 'bands', 'polyWipe', 'clock', 'mosaic', 'disc', 'blinds', 'lightLeak']);
+export const OVER = new Set<Enter>(['cardDrop', 'disc']); // the incoming clip lands on top of the outgoing
+export const COVER = new Set<Enter>(['flash', 'spin', 'rgbFlash', 'bands', 'polyWipe', 'clock', 'mosaic', 'blinds', 'lightLeak']);
 export const WHOOSH = new Set<Enter>(['whip', 'whipDiag', 'zoom', 'card', 'split', 'spin', 'blinds', 'polyWipe', 'diagWipe']);
 // whole transition in ms, centred on the cut (measured on the previews; card/split keep their 8 frames)
-export const DUR_MS: Partial<Record<Enter, number>> = {card: 267, split: 267, flash: 250, crossBlur: 210, spin: 333, rgbFlash: 333, bands: 667, polyWipe: 290, clock: 833, mosaic: 667, disc: 500, blinds: 625, particles: 290, diagWipe: 583, blocks: 500, cardDrop: 210, lightLeak: 400};
+export const DUR_MS: Partial<Record<Enter, number>> = {card: 267, split: 267, flash: 250, crossBlur: 210, spin: 333, rgbFlash: 333, bands: 667, polyWipe: 290, clock: 833, mosaic: 667, disc: 800, blinds: 625, particles: 290, diagWipe: 583, blocks: 500, cardDrop: 210, lightLeak: 400};
 export const overlapOf = (kind: Enter | undefined, fps: number) => (kind && (REVEALS.has(kind) || OVER.has(kind)) ? (kind === 'card' || kind === 'split' ? OVERLAP : Math.max(2, Math.round((fps * (DUR_MS[kind] ?? 267)) / 1000))) : 0);
 
 const PUNCH = 1.12, ZOOM_F = 8, WHIP_F = 5, WHIP_DX = 18, WHIP_BLUR = 18;
@@ -42,6 +42,7 @@ const fr = (fps: number, ms: number) => Math.max(1, Math.round((fps * ms) / 1000
 // next = the clip after it (for its exit)
 export function transitionFx(clip: Clip, frame: number, durFrames: number, next?: Clip, fps = 30): Fx {
   let scale = 1, dx = 0, blur = 0, angle: number | undefined, spin: number | undefined, rgb: number | undefined, drop: number | undefined;
+  let enterMask: string | undefined, canvas: Fx['canvas'], ring: Fx['ring'];
   const k = clip.enter;
   if (k === 'punch') scale = PUNCH;
   if (k === 'zoom') { const t = ease(clamp01(frame / ZOOM_F)); scale = 1.04 + (PUNCH - 1.04) * t; blur = (1 - t) * 4; }
@@ -56,6 +57,17 @@ export function transitionFx(clip: Clip, frame: number, durFrames: number, next?
   if (k === 'rgbFlash') { const n = fr(fps, 167); const t = ease(clamp01((frame + 1) / n)); rgb = 6 * (1 - t); blur = 20 * (1 - t); }
   if (k === 'blinds') { const n = fr(fps, 210); const t = ease(clamp01((frame + 1) / n)); blur = 18 * (1 - t); angle = 0; }
   if (k === 'cardDrop') { const n = overlapOf(k, fps); drop = ease(clamp01((frame + n) / n)); }
+  // Orbit's disc, all on the incoming clip while it pre-rolls on top: a light canvas disc slides in from the
+  // bottom-right corner (4 f), the shot appears inside a circle growing from centre-left (11 f) with a thin
+  // accent ring orbiting it, then the circle opens to the full frame (4 f)
+  if (k === 'disc' && frame < 0) {
+    const n = overlapOf(k, fps); const t = clamp01((frame + n) / n);
+    const cov = 160 * ease(clamp01(t / 0.2));
+    const r = t < 0.2 ? 0 : t < 0.78 ? 46 * ease((t - 0.2) / 0.58) : 46 + 114 * easeIn((t - 0.78) / 0.22);
+    canvas = {clip: `circle(${cov.toFixed(1)}% at 108% 108%)`, tone: 'light'};
+    enterMask = `circle(${r.toFixed(1)}% at 40% 45%)`;
+    if (t >= 0.2 && t < 0.78) { const th = t * 0.8 * (70 * Math.PI / 180); ring = {cx: 40 + 3 * Math.cos(th), cy: 45 + 3 * Math.sin(th) * (1080 / 1920), r: r + 3}; }
+  }
   if (dx) scale = Math.max(scale, 1 + (2 * Math.abs(dx)) / 100); // cover the edge it moves away from
   if (blur && angle == null && k !== 'crossBlur' && k !== 'spin' && k !== 'rgbFlash') scale = Math.max(scale, 1 + blur * 0.012); // a blurred edge turns see-through: push it off frame
   // outgoing side of the pack: spin / rgbFlash smear the last frames before the flash
@@ -66,6 +78,9 @@ export function transitionFx(clip: Clip, frame: number, durFrames: number, next?
   if (spin != null) fx.spin = spin;
   if (rgb != null) fx.rgb = rgb;
   if (drop != null) fx.drop = drop;
+  if (enterMask) fx.enterMask = enterMask;
+  if (canvas) fx.canvas = canvas;
+  if (ring) fx.ring = ring;
   const nk = next?.enter as Enter | undefined;
   const n = overlapOf(nk, fps);
   if (nk && n && frame >= durFrames - n) {
@@ -73,6 +88,8 @@ export function transitionFx(clip: Clip, frame: number, durFrames: number, next?
     if (nk === 'card' || nk === 'split') fx.exit = {type: nk, t};
     else if (nk === 'crossBlur') fx.exit = {type: 'fade', t};
     else if (nk === 'cardDrop') fx.exit = {type: 'shrink', t};
+    else if (nk === 'particles') fx.exit = {type: 'dissolve', t, seed: seedOf(next!.id)};
+    else if (nk === 'disc') { /* the incoming clip's canvas covers it */ }
     else fx.exit = {type: 'mask', t, clipPath: exitMask(nk, t, seedOf(next!.id)) ?? 'polygon(0 0, 0 0, 0 0)'};
   }
   return fx;
@@ -121,6 +138,8 @@ const bump = (t: number, c: number, w: number) => Math.max(0, 1 - Math.abs(t - c
 
 // ---- cover shapes: drawn above footage and B-roll, below captions, around the cut (t 0→1 over DUR_MS) ----
 export type Tone = 'accent' | 'deep' | 'dark' | 'white' | 'light';
+const shade = (hex: string, k: number) => { const n = parseInt(hex.replace('#', ''), 16); if (Number.isNaN(n) || hex.length !== 7) return hex; const c = (v: number) => Math.round(Math.min(255, Math.max(0, v * k))).toString(16).padStart(2, '0'); return `#${c(n >> 16)}${c((n >> 8) & 255)}${c(n & 255)}`; };
+export const toneColor = (tone: Tone | undefined, accent: string) => tone === 'deep' ? shade(accent, 0.72) : tone === 'dark' ? shade(accent, 0.45) : tone === 'white' ? '#ffffff' : tone === 'light' ? '#E9E8E2' : accent;
 export type Shape = {clip?: string; tone?: Tone; gradient?: string; opacity?: number; screen?: boolean};
 export function coverShapes(kind: Enter, t: number, seed: number): Shape[] {
   switch (kind) {
@@ -155,13 +174,6 @@ export function coverShapes(kind: Enter, t: number, seed: number): Shape[] {
         out.push({tone: 'light', clip: `inset(${(cy - hh).toFixed(2)}% ${(100 - cx - hw).toFixed(2)}% ${(100 - cy - hh).toFixed(2)}% ${(cx - hw).toFixed(2)}%)`});
       }
       return out;
-    }
-    case 'disc': { // a disc from outside a corner covers the frame, holds, then retires to the opposite corner
-      const tone: Tone = seed % 2 ? 'accent' : 'light';
-      if (t < 0.4) return [{tone, clip: `circle(${(200 * ease(t / 0.4)).toFixed(1)}% at 108% 108%)`}];
-      if (t <= 0.6) return [{tone, clip: 'circle(200% at 50% 50%)'}];
-      const r = 200 * (1 - easeIn((t - 0.6) / 0.4));
-      return r < 0.5 ? [] : [{tone, clip: `circle(${r.toFixed(1)}% at -8% -8%)`}];
     }
     case 'blinds': { // five vertical bars of different widths widen to close, hold, then retract
       const ws = Array.from({length: 5}, (_, k) => 0.6 + rand(seed, k) * 0.8);

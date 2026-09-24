@@ -2,7 +2,10 @@ import React from 'react';
 import {staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {sampleTransform, type Clip} from './timeline';
 import type {Grade} from './grade';
-import {transitionFx} from './transitions';
+import {toneColor, transitionFx} from './transitions';
+
+// a left→right ramp the dissolve adds to its grain, so the outgoing clip goes first on the left
+const RAMP = 'data:image/svg+xml;utf8,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='256' height='1' preserveAspectRatio='none'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='#000'/><stop offset='1' stop-color='#fff'/></linearGradient></defs><rect width='256' height='1' fill='url(#g)'/></svg>");
 
 // the cut into this clip and out of it: `clip` is the placed clip (the matte layer
 // passes the footage clip), offset = frames between the clip start and this Sequence
@@ -10,7 +13,7 @@ export type TransitionCtx = {clip: Clip; next?: Clip; offset: number; durFrames:
 
 // one clip's media with its keyframed zoom/pan transform applied, and its color
 // grade (per-channel levels as an SVG filter, then saturation)
-export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: Grade | null; transition?: TransitionCtx}> = ({clip, durFrames, Comp, grade, transition}) => {
+export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: Grade | null; accent?: string; transition?: TransitionCtx}> = ({clip, durFrames, Comp, grade, accent = '#FFB020', transition}) => {
   const {fps} = useVideoConfig();
   const frame = useCurrentFrame(); // relative to this clip's Sequence
   const speed = clip.speed ?? 1;
@@ -38,22 +41,45 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
     : exit?.type === 'shrink' ? {filter: `brightness(${(1 - 0.35 * ease(exit.t * 2)).toFixed(3)})`} // the card lands on it: it only dims (a shrink would show black edges without a canvas)
     : exit?.type === 'mask' ? {clipPath: exit.clipPath}
     : null;
+  // Form's particles: the clip dissolves left → right through a seeded grain; the fringe of the front is
+  // displaced by the same grain so it scatters like dust. th = the value below which a pixel is gone.
+  const did = `dissolve-${clip.id.replace(/[^\w-]/g, '_')}`;
+  const dissolve = exit?.type === 'dissolve' ? {th: -0.05 + 1.6 * exit.t, disp: 6 + 50 * exit.t, seed: exit.seed ?? 1} : null;
   const fly = exit ? ease((exit.t - 0.12) / 0.88) : 0; // tiles pause a beat, then fly
   const tiles = exit?.type === 'split' ? [[0, 0, -1, -1], [50, 0, 1, -1], [0, 50, -1, 1], [50, 50, 1, 1]] : null; // left%, top%, fly direction
   return (
     <div
       data-ab={`clip:${clip.id}`}
-      style={{width: '100%', height: '100%', overflow: 'hidden', transform: `translate(${x}%, ${y}%) scale(${scale})`, transformOrigin: 'center'}}
+      style={{width: '100%', height: '100%', overflow: 'hidden', transform: `translate(${x}%, ${y}%) scale(${scale})`, transformOrigin: 'center', ...(fx?.canvas ? {background: toneColor(fx.canvas.tone, accent), clipPath: fx.canvas.clip} : {})}}
     >
-      {grade ? (
+      {grade || dissolve ? (
         <svg width={0} height={0} style={{position: 'absolute'}} aria-hidden>
-          <filter id={fid} colorInterpolationFilters="sRGB">
-            <feComponentTransfer>
-              <feFuncR type="linear" slope={grade.slope[0]} intercept={grade.intercept[0]} />
-              <feFuncG type="linear" slope={grade.slope[1]} intercept={grade.intercept[1]} />
-              <feFuncB type="linear" slope={grade.slope[2]} intercept={grade.intercept[2]} />
-            </feComponentTransfer>
-          </filter>
+          {grade ? (
+            <filter id={fid} colorInterpolationFilters="sRGB">
+              <feComponentTransfer>
+                <feFuncR type="linear" slope={grade.slope[0]} intercept={grade.intercept[0]} />
+                <feFuncG type="linear" slope={grade.slope[1]} intercept={grade.intercept[1]} />
+                <feFuncB type="linear" slope={grade.slope[2]} intercept={grade.intercept[2]} />
+              </feComponentTransfer>
+            </filter>
+          ) : null}
+          {dissolve ? (
+            <filter id={did} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+              <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves={3} seed={dissolve.seed} result="raw" />
+              <feColorMatrix in="raw" type="matrix" values="1 0 0 0 0  1 0 0 0 0  1 0 0 0 0  0 0 0 0 1" result="noise" />
+              <feImage href={RAMP} x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="ramp" />
+              <feComposite in="noise" in2="ramp" operator="arithmetic" k1={0} k2={0.5} k3={1} k4={0} result="v" />
+              <feColorMatrix in="v" type="matrix" values={`0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 ${(-dissolve.th).toFixed(3)}`} result="keepRaw" />
+              <feComponentTransfer in="keepRaw" result="keep"><feFuncA type="linear" slope={400} intercept={0} /></feComponentTransfer>
+              <feColorMatrix in="v" type="matrix" values={`0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 ${(-(dissolve.th + 0.15)).toFixed(3)}`} result="coreRaw" />
+              <feComponentTransfer in="coreRaw" result="core"><feFuncA type="linear" slope={400} intercept={0} /></feComponentTransfer>
+              <feComposite in="keep" in2="core" operator="out" result="fringe" />
+              <feDisplacementMap in="SourceGraphic" in2="raw" scale={dissolve.disp} xChannelSelector="R" yChannelSelector="G" result="shaken" />
+              <feComposite in="SourceGraphic" in2="core" operator="in" result="solid" />
+              <feComposite in="shaken" in2="fringe" operator="in" result="dust" />
+              <feMerge><feMergeNode in="solid" /><feMergeNode in="dust" /></feMerge>
+            </filter>
+          ) : null}
         </svg>
       ) : null}
       {tiles ? tiles.map(([l, t, fx2, fy]) => (
@@ -63,7 +89,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
           </div>
         </div>
       )) : null}
-      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `${drop}${spin}${smear}translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: [moving && fx.blur > 0.2 ? `blur(${(fx.blur * (smear ? 0.4 : 1)).toFixed(1)}px)` : '', split].filter(Boolean).join(' ') || undefined, ...(exitStyle ?? {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
+      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `${drop}${spin}${smear}translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: [moving && fx.blur > 0.2 ? `blur(${(fx.blur * (smear ? 0.4 : 1)).toFixed(1)}px)` : '', split, dissolve ? `url(#${did})` : ''].filter(Boolean).join(' ') || undefined, ...(exitStyle ?? {}), ...(fx?.enterMask ? {clipPath: fx.enterMask} : {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
       <Comp
         src={staticFile(clip.src)}
         playbackRate={speed}
@@ -77,6 +103,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
         style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}}
       />
       </div>
+      {fx?.ring ? <div style={{position: 'absolute', left: `${(fx.ring.cx - fx.ring.r).toFixed(2)}%`, top: `${(fx.ring.cy - (fx.ring.r * 1080) / 1920).toFixed(2)}%`, width: `${(2 * fx.ring.r).toFixed(2)}%`, height: `${((2 * fx.ring.r * 1080) / 1920).toFixed(2)}%`, border: `4px solid ${accent}`, borderRadius: '50%', boxSizing: 'border-box', pointerEvents: 'none'}} /> : null}
     </div>
   );
 };

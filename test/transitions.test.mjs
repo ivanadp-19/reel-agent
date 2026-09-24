@@ -56,7 +56,7 @@ test('clipPoly keeps the half-plane a·x + b·y ≤ c: a square cut by x + y ≤
 });
 
 test('cover shapes: nothing before, everything at the middle, nothing after', () => {
-  for (const kind of ['bands', 'clock', 'disc', 'blinds', 'mosaic']) {
+  for (const kind of ['bands', 'clock', 'blinds', 'mosaic']) {
     const mid = coverShapes(kind, 0.5, 7);
     assert.ok(mid.length > 0, `${kind} covers at t=0.5`);
     const ends = [...coverShapes(kind, 0, 7), ...coverShapes(kind, 1, 7)].filter((s) => (s.opacity ?? 1) > 0.01);
@@ -98,5 +98,22 @@ test('crossBlur, spin, rgbFlash and cardDrop report their per-frame effects', ()
   assert.ok(transitionFx(c('b', 's', 'rgbFlash'), 0, 60, undefined, 30).rgb > 2);
   assert.ok(transitionFx(c('b', 's', 'cardDrop'), -5, 60, undefined, 30).drop < 0.5);
   assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'cardDrop'), 30).exit.type, 'shrink');
-  assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'particles'), 30).exit.type, 'mask');
+  assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'particles'), 30).exit.type, 'dissolve');
+});
+
+test('disc: the incoming clip brings a light canvas from the corner, shows itself in a growing circle with a ring, then opens', () => {
+  const n = overlapOf('disc', 30);
+  const early = transitionFx(c('b', 's', 'disc'), -n + 1, 60, undefined, 30);
+  assert.ok(early.canvas && early.canvas.clip.startsWith('circle(') && early.enterMask.startsWith('circle(0'));
+  const mid = transitionFx(c('b', 's', 'disc'), -Math.round(n * 0.5), 60, undefined, 30);
+  assert.ok(mid.ring && mid.ring.r > 3 && parseFloat(mid.enterMask.match(/circle\(([\d.]+)%/)[1]) > 10);
+  const last = transitionFx(c('b', 's', 'disc'), -1, 60, undefined, 30);
+  assert.ok(parseFloat(last.enterMask.match(/circle\(([\d.]+)%/)[1]) > 80); // 80 % from (40 %, 45 %) reaches the farthest corner
+  assert.equal(transitionFx(c('a'), 59, 60, c('b', 's', 'disc'), 30).exit, undefined); // the canvas covers it
+  assert.ok(OVER.has('disc') && !COVER.has('disc'));
+});
+
+test('particles: the outgoing clip dissolves with a seeded grain, not a mask', () => {
+  const e = transitionFx(c('a'), 55, 60, c('b', 's', 'particles'), 30).exit;
+  assert.equal(e.type, 'dissolve'); assert.ok(e.t > 0 && e.t < 1 && Number.isInteger(e.seed));
 });

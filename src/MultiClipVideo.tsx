@@ -12,7 +12,7 @@ import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
 import {gradeFor, type ProjectGrade} from './grade';
-import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, type Enter, type Tone} from './transitions';
+import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, toneColor, type Enter} from './transitions';
 import {ms as msToFrames} from './motion';
 
 // Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
@@ -46,16 +46,17 @@ const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zo
 };
 
 // Cover transitions: shapes drawn over the cut (above footage and B-roll, below graphics and captions)
-const shade = (hex: string, k: number) => { const n = parseInt(hex.replace('#', ''), 16); if (Number.isNaN(n) || hex.length !== 7) return hex; const c = (v: number) => Math.round(Math.min(255, Math.max(0, v * k))).toString(16).padStart(2, '0'); return `#${c(n >> 16)}${c((n >> 8) & 255)}${c(n & 255)}`; };
-const toneColor = (tone: Tone | undefined, accent: string) => tone === 'deep' ? shade(accent, 0.72) : tone === 'dark' ? shade(accent, 0.45) : tone === 'white' ? '#ffffff' : tone === 'light' ? '#E9E8E2' : accent;
 const TransitionOverlay: React.FC<{cuts: {frame: number; kind: Enter; seed: number}[]; accent: string}> = ({cuts, accent}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const shapes: React.ReactNode[] = [];
   for (const cut of cuts) {
+    // a reveal kind's shapes run with its pre-roll (before the cut); the others sit centred on the cut
+    const n = overlapOf(cut.kind, fps);
     const half = Math.max(1, Math.round((fps * (DUR_MS[cut.kind] ?? 250)) / 2000));
-    if (frame < cut.frame - half || frame > cut.frame + half) continue;
-    const t = (frame - (cut.frame - half)) / (2 * half);
+    const start = n ? cut.frame - n : cut.frame - half, len = n ? n : 2 * half;
+    if (frame < start || frame >= start + len) continue;
+    const t = (frame - start) / len;
     coverShapes(cut.kind, t, cut.seed).forEach((sh, i) => {
       if ((sh.opacity ?? 1) <= 0.005) return;
       shapes.push(<div key={`${cut.frame}-${i}`} style={{position: 'absolute', inset: 0, background: sh.gradient ?? toneColor(sh.tone, accent), clipPath: sh.clip, opacity: sh.opacity ?? 1, mixBlendMode: sh.screen ? 'screen' : undefined}} />);
@@ -155,7 +156,7 @@ export const MultiClipVideo: React.FC<{
         const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
         return (
           <Sequence key={`${clip.id}-pre`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (under the reveal)`}>
-            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
           </Sequence>
         );
       })}
@@ -169,7 +170,7 @@ export const MultiClipVideo: React.FC<{
           premountFor={Math.round(fps)}
           name={clip.label ?? clip.id}
         >
-          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
+          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
         </Sequence>
       ))}
       {/* a cardDrop lands ON TOP of the outgoing clip: its pre-roll is drawn last */}
@@ -179,7 +180,7 @@ export const MultiClipVideo: React.FC<{
         const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
         return (
           <Sequence key={`${clip.id}-over`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (landing)`}>
-            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
           </Sequence>
         );
       })}
