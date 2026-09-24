@@ -61,7 +61,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'};
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= '';
   return p;
 }
 async function save(id, p) {
@@ -114,6 +114,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 function summary(id, p) {
   const out = [];
   out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
+  if (p.plan) out.push('', 'PLAN (set_plan):', ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -219,6 +220,18 @@ server.registerTool('duplicate_project', {description: 'Copy a project under a n
 });
 
 server.registerTool('rename_project', {description: 'Rename a project.', inputSchema: {project_id: pid, name: z.string()}}, async ({project_id, name}) => { const p = load(project_id); p.name = name; await save(project_id, p); return text(`Renamed to "${name}"`); });
+server.registerTool('set_plan', {description: 'Write the editorial plan BEFORE touching the timeline (the reel-plan skill has the template): the one idea of the reel and its hero word (by word id), the beats (hook, claims, close), the cuts you intend, the caption pack and why, the key words to emphasize (ids), graphics, B-roll moments (ids), music and transitions. get_project shows it from then on; every later step follows it, and the final message notes where you departed from it.', inputSchema: {project_id: pid, plan: z.string().min(40).max(6000)}}, async ({project_id, plan}) => {
+  const p = load(project_id); p.plan = plan.trim(); await save(project_id, p);
+  const wids = [...new Set(p.plan.match(/\b[\w.-]+:\d+\b/g) ?? [])];
+  const unknown = wids.filter((w) => !transcriptHas(w));
+  return text(`Plan saved (${p.plan.split('\n').length} lines, ${wids.length} word ids${unknown.length ? `; NOT in the transcript, fix them: ${unknown.join(', ')}` : ''}).`);
+});
+// a word id present in the last transcript run (get_transcript); nothing to check against before one
+function transcriptHas(wid) {
+  let tr; try { tr = readPublic('transcript.json'); } catch { return true; }
+  const k = wid.lastIndexOf(':'); const source = wid.slice(0, k), i = wid.slice(k + 1);
+  return tr.some((t) => t.source === source && t.words.some((w) => String(w.i) === i));
+}
 
 server.registerTool('set_accent_color', {description: 'Set the caption accent (highlight) color, hex like #FFB020 (also the brand kit accent when the project has one — see set_brand).', inputSchema: {project_id: pid, color: z.string().regex(/^#[0-9a-fA-F]{6}$/)}}, async ({project_id, color}) => { const p = load(project_id); p.accentColor = color; if (p.brand) p.brand.colors.accent = color; await save(project_id, p); return text(`Accent color ${color}`); });
 
@@ -753,7 +766,7 @@ server.registerTool('set_caption_style', {description: `Caption preset for the w
   return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
 });
 
-server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = accent color — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = big emphasis — rare, at most one per 10 s. Never on function words. emoji = one emoji that pops in after the word (money → 💰; "" removes it) — a few per reel, on concrete nouns and feelings, never on function words. Returns each word it touched (check the text matches what you meant) plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2).optional(), emoji: z.string().max(16).optional()})).min(1)}}, async ({project_id, items}) => {
+server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = the pack\'s key-word treatment (bigger, bold italic gradient, pill or block, script…) — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = the pack\'s hero treatment (largest; in prism the footage blurs behind the word) — rare, at most one per 10 s, on the one word the reel is about. Never on function words. emoji = one emoji that pops in after the word (money → 💰; "" removes it) — a few per reel, on concrete nouns and feelings, never on function words. Returns each word it touched (check the text matches what you meant) plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2).optional(), emoji: z.string().max(16).optional()})).min(1)}}, async ({project_id, items}) => {
   const p = load(project_id);
   for (const x of items) if (x.emoji && !oneEmoji(x.emoji)) throw new Error(`${x.wid}: emoji must be exactly one emoji, got "${x.emoji}"`);
   const want = new Map(items.map((x) => [x.wid, x]));
