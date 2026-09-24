@@ -46,6 +46,10 @@ function graphicHeightPx(g: Graphic): number | null {
     case 'fill-title': return 200;
     case 'script-title': return (p.tag ? 42 : 0) + 150 + (p.sub ? 44 : 0);
     case 'sticker': return ((p.widthPct ?? 28) / 100) * W; // square-ish
+    case 'band-title': return 150;
+    case 'neon-frame': return ((p.heightPct ?? 34) / 100) * H;
+    case 'scribble': return ((p.heightPct ?? 16) / 100) * H;
+    case 'outline-rect': case 'frame-light': return 1; // see-through decoration, no band of its own
     case 'oversized': return oversizedPx(p.text, p.font) * 0.9;
     case 'chapter-caps': return 60 + (p.sub ? 50 : 0);
     case 'starburst': return STAR_PX[p.size] ?? STAR_PX.md;

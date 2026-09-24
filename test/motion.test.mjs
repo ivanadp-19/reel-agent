@@ -46,3 +46,42 @@ test('cardLanding: 70 % of the way in 330 ms, the rest drifting for 700 ms', () 
   assert.ok(Math.abs(cardLanding(ms(30, 330), 30) - 0.7) < 0.01);
   assert.equal(cardLanding(ms(30, 330) + ms(30, 700), 30), 1);
 });
+
+// ---- Phase 3: titles ----
+import {revealText, scrambleChar, lifeFx} from '../src/motion.ts';
+
+test('letters: one character every ~42 ms, the leading one blurred', () => {
+  const r0 = revealText('letters', 0, 30, 8), r4 = revealText('letters', 4, 30, 8), rEnd = revealText('letters', 30, 30, 8);
+  assert.ok(r0.shown < 1 && r0.blur > 0);
+  assert.ok(r4.shown > 2.5 && r4.shown < 4.5);
+  assert.equal(rEnd.shown, 8); assert.equal(rEnd.blur, 0); assert.equal(rEnd.scramble, false);
+});
+
+test('typewriter is faster than letters and never blurs; shuffle resolves left → right in 290 ms', () => {
+  assert.ok(revealText('typewriter', 4, 30, 16).shown > revealText('letters', 4, 30, 16).shown);
+  assert.equal(revealText('typewriter', 4, 30, 16).blur, 0);
+  const s = revealText('shuffle', 3, 30, 10);
+  assert.ok(s.scramble && s.shown > 2 && s.shown < 8);
+  assert.equal(revealText('shuffle', 20, 30, 10).scramble, false);
+  const a = scrambleChar(7, 3, 5), b = scrambleChar(7, 3, 5), c = scrambleChar(7, 3, 6);
+  assert.equal(a, b); assert.ok(/^[A-Z0-9]$/.test(a)); assert.ok(a !== c || scrambleChar(7, 4, 5) !== scrambleChar(7, 4, 6));
+});
+
+test('tracking settles from 0.7 em to 0.38 em in 375 ms with every char shown', () => {
+  const t0 = revealText('tracking', 0, 30, 5), t1 = revealText('tracking', 30, 30, 5);
+  assert.equal(t0.shown, 5); assert.ok(Math.abs(t0.tracking - 0.7) < 0.01); assert.ok(Math.abs(t1.tracking - 0.38) < 0.01);
+});
+
+test('arrivals for title blocks: band rises from below, slideDown drops from above, wipe sweeps a clip from the left', () => {
+  assert.ok(arrive('band', 0, 30).dy > 300 && arrive('band', 10, 30).dy === 0);
+  assert.ok(arrive('slideDown', 0, 30).dy < -200 && arrive('slideDown', 10, 30).dy === 0);
+  assert.ok(arrive('wipe', 0, 30).clip.startsWith('polygon(') && arrive('wipe', 10, 30).clip === undefined);
+});
+
+test('life: grow reaches 1.3× after 1.2 s, marquee runs ~408 px/s, oscillate stays within ±3°', () => {
+  assert.equal(lifeFx('grow', 0, 30).scale, 1);
+  assert.ok(Math.abs(lifeFx('grow', 36, 30).scale - 1.3) < 0.01 && Math.abs(lifeFx('grow', 90, 30).scale - 1.3) < 0.01);
+  assert.ok(Math.abs(lifeFx('marquee', 30, 30).dx + 408) < 1);
+  for (const f of [0, 7, 19, 40]) assert.ok(Math.abs(lifeFx('oscillate', f, 30).rotate) <= 3.001);
+  assert.deepEqual(lifeFx('none', 12, 30), {scale: 1, dx: 0, rotate: 0});
+});

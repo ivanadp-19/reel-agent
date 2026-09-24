@@ -21,7 +21,7 @@ import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/ti
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte} from '../src/graphicTemplates.ts';
+import {TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
@@ -673,13 +673,19 @@ async function anchorFor(p, {at_wid, at_sec}) {
   return {src: clip.src, startMs: Math.round(sourceSec * 1000)};
 }
 
-server.registerTool('add_graphic', {description: `Add a motion-graphics overlay (headline, label, stat, chapter) anchored to the footage. Templates:\n${TEMPLATE_HELP}\nAnchor with at_wid (word id from get_transcript, the graphic starts when that word starts) or at_sec. Keep the hook headline in the first 3 s; labels on room/feature mentions; ≤ 1 graphic on screen at a time.`, inputSchema: {project_id: pid, template: z.enum(Object.keys(TEMPLATES)), props: z.record(z.string(), z.any()), at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional().describe('block top, % of frame height; template default when omitted'), behind: z.boolean().default(false).describe('draw it BEHIND the presenter (big-word / word walls). Needs prepare_mattes afterwards')}}, async ({project_id, template, props, at_wid, at_sec, duration_sec, y_pct, behind}) => {
+const MOTION_HELP = {
+  reveal: 'how it arrives (the caption pack decides when omitted): blur = the template\'s own blur-in; letters = one character every ~42 ms, blurred (Elevate, Prime); typewriter = ~30 ms per character (Paper II, Lens, Align); shuffle = random glyphs resolving left→right in 290 ms (Align); tracking = letter-spacing settles 0.7→0.38 em (Align, Elevate); drop = falls in from above with a 1.3× zoom-out in 3 f (Stack); slideBlur = in from the right with motion blur (Prime GROWTH); slideDown = slides in from the top edge (Orbit); band = rises from the bottom edge (Focus band-title); wipe = a slanted sweep from the left (Lift); fade',
+  out: 'how it leaves: fade (default) | cut | blur = wiped right→left through blur (Elevate) | letters = last character first, each scaling to 0 (Form) | slideUp (Lift) | band = drops out through the bottom edge (Focus)',
+  life: 'what it does while on screen: grow = swells 1→1.3× over 1.2 s (Prime script) | marquee = slides ~17 px per frame, for oversized / word walls (Stack) | drift = slow ~65 px/s pan (Form) | oscillate = rocks ±3° (Prime) | none',
+};
+server.registerTool('add_graphic', {description: `Add a motion-graphics overlay (headline, label, stat, chapter) anchored to the footage. Templates:\n${TEMPLATE_HELP}\nAnchor with at_wid (word id from get_transcript, the graphic starts when that word starts) or at_sec. Keep the hook headline in the first 3 s; labels on room/feature mentions; ≤ 1 graphic on screen at a time.`, inputSchema: {project_id: pid, template: z.enum(Object.keys(TEMPLATES)), props: z.record(z.string(), z.any()), at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional().describe('block top, % of frame height; template default when omitted'), behind: z.boolean().default(false).describe('draw it BEHIND the presenter (big-word / word walls). Needs prepare_mattes afterwards'), reveal: z.enum(REVEAL_KINDS).optional().describe(MOTION_HELP.reveal), out: z.enum(OUT_KINDS).optional().describe(MOTION_HELP.out), life: z.enum(LIFE_KINDS).optional().describe(MOTION_HELP.life), camera: z.enum(['none', 'punch']).optional().describe('punch = the footage pushes in 1.4× with the title and settles back when it leaves (Orbit)')}}, async ({project_id, template, props, at_wid, at_sec, duration_sec, y_pct, behind, reveal, out, life, camera}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const clean = parseProps(template, props);
   if (template === 'sticker' && !/^https?:/.test(clean.src) && !fs.existsSync(path.join(PUBLIC, clean.src))) throw new Error(`sticker src not found under public/: ${clean.src} (use search_asset or generate_asset first)`);
   const {src, startMs} = await anchorFor(p, {at_wid, at_sec});
   const g = {id: nextId(p.graphics, 'g'), src, startMs, endMs: startMs + Math.round((duration_sec ? duration_sec * 1000 : TEMPLATES[template].defaultMs)), template, props: clean};
   if (y_pct != null) g.yPct = y_pct;
+  if (reveal) g.reveal = reveal; if (out) g.out = out; if (life) g.life = life; if (camera) g.camera = camera;
   if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
   const warn = validateProject(p, FPS, facesOf(p)).filter((i) => i.ref === g.id);
@@ -738,12 +744,13 @@ server.registerTool('prepare_mattes', {description: 'Cut the presenter out of th
   return text(`Matted ${done.length} span(s): ${done.map((m) => `${path.basename(m.src)} ${f1(m.startMs / 1000)}–${f1(m.endMs / 1000)}s`).join(', ')}`);
 });
 
-server.registerTool('edit_graphic', {description: 'Change a graphic: props (validated for its template), timing (seconds, timeline), y position.', inputSchema: {project_id: pid, graphic_id: z.string(), props: z.record(z.string(), z.any()).optional(), start_sec: sec('new timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional()}}, async ({project_id, graphic_id, props, start_sec, duration_sec, y_pct}) => {
+server.registerTool('edit_graphic', {description: 'Change a graphic: props (validated for its template), timing (seconds, timeline), y position, or its motion (reveal / out / life / camera, see add_graphic).', inputSchema: {project_id: pid, graphic_id: z.string(), props: z.record(z.string(), z.any()).optional(), start_sec: sec('new timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional(), reveal: z.enum(REVEAL_KINDS).optional(), out: z.enum(OUT_KINDS).optional(), life: z.enum(LIFE_KINDS).optional(), camera: z.enum(['none', 'punch']).optional()}}, async ({project_id, graphic_id, props, start_sec, duration_sec, y_pct, reveal, out, life, camera}) => {
   const p = load(project_id); const g = p.graphics.find((x) => x.id === graphic_id); if (!g) throw new Error(`no graphic ${graphic_id}`);
   if (props) g.props = parseProps(g.template, {...g.props, ...props});
   if (start_sec != null) { const a = await anchorFor(p, {at_sec: start_sec}); const len = g.endMs - g.startMs; g.src = a.src; g.startMs = a.startMs; g.endMs = a.startMs + len; }
   if (duration_sec != null) g.endMs = g.startMs + Math.round(duration_sec * 1000);
   if (y_pct != null) g.yPct = y_pct;
+  if (reveal) g.reveal = reveal; if (out) g.out = out; if (life) g.life = life; if (camera) g.camera = camera;
   await save(project_id, p); return text(`${graphic_id}: ${g.template} ${JSON.stringify(g.props)}`);
 });
 

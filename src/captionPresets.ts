@@ -57,6 +57,7 @@ export type Preset = {
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
   opening: 'none' | 'zoomBlur' | 'blurIn'; // the reel's first ~200 ms: a radial zoom-blur landing (Prism, Stack, Impact) or a plain blur-in (Prime)
+  titles: {reveal: import('./graphicTemplates.ts').Reveal; out: import('./graphicTemplates.ts').Out}; // how the pack's titles arrive and leave when a graphic sets neither
   heroPunch: number; // extra scale on the footage while a tier-2 word is up, 3–4 f in (Impact II: 0.12; 0 = off)
   glitchPulse: boolean; // a 250 ms blur + chromatic pulse on the footage at each tier-1 word (Impact II)
   tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
@@ -82,6 +83,7 @@ const base = {
   autoScale: false,
   focusPull: 0,
   opening: 'none',
+  titles: {reveal: 'auto', out: 'auto'},
   heroPunch: 0,
   glitchPulse: false,
   tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.15}},
@@ -154,6 +156,7 @@ export const PRESETS: Record<string, Preset> = {
     autoScale: true,
     focusPull: 18,
     opening: 'zoomBlur',
+    titles: {reveal: 'blur', out: 'fade'},
     tiers: {1: {weight: 800, italic: true, scale: 1.45, fill: 'gradient'}, 2: {weight: 800, italic: true, scale: 1.9, fill: 'gradient'}},
     layout: {maxWords: 6, maxCharsLine: 24},
   },
@@ -169,6 +172,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
     active: 'box-slide', // one blue box travels word to word; a tier-2 word gets it in white with black text
+    titles: {reveal: 'band', out: 'band'},
     wordIn: 'cut', // the 1-frame grey comes from `upcoming: dim`
     keyIn: 'cut',
     tiers: {1: {weight: 700}, 2: {weight: 800, bg: '#ffffff', fg: '#111111', scale: 1.12}},
@@ -186,6 +190,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
     opening: 'zoomBlur',
+    titles: {reveal: 'drop', out: 'fade'},
     active: 'box-jump', // the red pill jumps to each spoken word
     wordIn: 'fade',
     keyIn: 'pop',
@@ -204,6 +209,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'none', ms: 0},
     pageOut: 'fade',
     active: 'box-jump', // the mint box fades from word to word and switches off ~0.3 s after the last one
+    titles: {reveal: 'wipe', out: 'slideUp'},
     wordIn: 'cut',
     keyIn: 'cut',
     tiers: {1: {weight: 500}, 2: {weight: 600, scale: 1.12}},
@@ -225,6 +231,7 @@ export const PRESETS: Record<string, Preset> = {
     pageOut: 'cut',
     wordIn: 'blur',
     keyIn: 'blur',
+    titles: {reveal: 'blur', out: 'fade'},
     autoScale: true,
     tiers: {1: {weight: 800, scale: 1.15, color: 'text'}, 2: {weight: 800, scale: 1.35, color: 'text'}},
     layout: {maxWords: 3, maxCharsLine: 16},
@@ -241,6 +248,7 @@ export const PRESETS: Record<string, Preset> = {
     pageOut: 'cut',
     keyIn: 'fade',
     opening: 'blurIn',
+    titles: {reveal: 'letters', out: 'fade'},
     tiers: {1: {font: 'Kaushan Script', weight: 400, scale: 1.7, glow: true}, 2: {font: 'Kaushan Script', weight: 400, scale: 2.1, glow: true}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },
@@ -256,6 +264,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'blur', ms: 125},
     pageOut: 'cut',
     keyIn: 'cut',
+    titles: {reveal: 'slideDown', out: 'slideUp'},
     tiers: {1: {italic: true, weight: 500, color: 'text'}, 2: {italic: true, weight: 500, color: 'text', scale: 1.15}},
     layout: {maxWords: 4, maxCharsLine: 22},
   },
@@ -271,6 +280,7 @@ export const PRESETS: Record<string, Preset> = {
     pageOut: 'cut',
     keyIn: 'blur',
     opening: 'zoomBlur',
+    titles: {reveal: 'blur', out: 'cut'},
     heroPunch: 0.12,
     glitchPulse: true,
     tiers: {1: {scale: 1.25}, 2: {scale: 1.6}},

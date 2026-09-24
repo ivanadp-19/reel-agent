@@ -1,6 +1,8 @@
-import React from 'react';
+import React, {createContext, useContext} from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {CENTERED, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic} from './graphicTemplates';
+import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
+import {TEXT_REVEALS, arrive, leave, lifeFx, ms, revealText, scrambleChar, type ArriveKind, type LeaveKind, type TextReveal} from './motion';
+import {seedOf} from './transitions';
 import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
 import {fitSize, textWidthEm} from './textFit';
@@ -25,10 +27,52 @@ const useFace = (name: unknown, fallback: FaceName = 'display'): Face => {
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
 
 const outCubic = Easing.out(Easing.cubic);
+
+// how the graphic being drawn arrives and leaves (set by One from the graphic or the caption pack)
+type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number};
+const GfxContext = createContext<Gfx>({reveal: 'auto', out: 'auto', framesLeft: 1e6, seed: 1});
+// the template's own staggered entrance runs for 'auto' and 'blur' (its blur-in IS the catalog's 5–9 f blur-in);
+// any other reveal replaces it, so the template's parts are simply there
+const ownEntrance = (r: Reveal) => r === 'auto' || r === 'blur';
 // 0→1 over `frames`, starting at `delay`
 const useReveal = (delay: number, frames: number) => {
   const f = useCurrentFrame();
+  const g = useContext(GfxContext);
+  if (!ownEntrance(g.reveal)) return 1;
   return interpolate(f, [delay, delay + frames], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic});
+};
+
+// a title's text, character by character when the reveal (letters, typewriter, shuffle, tracking) or the
+// exit (letters: last first, scaling to 0) works per character; otherwise one plain span
+const seg = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+const Letters: React.FC<{text: string; style?: React.CSSProperties}> = ({text, style}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const g = useContext(GfxContext);
+  const perChar = TEXT_REVEALS.has(g.reveal) || g.out === 'letters';
+  if (!perChar) return <span style={style}>{text}</span>;
+  const chars = [...seg.segment(text)].map((x) => x.segment);
+  const n = chars.length;
+  const r = TEXT_REVEALS.has(g.reveal) ? revealText(g.reveal as TextReveal, frame, fps, n) : null;
+  const cut = g.out === 'letters' ? leave('letters', g.framesLeft, fps).letterCut : 0;
+  const shown = r ? r.shown : n;
+  const head = Math.floor(shown);
+  return (
+    <span style={{...style, whiteSpace: 'pre'}}>
+      {chars.map((ch, i) => {
+        const gone = i >= n - cut;
+        const leading = !!r && i === head && shown < n; // the char arriving right now
+        const frac = shown - head;
+        const later = !!r && i > head;
+        const glyph = r?.scramble && i >= head ? scrambleChar(g.seed, i, frame) : ch;
+        const opacity = gone ? 0 : later && !r?.scramble ? 0 : leading ? (r?.scramble ? 1 : Math.max(0.15, frac)) : r?.scramble && i >= head ? 0.7 : 1;
+        const blur = leading && r ? r.blur * (1 - frac) : 0;
+        return (
+          <span key={i} style={{display: 'inline-block', whiteSpace: 'pre', opacity, filter: blur > 0.2 ? `blur(${blur.toFixed(1)}px)` : undefined, transform: gone ? 'scale(0)' : undefined, letterSpacing: r?.tracking ? `${r.tracking}em` : undefined}}>{glyph}</span>
+        );
+      })}
+    </span>
+  );
 };
 // blur-in: unfocused and slightly low → sharp and in place
 const blurIn = (a: number): React.CSSProperties => ({opacity: a, filter: `blur(${(1 - a) * 12}px)`, transform: `translateY(${(1 - a) * 22}px)`});
@@ -50,7 +94,7 @@ const Line: React.FC<{i: number; l: any; upper: boolean; accent: string}> = ({i,
   const base = SIZES[l.size as keyof typeof SIZES] ?? SIZES.lg;
   return (
     <div style={{...face.style, fontSize: fitSize(upper ? String(l.text).toUpperCase() : l.text, base, face.family), color: l.accent ? accent : '#fff', textTransform: upper ? 'uppercase' : undefined, letterSpacing: -1, whiteSpace: 'nowrap', ...blurIn(a)}}>
-      {l.text}
+      <Letters text={l.text} />
     </div>
   );
 };
@@ -67,8 +111,8 @@ const Label2Tone: React.FC<{props: any; accent: string}> = ({props, accent}) => 
   return (
     <div style={{display: 'flex', justifyContent: 'center'}}>
       <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', ...plate}}>
-        <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}>{props.top}</div>
-        {props.bottom ? <div style={{...line(props.bottom), color: accent, ...blurIn(b)}}>{props.bottom}</div> : null}
+        <div style={{...line(props.top), color: '#fff', ...blurIn(a)}}><Letters text={props.top} /></div>
+        {props.bottom ? <div style={{...line(props.bottom), color: accent, ...blurIn(b)}}><Letters text={props.bottom} /></div> : null}
       </div>
     </div>
   );
@@ -122,7 +166,7 @@ const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const size = fitSize(text, BIG[props.size as keyof typeof BIG] ?? BIG.xl, family, 1000);
   const outline: React.CSSProperties = {color: 'transparent', WebkitTextStroke: `2px ${fill}`, opacity: 0.55};
   if (!props.repeat) {
-    return <div style={{fontSize: size, lineHeight: 0.95, whiteSpace: 'nowrap', ...face, ...(props.color === 'outline' ? {...outline, opacity: 0.9} : {color: fill}), ...blurIn(a)}}>{text}</div>;
+    return <div style={{fontSize: size, lineHeight: 0.95, whiteSpace: 'nowrap', ...face, ...(props.color === 'outline' ? {...outline, opacity: 0.9} : {color: fill}), ...blurIn(a)}}><Letters text={text} /></div>;
   }
   // wall: 5 rows, offset horizontally, the middle one filled
   return (
@@ -152,7 +196,7 @@ const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) =>
 };
 const CardLine: React.FC<{i: number; text: string; color: string; face: Face}> = ({i, text, color, face}) => {
   const a = useReveal(2 + i * 4, 8);
-  return <div style={{fontSize: fitSize(String(text).toUpperCase(), 118, face.family, 940), lineHeight: 1, textTransform: 'uppercase', whiteSpace: 'nowrap', color, ...face.style, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}>{text}</div>;
+  return <div style={{fontSize: fitSize(String(text).toUpperCase(), 118, face.family, 940), lineHeight: 1, textTransform: 'uppercase', whiteSpace: 'nowrap', color, ...face.style, opacity: a, transform: `translateY(${(1 - a) * 30}px)`}}><Letters text={text} /></div>;
 };
 
 // outlined title that fills with the accent color left → right
@@ -164,8 +208,8 @@ const FillTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const style: React.CSSProperties = {fontSize: fitSize(text, 200, face.family, 1000), lineHeight: 1, whiteSpace: 'nowrap', ...face.style};
   return (
     <div style={{position: 'relative', display: 'inline-block', opacity: a}}>
-      <div style={{...style, color: 'transparent', WebkitTextStroke: '3px rgba(255,255,255,0.6)'}}>{text}</div>
-      <div style={{...style, position: 'absolute', inset: 0, color: accent, clipPath: `inset(0 ${(1 - fill) * 100}% 0 0)`}}>{text}</div>
+      <div style={{...style, color: 'transparent', WebkitTextStroke: '3px rgba(255,255,255,0.6)'}}><Letters text={text} /></div>
+      <div style={{...style, position: 'absolute', inset: 0, color: accent, clipPath: `inset(0 ${(1 - fill) * 100}% 0 0)`}}><Letters text={text} /></div>
     </div>
   );
 };
@@ -179,7 +223,7 @@ const ScriptTitle: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
       {props.tag ? <div style={{fontSize: 30, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: '#fff', border: '2px solid rgba(255,255,255,0.8)', borderRadius: 999, padding: '6px 22px', opacity: a, textShadow: 'none'}}>{props.tag}</div> : null}
-      <div style={{fontSize: fitSize(props.title, 150, face.family, 960), lineHeight: 1, whiteSpace: 'nowrap', color: '#fff', ...face.style, ...blurIn(b)}}>{props.title}</div>
+      <div style={{fontSize: fitSize(props.title, 150, face.family, 960), lineHeight: 1, whiteSpace: 'nowrap', color: '#fff', ...face.style, ...blurIn(b)}}><Letters text={props.title} /></div>
       {props.sub ? <div style={{fontSize: 34, fontWeight: 600, letterSpacing: 5, textTransform: 'uppercase', color: accent, opacity: c}}>{props.sub}</div> : null}
     </div>
   );
@@ -197,7 +241,7 @@ const Oversized: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const look: React.CSSProperties = props.color === 'outline' ? {color: 'transparent', WebkitTextStroke: `4px ${fill}`, textShadow: 'none'} : {color: fill};
   return (
     <div style={{display: 'flex', justifyContent: 'center', margin: '0 -60px'}}>
-      <div style={{...face.style, ...look, fontSize: oversizedPx(text, props.font, face.family), lineHeight: 0.86, whiteSpace: 'nowrap', opacity: a, filter: `blur(${(1 - a) * 10}px)`, transform: `translateX(${drift}px) scale(${interpolate(a, [0, 1], [1.08, 1])})`}}>{text}</div>
+      <div style={{...face.style, ...look, fontSize: oversizedPx(text, props.font, face.family), lineHeight: 0.86, whiteSpace: 'nowrap', opacity: a, filter: `blur(${(1 - a) * 10}px)`, transform: `translateX(${drift}px) scale(${interpolate(a, [0, 1], [1.08, 1])})`}}><Letters text={text} /></div>
     </div>
   );
 };
@@ -215,7 +259,7 @@ const ChapterCaps: React.FC<{props: any; accent: string}> = ({props, accent}) =>
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16}}>
       <div style={{display: 'flex', alignItems: 'center', gap: 28, opacity: a}}>
         {props.rules ? rule : null}
-        <div style={{fontSize: size, fontWeight: 600, letterSpacing: `${spacing}em`, marginRight: `-${spacing}em`, color: '#fff', whiteSpace: 'nowrap'}}>{text}</div>
+        <div style={{fontSize: size, fontWeight: 600, letterSpacing: `${spacing}em`, marginRight: `-${spacing}em`, color: '#fff', whiteSpace: 'nowrap'}}><Letters text={text} /></div>
         {props.rules ? rule : null}
       </div>
       {props.sub ? <div style={{fontSize: 34, fontWeight: 700, color: accent, letterSpacing: '0.12em', textTransform: 'uppercase', whiteSpace: 'nowrap', ...blurIn(b)}}>{props.sub}</div> : null}
@@ -239,8 +283,11 @@ const Starburst: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const wiggle = Math.sin((frame / fps) * 7) * 2.5;
   const bg = props.color === 'light' ? kit.light : props.color === 'dark' ? kit.dark : kit.accent;
   const text = String(props.text).toUpperCase();
+  // stamp (Pop): lands from 1.25× to 1 in ~3 frames and then holds still; pop springs in and wiggles
+  const stamp = props.anim === 'stamp';
+  const land = stamp ? interpolate(frame, [0, ms(fps, 125)], [1.25, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic}) : 1;
   return (
-    <div style={{width: d, height: d, position: 'relative', opacity: Math.min(1, pop * 2), transform: `rotate(${props.rotate + wiggle}deg) scale(${interpolate(pop, [0, 1], [0.2, 1])})`}}>
+    <div style={{width: d, height: d, position: 'relative', opacity: stamp ? 1 : Math.min(1, pop * 2), transform: stamp ? `rotate(${props.rotate}deg) scale(${land.toFixed(3)})` : `rotate(${props.rotate + wiggle}deg) scale(${interpolate(pop, [0, 1], [0.2, 1])})`}}>
       <svg viewBox="0 0 100 100" width={d} height={d} style={{position: 'absolute', inset: 0, overflow: 'visible', filter: 'drop-shadow(6px 8px 0 rgba(0,0,0,0.35))'}}>
         <polygon points={STAR_POINTS} fill={bg} stroke="#111" strokeWidth={2.2} strokeLinejoin="round" />
       </svg>
@@ -305,7 +352,7 @@ const EndCard: React.FC<{props: any; accent: string}> = ({props, accent}) => {
     <div style={{position: 'absolute', inset: 0, background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 44, padding: '0 90px', textAlign: 'center', textShadow: 'none', opacity: card, transform: `translateY(${(1 - card) * 80}px)`}}>
       {kit.logo ? <Img src={staticFile(kit.logo)} style={{maxWidth: 360, maxHeight: 220, objectFit: 'contain', opacity: Math.min(1, logo * 1.5), transform: `scale(${interpolate(logo, [0, 1], [0.6, 1])})`}} /> : null}
       {/* the title gets two lines of room before it shrinks */}
-      <div style={{...face.style, fontSize: fitSize(props.title, 104, face.family, 1700, 60), lineHeight: 1.05, color: fg, maxWidth: 900, ...blurIn(title)}}>{props.title}</div>
+      <div style={{...face.style, fontSize: fitSize(props.title, 104, face.family, 1700, 60), lineHeight: 1.05, color: fg, maxWidth: 900, ...blurIn(title)}}><Letters text={props.title} /></div>
       {props.cta ? <div style={{fontSize: 44, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase', color: ink(pillBg), background: pillBg, borderRadius: 999, padding: '22px 56px', opacity: Math.min(1, cta * 1.5), transform: `scale(${interpolate(cta, [0, 1], [0.5, 1])})`}}>{props.cta}</div> : null}
       {props.handle ? <div style={{fontSize: 38, fontWeight: 600, color: fg, opacity: 0.8 * title}}>{props.handle}</div> : null}
     </div>
@@ -339,40 +386,151 @@ const Sticker: React.FC<{props: any}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
+// Focus: a full-width accent band with bold white capitals (rises with reveal 'band', drops with out 'band')
+const BandTitle: React.FC<{props: any; accent: string}> = ({props}) => {
+  const kit = useBrand();
+  const face = useFace(props.font, 'display');
+  const text = String(props.text).toUpperCase();
+  return (
+    <div style={{margin: '0 -60px', background: kit.accent, padding: '26px 0', textAlign: 'center', textShadow: 'none'}}>
+      <div style={{...face.style, fontSize: fitSize(text, 96, face.family, 1000), lineHeight: 1, letterSpacing: 1, color: ink(kit.accent), whiteSpace: 'nowrap'}}><Letters text={text} /></div>
+    </div>
+  );
+};
 
-const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({g, accent, durationInFrames}) => {
+// Prime: a thin glowing rectangle that draws on in 3 frames, tilted, oscillating ±3° with a copy trailing 4 frames behind
+const NeonFrame: React.FC<{props: any; accent: string}> = ({props}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const outF = Math.min(Math.round(fps * 0.15), Math.floor(durationInFrames / 3));
-  const fadeOut = outF > 0 ? interpolate(frame, [durationInFrames - outF, durationInFrames], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
+  const kit = useBrand();
+  const w = (1080 * props.widthPct) / 100, h = (1920 * props.heightPct) / 100, per = 2 * (w + h);
+  const draw = interpolate(frame, [0, ms(fps, 125)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic});
+  const rot = (f: number) => props.tilt + lifeFx('oscillate', f, fps).rotate;
+  const Rect = ({f, opacity}: {f: number; opacity: number}) => (
+    <svg width={w} height={h} style={{position: 'absolute', inset: 0, overflow: 'visible', transform: `rotate(${rot(f).toFixed(2)}deg)`, opacity}}>
+      <rect x={2} y={2} width={w - 4} height={h - 4} fill="none" stroke={kit.accent} strokeWidth={4} strokeDasharray={per} strokeDashoffset={per * (1 - draw)} style={{filter: `drop-shadow(0 0 6px ${kit.accent}) drop-shadow(0 0 22px ${kit.accent}aa)`}} />
+    </svg>
+  );
+  return <div style={{width: w, height: h, position: 'relative'}}>{frame >= 4 ? <Rect f={frame - 4} opacity={0.35} /> : null}<Rect f={frame} opacity={1} /></div>;
+};
+
+// Sketch / Chalk: a stroke that draws itself around a point; boil redraws it every frame
+const SCRIBBLE_COLOR: Record<string, string> = {light: '#F3EFE4', dark: '#1b1b1b'};
+const Scribble: React.FC<{props: any; accent: string}> = ({props}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const kit = useBrand();
+  const g = useContext(GfxContext);
+  const w = (1080 * props.widthPct) / 100, h = (1920 * props.heightPct) / 100;
+  const draw = interpolate(frame, [0, ms(fps, 250)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  const color = SCRIBBLE_COLOR[props.color] ?? kit.accent;
+  // boil: a small deterministic wobble that changes every frame (chalk); otherwise fixed
+  const j = (i: number) => { if (!props.boil) return 0; const x = Math.sin(g.seed * 12.9898 + i * 78.233 + frame * 37.719) * 43758.5453; return (x - Math.floor(x) - 0.5) * 6; };
+  const stroke = {fill: 'none', stroke: color, strokeWidth: 5, strokeLinecap: 'round' as const, pathLength: 100, strokeDasharray: 100, strokeDashoffset: 100 * (1 - draw)};
+  const cx = w / 2, cy = h / 2;
+  const d =
+    props.shape === 'underline' ? `M ${4 + j(0)},${cy + j(1)} Q ${cx + j(2)},${cy + 10 + j(3)} ${w - 4 + j(4)},${cy - 4 + j(5)}`
+    : props.shape === 'wave' ? `M 4,${cy} ` + Array.from({length: 6}, (_, k) => `Q ${(w * (k + 0.5)) / 6 + j(k)},${cy + (k % 2 ? 1 : -1) * (h * 0.4) + j(k + 6)} ${(w * (k + 1)) / 6},${cy}`).join(' ')
+    : '';
+  return (
+    <svg width={w} height={h} style={{overflow: 'visible', filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.35))'}}>
+      {props.shape === 'ellipse' ? (
+        <>
+          <ellipse cx={cx + j(0)} cy={cy + j(1)} rx={cx - 6} ry={cy - 6} transform={`rotate(${-3 + j(2)} ${cx} ${cy})`} {...stroke} />
+          <ellipse cx={cx + j(3)} cy={cy + 3 + j(4)} rx={cx - 10} ry={cy - 9} transform={`rotate(${4 + j(5)} ${cx} ${cy})`} {...stroke} strokeDashoffset={100 * Math.max(0, 1 - Math.max(0, draw - 0.15) / 0.85)} />
+        </>
+      ) : <path d={d} {...stroke} />}
+    </svg>
+  );
+};
+
+// Evo: a thin gradient rectangle that draws on in 11 frames and then keeps expanding until it leaves the frame
+const OutlineRect: React.FC<{props: any; accent: string}> = ({props}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const kit = useBrand();
+  const t = frame / fps;
+  const draw = interpolate(frame, [0, ms(fps, 460)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  const inset = props.grow ? props.inset - (props.inset + 6) * Math.min(1, t / 2.0) : props.inset; // out of the frame by ~2 s
+  const x = (1080 * inset) / 100, y = (1920 * inset) / 100;
+  return (
+    <svg width={1080} height={1920} style={{position: 'absolute', inset: 0, overflow: 'visible'}}>
+      <defs><linearGradient id="outline-rect-g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={kit.accent} /><stop offset="1" stopColor={kit.light} /></linearGradient></defs>
+      <rect x={x} y={y} width={1080 - 2 * x} height={1920 - 2 * y} rx={28} fill="none" stroke="url(#outline-rect-g)" strokeWidth={3} pathLength={100} strokeDasharray={100} strokeDashoffset={100 * (1 - draw)} transform={`rotate(180 540 960)`} />
+    </svg>
+  );
+};
+
+// Prime: a glowing segment running around a rounded border inset from the edges, one lap per ~700 ms
+const FrameLight: React.FC<{props: any; accent: string}> = ({props}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const kit = useBrand();
+  const x = (1080 * props.inset) / 100, y = (1920 * props.inset) / 100;
+  const lap = (frame / fps) / 0.7; // laps completed
+  return (
+    <svg width={1080} height={1920} style={{position: 'absolute', inset: 0, overflow: 'visible'}}>
+      <rect x={x} y={y} width={1080 - 2 * x} height={1920 - 2 * y} rx={24} fill="none" stroke={kit.accent} strokeWidth={5} strokeLinecap="round" pathLength={100} strokeDasharray="12 88" strokeDashoffset={-((lap * 100) % 100)} style={{filter: `drop-shadow(0 0 6px ${kit.accent}) drop-shadow(0 0 18px ${kit.accent}aa)`, opacity: lap < props.laps ? 1 : 0}} />
+    </svg>
+  );
+};
+
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'band-title': BandTitle, 'neon-frame': NeonFrame, scribble: Scribble, 'outline-rect': OutlineRect, 'frame-light': FrameLight, 'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
+
+export type Titles = {reveal: Reveal; out: Out}; // the caption pack's defaults for graphics that set neither
+
+// block-level arrivals (src/motion.ts); letters / typewriter / shuffle / tracking work per character inside Letters
+const BLOCK_IN: Partial<Record<Reveal, ArriveKind>> = {fade: 'fade', drop: 'drop', slideBlur: 'slideBlur', slideDown: 'slideDown', band: 'band', wipe: 'wipe'};
+const BLOCK_OUT: Partial<Record<Out, LeaveKind>> = {auto: 'fade', fade: 'fade', cut: 'cut', blur: 'blur', slideUp: 'slideUp', band: 'slideDown'};
+
+const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; titles?: Titles}> = ({g, accent, durationInFrames, titles}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
   const Comp = COMPONENTS[g.template];
   const FONT = useFace('display').style.fontFamily;
   // templates get the accent for TEXT (a dark brand color lightened to read over
   // footage); fills (cards, bars, pins, bursts) take the exact kit color themselves
   accent = legible(accent);
   if (!Comp) return null;
-  if (FULL_FRAME.has(g.template)) {
-    // covers the whole frame (a cutaway), no text-block positioning
-    return (
-      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', inset: 0, fontFamily: FONT, opacity: fadeOut, pointerEvents: 'none'}}>
+  const reveal: Reveal = g.reveal && g.reveal !== 'auto' ? g.reveal : titles?.reveal ?? 'auto';
+  const out: Out = g.out && g.out !== 'auto' ? g.out : titles?.out ?? 'auto';
+  const framesLeft = durationInFrames - 1 - frame;
+  const entry = BLOCK_IN[reveal] ? arrive(BLOCK_IN[reveal]!, frame, fps) : null;
+  const exit = BLOCK_OUT[out] ? leave(BLOCK_OUT[out]!, framesLeft, fps) : {opacity: 1, blur: 0, dy: 0, letterCut: 0}; // letters: per character
+  const life = lifeFx(g.life ?? 'none', frame, fps);
+  const dx = (entry?.dx ?? 0) + life.dx, dy = (entry?.dy ?? 0) + exit.dy, scale = (entry?.scale ?? 1) * life.scale;
+  const moving = dx !== 0 || dy !== 0 || scale !== 1 || life.rotate !== 0;
+  const wrap: React.CSSProperties = {
+    opacity: (entry?.opacity ?? 1) * exit.opacity,
+    filter: (entry?.blur ?? 0) + exit.blur > 0.2 ? `blur(${((entry?.blur ?? 0) + exit.blur).toFixed(1)}px)` : undefined,
+    clipPath: entry?.clip,
+    pointerEvents: 'none',
+  };
+  const move = moving ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${scale.toFixed(3)}) rotate(${life.rotate.toFixed(2)}deg)` : '';
+  const ctx: Gfx = {reveal, out, framesLeft, seed: seedOf(g.id)};
+  let node: React.ReactNode;
+  if (FULL_FRAME.has(g.template) || DECOR_FULL.has(g.template)) {
+    // covers the whole frame (a cutaway) or decorates it edge to edge: no text-block positioning
+    node = (
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', inset: 0, fontFamily: FONT, ...wrap, transform: move || undefined, transformOrigin: '50% 50%'}}>
+        <Comp props={g.props} accent={accent} />
+      </div>
+    );
+  } else if (CENTERED.has(g.template)) {
+    // decor (sticker, starburst, frames, scribbles) is positioned by its center, not as a text block
+    node = (
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: `${(g.props as any).xPct ?? 50}%`, transform: `translate(-50%, -50%) ${move}`, ...wrap}}>
+        <Comp props={g.props} accent={accent} />
+      </div>
+    );
+  } else {
+    node = (
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: 0, right: 0, padding: '0 60px', textAlign: 'center', fontFamily: FONT, textShadow: SHADOW, ...wrap, transform: move || undefined, transformOrigin: '50% 50%'}}>
         <Comp props={g.props} accent={accent} />
       </div>
     );
   }
-  if (CENTERED.has(g.template)) {
-    // decor (sticker, starburst) is positioned by its center, not as a text block
-    return (
-      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: `${(g.props as any).xPct ?? 50}%`, transform: 'translate(-50%, -50%)', opacity: fadeOut, pointerEvents: 'none'}}>
-        <Comp props={g.props} accent={accent} />
-      </div>
-    );
-  }
-  return (
-    <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: 0, right: 0, padding: '0 60px', textAlign: 'center', fontFamily: FONT, textShadow: SHADOW, opacity: fadeOut, pointerEvents: 'none'}}>
-      <Comp props={g.props} accent={accent} />
-    </div>
-  );
+  return <GfxContext.Provider value={ctx}>{node}</GfxContext.Provider>;
 };
 
 // ---- layouts: frame the base video ----
@@ -428,7 +586,7 @@ export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; child
 };
 
 // behind = only the graphics that go behind the presenter (rendered under the person matte)
-export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; behind?: boolean}> = ({items, accentColor, behind = false}) => {
+export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; behind?: boolean; titles?: Titles}> = ({items, accentColor, behind = false, titles}) => {
   const {fps} = useVideoConfig();
   if (!items?.length) return null;
   return (
@@ -438,7 +596,7 @@ export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; beh
         const dur = Math.max(1, Math.round(((g.endMs - g.startMs) / 1000) * fps));
         return (
           <Sequence key={`${g.id}@${from}`} from={from} durationInFrames={dur} layout="none" name={`gfx ${g.template}`}>
-            <One g={g} accent={accentColor} durationInFrames={dur} />
+            <One g={g} accent={accentColor} durationInFrames={dur} titles={titles} />
           </Sequence>
         );
       })}

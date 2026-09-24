@@ -30,7 +30,8 @@ const inSpans = (ms: number, spans: Span[], IN: number, OUT: number) => {
   }
   return smooth(k);
 };
-const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', punch, pulses = [], children}) => {
+type Zoom = Span & {scale: number; inMs: number; outMs: number}; // a camera push that lives with a title (Orbit)
+const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; zooms?: Zoom[]; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', punch, pulses = [], zooms = [], children}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const ms = (frame / fps) * 1000;
@@ -39,8 +40,14 @@ const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zo
   const o = opening !== 'none' && frame < openF ? 1 - smooth(frame / openF) : 0; // 1 at the first frame, gone by ~200 ms
   const p = punch ? inSpans(ms, punch.spans, 125, 125) : 0; // Impact II: 1.12× in 3–4 f on the hero word
   const g = pulses.length ? inSpans(ms, pulses, 125, 125) : 0; // Impact II: a 250 ms blur + chromatic pulse
+  let z = 0; // Orbit: 1.0 → 1.4× in 8 f from 3 f before the title, back over ~6 f when it leaves
+  for (const zm of zooms) {
+    if (ms < zm.startMs || ms > zm.endMs + zm.outMs) continue;
+    const v = ms < zm.startMs + zm.inMs ? (ms - zm.startMs) / zm.inMs : ms <= zm.endMs ? 1 : 1 - (ms - zm.endMs) / zm.outMs;
+    z = Math.max(z, zm.scale * smooth(Math.min(1, Math.max(0, v))));
+  }
   const blur = Math.max(k * blurPx, o * 24, g * 14);
-  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0) + (punch?.scale ?? 0) * p + 0.04 * g;
+  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0) + (punch?.scale ?? 0) * p + 0.04 * g + z;
   const split = g > 0.05 ? ` drop-shadow(${(6 * g).toFixed(1)}px 0 rgba(255,0,90,0.7)) drop-shadow(${(-6 * g).toFixed(1)}px 0 rgba(0,220,255,0.7))` : '';
   return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)${split}`, transform: `scale(${scale.toFixed(3)})`, transformOrigin: '50% 38%'} : undefined}>{children}</AbsoluteFill>;
 };
@@ -131,6 +138,7 @@ export const MultiClipVideo: React.FC<{
   const cards = projectedBrolls.filter((b) => b.mode === 'card').map((b) => ({startMs: b.startMs, endMs: b.endMs}));
   const punch = preset.heroPunch ? {spans: tierSpans(shownCaptions, 2, preset.holdMs), scale: preset.heroPunch} : undefined;
   const pulses = preset.glitchPulse ? tierSpans(shownCaptions, 1, preset.holdMs, 250) : [];
+  const zooms: Zoom[] = projectedGraphics.filter((g) => g.camera === 'punch').map((g) => ({startMs: g.startMs - 100, endMs: g.endMs, scale: 0.4, inMs: 333, outMs: 230}));
   // cover transitions on clips and on B-roll cues
   const cuts = [
     ...placed.filter(({clip}, i) => i > 0 && COVER.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({frame: fromFrame, kind: clip.enter as Enter, seed: seedOf(clip.id)})),
@@ -148,7 +156,7 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
-      <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening} punch={punch} pulses={pulses}>
+      <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening} punch={punch} pulses={pulses} zooms={zooms}>
       {/* a clip entered with a reveal shows under the outgoing one: it starts its overlap early, drawn first, with its own incoming effect */}
       {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
         const early = Math.min(overlapOf(clip.enter as Enter, fps), fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
@@ -186,7 +194,7 @@ export const MultiClipVideo: React.FC<{
       })}
       </FocusPull>
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
-      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
+      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind titles={preset.titles} />
       <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} behind />
       <PersonLayer mattes={mattes} clips={clips} grade={grade} />
       </LayoutStage>
@@ -199,7 +207,7 @@ export const MultiClipVideo: React.FC<{
       <TransitionOverlay cuts={cuts} accent={accentColor} />
 
       {/* motion graphics: headlines, labels, stats (in front of the presenter) */}
-      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />
+      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} titles={preset.titles} />
 
       {/* music */}
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}

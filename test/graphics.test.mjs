@@ -128,3 +128,18 @@ test('location-tag accepts text as an alias of place', async () => {
   assert.equal(pp('location-tag', {label: 'Mérida', sub: 'Yucatán'}).place, 'Mérida');
   assert.equal(pp('location-tag', {place: 'Mérida', text: 'ignored'}).place, 'Mérida');
 });
+
+import {parseProps as parse4, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS, CENTERED as C4, DECOR_FULL, describeSchema as ds4, TEMPLATES as T4} from '../src/graphicTemplates.ts';
+
+test('phase 3 templates parse with defaults and describe themselves', () => {
+  assert.deepEqual(parse4('band-title', {text: 'FOLLOWERS'}), {text: 'FOLLOWERS', font: 'display'});
+  assert.equal(parse4('neon-frame', {}).tilt, 10);
+  assert.equal(parse4('scribble', {shape: 'underline'}).color, 'light');
+  assert.equal(parse4('outline-rect', {}).inset, 12);
+  assert.equal(parse4('frame-light', {laps: 3}).laps, 3);
+  assert.equal(parse4('starburst', {text: 'NEW'}).anim, 'pop');
+  assert.throws(() => parse4('scribble', {shape: 'zigzag'}));
+  for (const id of ['band-title', 'neon-frame', 'scribble', 'outline-rect', 'frame-light']) assert.ok(ds4(T4[id].schema).startsWith('{'));
+  assert.ok(C4.has('neon-frame') && C4.has('scribble') && DECOR_FULL.has('frame-light'));
+  assert.ok(REVEAL_KINDS.includes('letters') && OUT_KINDS.includes('band') && LIFE_KINDS.includes('marquee'));
+});

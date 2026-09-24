@@ -135,6 +135,7 @@ export const TEMPLATES = {
       size: z.enum(['sm', 'md', 'lg']).default('md'),
       xPct: z.number().min(0).max(100).default(72).describe('center x, % of frame width'),
       rotate: z.number().min(-30).max(30).default(-8),
+      anim: z.enum(['pop', 'stamp']).default('pop').describe('pop = springs in and wiggles; stamp = lands like a stamp, 1.15× → 1 in 3 frames, then still (Pop)'),
     }),
   },
   // "📍 Mérida, Yucatán" — a pin and a place in a glass pill
@@ -164,6 +165,41 @@ export const TEMPLATES = {
       bg: z.enum(['dark', 'accent', 'light']).default('dark'),
     }),
   },
+  // Focus: a full-width accent band with bold white capitals that rises from the bottom edge and drops back out
+  'band-title': {
+    desc: 'full-width accent band with bold white capitals (Focus): rises from the bottom edge (reveal band) and drops out (out band); y_pct places its top',
+    defaultMs: 2400,
+    y: 74,
+    schema: z.object({text: short(18), font: z.enum(['display', 'condensed']).default('display')}),
+  },
+  // Prime: a thin glowing accent rectangle around the presenter's head that draws on, tilts and oscillates with a trailing copy
+  'neon-frame': {
+    desc: 'thin glowing accent rectangle around the head (Prime): draws on in 3 frames, tilted, oscillates ±3° with a trailing copy; placed by its center (x_pct/y_pct), width and height in % of the frame',
+    defaultMs: 2200,
+    y: 30,
+    schema: z.object({widthPct: z.number().min(20).max(100).default(78), heightPct: z.number().min(10).max(80).default(34), tilt: z.number().min(-20).max(20).default(10), xPct: z.number().min(0).max(100).default(50).describe('center x, % of frame width')}),
+  },
+  // Sketch / Chalk: a hand-drawn-looking stroke (double ellipse, underline or wave) that draws itself around a point
+  scribble: {
+    desc: 'a stroke that draws itself in ~6 frames (Sketch/Chalk): shape ellipse (double line around a word or graphic), underline or wave; color accent|light|dark; boil=true redraws it every frame like chalk; placed by its center (x_pct/y_pct), width in % of the frame',
+    defaultMs: 2000,
+    y: 50,
+    schema: z.object({shape: z.enum(['ellipse', 'underline', 'wave']).default('ellipse'), color: z.enum(['accent', 'light', 'dark']).default('light'), widthPct: z.number().min(10).max(100).default(60), heightPct: z.number().min(2).max(60).default(16), xPct: z.number().min(0).max(100).default(50).describe('center x, % of frame width'), boil: z.boolean().default(false)}),
+  },
+  // Evo: a thin gradient outline that draws itself from the right edge, then keeps expanding until it leaves the frame
+  'outline-rect': {
+    desc: 'thin accent→light gradient rectangle (Evo): draws on from the right edge in 11 frames, then slowly expands past the frame; inset = its starting margin in % of the frame',
+    defaultMs: 2400,
+    y: 0,
+    schema: z.object({inset: z.number().min(2).max(30).default(12), grow: z.boolean().default(true)}),
+  },
+  // Prime: a light segment travelling around the border of the frame (or of a B-roll card)
+  'frame-light': {
+    desc: 'a glowing accent segment that runs around a rounded border inset from the frame edges (Prime): one lap per ~700 ms; inset in % of the frame',
+    defaultMs: 2000,
+    y: 0,
+    schema: z.object({inset: z.number().min(0).max(30).default(10), laps: z.number().min(0.5).max(6).default(2)}),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',
@@ -182,9 +218,19 @@ export const TEMPLATES = {
 export type TemplateId = keyof typeof TEMPLATES;
 
 // decor sits by its center (x/y) and may share the screen with a text graphic
-export const CENTERED = new Set<string>(['sticker', 'starburst']);
+export const CENTERED = new Set<string>(['sticker', 'starburst', 'neon-frame', 'scribble']);
 // cards that cover the whole frame (cutaways, closing card)
 export const FULL_FRAME = new Set<string>(['kinetic-card', 'end-card']);
+// full-frame decoration that does not cover the video (drawn edge to edge, see-through)
+export const DECOR_FULL = new Set<string>(['outline-rect', 'frame-light']);
+
+// how a graphic arrives, leaves and lives (src/motion.ts); 'auto' = the template's own entrance / a short fade out
+export const REVEAL_KINDS = ['auto', 'blur', 'fade', 'letters', 'typewriter', 'shuffle', 'tracking', 'drop', 'slideBlur', 'slideDown', 'band', 'wipe'] as const;
+export const OUT_KINDS = ['auto', 'cut', 'fade', 'blur', 'letters', 'slideUp', 'band'] as const;
+export const LIFE_KINDS = ['none', 'grow', 'marquee', 'drift', 'oscillate'] as const;
+export type Reveal = (typeof REVEAL_KINDS)[number];
+export type Out = (typeof OUT_KINDS)[number];
+export type Life = (typeof LIFE_KINDS)[number];
 export const STAR_PX: Record<string, number> = {sm: 230, md: 310, lg: 400}; // starburst diameter
 // oversized: the font size that makes the word ~1.3× the 1080 px frame width
 export const OVERSIZED_FAMILY: Record<string, FontFamily> = {condensed: 'Anton', display: 'Montserrat', serif: 'Playfair Display'};
@@ -201,6 +247,10 @@ export type Graphic = {
   props: Record<string, unknown>; // validated by TEMPLATES[template].schema
   yPct?: number; // block top, % of frame height (template default when absent)
   behind?: boolean; // drawn behind the presenter (needs a matte for its span)
+  reveal?: Reveal; // how it arrives (the caption pack's title default when absent)
+  out?: Out; // how it leaves
+  life?: Life; // what it does while on screen
+  camera?: 'none' | 'punch'; // punch = the footage pushes in 1.4× with the title and settles back when it leaves (Orbit)
   // projected only:
   clipId?: string;
 };
