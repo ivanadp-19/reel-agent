@@ -124,3 +124,26 @@ export function findCutCandidates(clips: TClip[], opts: {gapMs?: number; windowM
   const order = (c: Candidate) => +c.from.split(':').pop()!;
   return out.sort((a, b) => order(a) - order(b));
 }
+
+// Autocut plan for ONE clip: its speech runs (split at pauses > gapMs), padded,
+// inside the clip's own trim window. Words are the source's (source ms); only
+// those under the clip count — a piece of a take must never grow back into the
+// rest of the source.
+export const AUTOCUT = {gapMs: 600, leadPad: 0.1, trailPad: 0.3, innerPad: 0.08, minLen: 0.35};
+export function speechSegments(words: {startMs: number; endMs: number}[], clip: {inSec: number; outSec: number}, o = AUTOCUT): {inSec: number; outSec: number}[] {
+  const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
+  const ws = words.filter((w) => w.endMs > inMs && w.startMs < outMs);
+  if (!ws.length) return [];
+  const runs: [number, number][] = [];
+  let start = ws[0].startMs;
+  ws.forEach((w, k) => {
+    const next = ws[k + 1];
+    if (!next || next.startMs - w.endMs > o.gapMs) { runs.push([start, w.endMs]); if (next) start = next.startMs; }
+  });
+  return runs
+    .map(([a, b], i) => ({
+      inSec: Math.max(clip.inSec, a / 1000 - (i === 0 ? o.leadPad : o.innerPad)),
+      outSec: Math.min(clip.outSec, b / 1000 + (i === runs.length - 1 ? o.trailPad : o.innerPad)),
+    }))
+    .filter((s) => s.outSec - s.inSec >= o.minLen);
+}

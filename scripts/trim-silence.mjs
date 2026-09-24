@@ -7,16 +7,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {transcribeClip, transcribeClips} from './lib-transcribe.mjs';
+import {speechSegments} from '../src/cuts.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
 const progress = (pct, label) => console.log(`PROGRESS:${pct}:${label}`);
 
-const GAP_THRESH = 600; // ms — pauses longer than this are cut out
-const LEAD_PAD = 0.1; // s before the very first word
-const TRAIL_PAD = 0.3; // s after the very last word
-const INNER_PAD = 0.08; // s of breath kept on either side of an internal cut
-const MIN_LEN = 0.35; // drop segments shorter than this
+// gaps, pads and minimum length: AUTOCUT in src/cuts.ts
 
 const {clips, lang = 'auto', offMic = 'mark'} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (!clips?.length) { console.error('no clips'); process.exit(1); }
@@ -36,28 +33,10 @@ clips.forEach((clip, i) => {
   if (offMic === 'cut') words = words.filter((w) => !w.off); // off-camera voice = silence
   if (!words.length) return; // no speech → leave untouched (likely B-roll)
 
-  const dur = clip.sourceDurationSec ?? clip.outSec;
+  const segments = speechSegments(words, clip); // only the words under this clip's trim window
 
-  // build speech runs split at long gaps
-  const runs = [];
-  let runStart = words[0].startMs;
-  for (let k = 0; k < words.length; k++) {
-    const gapNext = words[k + 1] ? words[k + 1].startMs - words[k].endMs : Infinity;
-    if (gapNext > GAP_THRESH) {
-      runs.push([runStart, words[k].endMs]);
-      if (words[k + 1]) runStart = words[k + 1].startMs;
-    }
-  }
-
-  const segments = runs
-    .map(([a, b], idx) => {
-      const lead = idx === 0 ? LEAD_PAD : INNER_PAD;
-      const trail = idx === runs.length - 1 ? TRAIL_PAD : INNER_PAD;
-      return {inSec: Math.max(0, a / 1000 - lead), outSec: Math.min(dur, b / 1000 + trail)};
-    })
-    .filter((s) => s.outSec - s.inSec >= MIN_LEN);
-
-  if (!segments.length) return;
+  // a piece of a talking take with no word left in it is dead air: an empty plan drops it
+  if (!segments.length) { plan.push({id: clip.id, segments: []}); return; }
   // skip clips that effectively don't change (one segment ≈ original)
   const unchanged =
     segments.length === 1 && Math.abs(segments[0].inSec - clip.inSec) < 0.05 && Math.abs(segments[0].outSec - clip.outSec) < 0.05;

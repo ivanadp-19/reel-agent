@@ -73,3 +73,9 @@ test('generate (no replace): existing pages stay, only new words get pages', () 
   const r = mergeCaptions(existing, fresh, [clip]);
   assert.deepEqual(r.captions.map((c) => `${c.id} ${c.words.map((x) => x.text).join(' ')}`), ['c0 uno dos', 'c1 tres']);
 });
+
+test('autocut: an empty segment list drops the clip, a missing entry keeps it', () => {
+  const b = {...clip, id: 'b'}, c2 = {...clip, id: 'c'};
+  const r = applyAutocut([clip, b, c2], [{id: 'b', segments: []}, {id: 'a', segments: [{inSec: 1, outSec: 2}]}]);
+  assert.deepEqual(r.clips.map((x) => x.id), ['a', 'c']);
+});

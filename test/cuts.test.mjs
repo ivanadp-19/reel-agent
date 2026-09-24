@@ -38,3 +38,14 @@ test('Spanish: eh, o sea, and "este" only between pauses', () => {
   const words = [['Eh', 0, 200], ['la', 700, 900], ['casa', 950, 1300], ['este', 1600, 1900], ['tiene', 2200, 2500], ['o', 2550, 2650], ['sea', 2700, 2900], ['este', 2950, 3200], ['jardín.', 3250, 3700]].map(([word, startMs, endMs], i) => ({i, word, startMs, endMs}));
   assert.deepEqual(brief(findCutCandidates([{clipId: 'c', source: 'S', words}])), ['filler Eh', 'filler este (between pauses)', 'filler o sea']);
 });
+
+import {speechSegments} from '../src/cuts.ts';
+
+test('autocut plans a piece of a take from its own words only (run 6: 11 pieces → 143 clips)', () => {
+  const words = [[1000, 1400], [1500, 1900], [5000, 5400], [9000, 9500], [9600, 9900]].map(([startMs, endMs]) => ({startMs, endMs}));
+  assert.deepEqual(speechSegments(words, {inSec: 0, outSec: 12}).length, 3);
+  const piece = speechSegments(words, {inSec: 8.5, outSec: 10.5});
+  assert.equal(piece.length, 1);
+  assert.ok(piece[0].inSec >= 8.5 && piece[0].outSec <= 10.5, JSON.stringify(piece));
+  assert.deepEqual(speechSegments(words, {inSec: 2.5, outSec: 4.5}), []); // silence only
+});

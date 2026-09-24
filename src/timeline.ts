@@ -155,7 +155,8 @@ export function cutRange(clips: Clip[], clipId: string, aSec: number, bSec: numb
   return {clips: kept, remap: kept.filter((c) => c.id === clipId || c.id === second.newId).map(seg), removed: [first.newId]};
 }
 
-// Autocut: replace clips with their speech segments (ends + internal pauses removed).
+// Autocut: replace clips with their speech segments (ends + internal pauses removed);
+// an empty segment list drops the clip (a piece of a take with no speech left).
 export type AutocutPlan = {id: string; segments: {inSec: number; outSec: number}[]}[];
 export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; remap: SegmentRemap} {
   const byId = new Map(plan.map((p) => [p.id, p.segments]));
@@ -173,7 +174,8 @@ export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; 
   };
   for (const c of clips) {
     const segs = byId.get(c.id);
-    if (!segs?.length) { out.push(c); continue; }
+    if (!segs) { out.push(c); continue; }
+    if (!segs.length) continue;
     segs.forEach((seg, k) => {
       const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
       out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec, ...(k ? {enter: undefined} : {})});
