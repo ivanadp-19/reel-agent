@@ -95,7 +95,7 @@ Spikes pendientes (cada uno con informe go/no-go):
 
 ### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
 
-Hecho hasta ahora: 4 presets (`palabra`, `caja`, `tracked`, `prism`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`, track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter` y `add_graphic`/`edit_graphic`/`delete_graphics`; selector de estilo y tiers en el editor.
+Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images); selector de estilo y tiers en el editor.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.

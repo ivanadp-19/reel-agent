@@ -1,5 +1,5 @@
 import React from 'react';
-import {Sequence, interpolate, spring, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
+import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
 import {loadFont} from '@remotion/google-fonts/Montserrat';
 import {TEMPLATES, type Graphic} from './graphicTemplates';
 
@@ -82,7 +82,34 @@ const Chapter: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter};
+// an image asset with a simple motion: pop in, then wiggle / float / spin
+const Sticker: React.FC<{props: any}> = ({props}) => {
+  const frame = useCurrentFrame();
+  const {fps, width} = useVideoConfig();
+  const pop = spring({frame, fps, config: {damping: 10, stiffness: 200, mass: 0.7}});
+  const t = frame / fps;
+  const motion =
+    props.anim === 'wiggle' ? `rotate(${Math.sin(t * 9) * 4}deg)`
+    : props.anim === 'float' ? `translateY(${Math.sin(t * 2.2) * 12}px)`
+    : props.anim === 'spin' ? `rotate(${t * 60}deg)`
+    : '';
+  const scale = props.anim === 'none' ? 1 : interpolate(pop, [0, 1], [0.3, 1]);
+  const src = /^https?:\/\//.test(props.src) ? props.src : staticFile(props.src);
+  return (
+    <Img
+      src={src}
+      style={{
+        width: (width * props.widthPct) / 100,
+        transform: `rotate(${props.rotate}deg) scale(${scale}) ${motion}`,
+        transformOrigin: 'center',
+        opacity: props.anim === 'none' ? 1 : pop,
+        filter: 'drop-shadow(0 6px 18px rgba(0,0,0,0.35))',
+      }}
+    />
+  );
+};
+
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, sticker: Sticker};
 
 const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({g, accent, durationInFrames}) => {
   const frame = useCurrentFrame();
@@ -91,6 +118,14 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   const fadeOut = outF > 0 ? interpolate(frame, [durationInFrames - outF, durationInFrames], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
   const Comp = COMPONENTS[g.template];
   if (!Comp) return null;
+  if (g.template === 'sticker') {
+    // positioned by its center, not as a text block
+    return (
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? 50}%`, left: `${(g.props as any).xPct ?? 50}%`, transform: 'translate(-50%, -50%)', opacity: fadeOut, pointerEvents: 'none'}}>
+        <Comp props={g.props} accent={accent} />
+      </div>
+    );
+  }
   return (
     <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: 0, right: 0, padding: '0 60px', textAlign: 'center', fontFamily: FONT, textShadow: SHADOW, opacity: fadeOut, pointerEvents: 'none'}}>
       <Comp props={g.props} accent={accent} />

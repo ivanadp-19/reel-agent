@@ -42,6 +42,19 @@ export const TEMPLATES = {
     y: 18,
     schema: z.object({label: short(20), number: short(6)}),
   },
+  // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
+  sticker: {
+    desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',
+    defaultMs: 2000,
+    y: 50,
+    schema: z.object({
+      src: short(200).describe('path under public/, e.g. assets/gen/sticker-ab12.png'),
+      anim: z.enum(['pop', 'wiggle', 'float', 'spin', 'none']).default('pop'),
+      widthPct: z.number().min(5).max(90).default(28).describe('width as % of frame width'),
+      xPct: z.number().min(0).max(100).default(50).describe('center x, % of frame width'),
+      rotate: z.number().min(-45).max(45).default(0),
+    }),
+  },
 } as const;
 
 export type TemplateId = keyof typeof TEMPLATES;
