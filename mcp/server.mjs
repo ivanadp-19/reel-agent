@@ -32,6 +32,8 @@ import {ENTERS, punchAlternate} from '../src/transitions.ts';
 import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
+import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
+import {CLEAN} from '../scripts/qc.mjs';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -59,7 +61,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null;
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'};
   return p;
 }
 async function save(id, p) {
@@ -111,7 +113,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}` : 'none'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -520,14 +522,32 @@ server.registerTool('delete_brolls', {description: 'Delete B-roll cues by id.', 
   p.brolls = p.brolls.filter((b) => !gone.has(b.id)); await save(project_id, p); return text(`Deleted ${before - p.brolls.length} B-roll cue(s)`);
 });
 
-server.registerTool('set_music', {description: 'Set or remove the music track. file = absolute path (copied into public/music) or "music/<name>" already there. volume 0–1, fade_out_sec, duck = lower under speech.', inputSchema: {project_id: pid, file: z.string().nullable(), volume: z.number().min(0).max(1).default(0.25), fade_out_sec: z.number().min(0).default(1.5), duck: z.boolean().default(true)}}, async ({project_id, file, volume, fade_out_sec, duck}) => {
+let lastMusic = []; // the last search_music results, so set_music can take an id
+server.registerTool('search_music', {description: 'Find music with a clean license (Openverse: CC0 and CC BY, commercial use allowed): mood or genre words ("upbeat corporate", "lo-fi chill", "cinematic piano", "reggaeton"). Nothing is downloaded until set_music picks an id; the credit line is kept with the project and must ship with the reel for CC BY tracks.', inputSchema: {query: z.string().min(2), limit: z.number().int().min(1).max(10).default(6), min_sec: z.number().min(5).default(20)}}, async ({query, limit, min_sec}) => {
+  lastMusic = await searchMusic(query, {limit, minSec: min_sec});
+  if (!lastMusic.length) return text(`No tracks for "${query}" — try other mood/genre words.`);
+  return text(lastMusic.map((r) => `${r.id}  ${r.durationSec}s  ${r.license}  "${r.title}" — ${r.creator} (${r.source})`).join('\n'));
+});
+
+server.registerTool('set_music', {description: 'Set or remove the music track: music_id from search_music (downloaded, credit kept), or file = absolute path (copied into public/music) / "music/<name>" already there. volume 0–1 (0.25 under speech is plenty), fade_out_sec, duck = lower under speech. null file removes it.', inputSchema: {project_id: pid, music_id: z.string().optional(), file: z.string().nullable().optional(), volume: z.number().min(0).max(1).default(0.25), fade_out_sec: z.number().min(0).default(1.5), duck: z.boolean().default(true)}}, async ({project_id, music_id, file, volume, fade_out_sec, duck}) => {
   const p = load(project_id);
-  if (file === null) { p.music = null; await save(project_id, p); return text('Music removed'); }
-  let src = file;
-  if (path.isAbsolute(file)) { if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
+  if (file === null && !music_id) { p.music = null; await save(project_id, p); return text('Music removed'); }
+  let src, credit;
+  if (music_id) {
+    const row = lastMusic.find((r) => r.id === music_id) ?? loadMusicLibrary().find((r) => r.id === music_id);
+    if (!row) throw new Error(`no track ${music_id} — search_music first`);
+    const entry = row.src && fs.existsSync(path.join(PUBLIC, row.src)) ? row : await downloadMusic(row);
+    src = entry.src; credit = entry.credit ?? creditOf(entry);
+  } else if (!file) throw new Error('give music_id or file');
+  else if (path.isAbsolute(file)) { if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
   else if (!fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
-  p.music = {src, volume, startSec: 0, fadeOutSec: fade_out_sec, duck, duckLevel: 0.25}; await save(project_id, p);
-  return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}`);
+  else src = file;
+  p.music = {src, volume, startSec: 0, fadeOutSec: fade_out_sec, duck, duckLevel: 0.25, ...(credit ? {credit} : {})}; await save(project_id, p);
+  return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}`);
+});
+
+server.registerTool('set_audio', {description: `Voice cleanup on the final render (drafts are untouched): ${Object.entries(CLEAN).map(([k, v]) => `${k} = ${v.desc}`).join('; ')}. Light is safe on phone recordings with room noise; strong can dull sibilants — check the final.`, inputSchema: {project_id: pid, clean: z.enum(Object.keys(CLEAN))}}, async ({project_id, clean}) => {
+  const p = load(project_id); p.audio = {...(p.audio ?? {}), clean}; await save(project_id, p); return text(`Voice cleanup: ${clean}`);
 });
 
 // words of every clip (trim window), source-relative; `${source}:${i}` is a stable word id
@@ -543,6 +563,21 @@ async function wordAt(p, wid, tr) {
   if (!t) throw new Error(`no word ${wid} on the timeline (see get_transcript)`);
   const k = t.words.findIndex((w) => String(w.i) === i);
   return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
+}
+// a clip edge inside a word (from the last transcript run): the syllable gets clipped
+function cutWordIssues(p) {
+  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
+  const bySource = new Map();
+  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
+  const out = [];
+  for (const c of p.clips) {
+    const words = [...(bySource.get(path.basename(c.src).replace(/\.[^.]+$/, ''))?.values() ?? [])];
+    for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]]) {
+      const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
+      if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
+    }
+  }
+  return out;
 }
 // off-mic words still inside the cut (from the last transcript run), per clip
 function offMicIssues(p) {
@@ -739,8 +774,8 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
-const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade});
+const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p), ...cutWordIssues(p)];
+const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);

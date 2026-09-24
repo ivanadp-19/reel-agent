@@ -490,10 +490,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?}
     let draft = false;
-    let expectSec;
+    let expectSec, clean = 'off';
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
+      clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
       // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
       // that fetch was failing mid-way on big files. Download every remote asset
@@ -545,7 +546,7 @@ const server = createServer(async (req, res) => {
         // process (a few seconds of ffmpeg must not block this event loop). A render
         // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
         renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
-        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec)], {cwd: ROOT});
+        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
         let out = '';
         fin.stdout.on('data', (d) => (out += d));
         fin.stderr.on('data', (d) => process.stderr.write(d));

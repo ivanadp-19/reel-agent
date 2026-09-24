@@ -17,7 +17,8 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `scripts/run-report.mjs` — metrics of a headless agent run (duration, off-mic left, cuts by seconds, schema rejections, validate warnings, turns, cost)
 - `src/cuts.ts` — cut candidates by word id (retakes, off-mic, meta talk, fillers ES/EN); the agent approves them with `cut_words ranges`
 - `src/grade.ts` + `scripts/grade.mjs` — color: bounded per-source correction from signalstats + named looks, applied at render as an SVG filter (`set_grade`); `src/hdr.ts` — HLG/PQ → SDR LUT used at ingest
-- `scripts/qc.mjs` — two-pass loudnorm (−14 LUFS, ≤ −1 dBTP) and the QC gate every final render passes
+- `scripts/qc.mjs` — optional voice cleanup (ffmpeg afftdn, no models), two-pass loudnorm (−14 LUFS, ≤ −1 dBTP) and the QC gate every final render passes
+- `mcp/music.mjs` — music with clean licenses (Openverse audio, CC0 / CC BY) downloaded into `public/music/` with its credit line (`search_music`, `set_music music_id`)
 - `src/transitions.ts` — how a clip starts (cut, punch, zoom, whip); `set_transitions`
 - `mcp/broll.mjs` + `src/brollMatch.ts` — the client's own B-roll library (`public/broll-assets/library.json`, tagged by the agent from contact sheets) and `suggest_broll`, which places assets on the words their tags match and insists black footage gets covered
 - `public/` — user media and project JSON (gitignored, never commit)
