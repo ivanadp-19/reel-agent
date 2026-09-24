@@ -15,6 +15,18 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {normalizeLoudness, qc, qcText} from '../scripts/qc.mjs';
 import {totalDurationFrames} from '../src/timeline.ts';
+import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
+
+// HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
+// through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
+// LUT file is generated once into .models/luts/.
+const HDR_TRC = {'arib-std-b67': ['hlg2sdr', hlgToSdr], smpte2084: ['pq2sdr', pqToSdr]};
+function hdrLut(trc) {
+  const [name, fn] = HDR_TRC[trc];
+  const file = path.join(ROOT, '.models', 'luts', `${name}-33.cube`);
+  if (!fs.existsSync(file)) { fs.mkdirSync(path.dirname(file), {recursive: true}); fs.writeFileSync(file, cube(fn, 33, name)); }
+  return file;
+}
 
 // run a command async, resolve {code, stdout, stderr}
 const run = (cmd, args, opts = {}) =>
@@ -364,12 +376,12 @@ const server = createServer(async (req, res) => {
         const out = path.join(clipsDir, `${id}.mp4`);
         // probe codec / pixel format / size / rotation / duration
         const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-          '-show_entries', 'stream=codec_name,pix_fmt,width,height:stream_side_data=rotation:format=duration', '-of', 'json', tmp]);
-        let codec = '', pix = '', duration = 0, w = 0, h = 0, rotated = false;
+          '-show_entries', 'stream=codec_name,pix_fmt,width,height,color_transfer:stream_side_data=rotation:format=duration', '-of', 'json', tmp]);
+        let codec = '', pix = '', duration = 0, w = 0, h = 0, rotated = false, trc = '';
         try {
           const p = JSON.parse(probe.stdout);
           const s = p.streams?.[0] ?? {};
-          codec = s.codec_name ?? ''; pix = s.pix_fmt ?? ''; w = s.width ?? 0; h = s.height ?? 0;
+          codec = s.codec_name ?? ''; pix = s.pix_fmt ?? ''; w = s.width ?? 0; h = s.height ?? 0; trc = s.color_transfer ?? '';
           rotated = (s.side_data_list ?? []).some((d) => d.rotation && d.rotation % 180 !== 0);
           duration = parseFloat(p.format?.duration ?? '0');
         } catch {}
@@ -378,11 +390,17 @@ const server = createServer(async (req, res) => {
         // else (4K phones, HEVC, rotation metadata, 10-bit) is re-encoded: rotation
         // baked in, fitted inside 1080×1920 (portrait) or 1920×1080 (landscape).
         // Remotion's compositor cannot read 2160-tall sources.
-        const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920;
+        const hdr = trc in HDR_TRC;
+        const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920 && !hdr;
         const fit = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':force_original_aspect_ratio=decrease:force_divisible_by=2";
+        // HDR: fit first (cheaper), then BT.2020 YUV → RGB → LUT → BT.709 YUV
+        const vf = hdr
+          ? `${fit},scale=in_color_matrix=bt2020:in_range=tv:out_range=pc,format=gbrp16le,lut3d=file=${hdrLut(trc)},scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv`
+          : fit;
         const enc = compatible
           ? await run('ffmpeg', ['-y', '-i', tmp, '-c', 'copy', '-movflags', '+faststart', out])
-          : await run('ffmpeg', ['-y', '-i', tmp, '-vf', fit, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+          : await run('ffmpeg', ['-y', '-i', tmp, '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+              ...(hdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
               '-c:a', 'aac', '-ar', '48000', '-movflags', '+faststart', out]);
         if (enc.code !== 0) {
           cleanup();
@@ -402,6 +420,7 @@ const server = createServer(async (req, res) => {
         return json(res, 200, {
           id, src: `clips/${id}.mp4`, label: rawName.replace(/\.[^.]+$/, ''),
           inSec: 0, outSec: dur, sourceDurationSec: dur,
+          ...(hdr ? {ingest: `${trc === 'smpte2084' ? 'PQ' : 'HLG'} HDR tone-mapped to SDR`} : {}),
         });
       } catch (e) {
         cleanup();

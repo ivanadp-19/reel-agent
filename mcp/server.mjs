@@ -264,7 +264,8 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
     const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
     const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
-    p.clips.push(r); added.push(`${r.id} (${f1(r.outSec)}s)`);
+    const {ingest, ...clip} = r;
+    p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
   }
   await save(id, p);
   return text(`Project ${id}: added ${added.join(', ')}\n\n${summary(id, p)}`);
