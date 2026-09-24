@@ -4,7 +4,7 @@
 
 import {projectCaptions, type Caption} from './captions.ts';
 import {presetOf} from './captionPresets.ts';
-import {projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
+import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import type {Clip} from './timeline.ts';
 
@@ -43,15 +43,19 @@ function graphicHeightPx(g: Graphic): number | null {
     case 'fill-title': return 200;
     case 'script-title': return (p.tag ? 42 : 0) + 150 + (p.sub ? 44 : 0);
     case 'sticker': return ((p.widthPct ?? 28) / 100) * W; // square-ish
+    case 'oversized': return oversizedPx(p.text, p.font) * 0.9;
+    case 'chapter-caps': return 60 + (p.sub ? 50 : 0);
+    case 'starburst': return STAR_PX[p.size] ?? STAR_PX.md;
+    case 'location-tag': return p.sub ? 120 : 84;
+    case 'price': return (p.label ? 44 : 0) + 150 + (p.note ? 46 : 0);
     default: return null;
   }
 }
 function graphicBand(g: Graphic): Band | null {
   const h = graphicHeightPx(g);
   if (h == null) return null;
-  const defaultY: Record<string, number> = {'hook-stack': 16, 'label-2tone': 62, stat: 34, chapter: 18, 'big-word': 8, 'fill-title': 8, 'script-title': 14, sticker: 50};
-  const y = g.yPct ?? defaultY[g.template] ?? 50;
-  const top = g.template === 'sticker' ? y - (h / H) * 50 : y;
+  const y = g.yPct ?? TEMPLATES[g.template]?.y ?? 50;
+  const top = CENTERED.has(g.template) ? y - (h / H) * 50 : y;
   return {top, bottom: top + (h / H) * 100};
 }
 const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
@@ -86,36 +90,37 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   const t1 = words.filter((w) => w.tier === 1).length;
   if (totalMs && t2 > Math.max(1, totalMs / 10000)) issues.push({level: 'warn', code: 'tier2-density', msg: `${t2} tier-2 words in ${(totalMs / 1000).toFixed(0)} s — aim for ≤ 1 per 10 s`});
   if (words.length >= 20 && t1 / words.length > 0.2) issues.push({level: 'warn', code: 'tier1-density', msg: `${Math.round((t1 / words.length) * 100)}% of words are accented — keep it under 20%`});
+  const emoji = words.filter((w) => w.emoji).length;
+  if (totalMs && emoji > Math.max(2, totalMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(totalMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
 
   // --- graphics ---
   for (const g of gfx) {
     const band = graphicBand(g);
-  const emoji = words.filter((w) => w.emoji).length;
-  if (totalMs && emoji > Math.max(2, totalMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(totalMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
     if (band) {
       if (band.top < SAFE.topPct && !g.behind) issues.push({level: 'warn', code: 'safe-top', msg: `graphic ${g.id} (${g.template}) starts at ${band.top.toFixed(0)}% — inside the top UI band`, ref: g.id});
       // text over the presenter's face (behind-graphics and stickers are fine there)
       const face = faces[g.src];
-      if (face && face.found !== false && !g.behind && g.template !== 'sticker') {
+      if (face && face.found !== false && !g.behind && !CENTERED.has(g.template)) {
         const fb = {top: face.top * 100 - 2, bottom: face.bottom * 100 + 2};
         if (overlap(band, fb)) {
           const h = band.bottom - band.top;
           const below = Math.ceil(fb.bottom + 1), above = Math.floor(fb.top - 1 - h);
-          const hint = below + h <= SAFE.bottomPct ? `y_pct ≥ ${below}` : above >= SAFE.topPct ? `y_pct ≤ ${above}` : 'shorter text or behind: true';
+          // behind: true keeps a headline where it is and lets the head cover part of it (reference R1)
+          const hint = [below + h <= SAFE.bottomPct ? `y_pct ${below}–${Math.floor(SAFE.bottomPct - h)}` : above >= SAFE.topPct ? `y_pct ≤ ${above}` : 'shorter text', 'or behind: true (the head covers part of it)'].join(' ');
           issues.push({level: 'warn', code: 'face', msg: `graphic ${g.id} (${g.template}, ${band.top.toFixed(0)}–${band.bottom.toFixed(0)}%) covers the presenter's face (${fb.top.toFixed(0)}–${fb.bottom.toFixed(0)}%) — move it: ${hint}`, ref: g.id});
         }
       }
       if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `graphic ${g.id} (${g.template}) reaches ${band.bottom.toFixed(0)}% — under the bottom UI strip`, ref: g.id});
       for (const c of caps) {
-        if (c.startMs < g.endMs && g.startMs < c.endMs && overlap(captionBand(c, p.captionStyle), band) && g.template !== 'sticker') {
+        if (c.startMs < g.endMs && g.startMs < c.endMs && overlap(captionBand(c, p.captionStyle), band) && !CENTERED.has(g.template)) {
           issues.push({level: 'warn', code: 'overlap-graphic', msg: `caption ${c.id} overlaps graphic ${g.id} (${g.template}) at ${(Math.max(c.startMs, g.startMs) / 1000).toFixed(1)} s`, ref: g.id});
           break;
         }
       }
     }
-    // one text graphic at a time (stickers and layouts may coexist)
+    // one text graphic at a time (decor and layouts may coexist)
     for (const o of gfx) {
-      if (o.id <= g.id || o.template === 'layout' || g.template === 'layout' || o.template === 'sticker' || g.template === 'sticker') continue;
+      if (o.id <= g.id || o.template === 'layout' || g.template === 'layout' || CENTERED.has(o.template) || CENTERED.has(g.template)) continue;
       if (o.startMs < g.endMs && g.startMs < o.endMs) issues.push({level: 'warn', code: 'overlap-graphics', msg: `graphics ${g.id} and ${o.id} are on screen at the same time`, ref: g.id});
     }
   }

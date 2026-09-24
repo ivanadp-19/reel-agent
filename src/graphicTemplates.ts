@@ -7,6 +7,8 @@
 
 import {z} from 'zod';
 import {placeClips, type Clip} from './timeline.ts';
+import {textWidthEm} from './textFit.ts';
+import type {FontFamily} from './fonts.ts';
 
 const short = (max: number) => z.string().trim().min(1).max(max);
 // a line of a stack: {text, …} — a bare string is accepted too
@@ -103,6 +105,52 @@ export const TEMPLATES = {
       split: z.enum(['none', 'broll-bottom', 'broll-top']).default('none'),
     }),
   },
+  // one word far wider than the frame, cropped by both edges, drifting sideways
+  oversized: {
+    desc: 'one word so big the frame crops it on both sides, drifting slowly — best behind the presenter; font condensed|display|serif, color text|accent|outline',
+    defaultMs: 2600,
+    y: 10,
+    schema: z.object({
+      text: short(12),
+      font: z.enum(['condensed', 'display', 'serif']).default('condensed'),
+      color: z.enum(['text', 'accent', 'outline']).default('accent'),
+      drift: z.boolean().default(true),
+    }),
+  },
+  // small spaced capitals with thin rules: "CHAPTER ONE", "THE LIE"
+  'chapter-caps': {
+    desc: 'small widely spaced capitals between thin rules, optional accent line under it — section marker (Elevate/Bloom)',
+    defaultMs: 2200,
+    y: 14,
+    schema: z.object({text: short(28), sub: z.string().trim().max(36).default(''), rules: z.boolean().default(true)}),
+  },
+  // comic starburst with a short shout: "NEW!", "-30%", "WOW"
+  starburst: {
+    desc: 'comic starburst bubble with a short shout ("NEW!", "-30%"); placed by its center (x_pct/y_pct), may sit next to other graphics',
+    defaultMs: 1800,
+    y: 30,
+    schema: z.object({
+      text: short(10),
+      color: z.enum(['accent', 'light', 'dark']).default('accent'),
+      size: z.enum(['sm', 'md', 'lg']).default('md'),
+      xPct: z.number().min(0).max(100).default(72).describe('center x, % of frame width'),
+      rotate: z.number().min(-30).max(30).default(-8),
+    }),
+  },
+  // "📍 Mérida, Yucatán" — a pin and a place in a glass pill
+  'location-tag': {
+    desc: 'map pin + place name in a glass pill, optional second line (city, neighborhood, venue)',
+    defaultMs: 2400,
+    y: 66,
+    schema: z.object({place: short(28), sub: z.string().trim().max(28).default('')}),
+  },
+  // price with its label: "DESDE / $2.5M / MXN · preventa"
+  price: {
+    desc: 'price block: small label above ("FROM", "DESDE"), the value on an accent bar (counts up), a note under it',
+    defaultMs: 2600,
+    y: 30,
+    schema: z.object({value: short(14), label: z.string().trim().max(20).default(''), note: z.string().trim().max(32).default(''), countUp: z.boolean().default(true)}),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',
@@ -119,6 +167,14 @@ export const TEMPLATES = {
 } as const;
 
 export type TemplateId = keyof typeof TEMPLATES;
+
+// decor sits by its center (x/y) and may share the screen with a text graphic
+export const CENTERED = new Set<string>(['sticker', 'starburst']);
+export const STAR_PX: Record<string, number> = {sm: 230, md: 310, lg: 400}; // starburst diameter
+// oversized: the font size that makes the word ~1.3× the 1080 px frame width
+export const OVERSIZED_FAMILY: Record<string, FontFamily> = {condensed: 'Anton', display: 'Montserrat', serif: 'Playfair Display'};
+export const oversizedPx = (text: string, font = 'condensed', family?: FontFamily) =>
+  Math.round((1080 * 1.3) / Math.max(1, textWidthEm(String(text).toUpperCase(), family ?? OVERSIZED_FAMILY[font] ?? 'Anton')));
 export const isTemplate = (id: string): id is TemplateId => id in TEMPLATES;
 
 export type Graphic = {

@@ -1,9 +1,9 @@
 import React from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {TEMPLATES, type Graphic} from './graphicTemplates';
+import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, type Graphic} from './graphicTemplates';
 import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
-import {useBrand} from './brand';
-import {fitSize} from './textFit';
+import {ink, useBrand} from './brand';
+import {fitSize, textWidthEm} from './textFit';
 
 // named faces the templates pick from (all in src/fonts.ts); a brand kit's
 // headline font replaces `display`
@@ -180,6 +180,107 @@ const ScriptTitle: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   );
 };
 
+// one word wider than the frame, cropped by both edges, drifting sideways
+const Oversized: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const a = useReveal(0, 10);
+  const face = useFace(props.font, 'condensed');
+  const text = String(props.text).toUpperCase();
+  const fill = props.color === 'text' || props.color === 'outline' ? '#fff' : accent;
+  const drift = props.drift ? 40 - (frame / fps) * 40 : 0; // px, slow leftward pan
+  const look: React.CSSProperties = props.color === 'outline' ? {color: 'transparent', WebkitTextStroke: `4px ${fill}`, textShadow: 'none'} : {color: fill};
+  return (
+    <div style={{display: 'flex', justifyContent: 'center', margin: '0 -60px'}}>
+      <div style={{...face.style, ...look, fontSize: oversizedPx(text, props.font, face.family), lineHeight: 0.86, whiteSpace: 'nowrap', opacity: a, filter: `blur(${(1 - a) * 10}px)`, transform: `translateX(${drift}px) scale(${interpolate(a, [0, 1], [1.08, 1])})`}}>{text}</div>
+    </div>
+  );
+};
+
+// small widely spaced capitals between thin rules, optional accent line under it
+const ChapterCaps: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 14);
+  const b = useReveal(8, 10);
+  const spacing = interpolate(a, [0, 1], [0.7, 0.38]); // em, the letters settle together
+  const text = String(props.text).toUpperCase();
+  const room = props.rules ? 720 : 940;
+  const size = Math.max(24, Math.min(40, Math.floor(room / (textWidthEm(text, 'Montserrat') + 0.38 * text.length))));
+  const rule = <div style={{height: 2, width: 90, background: 'rgba(255,255,255,0.85)', transform: `scaleX(${a})`}} />;
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16}}>
+      <div style={{display: 'flex', alignItems: 'center', gap: 28, opacity: a}}>
+        {props.rules ? rule : null}
+        <div style={{fontSize: size, fontWeight: 600, letterSpacing: `${spacing}em`, marginRight: `-${spacing}em`, color: '#fff', whiteSpace: 'nowrap'}}>{text}</div>
+        {props.rules ? rule : null}
+      </div>
+      {props.sub ? <div style={{fontSize: 34, fontWeight: 700, color: accent, letterSpacing: '0.12em', textTransform: 'uppercase', whiteSpace: 'nowrap', ...blurIn(b)}}>{props.sub}</div> : null}
+    </div>
+  );
+};
+
+// comic starburst: a parametric 14-point star (drawn in code, not an asset) with a shout inside
+const STAR_POINTS = Array.from({length: 28}, (_, i) => {
+  const r = i % 2 ? 40 : 50;
+  const t = (i / 28) * Math.PI * 2 - Math.PI / 2;
+  return `${(50 + r * Math.cos(t)).toFixed(2)},${(50 + r * Math.sin(t)).toFixed(2)}`;
+}).join(' ');
+const Starburst: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const kit = useBrand();
+  const face = useFace('display');
+  const d = STAR_PX[props.size] ?? STAR_PX.md;
+  const pop = spring({frame, fps, config: {damping: 9, stiffness: 220, mass: 0.6}});
+  const wiggle = Math.sin((frame / fps) * 7) * 2.5;
+  const bg = props.color === 'light' ? kit.light : props.color === 'dark' ? kit.dark : accent;
+  const text = String(props.text).toUpperCase();
+  return (
+    <div style={{width: d, height: d, position: 'relative', opacity: Math.min(1, pop * 2), transform: `rotate(${props.rotate + wiggle}deg) scale(${interpolate(pop, [0, 1], [0.2, 1])})`}}>
+      <svg viewBox="0 0 100 100" width={d} height={d} style={{position: 'absolute', inset: 0, overflow: 'visible', filter: 'drop-shadow(6px 8px 0 rgba(0,0,0,0.35))'}}>
+        <polygon points={STAR_POINTS} fill={bg} stroke="#111" strokeWidth={2.2} strokeLinejoin="round" />
+      </svg>
+      <div style={{position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', ...face.style, fontSize: fitSize(text, Math.round(d * 0.3), face.family, Math.round(d * 0.6)), lineHeight: 1, letterSpacing: -1, color: ink(bg), textShadow: 'none', whiteSpace: 'nowrap'}}>{text}</div>
+    </div>
+  );
+};
+
+// map pin + place in a glass pill
+const LocationTag: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 9);
+  const b = useReveal(5, 9);
+  const face = useFace('display');
+  return (
+    <div style={{display: 'inline-flex', alignItems: 'center', gap: 24, padding: '18px 36px 18px 26px', borderRadius: 999, background: 'rgba(0,0,0,0.38)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1.5px solid rgba(255,255,255,0.3)', textShadow: 'none', ...blurIn(a)}}>
+      <div style={{width: 44, height: 44, flex: '0 0 auto', borderRadius: '50% 50% 50% 0', transform: 'rotate(-45deg)', background: accent, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+        <div style={{width: 15, height: 15, borderRadius: '50%', background: ink(accent)}} />
+      </div>
+      <div style={{display: 'flex', flexDirection: 'column', alignItems: 'flex-start', textAlign: 'left'}}>
+        <div style={{...face.style, fontSize: fitSize(props.place, 52, face.family, 700, 34), lineHeight: 1.08, color: '#fff', whiteSpace: 'nowrap'}}>{props.place}</div>
+        {props.sub ? <div style={{fontSize: fitSize(props.sub, 30, 'Montserrat', 700, 22), fontWeight: 600, color: 'rgba(255,255,255,0.82)', letterSpacing: 1, whiteSpace: 'nowrap', opacity: b}}>{props.sub}</div> : null}
+      </div>
+    </div>
+  );
+};
+
+// price: label above, the value on an accent bar that wipes in, a note below
+const Price: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const a = useReveal(0, 8);
+  const bar = useReveal(3, 10);
+  const c = useReveal(3, 20);
+  const b = useReveal(10, 8);
+  const face = useFace('display');
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
+      {props.label ? <div style={{fontSize: 36, fontWeight: 700, letterSpacing: '0.3em', marginRight: '-0.3em', textTransform: 'uppercase', color: '#fff', ...blurIn(a)}}>{props.label}</div> : null}
+      <div style={{position: 'relative', padding: '6px 34px'}}>
+        <div style={{position: 'absolute', inset: 0, background: accent, borderRadius: 16, transform: `scaleX(${bar})`, transformOrigin: 'left center', boxShadow: '0 12px 40px rgba(0,0,0,0.35)'}} />
+        <div style={{position: 'relative', ...face.style, fontSize: fitSize(props.value, 140, face.family, 860), lineHeight: 1.05, letterSpacing: -2, color: ink(accent), textShadow: 'none', whiteSpace: 'nowrap', opacity: bar}}>{props.countUp ? countUp(props.value, c) : props.value}</div>
+      </div>
+      {props.note ? <div style={{fontSize: 34, fontWeight: 600, color: 'rgba(255,255,255,0.92)', whiteSpace: 'nowrap', ...blurIn(b)}}>{props.note}</div> : null}
+    </div>
+  );
+};
+
 // an image asset with a simple motion: pop in, then wiggle / float / spin
 const Sticker: React.FC<{props: any}> = ({props}) => {
   const frame = useCurrentFrame();
@@ -207,7 +308,7 @@ const Sticker: React.FC<{props: any}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, sticker: Sticker};
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, sticker: Sticker};
 
 const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({g, accent, durationInFrames}) => {
   const frame = useCurrentFrame();
@@ -225,10 +326,10 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
       </div>
     );
   }
-  if (g.template === 'sticker') {
-    // positioned by its center, not as a text block
+  if (CENTERED.has(g.template)) {
+    // decor (sticker, starburst) is positioned by its center, not as a text block
     return (
-      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? 50}%`, left: `${(g.props as any).xPct ?? 50}%`, transform: 'translate(-50%, -50%)', opacity: fadeOut, pointerEvents: 'none'}}>
+      <div data-ab={`gfx:${g.id}`} style={{position: 'absolute', top: `${g.yPct ?? TEMPLATES[g.template].y}%`, left: `${(g.props as any).xPct ?? 50}%`, transform: 'translate(-50%, -50%)', opacity: fadeOut, pointerEvents: 'none'}}>
         <Comp props={g.props} accent={accent} />
       </div>
     );

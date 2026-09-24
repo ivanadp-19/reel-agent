@@ -41,5 +41,14 @@ export function resolveBrand(brand: Brand | null | undefined, accentColor?: stri
   };
 }
 
+// readable text color on a background: near-black on light colors, white on dark
+export function ink(bg: string): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(bg);
+  if (!m) return '#fff';
+  const lin = (h: string) => { const c = parseInt(h, 16) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const L = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
+  return L > 0.4 ? '#111111' : '#ffffff';
+}
+
 export const BrandContext = createContext<Kit>(resolveBrand(null));
 export const useBrand = () => useContext(BrandContext);

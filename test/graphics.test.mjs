@@ -76,3 +76,35 @@ test('behind caption pages need a matte too; a covering matte satisfies them', (
   assert.deepEqual(spansWithoutMatte([{...page, behind: false}], []), []);
 });
 
+import {oversizedPx, parseProps as parse3} from '../src/graphicTemplates.ts';
+import {ink} from '../src/brand.ts';
+import {validateProject as validate3} from '../src/validate.ts';
+
+test('new templates validate their props and fill defaults', () => {
+  assert.equal(parse3('oversized', {text: 'wealth'}).color, 'accent');
+  assert.equal(parse3('chapter-caps', {text: 'chapter one'}).rules, true);
+  assert.equal(parse3('starburst', {text: 'NEW!'}).size, 'md');
+  assert.equal(parse3('location-tag', {place: 'Mérida, Yucatán'}).sub, '');
+  assert.equal(parse3('price', {value: '$2.5M', label: 'DESDE'}).countUp, true);
+  assert.throws(() => parse3('starburst', {text: 'WAY TOO LONG SHOUT'}), /text/);
+});
+
+test('oversized words are sized past the frame so both edges crop them', async () => {
+  const {textWidthEm} = await import('../src/textFit.ts');
+  const w = oversizedPx('WEALTH', 'condensed') * textWidthEm('WEALTH', 'Anton');
+  assert.ok(w > 1300 && w < 1500, String(w)); // ~1.3 × 1080 wide
+});
+
+test('ink picks dark text on light fills and white on dark ones', () => {
+  assert.equal(ink('#FFB020'), '#111111');
+  assert.equal(ink('#0b0b0d'), '#ffffff');
+  assert.equal(ink('#3B5BFF'), '#ffffff');
+});
+
+test('a starburst may share the screen with a label; two labels may not', () => {
+  const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10};
+  const g = (id, template, props) => ({id, src: 'clips/a.mp4', startMs: 1000, endMs: 3000, template, props});
+  const codes = (items) => validate3({clips: [clip], captions: [], graphics: items}).map((i) => i.code);
+  assert.ok(!codes([g('g0', 'label-2tone', {top: 'A', bottom: ''}), g('g1', 'starburst', {text: 'NEW!', size: 'md', xPct: 72})]).includes('overlap-graphics'));
+  assert.ok(codes([g('g0', 'label-2tone', {top: 'A', bottom: ''}), g('g1', 'price', {value: '$1', label: '', note: ''})]).includes('overlap-graphics'));
+});
