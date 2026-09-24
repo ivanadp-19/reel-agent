@@ -18,7 +18,9 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
   // entrance at onset (build) — tier-2 words pop in either way
   const pops = build || tier === 2;
   const pop = pops ? spring({frame: frame - onsetFrame, fps, config: {damping: 12, stiffness: 220, mass: 0.6}}) : 1;
-  const scale = (t.scale ?? 1) * (pops ? interpolate(pop, [0, 1], [0.7, 1]) : 1);
+  // the tier's size is real layout (font-size) so the gap and the page box grow
+  // with it; the transform only animates the pop
+  const scale = pops ? interpolate(pop, [0, 1], [0.7, 1]) : 1;
   const boxed = t.pill || t.block;
   const color = boxed
     ? preset.colors.onAccent ?? '#000'
@@ -42,6 +44,7 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
           fontFamily: t.font ? fontFamily(t.font) : undefined,
           color: dimmed ? preset.colors.dim : color,
           opacity,
+          fontSize: t.scale && t.scale !== 1 ? `${t.scale}em` : undefined,
           transform: scale === 1 ? undefined : `scale(${scale})`,
           transformOrigin: 'center 70%',
           whiteSpace: 'pre',
