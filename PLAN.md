@@ -10,6 +10,9 @@ Editor de reels open source cuyo cerebro es **Claude Code o Codex** (lo elige el
 | Uso comercial | No lo vendemos, pero terceros podrán usarlo | Toda dependencia y asset que se empaquete tiene que ser redistribuible. Remotion es gratis hasta 3 personas; se documenta en el README que las empresas más grandes necesitan su licencia |
 | Cerebro | Claude Code **o** Codex | El harness lanza el CLI **ya instalado** del usuario (`claude -p` / `codex exec`), con la sesión que el usuario inició él mismo, o bien con su API key. **Nunca** "Sign in with Claude" en la app, ni el Agent SDK con login de suscripción: Anthropic no lo permite a terceros. Ver `research/harness-claude-codex.md` |
 | Base | Fork de `andriidrok1/autobroll` (MIT) dentro de este repo, conservando su aviso MIT y el crédito | Elegido por un panel de 3 jueces entre 18 candidatos evaluados a nivel de código (`research/evaluations.json`, `research/judges.json`). Se eligió por su estructura, no por la calidad de lo que produce hoy |
+| Plataforma | **Instagram Reels** | Safe zones y límites según el perfil de Reels (1080×1920). TikTok y Shorts no son objetivo por ahora |
+| Idiomas | **Español de México (es-MX)** e **inglés de EE. UU. (en-US)** | WhisperX con `--language es|en` por clip. Léxicos de muletillas, lista GLUE y formato de números por idioma (es-MX: `1,500.50`, `$` MXN, fechas dd/mm). Probar al menos un clip que mezcle los dos idiomas |
+| LLM | **Solo Claude Code o Codex. Sin Gemini** | Se elimina `scripts/gemini.mjs`. Acentos, plan de B-roll y orden de tomas los decide el agente vía MCP. La cara se detecta en local con MediaPipe (Apache-2.0) o YuNet (MIT). La visión la da el propio agente: `Read` en Claude, `view_image` en Codex. Los botones de IA del editor lanzan el runner headless en vez de llamar a una API |
 
 **Investigación de respaldo** (carpeta `research/`):
 - `oss-landscape.md`: los 14 repos verificados más otros proyectos.
@@ -74,7 +77,7 @@ Por qué no otra base:
 | Motor de motion graphics | Remotion nativo | **HyperFrames como dependencia fijada**, render alpha (ProRes 4444/VP9) compuesto con `OffthreadVideo transparent` | Remotion nativo; HyperFrames solo como sidecar opcional tras revisión legal de GSAP | **Remotion nativo por defecto.** Un motor, una licencia, y captions y gráficos en el mismo DOM, así se esquivan entre sí. HyperFrames queda como opción de fase 4 si tus templates no alcanzan, con GSAP revisado y el tiempo de render medido (en Mac no hay BeginFrame) |
 | Semilla de presets de captions | 8 presets TS escritos a mano; tscaps en fase 2 | tscaps (38 templates MIT) como librería base, tras un spike | tscaps + open-edit, spike de 1–2 días | **8 presets nativos primero** (camino crítico sin depender de algo no probado). Spike de tscaps en fase 0, en paralelo; si pasa, amplía el catálogo después |
 | Runner headless de Claude/Codex | vibetube | diffusionstudio (Agent SDK + app-server) | vibetube + flags de openreelio | **vibetube `providers.js` (MIT, pequeño, con tests) + flags de openreelio.** De diffusionstudio solo el registro MCP (MPL, o reescribirlo) |
-| Gemini dentro del pipeline | Pasarlo al agente o dejarlo de fallback | — | Sustituirlo por pasos del cerebro | **El agente decide acentos y plan de B-roll vía MCP.** Gemini queda solo como fallback de visión para Codex y para el botón del editor sin agente |
+| Gemini dentro del pipeline | Pasarlo al agente o dejarlo de fallback | — | Sustituirlo por pasos del cerebro | **El agente decide acentos y plan de B-roll vía MCP. Gemini se elimina** (decisión del usuario, 2026-09-23) |
 
 ---
 
@@ -191,7 +194,7 @@ Regla general: se copia código solo de MIT o Apache, con atribución. Los archi
 | **Motion graphics B-roll** | Track de gráficos anclado a clip (`projectGraphics`) con un registry tipado (zod) de 6–8 templates: lower-third, titular cinético, stat count-up, pop de emoji o icono, tarjeta de notificación o UI, lista/stamp, CTA/end card. Herramienta `add_graphic({template, props, anchorWordId})`. Zoom punches por keyframes | En el MVP el LLM elige template y props; no escribe código. JSX escrito por el LLM o sidecar de HyperFrames quedan para la fase 4 |
 | **Audio** | Ducking actual, SFX (sintetizados + CC0 verificado por archivo) a −12 dB respecto a la voz, loudnorm de dos pasadas a −14 LUFS, gate de QC | El QC bloquea el render final si falla |
 | **Render** | Remotion 4.0.380 vía `server/index.mjs`. Un solo motor para captions, gráficos y B-roll | Fijar la versión 4.x. Medir el coste de blur y glow |
-| **Harness** | Un solo servidor MCP stdio (autobroll) para ambos cerebros. SKILL.md + AGENTS.md. Runner headless: `claude -p --allowedTools mcp__autobroll__* --strict-mcp-config` / `codex exec` con sandbox read-only. Registro automático en ambas configs | Sin shell para el agente headless. El texto del transcript se trata como no confiable (vía de prompt-injection). Gemini solo como fallback de visión para Codex |
+| **Harness** | Un solo servidor MCP stdio (autobroll) para ambos cerebros. SKILL.md + AGENTS.md. Runner headless: `claude -p --allowedTools mcp__autobroll__* --strict-mcp-config` / `codex exec` con sandbox read-only. Registro automático en ambas configs | Sin shell para el agente headless. El texto del transcript se trata como no confiable (vía de prompt-injection). Sin Gemini: la visión la da el propio agente (`Read` / `view_image`) |
 
 ---
 
@@ -205,7 +208,7 @@ Las duraciones son orientativas. El plan de 4 semanas del juez MVP es optimista 
 - Seguridad:
   - Backend en `127.0.0.1` con token por sesión.
   - Quitar `.trycloudflare.com` de `allowedHosts`, o protegerlo con el token.
-  - La key de Gemini pasa de la query string a un header.
+  - Eliminar `scripts/gemini.mjs` y sus llamadas: acentos, B-roll y arrange pasan a herramientas MCP; la cara a MediaPipe/YuNet local.
 - Arreglos en autobroll:
   - Parámetro `--language es|en|auto` y prompt localizado.
   - Lista GLUE en español.
@@ -233,7 +236,7 @@ Las duraciones son orientativas. El plan de 4 semanas del juez MVP es optimista 
 - Módulo de paginado compartido entre el pipeline y el MCP. Quita la duplicación con `editor/store.ts` en la parte de captions.
 - Primero 4 presets (clean, bold-pop, pill, karaoke), luego los 8.
 - Librería de animación `f(frame)`.
-- Placer con la safe zone universal (y 270–1440, x 140–940).
+- Placer con la safe zone de Instagram Reels (punto de partida: y 270–1440, x 140–940; calibrar con capturas reales de la UI de Reels).
 - `set_caption_style` y `annotate_captions`.
 - Validador de la etapa A con `node --test`.
 - Emoji Noto SVG y pack de SFX.
@@ -277,7 +280,7 @@ Las duraciones son orientativas. El plan de 4 semanas del juez MVP es optimista 
 - Runner headless con selector de cerebro (Claude o Codex).
 - Registro MCP en ambas configs.
 - SKILL.md y AGENTS.md.
-- `caption_proof` etapa D (crítica visual, con fallback a Gemini si Codex no ve imágenes).
+- `caption_proof` etapa D (crítica visual con la visión del agente; si el resultado MCP no lleva la imagen a Codex, el agente abre el PNG con `view_image`).
 
 **Criterios de aceptación:**
 - Un solo comando produce un reel completo (corte, grade, captions, 3 o más gráficos, B-roll, música) desde el clip crudo, con cada uno de los dos cerebros.
@@ -310,14 +313,12 @@ Las duraciones son orientativas. El plan de 4 semanas del juez MVP es optimista 
 
 ## Preguntas abiertas para ti
 
-_Respondidas el 2026-09-23: no habrá venta comercial y será un proyecto open source Apache-2.0 para terceros (ver "Decisiones ya tomadas"). Eso responde la antigua pregunta sobre la empresa y la de herramienta personal vs. producto. Seguridad y concurrencia agente/UI deben cumplir el estándar de un proyecto que otros van a instalar._
+_Respondidas el 2026-09-23 (ver "Decisiones ya tomadas"): proyecto open source Apache-2.0 para terceros y sin venta comercial; plataforma Instagram Reels; idiomas es-MX y en-US; LLM solo Claude Code o Codex, sin Gemini. Seguridad y concurrencia agente/UI deben cumplir el estándar de un proyecto que otros van a instalar._
 
-1. **¿Qué plataforma es la prioritaria (TikTok, Reels, Shorts)?** Define el perfil de safe zone. ¿Puedes subir un vídeo gris de prueba como borrador para calibrarlas con capturas?
-2. **¿Aceptas GSAP/HyperFrames como sidecar opcional (fase 4), o prefieres solo Remotion?** GSAP es gratis pero no tiene licencia OSI, así que no se empaqueta; solo sería una dependencia opcional.
-3. **Idioma:** ¿qué región de español (es-MX o es-ES; cambia el formato de números)? ¿Habrá vídeos que mezclen ES y EN?
-4. **Referencias de estilo:** ¿3–5 creadores o reels que quieras igualar? Es la entrada principal para diseñar presets y templates.
-5. **¿Eliminar Gemini del todo, o mantenerlo como fallback de visión y para el botón del editor sin agente?**
-6. **Túnel:** en tu clon local de autobroll, `vite.config.ts` permite `.trycloudflare.com`. Si ese túnel sigue abierto, el backend sin autenticación está expuesto a internet. Ciérralo.
+1. **¿Aceptas GSAP/HyperFrames como sidecar opcional (fase 4), o prefieres solo Remotion?** GSAP es gratis pero no tiene licencia OSI, así que no se empaqueta; solo sería una dependencia opcional.
+2. **Calibración de Reels:** ¿puedes subir a Instagram un vídeo gris de prueba como borrador y sacar capturas? Con eso se miden las safe zones reales.
+3. **Referencias de estilo:** ¿3–5 creadores o reels que quieras igualar? Es la entrada principal para diseñar presets y templates.
+4. **Túnel:** en tu clon local de autobroll, `vite.config.ts` permite `.trycloudflare.com`. Si ese túnel sigue abierto, el backend sin autenticación está expuesto a internet. Ciérralo.
 ---
 
 ## 7. Correcciones del critic (obligatorias antes de ejecutar)
