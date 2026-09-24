@@ -58,13 +58,13 @@ Por eso:
 | Trabajo | Stack | Estado |
 |---|---|---|
 | Transcripción | WhisperX `medium`, `--language` por proyecto, prompt por idioma que conserva muletillas, caché por fuente+idioma | Hecho. En CPU tarda ~3.5 min por 48 s: evaluar whisper.cpp (Metal) / parakeet-mlx |
-| Corte | 1) silencios (`trim-silence`), 2) candidatos de muletilla/retoma (léxicos ES/EN + repeticiones/false starts, idea de `deadWeight` de AIEV), 3) snap del corte a un hueco de audio real, 4) el agente aprueba por `wordId`, 5) se aplica como `split`/`trim` | Silencios hecho; el resto fase 2 |
-| Color | Detectar HDR/HLG (iPhone) → tonemap a SDR en el ingest → auto exposición/balance acotado → look de un catálogo fijo (LUT `.cube` o cadena ffmpeg horneada) con intensidad ≤ 0.8. El agente solo elige el nombre del look y verifica frames | Fase 2 |
+| Corte | 1) silencios (`trim-silence`), 2) candidatos de muletilla/retoma/off-mic/meta (`src/cuts.ts`), 3) snap del corte a la pausa, 4) el agente aprueba por `wordId`, 5) `cut_words ranges` | Hecho |
+| Color | HLG/PQ → SDR en el ingest (LUT generado, `src/hdr.ts`) → corrección automática acotada por fuente → look del catálogo con intensidad; aplicado en render como filtro SVG. El agente elige el look (`set_grade`) y verifica con `caption_proof` | Hecho (falta clip HDR real) |
 | Captions | Datos: página `{src, words[{text,start,end,tier,emoji?,sfx?}], preset, topPct}`. Render en Remotion con animaciones `f(frame)`, fuentes OFL empaquetadas, emoji Noto/Fluent, SFX CC0. Paginado, timing, safe zone y validación en código; el agente emite tiers/emoji/SFX/breaks | Base hecha (Inter empaquetada, cara local, glue ES). Presets: fase 1 |
 | B-roll propio | El agente etiqueta cada asset (`frame_at` / contact sheet) y lo empareja con menciones del transcript; reglas de los editores expertos: arranca a ±1 s de la palabra, 0.5–8 s, ~9 s entre inserts, nunca sobre el hook ni el remate | Fase 3 |
 | B-roll stock | Pexels (`search_stock`, portrait), descarga solo desde pexels.com, atribución en UI. Sin índices ni copias masivas (términos) | Hecho como respaldo |
 | Motion graphics | Registry tipado (zod) de templates 9:16 en Remotion; `add_graphic({template, props, anchorWordId})`; zoom punches por keyframes | Fase 1 (titulares) y 3 (resto) |
-| Audio | Ducking actual; loudnorm dos pasadas a −14 LUFS / −1 dBTP; limpieza opcional (DeepFilterNet o `arnndn`); SFX a −12 dB de la voz; gate de QC | Fase 2 |
+| Audio | Ducking; loudnorm dos pasadas a −14 LUFS / −1 dBTP y gate de QC en cada render final (hecho); limpieza opcional (DeepFilterNet o `arnndn`) y SFX a −12 dB de la voz pendientes | Parcial |
 | Render | Remotion 4.0.380 vía backend. Línea base: 48 s con 31 captions = 60 s draft / 65 s final en M-series | Hecho |
 | Harness | Un MCP para los dos cerebros. `AGENTS.md` (+ `CLAUDE.md` = `@AGENTS.md`), skills en `.agents/skills` con symlink a `.claude/skills`. Runner: `claude -p --allowedTools mcp__reel__* --strict-mcp-config --permission-mode dontAsk` / `codex exec --json --sandbox read-only` (patrón `providers.js` de vibetube, MIT). Sin shell para el agente headless | MCP y AGENTS hechos; runner fase 3 |
 | Verificación | Automática (ffprobe, silencios, negro, safe zones, contraste) → preview 540×960 → contact sheet que el agente mira (`Read` en Claude, `view_image` en Codex), máximo 2–3 rondas | Fase 1 (captions) y 3 (completa) |
@@ -118,6 +118,8 @@ Criterios de aceptación:
 - **Gate subjetivo**: comparación a ciegas contra el export de Captions.ai/Submagic; si pierde claramente, se itera antes de pasar de fase.
 
 ### Fase 2 — corte, color y audio (≈ 1.5 semanas)
+
+Hecho (2026-09-24): `find_cut_candidates` (retomas por similitud LCS con la última toma completa como la que se queda, líneas off-mic, meta-habla, muletillas ES/EN) + `cut_words ranges` en una llamada, con snap a las pausas y descarte de trozos mudos; loudnorm de dos pasadas en el render final y gate `qc` (−14 ±1 LUFS, ≤ −1 dBTP, tamaño, duración, audio; avisos de silencio y negro); color con corrección automática acotada por fuente + looks (`clean` = real estate limpio, `warm`, `crisp`, `moody`, `mono`) aplicados en render como filtro SVG (`set_grade`); tonemap HLG/PQ → SDR en el ingest con un LUT generado en código (ffmpeg sin zscale). Pendiente: probar con un clip HDR real de iPhone, limpieza de voz opcional, medir recall de muletillas en 5 clips anotados a mano.
 
 Entregables:
 - Candidatos de muletilla y retoma (ES/EN) + `find_cut_candidates` (el agente aprueba por `wordId`); snap del corte a huecos de audio; aplicación como `split`/`trim`.
