@@ -21,3 +21,9 @@ test('librarySearch ranks entries by query-word hits on tags/title/prompt', asyn
   // the library is per machine; this only checks the function tolerates an empty/missing file
   assert.deepEqual(librarySearch('', {}), []);
 });
+
+test('similarity ignores stopwords and wording so "house key, red tag" matches the earlier prompt', async () => {
+  const {similarity} = await import('../mcp/assets.mjs');
+  assert.ok(similarity('a house key with a red tag', 'house key, red tag') >= 0.6);
+  assert.ok(similarity('a house key with a red tag', 'a wine bottle and two glasses') < 0.2);
+});

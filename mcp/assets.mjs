@@ -72,7 +72,10 @@ const rel = (abs) => path.relative(PUBLIC, abs).split(path.sep).join('/');
 // license, credit, tags[], prompt?, title?, addedAt}
 const LIBRARY = path.join(ASSETS, 'library.json');
 const loadLibrary = () => { try { return JSON.parse(fs.readFileSync(LIBRARY, 'utf8')); } catch { return []; } };
-const tokens = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9]{2,}/g) ?? [];
+const STOP = new Set(['a', 'an', 'the', 'of', 'with', 'and', 'or', 'in', 'on', 'for', 'to', 'is', 'it', 'de', 'la', 'el', 'los', 'las', 'un', 'una', 'con', 'y', 'o', 'en', 'del', 'al', 'que', 'por', 'para']);
+const tokens = (s) => (String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9]{2,}/g) ?? []).filter((t) => !STOP.has(t));
+// how much two prompts share (Jaccard on content words)
+export const similarity = (a, b) => { const A = new Set(tokens(a)), B = new Set(tokens(b)); if (!A.size || !B.size) return 0; let n = 0; for (const t of A) if (B.has(t)) n++; return n / (A.size + B.size - n); };
 export function libraryAdd(entry) {
   const lib = loadLibrary();
   if (lib.some((e) => e.src === entry.src)) return;
@@ -213,9 +216,9 @@ export async function generateAsset({prompt, kind = 'sticker', size = '1024x1024
   const hash = crypto.createHash('sha1').update(`${model}|${size}|${quality}|${full}`).digest('hex').slice(0, 12);
   const dest = path.join(ASSETS, 'gen', `${kind}-${hash}.png`);
   if (fs.existsSync(dest)) return {src: rel(dest), cached: true, model};
-  // same idea already generated (any model/quality)? reuse it instead of paying again
-  const prev = loadLibrary().find((e) => e.kind === kind && e.prompt && tokens(e.prompt).join(' ') === tokens(prompt).join(' ') && fs.existsSync(path.join(PUBLIC, e.src)));
-  if (prev) return {src: prev.src, cached: true, model: prev.model ?? model};
+  // same idea already generated (any wording, model or quality)? reuse it instead of paying again
+  const prev = loadLibrary().filter((e) => e.kind === kind && e.prompt && fs.existsSync(path.join(PUBLIC, e.src))).map((e) => ({e, s: similarity(e.prompt, prompt)})).filter((x) => x.s >= 0.6).sort((a, b) => b.s - a.s)[0]?.e;
+  if (prev) return {src: prev.src, cached: true, model: prev.model ?? model, reusedPrompt: prev.prompt};
   const r = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
     headers: {Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json'},
