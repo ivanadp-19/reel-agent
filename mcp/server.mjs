@@ -332,12 +332,22 @@ server.registerTool('cut_words', {description: 'Remove speech by word id: from_w
   const merged = [];
   for (const c of plans) { const last = merged.at(-1); if (last && last.src === c.src && c.startMs <= last.endMs) { last.endMs = Math.max(last.endMs, c.endMs); last.text += ` ${c.text}`; } else merged.push({...c}); }
   const lines = [];
+  const pieces = new Set(); // clips this call cut into
   for (const c of merged) {
     const clip = p.clips.find((k) => k.src === c.src && k.inSec * 1000 <= c.startMs + 1 && k.outSec * 1000 >= c.endMs - 1);
     const r = clip && cutRange(p.clips, clip.id, c.startMs / 1000, c.endMs / 1000);
     if (!r) { lines.push(`skipped "${c.text}" (not on the timeline any more)`); continue; }
     p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap);
+    for (const s of r.remap) pieces.add(s.segId);
     lines.push(`cut "${c.text}" — ${f1((c.endMs - c.startMs) / 1000)}s of ${path.basename(c.src)} (${f1(c.startMs / 1000)}–${f1(c.endMs / 1000)})`);
+  }
+  // a piece left between two cuts that holds no word at all is dead air: drop it
+  const words = new Map(tr.map((t) => [t.source, []]));
+  for (const t of tr) words.get(t.source).push(...t.words);
+  const silent = p.clips.filter((k) => pieces.has(k.id) && k.outSec - k.inSec < 4 && !(words.get(path.basename(k.src).replace(/\.[^.]+$/, '')) ?? []).some((w) => w.endMs > k.inSec * 1000 && w.startMs < k.outSec * 1000));
+  if (silent.length) {
+    p.clips = p.clips.filter((k) => !silent.includes(k));
+    lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
   }
   await save(project_id, p);
   return text(`${lines.join('\n')}\n\n${summary(project_id, p)}`);
