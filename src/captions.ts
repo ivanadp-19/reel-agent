@@ -117,3 +117,13 @@ export function focusSpans(pages: Caption[], holdMs: number, leadMs = 120): {sta
   });
   return out;
 }
+
+// Impact II: the footage punches in on the hero word and pulses on each key word (timeline ms)
+export function tierSpans(pages: Caption[], tier: number, holdMs: number, maxMs = Infinity): {startMs: number; endMs: number}[] {
+  const out: {startMs: number; endMs: number}[] = [];
+  pages.forEach((c, i) => {
+    const visEnd = Math.min(pages[i + 1]?.startMs ?? Infinity, c.endMs + holdMs, c.holdMaxMs ?? Infinity);
+    for (const w of c.words) if (w.tier === tier) out.push({startMs: w.startMs, endMs: Math.min(visEnd, w.startMs + maxMs)});
+  });
+  return out;
+}

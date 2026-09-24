@@ -2,7 +2,7 @@ import React from 'react';
 import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVideoConfig, useCurrentFrame, interpolate, getRemotionEnvironment} from 'remotion';
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
-import {focusSpans, hideUnder, projectCaptions, type Caption} from './captions';
+import {focusSpans, hideUnder, projectCaptions, tierSpans, type Caption} from './captions';
 import {presetOf} from './captionPresets';
 import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
@@ -12,31 +12,56 @@ import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
 import {gradeFor, type ProjectGrade} from './grade';
-import {OVERLAP, REVEALS, WHOOSH, type Enter} from './transitions';
+import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, type Enter, type Tone} from './transitions';
 import {ms as msToFrames} from './motion';
 
 // Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
 // screen) while a tier-2 caption word or a B-roll card is up — Captions.ai
 // Prism's signature. The same wrapper lands the reel's opening: a radial
 // zoom-blur (or a plain blur-in) clearing over the first ~200 ms.
-const FocusPull: React.FC<{spans: {startMs: number; endMs: number}[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', children}) => {
-  const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
-  const ms = (frame / fps) * 1000;
-  const IN = 150, OUT = 240; // the blur is gone by the time the span ends (the next page lands sharp)
+type Span = {startMs: number; endMs: number};
+const smooth = (x: number) => x * x * (3 - 2 * x);
+// 0→1 inside a span with ramps at both ends (ms)
+const inSpans = (ms: number, spans: Span[], IN: number, OUT: number) => {
   let k = 0;
   for (const s of spans) {
     if (ms < s.startMs || ms > s.endMs) continue;
-    const v = Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1);
-    k = Math.max(k, Math.min(1, Math.max(0, v)));
+    k = Math.max(k, Math.min(1, Math.max(0, Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1))));
   }
-  const smooth = (x: number) => x * x * (3 - 2 * x);
-  k = smooth(k);
+  return smooth(k);
+};
+const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', punch, pulses = [], children}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const ms = (frame / fps) * 1000;
+  const k = inSpans(ms, spans, 150, 240); // the blur is gone by the time the span ends (the next page lands sharp)
   const openF = msToFrames(fps, 210);
   const o = opening !== 'none' && frame < openF ? 1 - smooth(frame / openF) : 0; // 1 at the first frame, gone by ~200 ms
-  const blur = Math.max(k * blurPx, o * 24);
-  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0);
-  return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)`, transform: `scale(${scale.toFixed(3)})`} : undefined}>{children}</AbsoluteFill>;
+  const p = punch ? inSpans(ms, punch.spans, 125, 125) : 0; // Impact II: 1.12× in 3–4 f on the hero word
+  const g = pulses.length ? inSpans(ms, pulses, 125, 125) : 0; // Impact II: a 250 ms blur + chromatic pulse
+  const blur = Math.max(k * blurPx, o * 24, g * 14);
+  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0) + (punch?.scale ?? 0) * p + 0.04 * g;
+  const split = g > 0.05 ? ` drop-shadow(${(6 * g).toFixed(1)}px 0 rgba(255,0,90,0.7)) drop-shadow(${(-6 * g).toFixed(1)}px 0 rgba(0,220,255,0.7))` : '';
+  return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)${split}`, transform: `scale(${scale.toFixed(3)})`, transformOrigin: '50% 38%'} : undefined}>{children}</AbsoluteFill>;
+};
+
+// Cover transitions: shapes drawn over the cut (above footage and B-roll, below graphics and captions)
+const shade = (hex: string, k: number) => { const n = parseInt(hex.replace('#', ''), 16); if (Number.isNaN(n) || hex.length !== 7) return hex; const c = (v: number) => Math.round(Math.min(255, Math.max(0, v * k))).toString(16).padStart(2, '0'); return `#${c(n >> 16)}${c((n >> 8) & 255)}${c(n & 255)}`; };
+const toneColor = (tone: Tone | undefined, accent: string) => tone === 'deep' ? shade(accent, 0.72) : tone === 'dark' ? shade(accent, 0.45) : tone === 'white' ? '#ffffff' : tone === 'light' ? '#E9E8E2' : accent;
+const TransitionOverlay: React.FC<{cuts: {frame: number; kind: Enter; seed: number}[]; accent: string}> = ({cuts, accent}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const shapes: React.ReactNode[] = [];
+  for (const cut of cuts) {
+    const half = Math.max(1, Math.round((fps * (DUR_MS[cut.kind] ?? 250)) / 2000));
+    if (frame < cut.frame - half || frame > cut.frame + half) continue;
+    const t = (frame - (cut.frame - half)) / (2 * half);
+    coverShapes(cut.kind, t, cut.seed).forEach((sh, i) => {
+      if ((sh.opacity ?? 1) <= 0.005) return;
+      shapes.push(<div key={`${cut.frame}-${i}`} style={{position: 'absolute', inset: 0, background: sh.gradient ?? toneColor(sh.tone, accent), clipPath: sh.clip, opacity: sh.opacity ?? 1, mixBlendMode: sh.screen ? 'screen' : undefined}} />);
+    });
+  }
+  return shapes.length ? <AbsoluteFill style={{pointerEvents: 'none'}}>{shapes}</AbsoluteFill> : null;
 };
 
 // Music layer: start offset, volume, optional end fade-out, and optional
@@ -103,6 +128,13 @@ export const MultiClipVideo: React.FC<{
   const focus = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
   // a B-roll card sits over blurred footage whatever the pack
   const cards = projectedBrolls.filter((b) => b.mode === 'card').map((b) => ({startMs: b.startMs, endMs: b.endMs}));
+  const punch = preset.heroPunch ? {spans: tierSpans(shownCaptions, 2, preset.holdMs), scale: preset.heroPunch} : undefined;
+  const pulses = preset.glitchPulse ? tierSpans(shownCaptions, 1, preset.holdMs, 250) : [];
+  // cover transitions on clips and on B-roll cues
+  const cuts = [
+    ...placed.filter(({clip}, i) => i > 0 && COVER.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({frame: fromFrame, kind: clip.enter as Enter, seed: seedOf(clip.id)})),
+    ...projectedBrolls.filter((b) => b.enter && COVER.has(b.enter)).map((b) => ({frame: Math.round((b.startMs / 1000) * fps), kind: b.enter as Enter, seed: seedOf(b.id)})),
+  ];
 
   // OffthreadVideo is built for rendering (frame-accurate, but stutters/freezes
   // in the live Player). Use native <Video> in preview for smooth playback,
@@ -115,15 +147,15 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
-      <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening}>
-      {/* a clip entered with a card / split reveal shows under the outgoing one: it starts OVERLAP frames early, drawn first */}
+      <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening} punch={punch} pulses={pulses}>
+      {/* a clip entered with a reveal shows under the outgoing one: it starts its overlap early, drawn first, with its own incoming effect */}
       {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
-        const early = Math.min(OVERLAP, fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
+        const early = Math.min(overlapOf(clip.enter as Enter, fps), fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
         if (early <= 0) return null;
-        const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), enter: undefined, muted: true};
+        const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
         return (
           <Sequence key={`${clip.id}-pre`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (under the reveal)`}>
-            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} />
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
           </Sequence>
         );
       })}
@@ -140,6 +172,17 @@ export const MultiClipVideo: React.FC<{
           <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
         </Sequence>
       ))}
+      {/* a cardDrop lands ON TOP of the outgoing clip: its pre-roll is drawn last */}
+      {placed.filter(({clip}) => OVER.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
+        const early = Math.min(overlapOf(clip.enter as Enter, fps), fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
+        if (early <= 0) return null;
+        const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
+        return (
+          <Sequence key={`${clip.id}-over`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (landing)`}>
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
+          </Sequence>
+        );
+      })}
       </FocusPull>
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
@@ -151,6 +194,8 @@ export const MultiClipVideo: React.FC<{
       <FocusPull spans={focus} blurPx={preset.focusPull}>
         <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
       </FocusPull>
+      {/* cover transitions: flashes, bands, discs, mosaics… over the cut */}
+      <TransitionOverlay cuts={cuts} accent={accentColor} />
 
       {/* motion graphics: headlines, labels, stats (in front of the presenter) */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />
@@ -160,7 +205,7 @@ export const MultiClipVideo: React.FC<{
 
       {/* sound effects (synthesized, public/sfx): a whoosh on whip / zoom / card / split cuts, a pop on stickers */}
       {audio?.sfx ? [
-        ...placed.filter(({clip}) => WHOOSH.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({key: clip.id, from: fromFrame - (REVEALS.has(clip.enter as Enter) ? OVERLAP : 3)})),
+        ...placed.filter(({clip}) => WHOOSH.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({key: clip.id, from: fromFrame - (overlapOf(clip.enter as Enter, fps) || 3)})),
         ...projectedBrolls.filter((b) => b.enter && WHOOSH.has(b.enter)).map((b) => ({key: b.id, from: Math.round((b.startMs / 1000) * fps) - 3})),
       ].map(({key, from}) => (
         <Sequence key={`sfx-${key}`} from={Math.max(0, from)} durationInFrames={Math.round(fps * 0.6)} layout="none" name="sfx whoosh">

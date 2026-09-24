@@ -57,6 +57,8 @@ export type Preset = {
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
   opening: 'none' | 'zoomBlur' | 'blurIn'; // the reel's first ~200 ms: a radial zoom-blur landing (Prism, Stack, Impact) or a plain blur-in (Prime)
+  heroPunch: number; // extra scale on the footage while a tier-2 word is up, 3–4 f in (Impact II: 0.12; 0 = off)
+  glitchPulse: boolean; // a 250 ms blur + chromatic pulse on the footage at each tier-1 word (Impact II)
   tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
   layout: {maxWords: number; maxCharsLine: number};
 };
@@ -80,6 +82,8 @@ const base = {
   autoScale: false,
   focusPull: 0,
   opening: 'none',
+  heroPunch: 0,
+  glitchPulse: false,
   tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.15}},
   layout: {maxWords: 6, maxCharsLine: 26},
 } satisfies Omit<Preset, 'id' | 'label' | 'desc' | 'font'>;
@@ -267,6 +271,8 @@ export const PRESETS: Record<string, Preset> = {
     pageOut: 'cut',
     keyIn: 'blur',
     opening: 'zoomBlur',
+    heroPunch: 0.12,
+    glitchPulse: true,
     tiers: {1: {scale: 1.25}, 2: {scale: 1.6}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },
