@@ -142,7 +142,8 @@ export const TEMPLATES = {
     desc: 'map pin + place name in a glass pill, optional second line (city, neighborhood, venue)',
     defaultMs: 2400,
     y: 66,
-    schema: z.object({place: short(28), sub: z.string().trim().max(28).default('')}),
+    // `text` is what agents reach for first (run 7): accept it as the place
+    schema: z.preprocess((v) => (v && typeof v === 'object' && !('place' in v) && 'text' in (v as object) ? {...(v as object), place: (v as any).text} : v), z.object({place: short(28), sub: z.string().trim().max(28).default('')})),
   },
   // price with its label: "DESDE / $2.5M / MXN · preventa"
   price: {

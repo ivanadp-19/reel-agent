@@ -121,3 +121,9 @@ test('end-card: defaults, full frame; captions under it are hidden, a page runni
   const r = hideUnder([page('c0', 1000, 2000), page('c1', 7000, 8500), page('c2', 8600, 9000)], [{startMs: 8000, endMs: 10000}]);
   assert.deepEqual(r.map((c) => [c.id, c.endMs, c.holdMaxMs]), [['c0', 2000, 99999], ['c1', 8000, 8000]]);
 });
+
+test('location-tag accepts text as an alias of place', async () => {
+  const {parseProps: pp} = await import('../src/graphicTemplates.ts');
+  assert.equal(pp('location-tag', {text: 'Norte de Mérida'}).place, 'Norte de Mérida');
+  assert.equal(pp('location-tag', {place: 'Mérida', text: 'ignored'}).place, 'Mérida');
+});
