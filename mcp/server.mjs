@@ -376,7 +376,7 @@ server.registerTool('cut_words', {description: 'Remove speech by word id: from_w
   return text(`${lines.join('\n')}\n\n${summary(project_id, p)}`);
 });
 
-server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, by word id (nothing is cut): retakes — an attempt the speaker said again; the kept take is the last complete one —, off-mic lines, meta talk ("sorry", "say it again", "otra vez", "corta") and fillers (um, uh, eh, mmm, "you know", "o sea"; "este"/"like" only between pauses). Review the list against the transcript, drop what should stay, then pass the rest to cut_words ranges in one call.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, by word id (nothing is cut): retakes — a line the speaker said more than once, including the quiet read-through she does before performing it; the kept take is the LAST complete one (rehearsal first, take last), attempts are whole sentences even when said with a pause inside —, off-mic lines, meta talk ("sorry", "say it again", "otra vez", "corta") and fillers (um, uh, eh, mmm, "you know", "o sea"; "este"/"like" only between pauses). Review the list against the transcript, drop what should stay, then pass the rest to cut_words ranges in one call.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const tr = await transcript(p);
   const cands = findCutCandidates(tr.map((t) => ({clipId: t.clipId, source: t.source, words: t.words})));

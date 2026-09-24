@@ -49,3 +49,43 @@ test('autocut plans a piece of a take from its own words only (run 6: 11 pieces 
   assert.ok(piece[0].inSec >= 8.5 && piece[0].outSec <= 10.5, JSON.stringify(piece));
   assert.deepEqual(speechSegments(words, {inSec: 2.5, outSec: 4.5}), []); // silence only
 });
+
+// words from [text, gapBeforeMs] pairs: 250 ms per word, 300 ms between words, the given gap before each phrase
+function seq(phrases, off = () => false) {
+  const words = [];
+  let t = 0, i = 0;
+  phrases.forEach(([p, gap], k) => {
+    t += gap;
+    for (const w of p.split(' ')) { words.push({i: i++, word: w, startMs: t, endMs: t + 250, ...(off(k) ? {off: true} : {})}); t += 300; }
+  });
+  return {clipId: 'c', source: 'S', words};
+}
+
+test('a rehearsal read in one breath loses to the real take said with a pause inside it (VIBEM 02 hook)', () => {
+  // she reads the line quietly first, then performs it with a 1.9 s pause after "cava,"
+  const c = seq([['¿Cuántos edificios en Mérida te dan tu propia cava?', 0], ['Tu propia cava, un salón para eventos privados y un skywalk.', 900], ['Tu propia cava,', 1300], ['Un salón de eventos privados y un sky bar.', 1900]]);
+  const out = findCutCandidates([c]);
+  assert.deepEqual(brief(out), ['retake Tu propia cava, un salón para eventos privados y un skywalk.']);
+  assert.equal(out[0].keep.text, 'Tu propia cava, Un salón de eventos privados y un sky bar.');
+});
+
+test('a fragment that only repeats the END of an earlier sentence is not its retake', () => {
+  const c = seq([['¿Cuántos edificios en Mérida te dan tu propia cava?', 0], ['Tu propia cava.', 1300]]);
+  assert.deepEqual(brief(findCutCandidates([c])), []);
+});
+
+test('a two-word false start before the full line goes; the full line stays (VIBEM 02 close)', () => {
+  const c = seq([['Montalban 326.', 0], ['Montalban 326, 54 departamentos en preventa al norte de Mérida.', 400], ['Escríbeme y te enseño el proyecto completo.', 400]]);
+  assert.deepEqual(brief(findCutCandidates([c])), ['retake Montalban 326. (false start)']);
+});
+
+test('Spanish direction talk is meta: te lo repito, vamos a grabar, a cuadro, no leí, dos veces', () => {
+  const c = seq([['No leí que decía que decía.', 0], ['Ahorita te lo repito.', 400], ['Este sí te vamos a grabar a cuadro.', 400], ['Aquí vamos a grabar dos veces este', 400]]);
+  assert.deepEqual(brief(findCutCandidates([c])).filter((x) => x.startsWith('meta')), ['meta No leí que decía que decía.', 'meta Ahorita te lo repito.', 'meta Este sí te vamos a grabar a cuadro.', 'meta Aquí vamos a grabar dos veces este']);
+});
+
+test('a take split by a short pause is one attempt: "Y" + "si necesitas…" beats the quiet read of the same line', () => {
+  const c = seq([['Contra, barra, cocina', 0], ['y despensa.', 1000], ['Y si necesitas chef o mesero, aquí mismo te los conseguimos.', 100], ['Tiene barra, contra, barra,', 900], ['cocina y despensa.', 300], ['Y', 0], ['si necesitas chef o mesero, aquí mismo te los conseguimos.', 500]]);
+  const out = brief(findCutCandidates([c]));
+  assert.deepEqual(out, ['retake Contra, barra, cocina y despensa.', 'retake Y si necesitas chef o mesero, aquí mismo te los conseguimos.']);
+});

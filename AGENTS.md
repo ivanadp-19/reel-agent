@@ -15,7 +15,7 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `mcp/assets.mjs` — decorative assets: `search_asset` (Iconify, Fluent Emoji 3D, Openverse) and `generate_asset` (OpenAI Images, transparent PNG); downloads land in `public/assets/` and are indexed in `public/assets/library.json` (the machine's own library; `list_assets` browses it, searches hit it first, generation reuses same-idea results)
 - `src/brand.ts` — brand kit (client colors, OFL fonts, logo) that captions, templates and canvases read through `BrandContext`; the agent sets it with `set_brand`, kits are reusable from `public/brands/`
 - `scripts/run-report.mjs` — metrics of a headless agent run (duration, off-mic left, cuts by seconds, schema rejections, validate warnings, turns, cost)
-- `src/cuts.ts` — cut candidates by word id (retakes, off-mic, meta talk, fillers ES/EN); the agent approves them with `cut_words ranges`
+- `src/cuts.ts` — cut candidates by word id (retakes incl. the quiet read-through before a take — attempts are sentences, the last one wins; off-mic, meta talk ES/EN, fillers); the agent approves them with `cut_words ranges`. Why the last take and what the others do: `research/retakes.md`
 - `src/grade.ts` + `scripts/grade.mjs` — color: bounded per-source correction from signalstats + named looks, applied at render as an SVG filter (`set_grade`); `src/hdr.ts` — HLG/PQ → SDR LUT used at ingest
 - `scripts/qc.mjs` — optional voice cleanup (ffmpeg afftdn, no models), two-pass loudnorm (−14 LUFS, ≤ −1 dBTP) and the QC gate every final render passes
 - `mcp/music.mjs` — music with clean licenses (Openverse audio, CC0 / CC BY) downloaded into `public/music/` with its credit line (`search_music`, `set_music music_id`)

@@ -2,10 +2,14 @@
 // deterministically from the word-level transcript. The agent reviews them and
 // approves each with cut_words; nothing is cut here.
 //   filler   — hesitations (um, uh, eh, mmm; "you know", "o sea"; "este" only between pauses)
-//   meta     — talk about the recording ("sorry", "say it again", "otra vez", "corta")
-//   retake   — an attempt the speaker said again; the kept take is the last complete one
+//   meta     — talk about the recording ("sorry", "say it again", "otra vez", "te lo repito", "a cuadro")
+//   retake   — an attempt the speaker said again; the kept take is the LAST complete one (a
+//              presenter reads the line to herself, then performs it: rehearsal first, take last —
+//              the same prior Descript's Remove Retakes and TimeBolt use)
 //   off-mic  — a second, quieter voice (see speech.ts) that is not part of a retake cluster
-// Pure: no fs. Words carry source-relative ms and their index in the source transcript.
+// An attempt is a sentence, not a breath: runs that pause without ending the sentence are joined
+// (up to JOIN_MS), so a take said with a pause in it competes whole against a rehearsal read in
+// one breath. Pure: no fs. Words carry source-relative ms and their index in the source transcript.
 
 export type TWord = {i: number; word: string; startMs: number; endMs: number; off?: boolean};
 export type TClip = {clipId: string; source: string; words: TWord[]};
@@ -17,7 +21,10 @@ const SENT_END = /[.!?]["')\]]*$/;
 const FILLERS = new Set(['um', 'umm', 'uh', 'uhm', 'uhh', 'er', 'erm', 'ah', 'ahh', 'hmm', 'hm', 'mm', 'mmm', 'mhm', 'eh', 'ehh', 'em', 'emm', 'eeh', 'mmmm']);
 const FILLER_PAIRS = new Set(['you know', 'i mean', 'o sea', 'es decir', 'o sease']);
 const PAUSED_FILLERS = new Set(['este', 'pues', 'like', 'so', 'okay', 'ok', 'bueno']); // only when isolated by pauses
-const META = [/\bsorry\b/, /\bsay it again\b/, /\bone more time\b/, /\blet me (start|try) (over|again)\b/, /\b(start|try) (over|again)\b/, /\bwait\b/, /\boh my god\b/, /\bclose\b$/, /\bperdon\b/, /\botra vez\b/, /\bde nuevo\b/, /\bcorta\b/, /\bespera\b/, /\bme equivoque\b/, /\bno me sale\b/];
+const META = [/\bsorry\b/, /\bsay it again\b/, /\bone more time\b/, /\blet me (start|try) (over|again)\b/, /\b(start|try) (over|again)\b/, /\bwait\b/, /\boh my god\b/, /\bclose\b$/, /\bfrom the top\b/, /\btake two\b/, /\brolling\b/,
+  /\bperdon\b/, /\botra vez\b/, /\bde nuevo\b/, /\bcorta\b/, /\bespera\b/, /\bme equivoque\b/, /\bno me sale\b/, /\brepito\b/, /\bvamos a grabar\b/, /\ba cuadro\b/, /\bno lei\b/, /\bdos veces\b/, /\bdesde el principio\b/, /\bla ultima\b/];
+const META_MAX = 10; // tokens: direction talk is short
+const JOIN_MS = 2500; // a pause up to this long inside a sentence does not end the attempt
 
 // longest common subsequence length of two token lists
 function lcs(a: string[], b: string[]): number {
@@ -32,16 +39,18 @@ function lcs(a: string[], b: string[]): number {
   }
   return dp[b.length];
 }
-// same attempt said twice: most of the longer one, or nearly all of a shorter (≥ 3 words) false start
+// the same attempt said twice: most of the longer one repeats — or `a`, said EARLIER, is a false start
+// of `b`: at least two words, shorter, and nearly all of it opens `b` (a suffix or a phrase merely
+// contained in an earlier sentence is not a retake: "…tu propia cava?" / "Tu propia cava, …")
 export function similar(a: string[], b: string[]): boolean {
   if (!a.length || !b.length) return false;
-  const l = lcs(a, b);
-  const short = Math.min(a.length, b.length);
-  return l / Math.max(a.length, b.length) >= 0.6 || (short >= 3 && l / short >= 0.75);
+  if (lcs(a, b) / Math.max(a.length, b.length) >= 0.6) return true;
+  return a.length >= 2 && a.length < b.length && lcs(a, b.slice(0, a.length + 2)) / a.length >= 0.75;
 }
 
 type Run = {clip: TClip; words: TWord[]; tokens: string[]; off: boolean; complete: boolean};
-// attempts: words between sentence ends or pauses longer than gapMs
+const isMeta = (r: Run) => r.tokens.length <= META_MAX && META.some((re) => re.test(r.tokens.join(' ')));
+// attempts: words between sentence ends or pauses longer than gapMs…
 function runsOf(clip: TClip, gapMs: number): Run[] {
   const runs: Run[] = [];
   let cur: TWord[] = [];
@@ -59,6 +68,21 @@ function runsOf(clip: TClip, gapMs: number): Run[] {
   push();
   return runs;
 }
+// …joined into sentences: a run that pauses without ending its sentence continues into the next one
+// (same voice, gap ≤ JOIN_MS, neither is direction talk)
+function attemptsOf(clip: TClip, gapMs: number): Run[] {
+  const out: Run[] = [];
+  for (const r of runsOf(clip, gapMs)) {
+    const last = out[out.length - 1];
+    const gap = last ? r.words[0].startMs - last.words[last.words.length - 1].endMs : Infinity;
+    if (last && !last.complete && last.off === r.off && gap <= JOIN_MS && !isMeta(last) && !isMeta(r)) {
+      last.words = [...last.words, ...r.words];
+      last.tokens = [...last.tokens, ...r.tokens];
+      last.complete = r.complete;
+    } else out.push({...r});
+  }
+  return out;
+}
 
 const wid = (r: Run, w: TWord) => `${r.clip.source}:${w.i}`;
 const text = (ws: TWord[]) => ws.map((w) => w.word).join(' ');
@@ -67,13 +91,12 @@ export function findCutCandidates(clips: TClip[], opts: {gapMs?: number; windowM
   const gapMs = opts.gapMs ?? 700;
   const windowMs = opts.windowMs ?? 30000;
   const out: Candidate[] = [];
-  const runs = clips.flatMap((c) => runsOf(c, gapMs));
+  const runs = clips.flatMap((c) => attemptsOf(c, gapMs));
   const cut = new Set<Run>();
 
   // meta talk: a short attempt about the recording itself
   for (const r of runs) {
-    const t = r.tokens.join(' ');
-    if (r.tokens.length <= 8 && META.some((re) => re.test(t))) {
+    if (isMeta(r)) {
       out.push({kind: 'meta', clipId: r.clip.clipId, from: wid(r, r.words[0]), to: wid(r, r.words[r.words.length - 1]), text: text(r.words)});
       cut.add(r);
     }
@@ -88,15 +111,18 @@ export function findCutCandidates(clips: TClip[], opts: {gapMs?: number; windowM
   }
   for (const cl of clusters) {
     if (cl.length < 2) continue;
-    // keep: the last complete take by the on-mic voice that is close to the longest one
+    // keep: the LAST take by the on-mic voice that says the whole line — complete and close to the
+    // longest; failing that, the last one that says most of it; failing that, the last one. Never the
+    // longest for its own sake: a rehearsal read in one breath is often the longest run
     const own = cl.filter((r) => !r.off);
     const pool = own.length ? own : cl;
     const longest = Math.max(...pool.map((r) => r.tokens.length));
     const good = pool.filter((r) => r.complete && r.tokens.length >= 0.8 * longest);
-    const keep = (good.length ? good : pool.filter((r) => r.tokens.length === longest)).at(-1)!;
+    const most = pool.filter((r) => r.tokens.length >= 0.6 * longest);
+    const keep = (good.length ? good : most.length ? most : pool).at(-1)!;
     for (const r of cl) {
       if (r === keep) continue;
-      out.push({kind: 'retake', clipId: r.clip.clipId, from: wid(r, r.words[0]), to: wid(r, r.words[r.words.length - 1]), text: text(r.words), keep: {from: wid(keep, keep.words[0]), text: text(keep.words)}, note: r.off ? 'off-mic voice' : r.tokens.length < keep.tokens.length ? 'false start' : undefined});
+      out.push({kind: 'retake', clipId: r.clip.clipId, from: wid(r, r.words[0]), to: wid(r, r.words[r.words.length - 1]), text: text(r.words), keep: {from: wid(keep, keep.words[0]), text: text(keep.words)}, note: r.off ? 'off-mic voice' : r.tokens.length < 0.7 * keep.tokens.length ? 'false start' : undefined}); // a near-full repeat is just a retake
       cut.add(r);
     }
   }
