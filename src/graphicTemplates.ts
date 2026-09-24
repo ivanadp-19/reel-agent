@@ -87,6 +87,20 @@ export const TEMPLATES = {
       font: z.enum(['script', 'serif-italic']).default('script'),
     }),
   },
+  // presenter framing for a span: the base video goes into a shaped frame over a canvas,
+  // optionally splitting the frame with the B-roll panel (Orbit, Focus, Lift, Evo, Bloom, Lens)
+  layout: {
+    desc: 'frame the presenter for a span: shape rounded|arch|circle|phone|none, canvas accent|dark|light|gradient, inset % margin, border none|thin|glass|accent, split none|broll-bottom|broll-top (B-roll cues in that span fill the other panel)',
+    defaultMs: 4000,
+    y: 0,
+    schema: z.object({
+      shape: z.enum(['rounded', 'arch', 'circle', 'phone', 'none']).default('rounded'),
+      canvas: z.enum(['accent', 'dark', 'light', 'gradient']).default('accent'),
+      inset: z.number().min(0).max(30).default(7),
+      border: z.enum(['none', 'thin', 'glass', 'accent']).default('none'),
+      split: z.enum(['none', 'broll-bottom', 'broll-top']).default('none'),
+    }),
+  },
   // a PNG/SVG asset (from search_asset / generate_asset) with a simple motion
   sticker: {
     desc: 'image asset (sticker, emoji, doodle, icon) placed at x/y with a pop/wiggle/float/spin motion',

@@ -3,7 +3,7 @@ import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVid
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {projectCaptions, type Caption} from './captions';
-import {GraphicsLayer} from './Graphics';
+import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
 import {placeClips, sampleTransform, totalDurationFrames, type Clip, type Music} from './timeline';
 
@@ -95,7 +95,9 @@ export const MultiClipVideo: React.FC<{
 
   return (
     <AbsoluteFill style={{backgroundColor: 'black'}}>
-      {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan */}
+      {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
+          layout graphic frames it over a canvas for its span */}
+      <LayoutStage items={projectedGraphics} accentColor={accentColor}>
       {placed.map(({clip, fromFrame, durFrames}) => (
         <Sequence
           key={clip.id}
@@ -109,9 +111,10 @@ export const MultiClipVideo: React.FC<{
           <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} />
         </Sequence>
       ))}
+      </LayoutStage>
 
       {/* B-roll overlay (above clips, below captions) */}
-      <BrollLayer items={projectedBrolls} />
+      <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
 
       {/* motion graphics: headlines, labels, stats */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />

@@ -20,3 +20,4 @@ test('a graphic follows its source through an autocut and is clipped at the cut'
   assert.equal(proj[0].startMs, 1000);
   assert.equal(proj[0].endMs, 2000);
 });
+

@@ -220,12 +220,63 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   );
 };
 
+// ---- layouts: frame the base video ----
+export type Box = {top: number; left: number; width: number; height: number}; // % of frame
+
+// the layout active at the current frame (projected graphics of template 'layout')
+export const useActiveLayout = (items: Graphic[]): Graphic | null => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const ms = (frame / fps) * 1000;
+  return items.find((g) => g.template === 'layout' && ms >= g.startMs && ms < g.endMs) ?? null;
+};
+
+// where the video and the B-roll panel go for a layout
+export const layoutBoxes = (props: any): {video: Box; panel: Box | null} => {
+  const m = props.inset ?? 7;
+  const full = {top: m, left: m, width: 100 - 2 * m, height: 100 - 2 * m};
+  if (props.split === 'broll-bottom') return {video: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}, panel: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}};
+  if (props.split === 'broll-top') return {video: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}, panel: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}};
+  // a true circle: equal pixels, so height% = width% × (1080/1920)
+  if (props.shape === 'circle') { const d = Math.min(full.width, full.height * (16 / 9)); return {video: {top: 50 - (d * 9) / 16 / 2, left: 50 - d / 2, width: d, height: (d * 9) / 16}, panel: null}; }
+  return {video: full, panel: null};
+};
+
+const SHAPE_RADIUS: Record<string, string> = {rounded: '36px', arch: '50% 50% 28px 28px / 42% 42% 28px 28px', circle: '50%', phone: '64px', none: '0'};
+const BORDER: Record<string, string> = {none: 'none', thin: '3px solid rgba(255,255,255,0.85)', glass: '1.5px solid rgba(255,255,255,0.35)', accent: '6px solid var(--accent)'};
+
+// wraps the clip layer: canvas behind, the clips inside a shaped, inset frame
+export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; children: React.ReactNode}> = ({items, accentColor, children}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const active = useActiveLayout(items);
+  if (!active) return <>{children}</>;
+  const p: any = active.props;
+  const {video} = layoutBoxes(p);
+  // ease the frame in from full-bleed over ~8 frames at the layout start
+  const startF = Math.round((active.startMs / 1000) * fps);
+  const a = interpolate(frame - startF, [0, 8], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: outCubic});
+  const box = {top: video.top * a, left: video.left * a, width: 100 - (100 - video.width) * a, height: 100 - (100 - video.height) * a};
+  const canvas =
+    p.canvas === 'dark' ? '#0b0b0d'
+    : p.canvas === 'light' ? '#f3f3f0'
+    : p.canvas === 'gradient' ? `linear-gradient(160deg, ${accentColor} 0%, #ffffff 140%)`
+    : accentColor;
+  return (
+    <div style={{position: 'absolute', inset: 0, background: canvas, ['--accent' as any]: accentColor}}>
+      <div style={{position: 'absolute', top: `${box.top}%`, left: `${box.left}%`, width: `${box.width}%`, height: `${box.height}%`, overflow: 'hidden', borderRadius: SHAPE_RADIUS[p.shape] ?? '0', border: BORDER[p.border] ?? 'none', boxSizing: 'border-box', boxShadow: p.canvas === 'light' ? '0 20px 60px rgba(0,0,0,0.18)' : '0 24px 70px rgba(0,0,0,0.45)'}}>
+        <div style={{position: 'absolute', inset: 0, width: '100%', height: '100%'}}>{children}</div>
+      </div>
+    </div>
+  );
+};
+
 export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string}> = ({items, accentColor}) => {
   const {fps} = useVideoConfig();
   if (!items?.length) return null;
   return (
     <>
-      {items.map((g) => {
+      {items.filter((g) => g.template !== 'layout').map((g) => {
         const from = Math.round((g.startMs / 1000) * fps);
         const dur = Math.max(1, Math.round(((g.endMs - g.startMs) / 1000) * fps));
         return (

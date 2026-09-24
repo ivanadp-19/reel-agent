@@ -1,6 +1,8 @@
 import React from 'react';
 import {Sequence, OffthreadVideo, Video, Img, staticFile, useVideoConfig, interpolate, useCurrentFrame, getRemotionEnvironment} from 'remotion';
 import {placeClips, type Clip} from './timeline';
+import {layoutBoxes, useActiveLayout} from './Graphics';
+import type {Graphic} from './graphicTemplates';
 
 export type BrollItem = {
   id: string;
@@ -52,11 +54,14 @@ const boxByMode: Record<BrollItem['mode'], React.CSSProperties> = {
   inset: {top: '6%', right: '5%', width: '34%', height: '22%', borderRadius: 18, overflow: 'hidden', border: '3px solid rgba(255,255,255,0.9)', boxShadow: '0 20px 50px rgba(0,0,0,0.5)'},
 };
 
-const One: React.FC<{item: BrollItem}> = ({item}) => {
+const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null}> = ({item, panel}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const fade = interpolate(frame, [0, Math.round(fps * 0.18)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
-  const box = item.mode === 'inset' ? boxByMode.inset : item.mode === 'top' ? boxByMode.top : boxByMode.fullscreen;
+  // a split layout owns the B-roll: it fills the panel, whatever the cue's mode
+  const box: React.CSSProperties = panel
+    ? {top: `${panel.top}%`, left: `${panel.left}%`, width: `${panel.width}%`, height: `${panel.height}%`, borderRadius: 36, overflow: 'hidden'}
+    : item.mode === 'inset' ? boxByMode.inset : item.mode === 'top' ? boxByMode.top : boxByMode.fullscreen;
   const VideoComp = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
   const src = resolveSrc(item.src);
   const scale = item.scale ?? 1;
@@ -74,8 +79,10 @@ const One: React.FC<{item: BrollItem}> = ({item}) => {
   );
 };
 
-export const BrollLayer: React.FC<{items: BrollItem[]}> = ({items}) => {
+export const BrollLayer: React.FC<{items: BrollItem[]; layouts?: Graphic[]}> = ({items, layouts = []}) => {
   const {fps} = useVideoConfig();
+  const active = useActiveLayout(layouts);
+  const panel = active ? layoutBoxes(active.props).panel : null;
   if (!items?.length) return null;
   return (
     <>
@@ -84,7 +91,7 @@ export const BrollLayer: React.FC<{items: BrollItem[]}> = ({items}) => {
         const dur = Math.max(1, Math.round(((b.endMs - b.startMs) / 1000) * fps));
         return (
           <Sequence key={b.id} from={from} durationInFrames={dur} layout="none" name={`broll: ${b.query ?? b.id}`}>
-            <One item={b} />
+            <One item={b} panel={panel} />
           </Sequence>
         );
       })}
