@@ -26,3 +26,14 @@ test('fitSize: short text keeps its size; long or wide-font text shrinks to the 
   assert.ok(fitSize('BIGGEST LIE', 180, 'Unbounded') < fitSize('BIGGEST LIE', 180, 'Anton'));
   assert.equal(fitSize('a very long label that will not fit', 72, 'Montserrat', 940, 52), 52); // floor
 });
+
+import {legible, luminance} from '../src/brand.ts';
+
+test('legible lightens a dark brand accent for text and leaves bright ones alone', () => {
+  assert.equal(legible('#FFB020'), '#FFB020');
+  assert.equal(legible('#9FD9DC'), '#9FD9DC');
+  const blue = legible('#2F6BFF'); // run 4's brand blue, unreadable over a navy blouse
+  assert.notEqual(blue, '#2F6BFF');
+  assert.ok(luminance(blue) >= 0.3 && luminance(blue) < 0.45, `${blue} ${luminance(blue)}`);
+  assert.ok(parseInt(blue.slice(5, 7), 16) === 255, 'still blue');
+});

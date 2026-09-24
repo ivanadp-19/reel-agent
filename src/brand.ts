@@ -41,13 +41,29 @@ export function resolveBrand(brand: Brand | null | undefined, accentColor?: stri
   };
 }
 
+// relative luminance (WCAG) of a #rrggbb color; null when it is not one
+export function luminance(hex: string): number | null {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return null;
+  const lin = (h: string) => { const c = parseInt(h, 16) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
+}
 // readable text color on a background: near-black on light colors, white on dark
 export function ink(bg: string): string {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(bg);
-  if (!m) return '#fff';
-  const lin = (h: string) => { const c = parseInt(h, 16) / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
-  const L = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
-  return L > 0.4 ? '#111111' : '#ffffff';
+  const L = luminance(bg);
+  return L != null && L > 0.4 ? '#111111' : '#ffffff';
+}
+// the accent as TEXT over footage: a dark brand color (navy, deep blue) is mixed
+// toward white just enough to read (luminance ≥ 0.3); fills keep the exact color
+export function legible(accent: string): string {
+  const L = luminance(accent);
+  if (L == null || L >= 0.3) return accent;
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(accent.replace('#', '').slice(i - 1, i + 1), 16));
+  for (let t = 0.1; t <= 0.8; t += 0.1) {
+    const mix = [r, g, b].map((c) => Math.round(c + (255 - c) * t).toString(16).padStart(2, '0')).join('');
+    if ((luminance(`#${mix}`) ?? 0) >= 0.3) return `#${mix}`;
+  }
+  return '#ffffff';
 }
 
 export const BrandContext = createContext<Kit>(resolveBrand(null));

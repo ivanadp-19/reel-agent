@@ -3,7 +3,7 @@ import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} 
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, presetOf, type Preset, type TierStyle} from './captionPresets';
 import {emojiFamily, fontFamily} from './fonts';
-import {useBrand} from './brand';
+import {legible, useBrand} from './brand';
 
 export type {Caption} from './captions';
 
@@ -23,7 +23,7 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
   const color = boxed
     ? preset.colors.onAccent ?? '#000'
     : tier && (t.color ?? 'accent') === 'accent'
-      ? accent
+      ? legible(accent) // accent as text; pills/blocks below keep the exact color
       : preset.active === 'color' && !active
         ? preset.colors.dim
         : preset.colors.text;

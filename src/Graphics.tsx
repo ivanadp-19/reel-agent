@@ -2,7 +2,7 @@ import React from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
 import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, type Graphic} from './graphicTemplates';
 import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
-import {ink, useBrand} from './brand';
+import {ink, legible, useBrand} from './brand';
 import {fitSize, textWidthEm} from './textFit';
 
 // named faces the templates pick from (all in src/fonts.ts); a brand kit's
@@ -134,7 +134,7 @@ const BigWord: React.FC<{props: any; accent: string}> = ({props, accent}) => {
 // full-frame solid card with staggered lines; `grid` draws graph paper
 const KineticCard: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const kit = useBrand();
-  const bg = props.bg === 'dark' ? kit.dark : props.bg === 'light' ? kit.light : accent;
+  const bg = props.bg === 'dark' ? kit.dark : props.bg === 'light' ? kit.light : kit.accent;
   const fg = props.bg === 'light' ? '#111' : '#fff';
   const face = useFace(props.font, 'condensed');
   return (
@@ -232,7 +232,7 @@ const Starburst: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const d = STAR_PX[props.size] ?? STAR_PX.md;
   const pop = spring({frame, fps, config: {damping: 9, stiffness: 220, mass: 0.6}});
   const wiggle = Math.sin((frame / fps) * 7) * 2.5;
-  const bg = props.color === 'light' ? kit.light : props.color === 'dark' ? kit.dark : accent;
+  const bg = props.color === 'light' ? kit.light : props.color === 'dark' ? kit.dark : kit.accent;
   const text = String(props.text).toUpperCase();
   return (
     <div style={{width: d, height: d, position: 'relative', opacity: Math.min(1, pop * 2), transform: `rotate(${props.rotate + wiggle}deg) scale(${interpolate(pop, [0, 1], [0.2, 1])})`}}>
@@ -249,10 +249,11 @@ const LocationTag: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   const a = useReveal(0, 9);
   const b = useReveal(5, 9);
   const face = useFace('display');
+  const {accent: fill} = useBrand();
   return (
     <div style={{display: 'inline-flex', alignItems: 'center', gap: 24, padding: '18px 36px 18px 26px', borderRadius: 999, background: 'rgba(0,0,0,0.38)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1.5px solid rgba(255,255,255,0.3)', textShadow: 'none', ...blurIn(a)}}>
-      <div style={{width: 44, height: 44, flex: '0 0 auto', borderRadius: '50% 50% 50% 0', transform: 'rotate(-45deg)', background: accent, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
-        <div style={{width: 15, height: 15, borderRadius: '50%', background: ink(accent)}} />
+      <div style={{width: 44, height: 44, flex: '0 0 auto', borderRadius: '50% 50% 50% 0', transform: 'rotate(-45deg)', background: fill, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+        <div style={{width: 15, height: 15, borderRadius: '50%', background: ink(fill)}} />
       </div>
       <div style={{display: 'flex', flexDirection: 'column', alignItems: 'flex-start', textAlign: 'left'}}>
         <div style={{...face.style, fontSize: fitSize(props.place, 52, face.family, 700, 34), lineHeight: 1.08, color: '#fff', whiteSpace: 'nowrap'}}>{props.place}</div>
@@ -269,12 +270,13 @@ const Price: React.FC<{props: any; accent: string}> = ({props, accent}) => {
   const c = useReveal(3, 20);
   const b = useReveal(10, 8);
   const face = useFace('display');
+  const {accent: fill} = useBrand();
   return (
     <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10}}>
       {props.label ? <div style={{fontSize: 36, fontWeight: 700, letterSpacing: '0.3em', marginRight: '-0.3em', textTransform: 'uppercase', color: '#fff', ...blurIn(a)}}>{props.label}</div> : null}
       <div style={{position: 'relative', padding: '6px 34px'}}>
-        <div style={{position: 'absolute', inset: 0, background: accent, borderRadius: 16, transform: `scaleX(${bar})`, transformOrigin: 'left center', boxShadow: '0 12px 40px rgba(0,0,0,0.35)'}} />
-        <div style={{position: 'relative', ...face.style, fontSize: fitSize(props.value, 140, face.family, 860), lineHeight: 1.05, letterSpacing: -2, color: ink(accent), textShadow: 'none', whiteSpace: 'nowrap', opacity: bar}}>{props.countUp ? countUp(props.value, c) : props.value}</div>
+        <div style={{position: 'absolute', inset: 0, background: fill, borderRadius: 16, transform: `scaleX(${bar})`, transformOrigin: 'left center', boxShadow: '0 12px 40px rgba(0,0,0,0.35)'}} />
+        <div style={{position: 'relative', ...face.style, fontSize: fitSize(props.value, 140, face.family, 860), lineHeight: 1.05, letterSpacing: -2, color: ink(fill), textShadow: 'none', whiteSpace: 'nowrap', opacity: bar}}>{props.countUp ? countUp(props.value, c) : props.value}</div>
       </div>
       {props.note ? <div style={{fontSize: 34, fontWeight: 600, color: 'rgba(255,255,255,0.92)', whiteSpace: 'nowrap', ...blurIn(b)}}>{props.note}</div> : null}
     </div>
@@ -317,6 +319,9 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number}> = ({
   const fadeOut = outF > 0 ? interpolate(frame, [durationInFrames - outF, durationInFrames], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}) : 1;
   const Comp = COMPONENTS[g.template];
   const FONT = useFace('display').style.fontFamily;
+  // templates get the accent for TEXT (a dark brand color lightened to read over
+  // footage); fills (cards, bars, pins, bursts) take the exact kit color themselves
+  accent = legible(accent);
   if (!Comp) return null;
   if (g.template === 'kinetic-card') {
     // covers the whole frame (a cutaway), no text-block positioning
