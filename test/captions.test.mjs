@@ -97,3 +97,15 @@ test('pageScale: short pages render bigger only in auto-scale packs', () => {
   assert.equal(pageScale(PRESETS.prism, 5), 1);
   assert.equal(pageScale(PRESETS.focus, 1), 1);
 });
+
+import {hideUnder} from '../src/captions.ts';
+
+test('hideUnder: a page before the closing card cannot hold into it once the pages under the card are gone', () => {
+  const P = (id, a, b) => ({id, src: 's', words: [{text: id, startMs: a, endMs: b}], startMs: a, endMs: b, topPct: 58, holdMaxMs: 10000});
+  const pages = [P('c0', 1000, 2000), P('c1', 4000, 5000), P('c2', 5300, 6000)];
+  const shown = hideUnder(pages, [{startMs: 5200, endMs: 8000}]);
+  assert.deepEqual(shown.map((c) => c.id), ['c0', 'c1']); // c2 starts under the card
+  assert.equal(shown[1].holdMaxMs, 5200); // c1's hold stops where the card starts
+  assert.equal(shown[0].holdMaxMs, 5200); // (a cap earlier than the clip end is harmless)
+  assert.equal(shown[1].endMs, 5000); // it ended before the card: its own end is kept
+});

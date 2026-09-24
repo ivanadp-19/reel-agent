@@ -72,14 +72,16 @@ export function projectCaptions(captions: Caption[], clips: Clip[], fps: number)
 }
 
 // Pages under a closing card (projected, timeline ms spans): pages that start
-// under it are not shown, a page running into it ends where the card starts.
+// under it are not shown, a page running into it ends where the card starts,
+// and no earlier page may hold into it (the hidden pages no longer end the
+// hold of the one before them).
 export function hideUnder(pages: Caption[], spans: {startMs: number; endMs: number}[]): Caption[] {
   if (!spans.length) return pages;
   return pages
     .filter((c) => !spans.some((s) => c.startMs >= s.startMs && c.startMs < s.endMs))
     .map((c) => {
-      const s = spans.find((x) => c.startMs < x.startMs && c.endMs > x.startMs);
-      return s ? {...c, endMs: s.startMs, holdMaxMs: Math.min(c.holdMaxMs ?? Infinity, s.startMs)} : c;
+      const s = spans.find((x) => c.startMs < x.startMs && (c.holdMaxMs ?? Infinity) > x.startMs);
+      return s ? {...c, endMs: Math.min(c.endMs, s.startMs), holdMaxMs: Math.min(c.holdMaxMs ?? Infinity, s.startMs)} : c;
     });
 }
 
