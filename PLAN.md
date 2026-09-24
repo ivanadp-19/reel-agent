@@ -313,12 +313,11 @@ Las duraciones son orientativas. El plan de 4 semanas del juez MVP es optimista 
 
 ## Preguntas abiertas para ti
 
-_Respondidas el 2026-09-23 (ver "Decisiones ya tomadas"): proyecto open source Apache-2.0 para terceros y sin venta comercial; plataforma Instagram Reels; idiomas es-MX y en-US; LLM solo Claude Code o Codex, sin Gemini. Seguridad y concurrencia agente/UI deben cumplir el estándar de un proyecto que otros van a instalar._
+_Respondidas el 2026-09-23 (ver "Decisiones ya tomadas" y sección 8): proyecto open source Apache-2.0 para terceros y sin venta comercial; plataforma Instagram Reels; idiomas es-MX y en-US; LLM solo Claude Code o Codex, sin Gemini; referencias de estilo: 4 reels de bienes raíces. Seguridad y concurrencia agente/UI deben cumplir el estándar de un proyecto que otros van a instalar._
 
 1. **¿Aceptas GSAP/HyperFrames como sidecar opcional (fase 4), o prefieres solo Remotion?** GSAP es gratis pero no tiene licencia OSI, así que no se empaqueta; solo sería una dependencia opcional.
 2. **Calibración de Reels:** ¿puedes subir a Instagram un vídeo gris de prueba como borrador y sacar capturas? Con eso se miden las safe zones reales.
-3. **Referencias de estilo:** ¿3–5 creadores o reels que quieras igualar? Es la entrada principal para diseñar presets y templates.
-4. **Túnel:** en tu clon local de autobroll, `vite.config.ts` permite `.trycloudflare.com`. Si ese túnel sigue abierto, el backend sin autenticación está expuesto a internet. Ciérralo.
+3. **Túnel:** en tu clon local de autobroll, `vite.config.ts` permite `.trycloudflare.com`. Si ese túnel sigue abierto, el backend sin autenticación está expuesto a internet. Ciérralo.
 ---
 
 ## 7. Correcciones del critic (obligatorias antes de ejecutar)
@@ -369,3 +368,22 @@ El critic revisó esta síntesis contra la evidencia (detalle completo en `resea
   - Excluir los templates de tscaps luca, luna y milo (necesitan el frame dentro del DOM) y pastor (necesita segmentación), y las 11 recetas de open-edit que son solo 16:9.
   - Arreglar en la fase 2 el bug de arrange-clips que manda el transcript de la fuente completa después del autocut.
   - Revisar los términos de la API de Pexels.
+
+---
+
+## 8. Referencias de estilo y cambios al plan (2026-09-23)
+
+El usuario dio 4 reels de referencia, todos de **bienes raíces**. El análisis completo está en `research/style-references.md`. Esto reordena las prioridades:
+
+| Antes | Ahora |
+|---|---|
+| 8 presets de captions, estilo Hormozi incluido | **3 presets minimalistas**: `palabra` (una palabra centrada), `caja` (frase en caja oscura), `tracked` (mayúsculas pequeñas espaciadas). En estas referencias lo premium **no** está en los captions |
+| Motion graphics genéricos (lower third, notificación, CTA) | **Tipografía de titulares y etiquetas inmobiliarias**: `hook-stack`, `label-2tone`, `stat`, `chapter`, `location-tag`, `price`/`desde`, `end-card`. Es el núcleo de la fase 1 junto con los captions |
+| B-roll de Pexels como fuente principal | **Biblioteca propia del usuario** (interiores, drone, renders). El agente etiqueta cada asset mirando su contact sheet y lo empareja con el transcript. Pexels queda de respaldo |
+| Transiciones: solo fade | **Librería de transiciones**: whip blur, zoom blur, speed ramp, split 2×2, card zoom-out, punch-in (fase 3) |
+| Nada detrás de la persona | **Texto detrás del presentador**: matte con MediaPipe, BiRefNet o SAM 2 (licencias limpias, nada de RVM, que es GPL), compuesto por capas en Remotion (fase 3) |
+| Color: auto-grade genérico | Look por defecto **"real estate limpio"** (luminoso, blancos neutros a cálidos). `pruebaeditoria.mp4` es plano y lavado, así que es el caso de prueba |
+| — | **Brand kit por cliente** (logo, acentos, fuentes), leído por todos los templates (fase 1) |
+| — | **Fase 4+:** etiquetas ancladas en 3D a la pared (tracking planar) |
+
+**Material de prueba.** En `pruebaeditoria.mp4` el tramo **negro de 7.2 s a 40.1 s es intencional**: es el hueco que el editor tiene que llenar con B-roll propio y etiquetas. El criterio de aceptación de la fase 3 queda así: dado el crudo, la biblioteca de assets y el brand kit, sale un reel en el estilo de `research/style-references.md` sin intervención manual.
