@@ -28,7 +28,8 @@ function requestPinned(u, address, family) {
     const req = https.request(u, {
       method: 'GET',
       headers: {'User-Agent': UA, Accept: '*/*'},
-      lookup: (_host, _opts, cb) => cb(null, address, family),
+      // net may ask for one address or (options.all) a list — answer both with the pinned one
+      lookup: (_host, opts, cb) => (opts?.all ? cb(null, [{address, family}]) : cb(null, address, family)),
       timeout: 30000,
     }, (res) => {
       const chunks = [];
