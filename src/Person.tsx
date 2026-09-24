@@ -15,7 +15,8 @@ export const PersonLayer: React.FC<{mattes: Matte[]; clips: Clip[]; grade?: Proj
   if (!mattes?.length) return null;
   const Comp = getRemotionEnvironment().isRendering ? (p: any) => <OffthreadVideo {...p} transparent /> : Video;
   const out: React.ReactNode[] = [];
-  for (const pc of placeClips(clips, fps)) {
+  const placed = placeClips(clips, fps);
+  for (const [i, pc] of placed.entries()) {
     for (const m of mattes) {
       if (m.src !== pc.clip.src) continue;
       const inMs = pc.clip.inSec * 1000;
@@ -31,7 +32,7 @@ export const PersonLayer: React.FC<{mattes: Matte[]; clips: Clip[]; grade?: Proj
       const pseudo: Clip = {...pc.clip, src: m.file, inSec: a / 1000 - shift, outSec: b / 1000 - shift, transform: pc.clip.transform?.map((k) => ({...k, t: k.t - shift})), muted: true};
       out.push(
         <Sequence key={`${pc.clip.id}@${m.file}@${from}`} from={from} durationInFrames={dur} layout="none" name={`person ${pc.clip.id}`}>
-          <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src)} />
+          <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src)} transition={{clip: pc.clip, next: placed[i + 1]?.clip, offset: from - pc.fromFrame, durFrames: pc.durFrames}} />
         </Sequence>,
       );
     }

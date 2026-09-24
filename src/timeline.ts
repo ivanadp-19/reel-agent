@@ -17,6 +17,7 @@ export type Clip = {
   volume?: number; // clip audio gain, 1 = original
   muted?: boolean; // hard-mute the clip's own audio
   speed?: number; // playback rate (0.25..4), 1 = normal; timeline duration = source/speed
+  enter?: 'cut' | 'punch' | 'zoom' | 'whip'; // transition from the previous clip (src/transitions.ts)
 };
 
 const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
@@ -112,7 +113,7 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
     if (!bK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) bK = [{...pin}, ...(bK ?? [])];
   }
   const a = {...clip, outSec: splitSrc, transform: aK};
-  const b = {...clip, id: newId, inSec: splitSrc, transform: bK};
+  const b = {...clip, id: newId, inSec: splitSrc, transform: bK, enter: undefined}; // a new cut starts plain
   const remap: SegmentRemap = [
     {origId: clip.id, segId: clip.id, inMs: clip.inSec * 1000, outMs: splitSrc * 1000},
     {origId: clip.id, segId: newId, inMs: splitSrc * 1000, outMs: clip.outSec * 1000},
@@ -175,7 +176,7 @@ export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; 
     if (!segs?.length) { out.push(c); continue; }
     segs.forEach((seg, k) => {
       const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
-      out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec});
+      out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec, ...(k ? {enter: undefined} : {})});
       remap.push({origId: c.id, segId: id, inMs: seg.inSec * 1000, outMs: seg.outSec * 1000});
     });
   }

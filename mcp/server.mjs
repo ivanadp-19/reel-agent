@@ -28,6 +28,7 @@ import {validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
+import {ENTERS, punchAlternate} from '../src/transitions.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -111,7 +112,7 @@ function summary(id, p) {
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
-    const extra = [c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -360,6 +361,20 @@ server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, b
   if (!cands.length) return text('No cut candidates: no retakes, fillers, meta talk or off-mic lines on the timeline.');
   const lines = cands.map((c) => `${c.kind.padEnd(7)} ${c.from}${c.to !== c.from ? `…${c.to}` : ''}  "${c.text}"${c.note ? `  (${c.note})` : ''}${c.keep ? `  — kept take starts at ${c.keep.from}: "${c.keep.text.slice(0, 60)}"` : ''}`);
   return text(`${cands.length} candidates:\n${lines.join('\n')}\n\nAll of them as cut_words ranges (remove the ones to keep):\n${JSON.stringify(cands.map((c) => (c.to === c.from ? {from_wid: c.from} : {from_wid: c.from, to_wid: c.to})))}`);
+});
+
+server.registerTool('set_transitions', {description: 'How each clip starts (the cut from the previous clip): cut = plain; punch = the whole clip sits 12 % closer — hides a jump cut inside a take (alternate them); zoom = quick eased push-in with a short blur — a beat of emphasis; whip = motion-blurred slide out of the previous clip and into this one — between topics, sparingly. pattern punch-alternate punches every other jump cut inside each take; items set single clips by id (get_project). Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, pattern: z.enum(['punch-alternate', 'none']).optional(), items: z.array(z.object({clip_id: z.string(), type: z.enum(ENTERS)})).optional()}}, async ({project_id, pattern, items}) => {
+  const p = load(project_id);
+  if (!pattern && !items?.length) throw new Error('give a pattern or items');
+  if (pattern === 'none') p.clips = p.clips.map(({enter, ...c}) => c);
+  if (pattern === 'punch-alternate') p.clips = punchAlternate(p.clips);
+  for (const it of items ?? []) {
+    const c = p.clips.find((x) => x.id === it.clip_id); if (!c) throw new Error(`no clip ${it.clip_id}`);
+    if (it.type === 'cut') delete c.enter; else c.enter = it.type;
+  }
+  await save(project_id, p);
+  const set = p.clips.filter((c) => c.enter && c.enter !== 'cut');
+  return text(`Transitions: ${set.length ? set.map((c) => `${c.id} ${c.enter}`).join(', ') : 'all plain cuts'}`);
 });
 
 server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan keyframes. t = source-time seconds; scale 1 = none; x/y = pan in px of the 1080x1920 frame. Empty list removes the animation. Two keyframes = smooth move between them.', inputSchema: {project_id: pid, clip_id: z.string(), keyframes: z.array(z.object({t: z.number(), scale: z.number().min(0.5).max(4), x: z.number().default(0), y: z.number().default(0)}))}}, async ({project_id, clip_id, keyframes}) => {

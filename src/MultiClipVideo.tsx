@@ -79,7 +79,7 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
-      {placed.map(({clip, fromFrame, durFrames}) => (
+      {placed.map(({clip, fromFrame, durFrames}, i) => (
         <Sequence
           key={clip.id}
           from={fromFrame}
@@ -89,7 +89,7 @@ export const MultiClipVideo: React.FC<{
           premountFor={Math.round(fps)}
           name={clip.label ?? clip.id}
         >
-          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} />
+          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
         </Sequence>
       ))}
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
