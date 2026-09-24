@@ -7,6 +7,8 @@ import {FLOAT_SLOTS, presetOf} from './captionPresets.ts';
 import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import type {Clip} from './timeline.ts';
+import {textWidthEm} from './textFit.ts';
+import type {FontFamily} from './fonts.ts';
 
 export type Issue = {level: 'error' | 'warn'; code: string; msg: string; ref?: string};
 
@@ -62,7 +64,34 @@ function graphicBand(g: Graphic): Band | null {
 const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
 
 // face box per source file, fractions of the frame (from the captions job's YuNet pass)
-export type FaceBox = {found?: boolean; top: number; bottom: number};
+export type FaceBox = {found?: boolean; top: number; bottom: number; left?: number; right?: number};
+
+// rough on-screen width of a text graphic, % of the frame width (centered blocks)
+const FACE_FAMILY: Record<string, FontFamily> = {display: 'Montserrat', condensed: 'Anton', script: 'Caveat', serif: 'Playfair Display', 'serif-italic': 'Instrument Serif'};
+function graphicWidthPct(g: Graphic): number {
+  const p: any = g.props;
+  const w = (text: string, px: number, family: FontFamily = 'Montserrat') => Math.min(960, textWidthEm(text, family) * px);
+  switch (g.template) {
+    case 'hook-stack': return (Math.max(...p.lines.map((l: any) => w(p.upper ? String(l.text).toUpperCase() : l.text, SIZES[l.size] ?? 130))) / W) * 100;
+    case 'big-word': return (w(p.upper ? String(p.text).toUpperCase() : p.text, BIG[p.size] ?? 210, FACE_FAMILY[p.font]) / W) * 100;
+    case 'oversized': return 100;
+    case 'label-2tone': return (Math.max(w(p.top, 72), w(p.bottom ?? '', 72)) / W) * 100;
+    default: return 80;
+  }
+}
+// share of a behind graphic hidden by the presenter's head (face box grown by a quarter for hair, and to the neck)
+function hiddenShare(band: Band, g: Graphic, face: FaceBox): number {
+  if (face.left == null || face.right == null) return 0;
+  const fh = face.bottom - face.top, fw = face.right - face.left;
+  const head = {top: (face.top - 0.25 * fh) * 100, bottom: (face.bottom + 0.3 * fh) * 100, left: (face.left - 0.15 * fw) * 100, right: (face.right + 0.15 * fw) * 100};
+  const width = graphicWidthPct(g);
+  const text = {top: band.top, bottom: band.bottom, left: 50 - width / 2, right: 50 + width / 2};
+  const ix = Math.max(0, Math.min(head.right, text.right) - Math.max(head.left, text.left));
+  const iy = Math.max(0, Math.min(head.bottom, text.bottom) - Math.max(head.top, text.top));
+  const area = (text.right - text.left) * (text.bottom - text.top);
+  return area > 0 ? (ix * iy) / area : 0;
+}
+const SINGLE_WORD = new Set(['big-word', 'oversized', 'fill-title']); // what may sit behind the head
 
 export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
   const issues: Issue[] = [];
@@ -107,9 +136,20 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
         if (overlap(band, fb)) {
           const h = band.bottom - band.top;
           const below = Math.ceil(fb.bottom + 1), above = Math.floor(fb.top - 1 - h);
-          // behind: true keeps a headline where it is and lets the head cover part of it (reference R1)
-          const hint = [below + h <= SAFE.bottomPct ? `y_pct ${below}–${Math.floor(SAFE.bottomPct - h)}` : above >= SAFE.topPct ? `y_pct ≤ ${above}` : 'shorter text', 'or behind: true (the head covers part of it)'].join(' ');
+          // a single giant word may instead go behind the head (reference R1); stacked lines may not
+          const move = below + h <= SAFE.bottomPct ? `y_pct ${below}–${Math.floor(SAFE.bottomPct - h)}` : above >= SAFE.topPct ? `y_pct ≤ ${above}` : 'shorter text';
+          const hint = SINGLE_WORD.has(g.template) ? `${move}, or behind: true (the head covers part of the word)` : move;
           issues.push({level: 'warn', code: 'face', msg: `graphic ${g.id} (${g.template}, ${band.top.toFixed(0)}–${band.bottom.toFixed(0)}%) covers the presenter's face (${fb.top.toFixed(0)}–${fb.bottom.toFixed(0)}%) — move it: ${hint}`, ref: g.id});
+        }
+      }
+      // behind the head: fine while most of the text still reads
+      if (face && face.found !== false && g.behind) {
+        const hidden = hiddenShare(band, g, face);
+        if (hidden > 0.3) {
+          const h = band.bottom - band.top;
+          const headTop = (face.top - 0.25 * (face.bottom - face.top)) * 100;
+          const above = Math.floor(headTop - h + 4); // the crown may cut into the last few %
+          issues.push({level: 'warn', code: 'behind-hidden', msg: `about ${Math.round(hidden * 100)}% of graphic ${g.id} (${g.template}) is hidden behind the presenter's head — ${above >= SAFE.topPct ? `raise it (y_pct ≤ ${above}) or ` : ''}use one big word, or bring it in front`, ref: g.id});
         }
       }
       if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `graphic ${g.id} (${g.template}) reaches ${band.bottom.toFixed(0)}% — under the bottom UI strip`, ref: g.id});
