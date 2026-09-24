@@ -387,3 +387,27 @@ El usuario dio 4 reels de referencia, todos de **bienes raíces**. El análisis 
 | — | **Fase 4+:** etiquetas ancladas en 3D a la pared (tracking planar) |
 
 **Material de prueba.** En `pruebaeditoria.mp4` el tramo **negro de 7.2 s a 40.1 s es intencional**: es el hueco que el editor tiene que llenar con B-roll propio y etiquetas. El criterio de aceptación de la fase 3 queda así: dado el crudo, la biblioteca de assets y el brand kit, sale un reel en el estilo de `research/style-references.md` sin intervención manual.
+
+---
+
+## Estado de la fase 0 (2026-09-23)
+
+Hecho (commit `449b1fd` y siguientes):
+- Repo Apache-2.0 con autobroll@9122e89 (MIT) como base, atribución en `NOTICE`.
+- `AGENTS.md` como única fuente de instrucciones para los dos cerebros (`CLAUDE.md` = `@AGENTS.md`).
+- Gemini eliminado por completo. Arrange y B-roll ya no son "pasos de IA": los hace el agente con `get_transcript` + `reorder_clips`/`delete_clips` y `search_stock`/`add_broll`.
+- Idioma por proyecto (`auto`/`es`/`en`) en editor y MCP; WhisperX con prompt por idioma que conserva muletillas; GLUE en español; caché de transcripción por fuente + idioma.
+- Cara local con YuNet (OpenCV, Apache-2.0), 3 frames por fuente.
+- `get_transcript` con ids de palabra estables `fuente:i`; `set_language`.
+- Backend solo en `127.0.0.1` y rechaza `Host` ajeno (DNS rebinding).
+- Inter empaquetada con `@remotion/google-fonts` (el export usa la misma fuente que el preview).
+- Verificado en `pruebaeditoria.mp4`: transcripción es-MX correcta (129 palabras), 31 páginas, cara detectada (captions al 57 %).
+
+Pendiente de la fase 0:
+- Módulo único de mutaciones del proyecto (hoy `editor/store.ts` y `mcp/server.mjs` duplican split, reanchor y autocut) con compare-and-swap por `updatedAt`.
+- Re-anclaje de captions **por palabra** con ids estables, y test `node --test`.
+- Spikes: paridad de Codex con MCP (Codex no está instalado en esta Mac), comparativa visual de captions, muletillas en español (medir contra conteo manual), benchmark de render.
+
+Notas de la máquina de desarrollo:
+- WhisperX `medium` en CPU tarda ~3.5 min por 48 s de audio (int8, sin GPU). Candidatos para el benchmark: whisper.cpp con Metal, parakeet-mlx.
+- El ffmpeg de Homebrew no trae `drawtext`, `subtitles`/libass, `zscale` ni `libplacebo`.

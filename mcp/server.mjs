@@ -230,7 +230,7 @@ server.registerTool('set_accent_color', {description: 'Set the caption accent (h
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {
   await needBackend();
   const id = project_id || `p-${Date.now()}`;
-  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], brollAssets: [], music: null, accentColor: '#FFB020'};
+  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto'};
   const added = [];
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
