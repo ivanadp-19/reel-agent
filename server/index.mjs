@@ -13,6 +13,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import {normalizeLoudness, qc, qcText} from '../scripts/qc.mjs';
+import {totalDurationFrames} from '../src/timeline.ts';
 
 // run a command async, resolve {code, stdout, stderr}
 const run = (cmd, args, opts = {}) =>
@@ -454,9 +456,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?}
     let draft = false;
+    let expectSec;
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
+      expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
       // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
       // that fetch was failing mid-way on big files. Download every remote asset
       // once into public/broll/ and render from disk instead.
@@ -498,8 +502,21 @@ const server = createServer(async (req, res) => {
     child.stderr.on('data', onProgress);
     child.on('close', (code) => {
       fs.rmSync(propsFile, {force: true});
-      if (code === 0) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`};
-      else {
+      if (code === 0 && draft) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`};
+      else if (code === 0) {
+        // final: two-pass loudness to −14 LUFS, then the QC gate. A render that
+        // fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
+        // ponytail: runs synchronously (~3 s per minute of video) on the backend thread
+        renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
+        const ln = normalizeLoudness(outFile);
+        const report = qc(outFile, {expectSec});
+        if (ln.ok && report.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: qcText(report)};
+        else {
+          const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
+          fs.renameSync(outFile, path.join(EXPORTS, failed));
+          renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[ln.ok ? '' : ln.error, ...report.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: qcText(report)};
+        }
+      } else {
         const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
         console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);
         renders[id] = {status: 'error', error: line || `render exited ${code}`};

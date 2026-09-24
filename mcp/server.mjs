@@ -26,6 +26,7 @@ import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.
 import {renderProof} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
+import {qc, qcText} from '../scripts/qc.mjs';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -647,11 +648,20 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   ]};
 });
 
-server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
+server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const r = await runJob('/api/render', {...projectProps(p), draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
-  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)`);
+  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)${r.qc ? `\nQC passed:\n${r.qc}` : ''}`);
+});
+
+server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame size, duration against the project, audio present, loudness −14 ±1 LUFS and true peak ≤ −1 dBTP (blocking on final renders; drafts are not normalized, so there they are only reported), plus warnings for silent (≥ 2 s) or black (≥ 0.5 s) stretches. Final renders already run this gate.', inputSchema: {project_id: pid, file: z.string().describe('path returned by render')}}, async ({project_id, file}) => {
+  const p = load(project_id);
+  const f = path.isAbsolute(file) && fs.existsSync(file) ? path.resolve(file) : path.join(PUBLIC, file.replace(/^\//, '')); // absolute (from render) or /exports/…
+  if (!f.startsWith(path.join(PUBLIC, 'exports') + path.sep)) throw new Error('file must be a render under public/exports/');
+  const draft = /-draft\.mp4$/.test(f);
+  const r = qc(f, {expectSec: totalSec(p.clips), draft});
+  return text(`${r.ok ? 'QC passed' : 'QC FAILED'}${draft ? ' (draft: loudness is normalized on the final render only)' : ''}\n${qcText(r)}`);
 });
 
 server.registerTool('frame_at', {description: 'Look at a frame. Without `video`: the raw source frame at that timeline time (no captions/B-roll). With `video` = a rendered mp4 path from render: the finished frame with everything on it.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds'), video: z.string().optional()}}, async ({project_id, at_sec, video}) => {
