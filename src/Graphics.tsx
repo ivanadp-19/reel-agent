@@ -271,12 +271,13 @@ export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; child
   );
 };
 
-export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string}> = ({items, accentColor}) => {
+// behind = only the graphics that go behind the presenter (rendered under the person matte)
+export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; behind?: boolean}> = ({items, accentColor, behind = false}) => {
   const {fps} = useVideoConfig();
   if (!items?.length) return null;
   return (
     <>
-      {items.filter((g) => g.template !== 'layout').map((g) => {
+      {items.filter((g) => g.template !== 'layout' && !!g.behind === behind).map((g) => {
         const from = Math.round((g.startMs / 1000) * fps);
         const dur = Math.max(1, Math.round(((g.endMs - g.startMs) / 1000) * fps));
         return (

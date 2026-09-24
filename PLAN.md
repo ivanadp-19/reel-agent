@@ -95,7 +95,7 @@ Spikes pendientes (cada uno con informe go/no-go):
 
 ### Fase 1 — captions premium + titulares + style packs (≈ 3–4 semanas, camino crítico)
 
-Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images); selector de estilo y tiers en el editor.
+Hecho hasta ahora: captions v2 (build-up, karaoke, tratamientos de énfasis, contenedores, posición flotante, catálogo de 13 fuentes OFL), 9 presets (`palabra`, `caja`, `tracked` + packs `prism`, `focus`, `stack`, `lift`, `orbit`, `impact`), tiers por palabra con ids estables, pager compartido, `set_caption_style`, `annotate_captions`; track de gráficos con `hook-stack`, `label-2tone`, `stat`, `chapter`, `big-word` (+ word wall), `kinetic-card`, `fill-title`, `script-title`, `sticker` y `add_graphic`/`edit_graphic`/`delete_graphics`; herramienta de assets (`search_asset` Iconify/Fluent 3D/Openverse, `generate_asset` OpenAI Images, librería local con `list_assets`); layouts (`layout`: marco redondeado/arco/círculo/phone sobre lienzo, split con B-roll); **matte de la persona** (MediaPipe selfie segmenter, ~30 fps en CPU, WebM VP9 con alfa) con gráficos `behind=true` y `prepare_mattes`, adelantado desde la fase 3; selector de estilo y tiers en el editor.
 
 Entregables:
 - Modelo de datos: `tier` (0–3), `emoji`, `sfx`, `brk`, `preset` por página; migración de `accent` → `tier: 1`.
@@ -135,7 +135,7 @@ Criterios:
 Entregables:
 - Biblioteca de assets: etiquetado por el agente (contact sheet), matching con el transcript, reglas de colocación; Pexels de respaldo.
 - Transiciones (whip blur, zoom blur, speed ramp, split 2×2, card zoom-out, punch-in) y golpes de SFX.
-- Texto detrás del presentador (matte precalculado con alfa, composición por capas).
+- Texto detrás del presentador: hecho en fase 1 (`behind=true` + `prepare_mattes`); falta el contorno dibujado (Chalk) y captions detrás.
 - `end-card` y publicación del brand kit.
 - Runner headless con selector de cerebro; registro del MCP en `~/.claude.json` y en el `config.toml` de Codex; skills para ambos.
 - Crítica visual completa (contact sheet del render) con ≤ 3 rondas.

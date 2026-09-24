@@ -127,6 +127,7 @@ export type Graphic = {
   template: TemplateId;
   props: Record<string, unknown>; // validated by TEMPLATES[template].schema
   yPct?: number; // block top, % of frame height (template default when absent)
+  behind?: boolean; // drawn behind the presenter (needs a matte for its span)
   // projected only:
   clipId?: string;
 };
@@ -136,6 +137,28 @@ export function parseProps(template: TemplateId, props: unknown): Record<string,
   const r = TEMPLATES[template].schema.safeParse(props);
   if (!r.success) throw new Error(`${template}: ${r.error.issues.map((i) => `${i.path.join('.') || 'props'} ${i.message}`).join('; ')}`);
   return r.data as Record<string, unknown>;
+}
+
+// the source spans that need a person matte: every `behind` graphic, padded and merged per source
+export function matteSpans(items: Graphic[], padMs = 300): {src: string; startMs: number; endMs: number}[] {
+  const bySrc = new Map<string, {startMs: number; endMs: number}[]>();
+  for (const g of items) {
+    if (!g.behind) continue;
+    const list = bySrc.get(g.src) ?? [];
+    list.push({startMs: Math.max(0, g.startMs - padMs), endMs: g.endMs + padMs});
+    bySrc.set(g.src, list);
+  }
+  const out: {src: string; startMs: number; endMs: number}[] = [];
+  for (const [src, list] of bySrc) {
+    list.sort((a, b) => a.startMs - b.startMs);
+    let cur = {...list[0]};
+    for (const s of list.slice(1)) {
+      if (s.startMs <= cur.endMs) cur.endMs = Math.max(cur.endMs, s.endMs);
+      else { out.push({src, ...cur}); cur = {...s}; }
+    }
+    out.push({src, ...cur});
+  }
+  return out;
 }
 
 // source-relative spans → absolute timeline spans, one per placement of the source

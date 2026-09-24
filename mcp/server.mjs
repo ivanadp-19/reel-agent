@@ -21,7 +21,7 @@ import {applyAutocut, placeClips, reanchor, splitClip} from '../src/timeline.ts'
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {TEMPLATES, isTemplate, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
+import {TEMPLATES, isTemplate, matteSpans, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -48,7 +48,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= [];
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= [];
   return p;
 }
 async function save(id, p) {
@@ -118,8 +118,10 @@ function summary(id, p) {
   }
   if (!p.brolls.length) out.push('  none');
   out.push('', 'GRAPHICS (timeline time):');
-  for (const g of projectGraphics(p.graphics, p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
+  for (const g of projectGraphics(p.graphics, p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.behind ? ' (behind the presenter)' : ''}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
   if (!p.graphics.length) out.push('  none');
+  const need = matteSpans(p.graphics).filter((s) => !p.mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+  if (need.length) out.push(`  ⚠ ${need.length} behind-span(s) have no person matte yet — call prepare_mattes`);
   if (p.brollAssets.length) out.push('', `OWN FOOTAGE (for B-roll): ${p.brollAssets.map((a) => `${a.id} (${a.kind}, ${a.label})`).join(', ')}`);
   return out.join('\n');
 }
@@ -368,15 +370,16 @@ async function anchorFor(p, {at_wid, at_sec}) {
   return {src: clip.src, startMs: Math.round(sourceSec * 1000)};
 }
 
-server.registerTool('add_graphic', {description: `Add a motion-graphics overlay (headline, label, stat, chapter) anchored to the footage. Templates:\n${TEMPLATE_HELP}\nAnchor with at_wid (word id from get_transcript, the graphic starts when that word starts) or at_sec. Keep the hook headline in the first 3 s; labels on room/feature mentions; ≤ 1 graphic on screen at a time.`, inputSchema: {project_id: pid, template: z.enum(Object.keys(TEMPLATES)), props: z.record(z.string(), z.any()), at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional().describe('block top, % of frame height; template default when omitted')}}, async ({project_id, template, props, at_wid, at_sec, duration_sec, y_pct}) => {
+server.registerTool('add_graphic', {description: `Add a motion-graphics overlay (headline, label, stat, chapter) anchored to the footage. Templates:\n${TEMPLATE_HELP}\nAnchor with at_wid (word id from get_transcript, the graphic starts when that word starts) or at_sec. Keep the hook headline in the first 3 s; labels on room/feature mentions; ≤ 1 graphic on screen at a time.`, inputSchema: {project_id: pid, template: z.enum(Object.keys(TEMPLATES)), props: z.record(z.string(), z.any()), at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional().describe('block top, % of frame height; template default when omitted'), behind: z.boolean().default(false).describe('draw it BEHIND the presenter (big-word / word walls). Needs prepare_mattes afterwards')}}, async ({project_id, template, props, at_wid, at_sec, duration_sec, y_pct, behind}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const clean = parseProps(template, props);
   if (template === 'sticker' && !/^https?:/.test(clean.src) && !fs.existsSync(path.join(PUBLIC, clean.src))) throw new Error(`sticker src not found under public/: ${clean.src} (use search_asset or generate_asset first)`);
   const {src, startMs} = await anchorFor(p, {at_wid, at_sec});
   const g = {id: nextId(p.graphics, 'g'), src, startMs, endMs: startMs + Math.round((duration_sec ? duration_sec * 1000 : TEMPLATES[template].defaultMs)), template, props: clean};
   if (y_pct != null) g.yPct = y_pct;
+  if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
-  return text(`Added ${g.id} ${template}\n\n${summary(project_id, p)}`);
+  return text(`Added ${g.id} ${template}${behind ? ' (behind the presenter — run prepare_mattes before rendering)' : ''}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('search_asset', {description: 'Find decorative assets with clean licenses: icons and emoji (Iconify: Fluent Emoji, Noto, Lucide, Phosphor…), stickers and illustrations (Iconify hand-drawn sets + Openverse CC0/CC-BY). Files are downloaded under public/assets/ so you can use them with add_graphic template=sticker. Returns license and, when required, the credit line to keep.', inputSchema: {query: z.string().min(1), kind: z.enum(['icon', 'emoji', 'sticker', 'illustration']).default('sticker'), style: z.enum(['flat', '3d', 'hand-drawn', 'outline']).optional(), limit: z.number().int().min(1).max(12).default(6)}}, async ({query, kind, style, limit}) => {
@@ -401,6 +404,17 @@ server.registerTool('generate_asset', {description: 'LAST RESORT: generate an im
   }
   const r = await generateAsset({prompt, kind, size, quality, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
   return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
+});
+
+server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic marked behind=true, so those graphics render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  const p = load(project_id);
+  const spans = matteSpans(p.graphics).filter((s) => !p.mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+  if (!spans.length) return text('Nothing to matte: every behind-span already has a matte (or no graphic is marked behind).');
+  await runJob('/api/matte', {spans});
+  const done = readPublic('mattes.json');
+  p.mattes = [...p.mattes, ...(Array.isArray(done) ? done : [])];
+  await save(project_id, p);
+  return text(`Matted ${done.length} span(s): ${done.map((m) => `${path.basename(m.src)} ${f1(m.startMs / 1000)}–${f1(m.endMs / 1000)}s`).join(', ')}`);
 });
 
 server.registerTool('edit_graphic', {description: 'Change a graphic: props (validated for its template), timing (seconds, timeline), y position.', inputSchema: {project_id: pid, graphic_id: z.string(), props: z.record(z.string(), z.any()).optional(), start_sec: sec('new timeline start').optional(), duration_sec: z.number().min(0.5).max(15).optional(), y_pct: z.number().min(0).max(90).optional()}}, async ({project_id, graphic_id, props, start_sec, duration_sec, y_pct}) => {
@@ -463,7 +477,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
+  const r = await runJob('/api/render', {clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)`);
 });

@@ -3,11 +3,12 @@ import type {Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
 import type {PresetId} from '../src/captionPresets';
 import type {Graphic} from '../src/graphicTemplates';
+import type {Matte} from '../src/Person';
 import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId};
 export type Lang = 'auto' | 'es' | 'en';
 
 const HISTORY_LIMIT = 100;
@@ -24,6 +25,7 @@ type EditorState = {
   music: Music;
   brolls: BrollItem[];
   graphics: Graphic[];
+  mattes: Matte[];
   brollAssets: BrollAsset[];
   accentColor: string;
   captionStyle: PresetId;
@@ -108,6 +110,7 @@ export const useEditor = create<EditorState>((set) => ({
   music: null,
   brolls: [],
   graphics: [],
+  mattes: [],
   brollAssets: [],
   accentColor: '#FFB020',
   captionStyle: 'palabra',
@@ -130,6 +133,7 @@ export const useEditor = create<EditorState>((set) => ({
         music: p.music ?? null,
         brolls: p.brolls ?? [],
         graphics: p.graphics ?? [],
+        mattes: p.mattes ?? [],
         brollAssets: p.brollAssets ?? [],
         accentColor: p.accentColor ?? s.accentColor,
         lang: p.lang ?? 'auto',

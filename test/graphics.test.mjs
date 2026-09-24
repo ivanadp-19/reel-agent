@@ -21,3 +21,10 @@ test('a graphic follows its source through an autocut and is clipped at the cut'
   assert.equal(proj[0].endMs, 2000);
 });
 
+
+test('matteSpans pads and merges behind-graphics per source, ignores front graphics', async () => {
+  const {matteSpans} = await import('../src/graphicTemplates.ts');
+  const g = (id, src, s, e, behind) => ({id, src, startMs: s, endMs: e, template: 'big-word', props: {}, behind});
+  const spans = matteSpans([g('a', 'clips/x.mp4', 1000, 2000, true), g('b', 'clips/x.mp4', 2100, 3000, true), g('c', 'clips/x.mp4', 8000, 9000, true), g('d', 'clips/x.mp4', 4000, 5000, false), g('e', 'clips/y.mp4', 0, 500, true)], 300);
+  assert.deepEqual(spans, [{src: 'clips/x.mp4', startMs: 700, endMs: 3300}, {src: 'clips/x.mp4', startMs: 7700, endMs: 9300}, {src: 'clips/y.mp4', startMs: 0, endMs: 800}]);
+});

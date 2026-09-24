@@ -5,36 +5,9 @@ import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {projectCaptions, type Caption} from './captions';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
-import {placeClips, sampleTransform, totalDurationFrames, type Clip, type Music} from './timeline';
-
-// one clip's media with its keyframed zoom/pan transform applied
-const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType}> = ({clip, durFrames, Comp}) => {
-  const {fps} = useVideoConfig();
-  const frame = useCurrentFrame(); // relative to this clip's Sequence
-  const speed = clip.speed ?? 1;
-  // keyframe times are source-relative → advance source-time at `speed`
-  const {scale, x, y} = sampleTransform(clip.transform, clip.inSec + (frame / fps) * speed);
-  const trimBefore = Math.round(clip.inSec * fps);
-  return (
-    <div
-      data-ab={`clip:${clip.id}`}
-      style={{width: '100%', height: '100%', overflow: 'hidden', transform: `translate(${x}%, ${y}%) scale(${scale})`, transformOrigin: 'center'}}
-    >
-      <Comp
-        src={staticFile(clip.src)}
-        playbackRate={speed}
-        trimBefore={trimBefore}
-        // source frames consumed = timeline frames × speed (keeps the trimmed
-        // span exactly as long as the Sequence — no black tail frame)
-        trimAfter={trimBefore + Math.round(durFrames * speed)}
-        acceptableTimeShiftInSeconds={0.5}
-        muted={clip.muted || (clip.volume ?? 1) === 0}
-        volume={clip.muted ? 0 : clip.volume ?? 1}
-        style={{width: '100%', height: '100%', objectFit: 'cover'}}
-      />
-    </div>
-  );
-};
+import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
+import {ClipMedia} from './ClipMedia';
+import {PersonLayer, type Matte} from './Person';
 
 // Music layer: start offset, volume, optional end fade-out, and optional
 // auto-ducking — the music dips while someone is speaking (speech = caption spans).
@@ -78,8 +51,9 @@ export const MultiClipVideo: React.FC<{
   captionStyle?: string;
   brolls?: BrollItem[];
   graphics?: Graphic[];
+  mattes?: Matte[];
   accentColor?: string;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], accentColor = '#FFB020', captionStyle}) => {
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor = '#FFB020', captionStyle}) => {
   const {fps} = useVideoConfig();
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
@@ -111,12 +85,15 @@ export const MultiClipVideo: React.FC<{
           <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} />
         </Sequence>
       ))}
+      {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
+      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
+      <PersonLayer mattes={mattes} clips={clips} />
       </LayoutStage>
 
       {/* B-roll overlay (above clips, below captions) */}
       <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
 
-      {/* motion graphics: headlines, labels, stats */}
+      {/* motion graphics: headlines, labels, stats (in front of the presenter) */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />
 
       {/* music */}

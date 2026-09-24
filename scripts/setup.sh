@@ -42,6 +42,11 @@ mkdir -p .models
 [ -f .models/yunet.onnx ] || curl -sSfL -o .models/yunet.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
 ok "YuNet ready"
 
+echo "Person segmentation (text behind the presenter)"
+.venv/bin/python -c 'import mediapipe' 2>/dev/null || .venv/bin/pip install -q mediapipe
+[ -f .models/selfie_segmenter.tflite ] || curl -sSfL -o .models/selfie_segmenter.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite
+ok "MediaPipe selfie segmenter ready"
+
 echo "API keys"
 if [ ! -f .env ]; then cp .env.example .env; fi
 if grep -q '^PEXELS_API_KEY=.\+' .env; then ok "PEXELS_API_KEY set"; else miss "PEXELS_API_KEY empty (optional) — https://www.pexels.com/api"; fi

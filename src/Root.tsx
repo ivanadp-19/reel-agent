@@ -15,7 +15,7 @@ export const RemotionRoot: React.FC = () => {
       fps={30}
       width={1080}
       height={1920}
-      defaultProps={{clips: [], music: null, captions: [], brolls: [], graphics: [], accentColor: '#FFB020', captionStyle: 'palabra'}}
+      defaultProps={{clips: [], music: null, captions: [], brolls: [], graphics: [], mattes: [], accentColor: '#FFB020', captionStyle: 'palabra'}}
       calculateMetadata={async ({props}) => {
         const fps = 30;
         // Files on disk are ONLY a Studio convenience: a render request always
