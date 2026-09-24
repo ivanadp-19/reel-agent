@@ -5,11 +5,13 @@
 //
 // palabra / caja / tracked come from the real-estate reference reels
 // (research/style-references.md). The rest imitate Captions.ai AI Edit styles
-// (research/captions-ai-styles.md) with OFL fonts and our own palettes.
+// (research/captions-ai-styles.md) with OFL fonts and our own palettes. Sizes
+// were measured on their 1080×1920 previews: phrase styles run 62–88 px with
+// key words 1.5–1.9× bigger; a page of one or two words renders larger still.
 
 import type {FontFamily} from './fonts.ts';
 
-export type AnimIn = 'fade' | 'slideUp' | 'pop' | 'blur';
+export type AnimIn = 'fade' | 'slideUp' | 'pop' | 'blur' | 'none';
 
 // what a tier does to a word (combinable)
 export type TierStyle = {
@@ -18,9 +20,13 @@ export type TierStyle = {
   italic?: boolean;
   font?: FontFamily; // switch family (script / serif / hand)
   color?: 'accent' | 'text'; // default accent
+  fill?: 'gradient'; // metallic gradient (colors.gradient) instead of a flat color
   pill?: boolean; // solid accent background, rounded
   block?: boolean; // solid accent background, square-ish (marker highlight)
+  bg?: string; // pill/block colors when not the accent
+  fg?: string;
   underline?: boolean;
+  glow?: boolean; // neon glow in the word's color
 };
 
 export type Preset = {
@@ -34,6 +40,7 @@ export type Preset = {
     accent?: string; // pack palette; the project accent is used when absent
     onAccent?: string; // text color on pill/block backgrounds
     container?: string; // page container background
+    gradient?: string; // CSS gradient for `fill: 'gradient'` tiers
   };
   shadow: string; // CSS text-shadow ('' = none)
   container: 'none' | 'pill' | 'bar' | 'glass';
@@ -43,7 +50,11 @@ export type Preset = {
   position: 'anchored' | 'float'; // anchored = face-aware topPct; float = alternate corners
   pageIn: {type: AnimIn; ms: number};
   pageOut: {ms: number}; // fade
-  tiers: {1: TierStyle; 2: TierStyle}; // tier 3 (hero page) is reserved
+  wordIn: AnimIn; // build: how a plain word arrives at its onset (tier words always pop)
+  holdMs: number; // a page stays this long after its last word (never past the next page)
+  autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
+  focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
+  tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
   layout: {maxWords: number; maxCharsLine: number};
 };
 
@@ -60,6 +71,10 @@ const base = {
   position: 'anchored',
   pageIn: {type: 'fade', ms: 120},
   pageOut: {ms: 120},
+  wordIn: 'pop',
+  holdMs: 700,
+  autoScale: false,
+  focusPull: 0,
   tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.15}},
   layout: {maxWords: 6, maxCharsLine: 26},
 } satisfies Omit<Preset, 'id' | 'label' | 'desc' | 'font'>;
@@ -72,6 +87,10 @@ export const FLOAT_SLOTS = [
   {top: 64, align: 'center'},
 ] as const;
 
+// short pages get bigger type (Captions.ai "auto scale"): one word alone on
+// screen is a statement, not a subtitle
+export const pageScale = (p: Preset, nWords: number) => (!p.autoScale ? 1 : nWords <= 1 ? 1.5 : nWords === 2 ? 1.35 : nWords === 3 ? 1.18 : 1);
+
 export const PRESETS: Record<string, Preset> = {
   // ---- from the real-estate references ----
   palabra: {
@@ -82,6 +101,7 @@ export const PRESETS: Record<string, Preset> = {
     font: {family: 'Montserrat', weight: 700, sizePx: 92, case: 'none', trackingPx: -1, lineHeight: 1.1},
     pageIn: {type: 'pop', ms: 160},
     pageOut: {ms: 100},
+    holdMs: 250, // word-at-a-time pages should not linger
     tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.18}},
     layout: {maxWords: 1, maxCharsLine: 18},
   },
@@ -90,12 +110,13 @@ export const PRESETS: Record<string, Preset> = {
     id: 'caja',
     label: 'Caja',
     desc: 'short phrase in a dark rounded box, spoken word in white (R2)',
-    font: {family: 'Inter', weight: 600, sizePx: 54, case: 'none', trackingPx: -0.5, lineHeight: 1.25},
+    font: {family: 'Inter', weight: 600, sizePx: 62, case: 'none', trackingPx: -0.5, lineHeight: 1.25},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.72)', container: 'rgba(0,0,0,0.72)'},
     shadow: '',
     container: 'pill',
     active: 'color',
     tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.12}},
+    layout: {maxWords: 6, maxCharsLine: 24},
   },
   tracked: {
     ...base,
@@ -107,70 +128,114 @@ export const PRESETS: Record<string, Preset> = {
     pageOut: {ms: 160},
     layout: {maxWords: 4, maxCharsLine: 22},
   },
-  // ---- Captions.ai-like packs (level A: typography and color blocks only) ----
+  // ---- Captions.ai-like packs ----
   prism: {
     ...base,
     id: 'prism',
     label: 'Prism',
-    desc: 'light phrase built word by word, key words bold italic in a cool tint, floating position (Captions.ai Prism Pro)',
-    font: {family: 'Inter', weight: 300, sizePx: 58, case: 'none', trackingPx: -0.5, lineHeight: 1.15},
-    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.4)', accent: '#9FD9DC'},
+    desc: 'clean sans built word by word in floating positions; key words 1.5× in bold italic with a metallic teal gradient, and a tier-2 word blurs the footage behind it (Captions.ai Prism Pro)',
+    font: {family: 'Inter', weight: 400, sizePx: 64, case: 'none', trackingPx: -0.5, lineHeight: 1.12},
+    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.4)', accent: '#9FD9DC', gradient: 'linear-gradient(100deg, #eef1f2 0%, #ffffff 30%, #a9dfe1 55%, #6c9ea1 100%)'},
     reveal: 'build',
     position: 'float',
-    pageIn: {type: 'slideUp', ms: 160},
-    tiers: {1: {weight: 800, italic: true, scale: 1.12}, 2: {weight: 800, italic: true, scale: 1.4}},
+    pageIn: {type: 'fade', ms: 120},
+    wordIn: 'fade',
+    holdMs: 1200,
+    autoScale: true,
+    focusPull: 18,
+    tiers: {1: {weight: 800, italic: true, scale: 1.45, fill: 'gradient'}, 2: {weight: 800, italic: true, scale: 1.9, fill: 'gradient'}},
     layout: {maxWords: 6, maxCharsLine: 24},
   },
   focus: {
     ...base,
     id: 'focus',
     label: 'Focus',
-    desc: 'white sans, key word on a solid highlight block, royal blue (Captions.ai Focus)',
-    font: {family: 'Inter', weight: 600, sizePx: 54, case: 'none', trackingPx: -0.5, lineHeight: 1.3},
+    desc: 'bold white sans, words dim until spoken, key words on a royal-blue block, tier 2 on a white block (Captions.ai Focus)',
+    font: {family: 'Inter', weight: 700, sizePx: 68, case: 'none', trackingPx: -0.5, lineHeight: 1.25},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#3B5BFF', onAccent: '#ffffff'},
     reveal: 'build',
-    tiers: {1: {weight: 700, block: true}, 2: {weight: 800, block: true, scale: 1.1}},
+    upcoming: 'dim',
+    wordIn: 'fade',
+    tiers: {1: {weight: 700, block: true}, 2: {weight: 800, block: true, bg: '#ffffff', fg: '#111111', scale: 1.12}},
+    layout: {maxWords: 5, maxCharsLine: 20},
   },
   stack: {
     ...base,
     id: 'stack',
     label: 'Stack',
-    desc: 'bold sans, key words in red pills (Captions.ai Stack)',
-    font: {family: 'Inter', weight: 700, sizePx: 54, case: 'none', trackingPx: -0.5, lineHeight: 1.3},
+    desc: 'bold rounded sans, words dim until spoken; key words 1.5× bigger, tier 2 in a red pill (Captions.ai Stack)',
+    font: {family: 'Poppins', weight: 700, sizePx: 62, case: 'none', trackingPx: -0.5, lineHeight: 1.15},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#E63312', onAccent: '#ffffff'},
     reveal: 'build',
-    tiers: {1: {weight: 800, pill: true}, 2: {weight: 800, pill: true, scale: 1.15}},
+    upcoming: 'dim',
+    wordIn: 'pop',
+    tiers: {1: {weight: 800, scale: 1.5, color: 'text'}, 2: {weight: 800, scale: 1.6, pill: true}},
+    layout: {maxWords: 6, maxCharsLine: 22},
   },
   lift: {
     ...base,
     id: 'lift',
     label: 'Lift',
-    desc: 'white sans, key words in mint pills with dark text (Captions.ai Lift)',
-    font: {family: 'Inter', weight: 600, sizePx: 52, case: 'none', trackingPx: -0.3, lineHeight: 1.3},
-    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#7EE0B4', onAccent: '#1F3A2E'},
+    desc: 'large medium-weight sans, words dim until spoken, key words in a mint pill with dark text (Captions.ai Lift)',
+    font: {family: 'Inter', weight: 500, sizePx: 84, case: 'none', trackingPx: -1, lineHeight: 1.15},
+    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#6FD3A5', onAccent: '#163B2E'},
     reveal: 'build',
-    tiers: {1: {weight: 700, pill: true}, 2: {weight: 800, pill: true, scale: 1.12}},
+    upcoming: 'dim',
+    wordIn: 'fade',
+    tiers: {1: {weight: 500, pill: true}, 2: {weight: 600, pill: true, scale: 1.12}},
+    layout: {maxWords: 5, maxCharsLine: 18},
+  },
+  evo: {
+    ...base,
+    id: 'evo',
+    label: 'Evo',
+    desc: 'bold italic sans in a frosted-glass pill, 1–3 words per page floating around the frame, words dim until spoken (Captions.ai Evo)',
+    font: {family: 'Inter', weight: 700, sizePx: 78, case: 'none', trackingPx: -1, lineHeight: 1.15, italic: true},
+    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.45)', accent: '#ffffff', container: 'rgba(255,255,255,0.16)'},
+    shadow: '0 2px 10px rgba(0,0,0,0.45)',
+    container: 'glass',
+    reveal: 'build',
+    upcoming: 'dim',
+    position: 'float',
+    pageIn: {type: 'fade', ms: 120},
+    wordIn: 'fade',
+    autoScale: true,
+    tiers: {1: {weight: 800, scale: 1.15, color: 'text'}, 2: {weight: 800, scale: 1.35, color: 'text'}},
+    layout: {maxWords: 3, maxCharsLine: 16},
+  },
+  prime: {
+    ...base,
+    id: 'prime',
+    label: 'Prime',
+    desc: 'extra-bold white sans, 1–3 words per page, key words switch to a glowing cyan brush script (Captions.ai Prime)',
+    font: {family: 'Montserrat', weight: 800, sizePx: 74, case: 'none', trackingPx: -1, lineHeight: 1.15},
+    colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.5)', accent: '#7CEFF5'},
+    shadow: '0 3px 0 rgba(0,0,0,0.25), 0 6px 24px rgba(0,0,0,0.5)',
+    pageIn: {type: 'pop', ms: 140},
+    pageOut: {ms: 100},
+    tiers: {1: {font: 'Kaushan Script', weight: 400, scale: 1.7, glow: true}, 2: {font: 'Kaushan Script', weight: 400, scale: 2.1, glow: true}},
+    layout: {maxWords: 3, maxCharsLine: 16},
   },
   orbit: {
     ...base,
     id: 'orbit',
     label: 'Orbit',
     desc: 'serif phrase in a royal-blue pill, emphasis in italic (Captions.ai Orbit)',
-    font: {family: 'Playfair Display', weight: 500, sizePx: 48, case: 'none', trackingPx: 0, lineHeight: 1.3},
+    font: {family: 'Playfair Display', weight: 400, sizePx: 52, case: 'none', trackingPx: 0, lineHeight: 1.3},
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.7)', accent: '#ffffff', container: '#2456C7'},
     shadow: '',
     container: 'pill',
-    tiers: {1: {italic: true, color: 'text'}, 2: {italic: true, color: 'text', scale: 1.15}},
-    layout: {maxWords: 5, maxCharsLine: 24},
+    tiers: {1: {italic: true, weight: 500, color: 'text'}, 2: {italic: true, weight: 500, color: 'text', scale: 1.15}},
+    layout: {maxWords: 4, maxCharsLine: 22},
   },
   impact: {
     ...base,
     id: 'impact',
     label: 'Impact',
-    desc: 'condensed uppercase, 1–3 words, cyan with white emphasis, pop (Captions.ai Impact II)',
-    font: {family: 'Bebas Neue', weight: 400, sizePx: 96, case: 'upper', trackingPx: 2, lineHeight: 1},
-    colors: {text: '#38BDF8', dim: 'rgba(56,189,248,0.5)', accent: '#ffffff'},
-    shadow: HARD,
+    desc: 'condensed uppercase, 1–3 words, glowing cyan with white emphasis, pop (Captions.ai Impact II)',
+    font: {family: 'Bebas Neue', weight: 400, sizePx: 88, case: 'upper', trackingPx: 2, lineHeight: 1},
+    colors: {text: '#38C8F4', dim: 'rgba(56,200,244,0.5)', accent: '#ffffff'},
+    shadow: `0 0 22px rgba(56,200,244,0.55), ${HARD}`,
     pageIn: {type: 'pop', ms: 140},
     pageOut: {ms: 80},
     tiers: {1: {scale: 1.25}, 2: {scale: 1.6}},

@@ -3,7 +3,7 @@
 // caption_proof stills); the point is to catch the obvious before a render.
 
 import {projectCaptions, type Caption} from './captions.ts';
-import {FLOAT_SLOTS, presetOf} from './captionPresets.ts';
+import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import type {Clip} from './timeline.ts';
@@ -26,7 +26,7 @@ function captionBand(c: Caption, style: string | undefined, index: number): Band
   const p = presetOf(style);
   const chars = c.words.reduce((n, w) => n + w.text.length + 1, -1);
   const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
-  const scale = c.scale ?? 1;
+  const scale = (c.scale ?? 1) * pageScale(p, c.words.length);
   const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
   const top = p.position === 'float' && !c.pin ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};

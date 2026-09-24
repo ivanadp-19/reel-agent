@@ -79,3 +79,21 @@ test('autocut: an empty segment list drops the clip, a missing entry keeps it', 
   const r = applyAutocut([clip, b, c2], [{id: 'b', segments: []}, {id: 'a', segments: [{inSec: 1, outSec: 2}]}]);
   assert.deepEqual(r.clips.map((x) => x.id), ['a', 'c']);
 });
+
+import {focusSpans} from '../src/captions.ts';
+import {pageScale, PRESETS} from '../src/captionPresets.ts';
+
+test('focusSpans: a tier-2 word blurs from just before its onset to the end of its page', () => {
+  const pages = [
+    {id: 'c0', src: 's', words: [{text: 'y', startMs: 1000, endMs: 1100}, {text: 'sky', startMs: 1200, endMs: 1600, tier: 2}], startMs: 1000, endMs: 1600, topPct: 58},
+    {id: 'c1', src: 's', words: [{text: 'bar', startMs: 2000, endMs: 2300}], startMs: 2000, endMs: 2300, topPct: 58},
+  ];
+  assert.deepEqual(focusSpans(pages, 1200), [{startMs: 1080, endMs: 2000}]); // the next page cuts the hold
+  assert.deepEqual(focusSpans(pages.slice(0, 1), 1200), [{startMs: 1080, endMs: 2800}]);
+});
+
+test('pageScale: short pages render bigger only in auto-scale packs', () => {
+  assert.equal(pageScale(PRESETS.prism, 1), 1.5);
+  assert.equal(pageScale(PRESETS.prism, 5), 1);
+  assert.equal(pageScale(PRESETS.focus, 1), 1);
+});

@@ -103,3 +103,15 @@ export function mergeCaptions(existing: Caption[], fresh: Caption[], clips: Clip
   let n = kept.reduce((m, c) => Math.max(m, +(c.id.match(/^c(\d+)$/)?.[1] ?? -1) + 1), 0);
   return {captions: [...kept, ...added.map((c) => ({...c, id: `c${n++}`}))], added: added.length};
 }
+
+// Focus pull (Prism): while a tier-2 word is on screen the footage blurs. Spans
+// in the pages' own time base, from just before the word's onset to the end of
+// its page (the page holds until the next one, at most holdMs after its last word).
+export function focusSpans(pages: Caption[], holdMs: number, leadMs = 120): {startMs: number; endMs: number}[] {
+  const out: {startMs: number; endMs: number}[] = [];
+  pages.forEach((c, i) => {
+    const visEnd = Math.min(pages[i + 1]?.startMs ?? Infinity, c.endMs + holdMs, c.holdMaxMs ?? Infinity);
+    for (const w of c.words) if (w.tier === 2) out.push({startMs: w.startMs - leadMs, endMs: visEnd});
+  });
+  return out;
+}

@@ -2,7 +2,8 @@ import React from 'react';
 import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVideoConfig, useCurrentFrame, interpolate, getRemotionEnvironment} from 'remotion';
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
-import {hideUnder, projectCaptions, type Caption} from './captions';
+import {focusSpans, hideUnder, projectCaptions, type Caption} from './captions';
+import {presetOf} from './captionPresets';
 import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
@@ -12,6 +13,23 @@ import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
 import {gradeFor, type ProjectGrade} from './grade';
 import {OVERLAP, REVEALS, WHOOSH, type Enter} from './transitions';
+
+// Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
+// screen) while a tier-2 caption word is up — Captions.ai Prism's signature.
+const FocusPull: React.FC<{spans: {startMs: number; endMs: number}[]; blurPx: number; children: React.ReactNode}> = ({spans, blurPx, children}) => {
+  const frame = useCurrentFrame();
+  const {fps} = useVideoConfig();
+  const ms = (frame / fps) * 1000;
+  const IN = 150, OUT = 240; // the blur is gone by the time the span ends (the next page lands sharp)
+  let k = 0;
+  for (const s of spans) {
+    if (ms < s.startMs || ms > s.endMs) continue;
+    const v = Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1);
+    k = Math.max(k, Math.min(1, Math.max(0, v)));
+  }
+  k = k * k * (3 - 2 * k); // smoothstep
+  return <AbsoluteFill style={k > 0.02 ? {filter: `blur(${(k * blurPx).toFixed(1)}px)`, transform: `scale(${(1 + 0.06 * k).toFixed(3)})`} : undefined}>{children}</AbsoluteFill>;
+};
 
 // Music layer: start offset, volume, optional end fade-out, and optional
 // auto-ducking — the music dips while someone is speaking (speech = caption spans).
@@ -73,6 +91,8 @@ export const MultiClipVideo: React.FC<{
   const projectedGraphics = projectGraphics(graphics, clips, fps);
   // captions step around text graphics, and none over a closing card (the voice goes on; the card carries the message)
   const shownCaptions = hideUnder(avoidGraphics(projectedCaptions, projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
+  const preset = presetOf(captionStyle);
+  const focus = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
 
   // OffthreadVideo is built for rendering (frame-accurate, but stutters/freezes
   // in the live Player). Use native <Video> in preview for smooth playback,
@@ -85,6 +105,7 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
+      <FocusPull spans={focus} blurPx={preset.focusPull}>
       {/* a clip entered with a card / split reveal shows under the outgoing one: it starts OVERLAP frames early, drawn first */}
       {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
         const early = Math.min(OVERLAP, fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));
@@ -109,14 +130,17 @@ export const MultiClipVideo: React.FC<{
           <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
         </Sequence>
       ))}
+      </FocusPull>
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
       <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} behind />
       <PersonLayer mattes={mattes} clips={clips} grade={grade} />
       </LayoutStage>
 
-      {/* B-roll overlay (above clips, below captions) */}
-      <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
+      {/* B-roll overlay (above clips, below captions); it blurs with the footage during a focus pull */}
+      <FocusPull spans={focus} blurPx={preset.focusPull}>
+        <BrollLayer items={projectedBrolls} layouts={projectedGraphics} />
+      </FocusPull>
 
       {/* motion graphics: headlines, labels, stats (in front of the presenter) */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} />
