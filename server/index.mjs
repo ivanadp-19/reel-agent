@@ -316,36 +316,48 @@ const server = createServer(async (req, res) => {
     const ext = kind === 'image' ? 'jpg' : 'mp4';
     while (fs.existsSync(path.join(dir, `${id}.${ext}`))) id = `${base}-${n++}`;
 
-    const tmp = path.join(ROOT, `.upload-broll-${id}.bin`);
-    const ws = fs.createWriteStream(tmp);
-    req.pipe(ws);
-    req.on('error', () => { try { fs.rmSync(tmp, {force: true}); } catch {} json(res, 500, {error: 'upload failed'}); });
-    ws.on('finish', async () => {
+    // a local path (same machine, from the MCP server) skips the upload — token-gated, like add-clip
+    const local = url.searchParams.get('path');
+    if (local) {
+      if (req.headers['x-reel-token'] !== TOKEN) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp|heic)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video or image file'});
+    }
+    const tmp = local ?? path.join(ROOT, `.upload-broll-${id}.bin`);
+    const cleanup = () => { if (tmp !== local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
+    const ingest = async () => {
       try {
         const out = path.join(dir, `${id}.${ext}`);
         const thumb = path.join(thumbs, `${id}.jpg`);
+        let durationSec = null;
         if (kind === 'image') {
           // normalize to jpg (handles png/heic/webp) + a thumbnail
           await run('ffmpeg', ['-y', '-i', tmp, '-vf', 'scale=1080:-1', out]);
           await run('ffmpeg', ['-y', '-i', out, '-vf', 'scale=160:-1', thumb]);
         } else {
-          const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt', '-of', 'json', tmp]);
-          let codec = '', pix = '';
-          try { const p = JSON.parse(probe.stdout); codec = p.streams?.[0]?.codec_name ?? ''; pix = p.streams?.[0]?.pix_fmt ?? ''; } catch {}
-          const compatible = codec === 'h264' && pix.startsWith('yuv420');
+          const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt,width,height:stream_side_data=rotation:format=duration', '-of', 'json', tmp]);
+          let codec = '', pix = '', w = 0, h = 0, rotated = false;
+          try { const p = JSON.parse(probe.stdout); const s = p.streams?.[0] ?? {}; codec = s.codec_name ?? ''; pix = s.pix_fmt ?? ''; w = s.width ?? 0; h = s.height ?? 0; rotated = (s.side_data_list ?? []).some((d) => d.rotation && d.rotation % 180 !== 0); durationSec = parseFloat(p.format?.duration ?? '0') || null; } catch {}
+          // same rule as clips: 1080p-class h264 remuxes, anything bigger/rotated/other is fitted into 1080×1920 / 1920×1080
+          const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920;
+          const fit = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':force_original_aspect_ratio=decrease:force_divisible_by=2";
           const enc = compatible
             ? await run('ffmpeg', ['-y', '-i', tmp, '-c', 'copy', '-movflags', '+faststart', out])
-            : await run('ffmpeg', ['-y', '-i', tmp, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out]);
-          if (enc.code !== 0) { fs.rmSync(tmp, {force: true}); return json(res, 500, {error: 'transcode failed'}); }
+            : await run('ffmpeg', ['-y', '-i', tmp, '-vf', fit, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', out]);
+          if (enc.code !== 0) { cleanup(); return json(res, 500, {error: 'transcode failed'}); }
           await run('ffmpeg', ['-y', '-ss', '0.3', '-i', out, '-frames:v', '1', '-vf', 'scale=160:-1', thumb]);
         }
-        fs.rmSync(tmp, {force: true});
-        return json(res, 200, {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`});
+        cleanup();
+        return json(res, 200, {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`, ...(durationSec ? {durationSec: +durationSec.toFixed(2)} : {})});
       } catch (e) {
-        try { fs.rmSync(tmp, {force: true}); } catch {}
+        cleanup();
         return json(res, 500, {error: String(e).slice(0, 200)});
       }
-    });
+    };
+    if (local) { ingest(); return; }
+    const ws = fs.createWriteStream(tmp);
+    req.pipe(ws);
+    req.on('error', () => { cleanup(); json(res, 500, {error: 'upload failed'}); });
+    ws.on('finish', ingest);
     return;
   }
 

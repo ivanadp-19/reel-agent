@@ -19,6 +19,7 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `src/grade.ts` + `scripts/grade.mjs` — color: bounded per-source correction from signalstats + named looks, applied at render as an SVG filter (`set_grade`); `src/hdr.ts` — HLG/PQ → SDR LUT used at ingest
 - `scripts/qc.mjs` — two-pass loudnorm (−14 LUFS, ≤ −1 dBTP) and the QC gate every final render passes
 - `src/transitions.ts` — how a clip starts (cut, punch, zoom, whip); `set_transitions`
+- `mcp/broll.mjs` + `src/brollMatch.ts` — the client's own B-roll library (`public/broll-assets/library.json`, tagged by the agent from contact sheets) and `suggest_broll`, which places assets on the words their tags match and insists black footage gets covered
 - `public/` — user media and project JSON (gitignored, never commit)
 
 ## Rules

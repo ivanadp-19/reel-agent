@@ -135,7 +135,7 @@ Criterios:
 ### Fase 3 — B-roll propio, transiciones y los dos cerebros (≈ 2–3 semanas)
 
 Entregables:
-- Biblioteca de assets: etiquetado por el agente (contact sheet), matching con el transcript, reglas de colocación; Pexels de respaldo.
+- Biblioteca de B-roll propio: hecho (`add_broll_assets` + contact sheet, `tag_broll_asset`, `broll_library`, `suggest_broll` con las reglas de colocación y cobertura del negro; Pexels de respaldo vía `search_stock`).
 - Transiciones: punch-in, zoom y whip blur hechos (`set_transitions`, patrón `punch-alternate`); faltan speed ramp, split 2×2, card zoom-out y golpes de SFX.
 - Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
 - `end-card` hecho (logo del brand kit, título, CTA, handle).

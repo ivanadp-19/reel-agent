@@ -29,6 +29,9 @@ import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {ENTERS, punchAlternate} from '../src/transitions.ts';
+import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
+import {suggestBroll} from '../src/brollMatch.ts';
+import {projectBrolls} from '../src/brollModel.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -421,17 +424,87 @@ server.registerTool('search_stock', {description: 'Search Pexels for portrait st
   return text(rows.length ? rows.map((r, i) => `${i + 1}. ${r.src}${r.duration ? `  ${r.duration}s ${r.size}` : r.alt ? `  "${r.alt}"` : ''}`).join('\n') : 'nothing found');
 });
 
-server.registerTool('add_broll', {description: 'Overlay B-roll from at_sec for duration_sec. src = Pexels URL (from search_stock), a path inside public/ (e.g. "broll/x.mp4"), or an absolute file path (copied in). mode: fullscreen | top (upper 45%) | inset (small card top-right).', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3), src: z.string(), kind: z.enum(['video', 'image']), mode: z.enum(['fullscreen', 'top', 'inset']).default('inset'), label: z.string().optional()}}, async ({project_id, at_sec, duration_sec, src, kind, mode, label}) => {
-  const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
-  let s = src;
-  if (!/^https?:/.test(src) && path.isAbsolute(src)) {
+server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec, starting at a word (at_wid, from get_transcript — preferred) or a timeline time (at_sec). What to show: asset_id from the own library (broll_library / suggest_broll), or src = Pexels URL (from search_stock), a path inside public/ (e.g. "broll/x.mp4"), or an absolute file path (copied in). mode: fullscreen | top (upper 45%) | inset (small card top-right). Rules: start on the mention, 0.5–8 s, one insert per ~9 s, never over the hook or the closing line — suggest_broll already applies them.', inputSchema: {project_id: pid, at_wid: z.string().optional(), at_sec: sec('timeline start').optional(), duration_sec: z.number().min(0.3).max(8), asset_id: z.string().optional().describe('id from broll_library'), src: z.string().optional(), kind: z.enum(['video', 'image']).optional(), mode: z.enum(['fullscreen', 'top', 'inset']).default('inset'), label: z.string().optional()}}, async ({project_id, at_wid, at_sec, duration_sec, asset_id, src, kind, mode, label}) => {
+  const p = load(project_id);
+  let clip, sourceSec;
+  if (at_wid) { const w = await wordAt(p, at_wid); clip = w.clip; sourceSec = Math.max(clip.inSec, w.word.startMs / 1000 - 0.3); }
+  else if (at_sec != null) ({clip, sourceSec} = locate(p, at_sec));
+  else throw new Error('give at_wid or at_sec');
+  let s = src, source = 'own', query = label;
+  if (asset_id) {
+    const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
+    s = a.src; kind = a.kind; query = label ?? a.label;
+  } else if (!src) throw new Error('give asset_id or src');
+  else if (!/^https?:/.test(src) && path.isAbsolute(src)) {
     if (!fs.existsSync(src)) throw new Error(`file not found: ${src}`);
     const dir = path.join(PUBLIC, 'broll'); fs.mkdirSync(dir, {recursive: true});
     const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name)); s = `broll/${name}`;
   } else if (!/^https?:/.test(src) && !fs.existsSync(path.join(PUBLIC, src))) throw new Error(`not found in public/: ${src}`);
-  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source: /^https?:/.test(s) ? 'pexels' : 'own', query: label, alternatives: []};
+  if (/^https?:/.test(s)) source = 'pexels';
+  if (!kind) kind = /\.(jpe?g|png|webp)(\?|$)/i.test(s) ? 'image' : 'video';
+  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {})};
   p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
-  return text(`Added B-roll ${p.brolls.at(-1).id} on ${clip.id} @${f1(at_sec)}s (${mode} ${kind})`);
+  const abs = toAbs(p, clip.id, b.startMs) ?? 0;
+  return text(`Added B-roll ${p.brolls.at(-1).id} on ${clip.id} @${f1(abs)}–${f1(abs + (b.endMs - b.startMs) / 1000 / (clip.speed ?? 1))}s (${mode} ${kind}${asset_id ? `, library ${asset_id}` : ''})`);
+});
+
+// ---------- the user's own B-roll library ----------
+const sheetContent = (a) => { const f = sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
+const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationSec)}s` : ''}  "${a.label}"${a.tags?.length ? `  tags: ${a.tags.join(', ')}` : '  (untagged)'}${a.desc ? `  — ${a.desc}` : ''}`;
+
+server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
+  await needBackend();
+  const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+  const content = [];
+  for (const f of files) {
+    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
+    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
+    const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
+    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));
+  }
+  content.push({type: 'text', text: 'Now tag each one: tag_broll_asset(id, tags, desc) — what is in the shot (room, object, mood, time of day), in the language of the reel.'});
+  return {content};
+});
+
+server.registerTool('tag_broll_asset', {description: 'Describe a library asset so suggest_broll can match it to the transcript: tags = 3–8 nouns for what is in the shot (in the reel language, e.g. "cava", "vino", "salón"), desc = one line (room, mood, time of day, camera move). Replaces earlier tags.', inputSchema: {asset_id: z.string(), tags: z.array(z.string().trim().min(2).max(30)).min(1).max(12), desc: z.string().trim().max(200).default('')}}, async ({asset_id, tags, desc}) => {
+  if (!loadLibrary().some((a) => a.id === asset_id)) throw new Error(`no library asset ${asset_id}`);
+  return text(assetLine(upsertAsset({id: asset_id, tags, desc})));
+});
+
+server.registerTool('broll_library', {description: "The client's own B-roll library (footage and photos ingested with add_broll_assets, with the tags you gave them). query narrows by tags/description; sheet=true attaches each asset's contact sheet.", inputSchema: {query: z.string().optional(), sheet: z.boolean().default(false)}}, async ({query, sheet}) => {
+  const rows = searchLibrary(query);
+  if (!rows.length) return text(query ? `Nothing in the library matches "${query}".` : 'The B-roll library is empty — add_broll_assets with the client footage.');
+  if (!sheet) return text(rows.map(assetLine).join('\n'));
+  return {content: rows.flatMap((a) => [{type: 'text', text: assetLine(a)}, sheetContent(a)])};
+});
+
+server.registerTool('suggest_broll', {description: 'Where the own library should go, by word id: an asset over the mention its tags match (start on the word, 0.5–8 s, one per ~9 s, never over the hook or the closing line), plus every black stretch of footage — with the best asset, or a search_stock query when nothing in the library fits. Nothing is placed: apply what you approve with add_broll (asset_id + at_wid, or search_stock + src). Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  const lib = loadLibrary().filter((a) => a.tags?.length);
+  const tr = await transcript(p);
+  const placed = place(p.clips);
+  const mentions = [];
+  for (const pc of placed) {
+    const t = tr.find((x) => x.clipId === pc.clip.id); if (!t) continue;
+    const inMs = pc.clip.inSec * 1000, speed = pc.clip.speed ?? 1;
+    for (const w of t.words) if (!w.off) mentions.push({wid: `${t.source}:${w.i}`, word: w.word, startMs: pc.startMs + (Math.max(w.startMs, inMs) - inMs) / speed, endMs: pc.startMs + (Math.min(w.endMs, pc.clip.outSec * 1000) - inMs) / speed});
+  }
+  mentions.sort((a, b) => a.startMs - b.startMs);
+  const black = [];
+  for (const pc of placed) for (const s of blackSpans(pc.clip.src)) {
+    const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000, speed = pc.clip.speed ?? 1;
+    const a = Math.max(s.startMs, inMs), b = Math.min(s.endMs, outMs);
+    if (b > a) black.push({startMs: pc.startMs + (a - inMs) / speed, endMs: pc.startMs + (b - inMs) / speed});
+  }
+  const existing = projectBrolls(p.brolls, p.clips, FPS).map((b) => ({startMs: b.startMs, endMs: b.endMs}));
+  const lastK = mentions.findLastIndex((m, i) => i > 0 && /[.!?]$/.test(mentions[i - 1].word));
+  const totalMs = totalSec(p.clips) * 1000;
+  const out = suggestBroll(mentions, lib, {totalMs, black, existing, lastSentenceStartMs: lastK > 0 ? mentions[lastK].startMs : undefined});
+  if (!out.length) return text(`${lib.length ? 'No mention matches the library tags' : 'The library has no tagged assets'}${black.length ? '' : ', and there is no black footage to cover'}.${lib.length ? '' : ' add_broll_assets + tag_broll_asset first, or use search_stock.'}`);
+  const lines = out.map((s) => `${s.cover ? 'COVER ' : '      '}${f1(s.startMs / 1000)}–${f1(s.endMs / 1000)}s  ${s.assetId ? `asset ${s.assetId}` : `search_stock "${s.query}"`}${s.atWid ? `  at_wid ${s.atWid}` : ''}  — ${s.why}`);
+  return text(`${out.length} suggestion(s) (COVER = black footage that must be covered):\n${lines.join('\n')}\n\nApply with add_broll {asset_id, at_wid, duration_sec, mode: 'fullscreen' for covers}.`);
 });
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec}) => {
