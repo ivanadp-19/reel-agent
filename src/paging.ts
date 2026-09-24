@@ -71,7 +71,14 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     if (SENT_END.test(w.word)) flush();
     else if (next && !sameClipNext) flush(); // clip boundary
     else if (!isGlue(display) && (full || gapAfter || CLAUSE_END.test(w.word))) flush();
-    else if (cur.length >= maxWords + 2) flush(); // glue word or not, we're overflowing
+    else if (full && isGlue(display)) {
+      // full on a function word: break BEFORE the trailing function words so
+      // they open the next page ("They all lied to us / about this one thing")
+      let k = cur.length;
+      while (k > 0 && isGlue(cur[k - 1].text)) k--;
+      if (k > 0) { const carry = cur.slice(k); cur = cur.slice(0, k); flush(); cur = carry; }
+      else if (cur.length >= maxWords + 2) flush();
+    }
   });
   flush();
   if (maxWords > 1) {

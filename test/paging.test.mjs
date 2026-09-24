@@ -49,3 +49,10 @@ test('re-paging keeps per-word emoji', () => {
   const fresh = [{id: 'c0', src: 's', words: [{wid: 's:0', text: 'money', startMs: 0, endMs: 300, tier: 0}], startMs: 0, endMs: 300, topPct: 58}];
   assert.equal(carry(old, fresh)[0].words[0].emoji, '💰');
 });
+
+test('a full page breaks before its trailing function words, not after them', () => {
+  const text = 'They all lied to us about this one thing.'.split(' ');
+  const words = text.map((word, i) => ({wid: `s:${i}`, word, src: 's', clipId: 'a', startMs: i * 300, endMs: i * 300 + 250, srcStartMs: i * 300, srcEndMs: i * 300 + 250}));
+  const pages = pageWords(words, PRESETS.focus).map((p) => p.words.map((w) => w.text).join(' '));
+  assert.deepEqual(pages, ['They all lied to us', 'about this one thing']);
+});

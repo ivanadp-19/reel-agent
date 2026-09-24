@@ -3,7 +3,7 @@
 // caption_proof stills); the point is to catch the obvious before a render.
 
 import {projectCaptions, type Caption} from './captions.ts';
-import {presetOf} from './captionPresets.ts';
+import {FLOAT_SLOTS, presetOf} from './captionPresets.ts';
 import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import type {Clip} from './timeline.ts';
@@ -18,14 +18,15 @@ const W = 1080, H = 1920;
 
 type Band = {top: number; bottom: number}; // % of frame height
 
-// rough on-screen height of a caption page for its preset
-function captionBand(c: Caption, style?: string): Band {
+// rough on-screen band of a caption page for its preset; index = its place in
+// the projected list (floating presets cycle their slots by it, like the renderer)
+function captionBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
   const chars = c.words.reduce((n, w) => n + w.text.length + 1, -1);
   const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
   const scale = c.scale ?? 1;
   const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
-  const top = p.position === 'float' && !c.pin ? 12 : c.topPct;
+  const top = p.position === 'float' && !c.pin ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};
 }
 
@@ -70,9 +71,10 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   const totalMs = caps.length || gfx.length ? Math.max(...caps.map((c) => c.endMs), ...gfx.map((g) => g.endMs), 0) : 0;
 
   // --- captions ---
+  const bands = caps.map((c, i) => captionBand(c, p.captionStyle, i));
   for (let i = 0; i < caps.length; i++) {
     const c = caps[i];
-    const band = captionBand(c, p.captionStyle);
+    const band = bands[i];
     if (band.top < SAFE.topPct) issues.push({level: 'warn', code: 'safe-top', msg: `caption ${c.id} starts at ${band.top.toFixed(0)}% — inside the top UI band (<${SAFE.topPct}%)`, ref: c.id});
     if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `caption ${c.id} reaches ${band.bottom.toFixed(0)}% — under the Reels caption/actions strip (>${SAFE.bottomPct}%)`, ref: c.id});
     const last = c.words[c.words.length - 1];
@@ -111,8 +113,8 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
         }
       }
       if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `graphic ${g.id} (${g.template}) reaches ${band.bottom.toFixed(0)}% — under the bottom UI strip`, ref: g.id});
-      for (const c of caps) {
-        if (c.startMs < g.endMs && g.startMs < c.endMs && overlap(captionBand(c, p.captionStyle), band) && !CENTERED.has(g.template)) {
+      for (const [ci, c] of caps.entries()) {
+        if (c.startMs < g.endMs && g.startMs < c.endMs && overlap(bands[ci], band) && !CENTERED.has(g.template)) {
           issues.push({level: 'warn', code: 'overlap-graphic', msg: `caption ${c.id} overlaps graphic ${g.id} (${g.template}) at ${(Math.max(c.startMs, g.startMs) / 1000).toFixed(1)} s`, ref: g.id});
           break;
         }

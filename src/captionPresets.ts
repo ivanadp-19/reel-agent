@@ -64,6 +64,14 @@ const base = {
   layout: {maxWords: 6, maxCharsLine: 26},
 } satisfies Omit<Preset, 'id' | 'label' | 'desc' | 'font'>;
 
+// floating positions cycle per page (Prism-style): top-left, top-right, low-center.
+// Tops stay under the Reels top UI band (validate.ts SAFE.topPct = 13).
+export const FLOAT_SLOTS = [
+  {top: 15, align: 'flex-start'},
+  {top: 18, align: 'flex-end'},
+  {top: 64, align: 'center'},
+] as const;
+
 export const PRESETS: Record<string, Preset> = {
   // ---- from the real-estate references ----
   palabra: {

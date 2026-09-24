@@ -1,7 +1,7 @@
 import React from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
-import {presetOf, type Preset, type TierStyle} from './captionPresets';
+import {FLOAT_SLOTS as FLOAT, presetOf, type Preset, type TierStyle} from './captionPresets';
 import {emojiFamily, fontFamily} from './fonts';
 import {useBrand} from './brand';
 
@@ -58,13 +58,7 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
   );
 };
 
-// floating positions cycle per page (Prism-style): top-left, top-right, low-center
-const FLOAT = [
-  {top: 12, align: 'flex-start'},
-  {top: 15, align: 'flex-end'},
-  {top: 66, align: 'center'},
-] as const;
-
+// floating positions: FLOAT_SLOTS in captionPresets.ts (shared with validate.ts)
 // one caption page inside its own Sequence
 const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; accent: string; durationInFrames: number}> = ({caption, index, preset, accent, durationInFrames}) => {
   const frame = useCurrentFrame();
