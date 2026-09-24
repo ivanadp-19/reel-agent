@@ -1,0 +1,84 @@
+{
+ "gaps": [
+  {
+   "gap": "I checked this in the local code and the synthesis gets it wrong. It says 'captions y B-roll se re-anclan solos… los cortes no obligan a re-sincronizar' and 'No es destructivo', but that only holds when a cut lands between caption pages. /Users/felipealonzo/autobroll/mcp/server.mjs:141-162 (applyAutocut reanchor) and editor/store.ts:202-247 move a WHOLE page to whichever segment contains the page's startMs. src/captions.ts:22-49 (projectCaptions) maps every word with toAbs, never drops words inside removed ranges, and clamps only endMs. Filler and retake cuts land inside phrases, which is the whole point of problem #1. When they do, the cut word stays on screen, words after the cut get timestamps past the page end, and page starts can bleed into the previous clip. Today's autocut only hides this because it cuts gaps over 600 ms and pages already break at 450 ms. The Phase 2 criterion 'captions y B-roll siguen anclados' would pass while showing deleted words.",
+   "severity": "high",
+   "how_to_close": "Re-anchor each word, not each page: assign every word to the segment that contains it, drop words that fall in removed ranges, then re-run the shared pager on the result, so pages are derived from transcript plus edit list instead of persisted. Add a node --test case with a cut inside a page. Move this into Phase 1, before the deadWeight/find_cut_candidates work in Phase 2."
+  },
+  {
+   "gap": "Nobody looked at any rendered output. Every premium-caption quality judgment comes from reading code: tscaps 'high', HyperFrames 'highest', open-edit 'best open pool', and the choice of 8 hand-written presets over imported ones. HyperFrames' own eval says 'Nothing was rendered… visual quality unverified'. The user's question is purely about how the captions look, so the build-vs-import decision rests on untested assumptions.",
+   "severity": "high",
+   "how_to_close": "Run a visual bake-off before Phase 1: watch the published outputs (tscaps README clips and examples/output/cli-defaults.mp4, the HyperFrames registry preview mp4s on static.heygen.ai, open-edit's showcase). Then render one 10 s Spanish clip through the tscaps studio in a browser, one open-edit recipe, and pycaps 'hype', and compare them against a Captions.ai/Submagic export. Use the result to pick which presets to port versus hand-write."
+  },
+  {
+   "gap": "Codex parity for the headless runner is hand-waved. The plan says 'codex exec con sandbox read-only' and 'Sin shell para el agente headless' for both brains, but no evaluated repo runs `codex exec --sandbox read-only` with MCP. openreelio explicitly disables MCP for Codex (`-c mcp_servers={}`) and injects tools as app-server dynamicTools. diffusionstudio uses app-server with MCP, but with approvalPolicy 'never' and danger-full-access. Codex has no equivalent of Claude's `--tools \"\"`, so shell can't be removed, only sandboxed. It is also unverified whether exec-mode MCP calls need approval or get cancelled, and whether the sandbox restricts the MCP server's own writes and renders. If any of these fail, the runner design changes.",
+   "severity": "high",
+   "how_to_close": "Extend Phase 0 spike 1 so it tests, all under `codex exec` with read-only sandbox and the chosen approval policy: an MCP tool call that writes project JSON, one that triggers a render, whether image content from frame_at reaches the model, and whether a shell attempt is blocked. Run the same checks against the openreelio pattern (codex app-server plus dynamicTools; src-tauri/src/ipc/commands/codex_app_server.rs). Pick whichever passes."
+  },
+  {
+   "gap": "The spec addresses words by page and index ({cap:'c4', w:3}), but those ids are unstable. mergeCaptions renumbers every caption to `c${i}` whenever AI captions run (mcp/server.mjs:165-171), and annotate_captions itself re-pages around tier-3 words. An LLM annotating over two calls, or after any cut, will hit the wrong words. The synthesis even names dawn-cut's rule 'seleccione por wordId, nunca en ms' as a donor, but the spec doesn't follow it.",
+   "severity": "medium",
+   "how_to_close": "Give every word a stable id derived from source and time (for example sourceId plus startMs, or transcript index), address annotations and edits by wordId, and treat page ids as display-only."
+  },
+  {
+   "gap": "Caption engines that fall outside the 18 verified repos were never examined, yet they are the closest drop-ins for a Remotion codebase. remotion-captions-kit (MIT, 6 presets, emphasis rules) was the captions report's recommended fallback and the synthesis drops it entirely. remotion-captioneer has 15 animation components and emoji. remotion-captions-themes has 13 themes and collision-aware layout. captioncat has 36 JSON presets but only its README was checked. The claim 'Ninguno de los 18… lo más cercano está en tres proyectos' ignores them. OpenChatCut was judged only through a dead fork 915 commits behind 0xsline upstream.",
+   "severity": "medium",
+   "how_to_close": "Spend a short timeboxed session reading the code of the three Remotion-native caption kits and rendering each once in autobroll, before writing 8 presets from scratch. Record licenses and quality. Fold the best one into the Phase 0 spike next to tscaps."
+  },
+  {
+   "gap": "'Buy' options were never evaluated. For premium captions there are hosted APIs: tscaps.io's API (skills/tscaps-api exists in the repo), Submagic, Captions.ai and ZapCap. For motion graphics there are Lottie or licensed template packs rendered through @remotion/lottie. Risk #2 ('no existe una librería open source 9:16 de calidad profesional') and the multi-week template-design estimate only compare against open-source code repos.",
+   "severity": "medium",
+   "how_to_close": "Price the hosted caption APIs per minute and check their Spanish support and whether they return word data or burn-in only. Check @remotion/lottie with a few Lottie lower-thirds and stat animations (verify each license). Then compare that cost against the 2 weeks of caption work and the weeks of template design."
+  },
+  {
+   "gap": "The license reasoning is inconsistent. HyperFrames is pushed to phase 4 partly because GSAP is 'licencia no OSI', while the whole stack standardizes on Remotion, which is also non-OSI (source-available), paid for companies above 3 employees, has separate pricing for server-side rendering, and has announced license changes for 5.0. HyperFrames (Apache) and diffusionstudio (MPL) carry no Remotion exposure. Open question 1 (company size, commercial sale) could flip the weighting, yet the decision is already final.",
+   "severity": "medium",
+   "how_to_close": "Answer open question 1 before Phase 1. If the product is commercial, get a Remotion Company License quote that covers automated rendering, and weigh Remotion and GSAP by the same criterion in the engine decision table."
+  },
+  {
+   "gap": "'Ninguna pieza exige cambiar la arquitectura' is hand-waved. Split, reanchor and autocut are implemented twice, once in mcp/server.mjs and once in editor/store.ts (verified), and the agent and the UI both write the project with last-write-wins. The plan removes duplication only for caption paging while adding cut, grade, graphic and QC tools on the MCP side, so the two copies will drift further apart. A headless runner writing while the editor is open makes the race worse.",
+   "severity": "medium",
+   "how_to_close": "In Phase 0, extract one shared module for project mutations that both editor/store.ts and mcp/server.mjs import. Add an updatedAt compare-and-swap check on POST /api/projects/:id so a stale write is rejected instead of silently overwriting."
+  },
+  {
+   "gap": "The ranking's 'Jueces (media)' column and the statement 'Los tres jueces coinciden' have no support in the evidence, apart from autobroll's 8, 6.5 and 7. The verified fit_as_base scores put HyperFrames (6) above autobroll (5), with diffusionstudio tied at 5, and HyperFrames beats autobroll on every capability dimension. Ranking autobroll #1 is a judgment call presented as if it came from the numbers.",
+   "severity": "medium",
+   "how_to_close": "Either include the per-judge scores for every repo, or rank by the verified fit_as_base and state the override explicitly: autobroll is chosen for its MCP, its anchoring model and ownership, despite lower verified fit."
+  },
+  {
+   "gap": "Render performance is never measured, and no acceptance criterion sets a time budget. The premium presets add stacked stroke copies, blur, glow and a DOM node per word, rendered in Chromium through OffthreadVideo on a Mac. On top of that, caption_proof renders stills repeatedly. If a 60 s reel becomes too slow to render, the engine choice (Remotion vs ASS vs pre-rendered alpha) is back on the table.",
+   "severity": "medium",
+   "how_to_close": "Add a Phase 0 benchmark: render the current 60 s 1080x1920 baseline, then the same clip with a bold-pop plus blur/glow prototype on the same machine. Set a maximum acceptable ratio as a Phase 1 criterion."
+  },
+  {
+   "gap": "Voice cleanup (denoise and enhancement) was not examined, even though it is part of what makes Captions.ai and Submagic feel premium for talking-head creators. The plan covers only ducking and loudnorm. The evidence shows other candidates do it: vibetube uses NVIDIA Studio Voice, OpenMontage uses afftdn and highpass.",
+   "severity": "medium",
+   "how_to_close": "Evaluate ffmpeg arnndn/afftdn and DeepFilterNet (check its license) as an optional ingest step in Phase 2, A/B tested on 3 real phone recordings."
+  },
+  {
+   "gap": "The plan has no UI for manual polish of the new caption data (tier, emoji, SFX, preset, word timing). The evidence already shows caption and B-roll timing can't be edited in the UI (Timeline.tsx only selects and seeks), and every new capability is MCP-only. Editor-button users without an agent only get Gemini tier-1 accents.",
+   "severity": "medium",
+   "how_to_close": "Add Inspector controls for preset, tier, emoji and SFX per word, and drag-retime on the caption track, as a Phase 1 or 2 deliverable. Otherwise, explicitly accept that the product is agent-only."
+  },
+  {
+   "gap": "Spanish filler removal has a weak fallback, and nearby options were skipped. Plan B, 'sondear los huecos por RMS', won't catch voiced fillers ('eh', 'este', 'mmm'), since they carry energy. The detector has to look for voiced energy inside inter-word gaps shorter than 600 ms that no aligned word covers. Verbatim-ASR options were not evaluated, and neither was ES/EN code-switching, even though WhisperX alignment uses a single language model per file.",
+   "severity": "low",
+   "how_to_close": "Define plan B in spike 3 as 'voiced energy with no aligned word', and measure it against the manual filler count. Check whether any verbatim ASR is licensed for commercial use. Test one mixed ES/EN clip."
+  },
+  {
+   "gap": "The color plan (bake at ingest with ffmpeg) re-encodes sources that autobroll currently sometimes just remuxes, and any grade change requires re-transcoding, with no preview. The alternative of applying the grade at render time in the same DOM was not considered: a LUT via CSS/WebGL (HyperFrames colorGrading.ts, openchatcut lut.frag).",
+   "severity": "low",
+   "how_to_close": "Compare the two approaches on one HDR iPhone clip: an ingest bake versus a render-time LUT in Remotion, measuring render cost and preview parity."
+  },
+  {
+   "gap": "Some minor facts in the reports are wrong, and some caveats were dropped. The captions report says the HyperFrames matte runs 'CPU at about 2 fps' (the verified figure is ~9 fps on CoreML) and that there are 16 caption-* components (there are 17). The synthesis omits that the tscaps templates luca, luna and milo need the video frame inside the caption DOM and pastor needs segmentation, and that 11 of open-edit's 42 recipes are 16:9 only. The autobroll arrange-clips bug (full-source transcript sent after autocut) is not in the fix list. The Pexels API guidelines on linking back and rate limits are unchecked.",
+   "severity": "low",
+   "how_to_close": "Correct the numbers. List these template and recipe exclusions in the donor table. Add the arrange-clips fix to Phase 2. Check the Pexels API terms before shipping a product."
+  },
+  {
+   "gap": "The harness flagged 'settings-json' and 'bypass-permissions' patterns in the synthesis text. Looking at them, they are descriptive references to what candidate repos do (vibetube's --permission-mode bypassPermissions, AIEV's .claude/settings.json) and a recommendation to replace them. They are not directives, and nothing was acted on.",
+   "severity": "low",
+   "how_to_close": "No action needed beyond telling the user the flagged text is benign."
+  }
+ ]
+}

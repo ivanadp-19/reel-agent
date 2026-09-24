@@ -1,0 +1,624 @@
+[
+ {
+  "lens": "mvp-speed",
+  "strategy": "hybrid",
+  "base_repo": "andriidrok1/autobroll (the user's own MIT copy at /Users/felipealonzo/autobroll, which is effectively already forked)",
+  "ranking": [
+   {
+    "repo": "andriidrok1/autobroll",
+    "score": 8,
+    "why": "This is the fastest base because it is already the user's repo and it already runs: Remotion 4.0.380, with one composition shared by preview and export; a clip-anchored overlay model that keeps captions and B-roll in place after trims, reorders and speed changes; a working 24-tool stdio MCP server that the user's Claude Code session has already mounted; WhisperX word timings; silence autocut; Pexels portrait B-roll; face-aware caption placement; music ducking; and a CapCut-like editor with live reload. The code is about 4.6k lines, small enough to own. Its gaps (premium captions, motion graphics, color, filler/retake cutting, Spanish) are all additive work: new clip-anchored tracks or a CaptionTrack rewrite, not an architecture change. Before building on it, fix these: `--language en`, the English-only GLUE list, the Inter font missing from the render bundle, the px/% unit bug in set_keyframes, the missing per-word transcript tool, and a backend that binds 0.0.0.0 with no authentication."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "score": 6,
+    "why": "It has the strongest caption and motion-graphics design in the whole set: embedded-captions with 35 styles, hero-word rules, and QA gates for timing, occlusion and overflow; a 388-item motion registry; a cut-list compiler; WebGL color grading; and packaging for both Claude and Codex, all Apache-2.0. For a fast MVP it is the wrong base. It would add a second render engine (Chrome+GSAP+Python) to an 8k-file repo that ships several releases a day, 92% of its blocks are 16:9, the caption skill refuses footage with cuts, and GSAP is under a non-OSI license. Take design ideas and small Apache files from it."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "score": 6,
+    "why": "It is the best Apache-2.0 donor for the caption motion vocabulary: 42 recipes plus 6 classic presets (per-glyph stagger, bigPop, karaoke, dropIn, and more), frame-snapped EDL/speech-probe cut primitives, and a skill harness that works across Claude, Codex and Gemini. It cannot be the base, because rendering, verification and safe-zone checks all run inside VEED's closed renderer, which is under the PolyForm Shield noncompete and only runs on macOS arm64 and Windows desktop. Its recipes would have to be ported into Remotion."
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "score": 6,
+    "why": "The best MIT caption template library: 38 SCSS styles, 15 animation primitives, a timing CSS-variable contract, a tag-to-class mapping for emphasis, and emoji decorations. It lines up exactly with the 'LLM emits per-word tags and the engine styles them' split. Its renderer is browser-only and its editor is AGPL, so use it as a donor. Porting it into Remotion (a paused-CSS approach plus your own shims for its Sass functions) has not been tried yet; it needs a 1–2 day test build first."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "score": 5,
+    "why": "Has well-built deterministic MIT parts that fill gaps in autobroll: deadWeight.ts (detects filler words, stutters, repeated takes via LCS, and hesitations, and returns them as candidates for approval), autoTrim.ts (silence-threshold sweep with a guard against cutting mid-word), color.ts (14 ffmpeg grade presets plus HDR tonemapping), qc.ts (loudness, black-frame and freeze gates), and an agent runner. It is not a base: it is Claude-only, its lexicons and prompts are Vietnamese, its captions are basic, and it has no stock footage support."
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "score": 5,
+    "why": "Among the motion-graphics donors, this is the closest match to what the user already runs. It has about 16 MIT Remotion overlays built for 9:16 with spring animation (stamp lists, quote, strike, prompt/terminal, GitHub card, logos, emoji, end card), a useZoom snap/push system for zoom punches, and make_sfx.py, which synthesizes license-clean SFX. They drop into autobroll's composition with little work. The repo itself is one commit old and its captions are basic."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "score": 5,
+    "why": "Has the most complete working selectable brain: Claude Code through the Agent SDK and Codex through app-server over JSON-RPC, plus MCP auto-registration into 9 agent configs, including the Codex TOML config. MPL-2.0 is fine for a donor. It is not a base: its captions have the same basic gap, it has no motion templates, transcription goes through a closed backend, and it renders only in Electron."
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "score": 4,
+    "why": "electron/providers.js and agent.js (MIT) are a small, tested way to build headless `claude -p` / `codex exec` calls, with session capture and timeouts. They are the quickest route to an in-app 'run agent' button. The rest of the repo is a macOS screen recorder whose captions and graphics exist only as prompt text."
+   },
+   {
+    "repo": "browser-use/video-use",
+    "score": 3,
+    "why": "Useful small MIT ffmpeg helpers: HDR/HLG tonemapping, two-pass loudnorm to -14 LUFS, signalstats auto-grade, and rotation-aware portrait detection. It also shows the pattern of skill plus CLI tools. Its captions are below basic, and it has no motion graphics code and no stock footage support."
+   },
+   {
+    "repo": "francozanardi/pycaps",
+    "score": 3,
+    "why": "Worth copying as patterns: SFX triggered by word tags, emoji pacing rules, and emphasis via tags mapped to CSS classes. Motion is limited to raster transforms, its AI features are locked to OpenAI or its own API, and it has multiple bugs. Not an engine to adopt."
+   },
+   {
+    "repo": "openreelio/openreelio",
+    "score": 3,
+    "why": "Well-built Claude headless launch code and a Codex dynamicTools bridge, plus DTW word timing (MIT, Rust). Its captions are static ASS, its motion-graphics code is dead, and the codebase is a huge single-author Tauri app. At most a reference for the harness."
+   },
+   {
+    "repo": "LeonSooLab/openchatcut",
+    "score": 3,
+    "why": "Has the right idea for custom motion graphics: the LLM writes Remotion JSX, a sandbox compiles it, and frame images are fed back for verification. But it is AGPL, 915 commits behind its upstream, its video cutting doesn't cut, and its ASR is hardwired to Chinese. Reimplement the idea later; copy no code."
+   },
+   {
+    "repo": "kwakseongjae/dawn-cut",
+    "score": 2,
+    "why": "A clean pattern of an EditCommand bus with dry-run and an audit log, plus selectors that let the LLM avoid computing microseconds. It is single-source, Korean-first, has captions that are PNG frame swaps, and bundles Apple emoji assets it can't license. Patterns only."
+   },
+   {
+    "repo": "calesthio/OpenMontage",
+    "score": 2,
+    "why": "The stock-footage retrieval design (CLIP ranking plus MMR diversity) and the checkpoint-gated pipeline are worth studying. It is AGPL, its captions are basic karaoke, and its relevant tools are experimental with bugs. Reference only."
+   },
+   {
+    "repo": "mutonby/openshorts",
+    "score": 2,
+    "why": "A long-video clip farm. edit_builder.py (MIT) is a nice example of an LLM producing an edit-decision list that gets compiled to ffmpeg. main.py imports the AGPL Ultralytics package, and its captions are basic karaoke."
+   },
+   {
+    "repo": "krusemediallc/video-editor-agent",
+    "score": 1,
+    "why": "Good ideas (a VAD residual-gap cut planner, 36 GSAP primitives, seam QA), but it has no license, so it cannot be copied. Ideas only."
+   },
+   {
+    "repo": "mutonby/shortcast",
+    "score": 1,
+    "why": "Its 'captions' are social-post text, and it has no cutting within a clip. It is a Swift/MLX macOS app. Only the moment-finder prompt and the JSON salvage code are of any use."
+   },
+   {
+    "repo": "itsjwill/vanta",
+    "score": 1,
+    "why": "Marketing scaffolding. The only rendered parts are a landscape promo and a few visual patterns (grain overlay, clip-path word wipe, stat bars)."
+   }
+  ],
+  "donor_parts": [
+   {
+    "repo": "andriidrok1/autobroll",
+    "part": "The whole repo as base: mcp/server.mjs (24 tools), src/ clip-anchored model (projectCaptions/projectBrolls/placeClips), scripts/lib-transcribe.mjs, trim-silence.mjs, captions-multiclip.mjs (paging, face placement), broll-multiclip.mjs (Pexels), server/index.mjs render job, and the editor",
+    "use_for": "The MVP skeleton. First fixes: pass --language es|en|auto, add a Spanish GLUE list, bundle fonts with delayRender, correct the set_keyframes unit documentation, add a get_transcript word-level MCP tool, make edit_caption preserve word timings, and bind to 127.0.0.1"
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/deadWeight.ts (pure filler/stutter/repeat-take LCS/hesitation detector)",
+    "use_for": "Filler and retake cut candidates, after replacing the Vietnamese lexicons with ES/EN lists. Candidates go out through a new MCP find_cut_candidates tool; the LLM approves them and they are applied as split_clip/trim_clip on autobroll's clips"
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/color.ts (14 ffmpeg eq/curves/colorbalance presets, sliders, HDR/HLG tonemap)",
+    "use_for": "Color grading for the MVP: baked into the ingest transcode autobroll already runs. Add a set_grade MCP tool that re-runs it per source"
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/qc.ts (loudnorm -14 LUFS measurement, blackdetect, freezedetect)",
+    "use_for": "The final render QC gate, exposed to the agent as an MCP tool"
+   },
+   {
+    "repo": "browser-use/video-use",
+    "part": "helpers/grade.py auto_grade_for_clip plus render.py is_hdr_source/TONEMAP_CHAIN/apply_loudnorm_two_pass",
+    "use_for": "Bounded automatic correction before the chosen grade preset (analyze after tonemapping), iPhone HDR ingest, and final loudness normalization"
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "cli/src/commands/speech-probe.ts (adaptive RMS noise-floor gap probe)",
+    "use_for": "Snapping silence, filler and retake cut boundaries to actual audio gaps, because WhisperX often leaves fillers out of the transcript"
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "refs/html/*/recipe.ts, refs/html/classic/classic-lib.ts, pipeline/recipes/lib.ts (Apache-2.0)",
+    "use_for": "The motion vocabulary for the 8 Remotion presets in the premium captions spec (per-glyph stagger, bigPop, karaoke fill, dropIn, balanced line split, size ladders), re-implemented with interpolate() and Easing"
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "part": "templates/*/style.scss, templates/_lib/animation/*, packages/engine/src/modules/document/CssVariable.ts, rendering/subtitle/SegmentSubtreeHtmlBuilder.ts, splitting/BalancedPixelWidthLineSplitter.ts (MIT)",
+    "use_for": "Phase-2 expansion of the caption presets from 8 to about 38 through a paused-CSS port into Remotion (1–2 day test build first), with our own MIT Sass shims. Skip the Loki template, which uses the Komika font"
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "skills/embedded-captions DNA and theme JSON fields, hero-word rules, check-timing / check-occlusion / check-overflow concepts",
+    "use_for": "Design of the caption validator (stage A) and the geometry checks (stage B) from the premium captions spec, including the 80 ms sync tolerance and the rule of a mostly normal caption line with an occasional hero word"
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "registry blocks and components (count-up, data-chart, lower-thirds, notification/chat UI mockups, camera-shake, push-in) as design references; skills/media-use/scripts/lib/cutlist.mjs",
+    "use_for": "Re-authoring the best motion-graphics looks as 9:16 Remotion templates (no GSAP); reference logic for the cut-list compiler"
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "part": "remotion/src/talk/reel-overlays.tsx (13 vertical overlays), overlays.tsx LogoRow/Card/Big, Reel.tsx useZoom (SNAPS x PUSHES)",
+    "use_for": "The first set of motion-graphics templates: parameterize each as a typed template on a new clip-anchored graphics track (add_graphic MCP tool). Zoom punches get written through autobroll's keyframes"
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "part": "remotion/scripts/make_sfx.py (stdlib SFX synthesizer)",
+    "use_for": "A license-clean SFX pack (pop, whoosh, tap, ding, thud) for caption hero words and motion-graphics entrances"
+   },
+   {
+    "repo": "itsjwill/vanta",
+    "part": "src/components/GradientBackground.tsx, src/scenes/KineticText.tsx, DataVizScene.tsx",
+    "use_for": "Small patterns for kinetic-type and stat-card templates (grain/vignette, clip-path word wipe, staggered bars)"
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "part": "electron/providers.js (headless claude -p / codex exec argument builders, CLAUDE.md/AGENTS.md block writer, Codex JSONL parser)",
+    "use_for": "An optional in-app 'Edit with Claude / Codex' button. Swap bypassPermissions for an MCP-only allowlist"
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "part": "apps/desktop/src/mcp-config.ts (JSON/TOML upsert into Claude Code and Codex configs, with tests; MPL-2.0)",
+    "use_for": "One-click registration of autobroll's MCP server in Codex's config.toml as well as Claude Code, so the user can pick either as the brain"
+   },
+   {
+    "repo": "francozanardi/pycaps",
+    "part": "effect/sound/sound_effect.py tag-triggered SFX and emoji_in_segment_effect.py pacing rules (patterns only)",
+    "use_for": "The per-word SFX trigger and the emoji budget rules in the caption validator"
+   },
+   {
+    "repo": "LeonSooLab/openchatcut",
+    "part": "template-host.ts + frames-tool.ts design (LLM-written Remotion JSX, sandbox compile, contact-sheet verification) — AGPL, reimplement only",
+    "use_for": "Phase-2 escape hatch for custom motion graphics beyond the template registry"
+   }
+  ],
+  "motion_graphics_engine": "Remotion, the same composition autobroll already renders, so there is only one engine. Add a clip-anchored graphics track (projectGraphics, like projectBrolls) that renders a typed template registry: lower-third, kinetic headline, stat count-up, icon/emoji pop, UI card or notification mockup, list/stamp, CTA/end card, zoom punch, and SFX hits. Seed it by porting talking-head-reel's 9:16 overlays (MIT), then re-author the best HyperFrames and open-edit designs in Remotion. The LLM picks a template and its props through a new add_graphic MCP tool and checks the result with frame_at. It does not write code in the MVP. LLM-written TSX (the openchatcut sandbox pattern, reimplemented) and optional offline HyperFrames alpha-WebM renders come in phase 2.",
+  "captions_engine": "Remotion: rewrite autobroll's src/CaptionTrack.tsx into the preset engine from the premium captions spec. The 8 presets become data objects, every animation is a function of the frame (interpolate/Easing, no CSS keyframes), strokes are drawn with a stacked copy of the text, OFL fonts are bundled and loaded with delayRender, emoji come from Noto SVG, SFX fire on tier-3 words, and a face-aware placer keeps captions in the safe zone. The LLM drives it with annotate_captions and set_caption_style (tiers, color roles, emoji, SFX, forced breaks), backed by a deterministic validator and a caption_proof loop. Motion vocabulary is ported from open-edit's Apache recipes. Phase 2 adds tscaps' 38 MIT templates through a paused-CSS port, falling back to remotion-captions-kit's MIT presets if that port fails.",
+  "risks": [
+   "No candidate delivers Captions.ai/Submagic-level captions ready to use. The premium look has to be built: roughly 1–2 weeks for 8 presets plus the annotation tool and validator. This is the critical path, and design taste matters as much as code.",
+   "Motion graphics are the longest job: no open-source vertical template library of pro quality exists (HyperFrames is 92% 16:9, talking-head-reel has a narrow look). Expect several weeks of template design, and until then the demo will have a small template set.",
+   "Porting tscaps templates into Remotion via paused CSS has not been tested. Its Sass functions are implemented only in AGPL scripts (our own shims needed), and some templates need the video frame or segmentation.",
+   "Filler detection depends on the ASR writing out fillers. WhisperX usually drops 'eh/este/um', so the Spanish filler cuts need a verbatim initial_prompt plus RMS gap probing, and accuracy is uncertain. deadWeight's repeat-take LCS can cut intentional repetition, so keep the LLM or user approval step.",
+   "Remotion License: free only for up to 3 employees. A paid company license is required beyond that, and terms change in Remotion 5.0. This applies to every path built on autobroll.",
+   "Codex CLI: connecting to the MCP server via config.toml is inferred, not tested, and whether it can see images in MCP results (frame_at, caption_proof) is unverified. The fallback is a Gemini vision critique returned as text.",
+   "autobroll has a bus factor of 1, no tests and no CI. Logic is duplicated between mcp/server.mjs and editor/store.ts, and the agent and the UI both write the project with last-write-wins. The fork has to be fully owned.",
+   "Security: the autobroll backend binds all interfaces with no authentication and may be tunneled through trycloudflare. Also, agent runners borrowed from vibetube or diffusionstudio default to bypassPermissions; restrict them to MCP tools only.",
+   "Color baked at ingest is not live-adjustable; changing the look means re-transcoding. There are no LUTs or skin handling in the MVP.",
+   "Unverified: the safe-zone pixel values, paint-order stroke behavior in Chrome 134, the animated Noto emoji license, the license of each SFX file, and the render-time cost of blur/glow filters in Remotion.",
+   "License contamination: copying any code from OpenChatCut, OpenMontage, openshorts main.py or tscaps studio forces AGPL. video-editor-agent has no license. diffusionstudio files stay MPL-2.0. HyperFrames/GSAP carries a non-OSI GSAP license if it is ever used.",
+   "Gemini is still hard-wired for arrange, accents, faces and B-roll planning. Either route these steps through the agent or keep them as a fallback that needs GEMINI_API_KEY."
+  ],
+  "rationale": "Direct answer to the question: yes, autobroll's captions are basic. It has one hard-coded style: the active word scales to 1.05x, accent words change color, there is no per-word animation, no emoji and no presets, and Inter isn't even bundled into the render. But no other candidate fixes this out of the box. The best caption material (open-edit recipes, HyperFrames embedded-captions, tscaps templates) sits at 4/5 and is locked behind a closed renderer, a second engine, or a browser-only renderer. Everyone else is at 2/5 or below. Switching base therefore does not solve captions, and the caption gap is not a reason to switch.\n\nWhat makes Captions.ai and Submagic feel premium comes down to two things: (1) a motion and style vocabulary, and (2) per-word decisions about emphasis, emoji and SFX, made on their servers. In this harness, (2) is exactly the job Claude Code or Codex should do, sent as JSON over MCP. So (1) is the only part that has to be built.\n\nFastest MVP for a small team: keep autobroll as the base. It already has Remotion (preview matches export), clip-anchored overlays that survive cuts, WhisperX, silence cutting, Pexels B-roll, face-aware placement, ducking, an editor, and an MCP server already mounted in Claude Code. Every one of the missing problems adds cleanly on top of it:\n- Captions: rewrite CaptionTrack as a preset engine following the premium captions spec, porting the motion ideas from open-edit and tscaps.\n- Motion graphics: a new clip-anchored graphics track in Remotion, seeded from talking-head-reel's MIT 9:16 overlays and redesigned HyperFrames looks.\n- Cutting: AIEV's deadWeight detector and open-edit's speech-probe produce filler and retake candidates, applied through autobroll's split/trim tools.\n- Color: AIEV color.ts and video-use auto-grade/tonemap, baked at ingest.\n- Brain choice: document the MCP server for both CLIs and use diffusionstudio's mcp-config to write Codex's TOML.\n\nRejected as bases:\n- HyperFrames (score 6): best design, but a second engine, huge churn, landscape defaults, and a caption skill that refuses cut footage.\n- diffusionstudio: closed backend and the same caption gap.\n- open-edit: closed noncompete renderer.\n- AIEV: Vietnamese-first and Claude-only.\n- The rest are thinner, AGPL, or unlicensed.\n\nSuggested plan:\n- Week 1: autobroll fixes (language, Spanish GLUE, fonts, edit_caption timing, get_transcript, localhost binding), the caption data model, and 4 presets.\n- Week 2: annotate_captions plus validator, the remaining presets, emoji and SFX, deadWeight cuts, and the color bake.\n- Week 3: graphics track with 6–8 templates plus add_graphic, zoom punches, and Codex registration.\n- Week 4: caption_proof, QC and loudness, and the ES/EN demo.\n- Phase 2: tscaps template import and LLM-authored graphics."
+ },
+ {
+  "lens": "quality-ceiling",
+  "strategy": "hybrid",
+  "base_repo": "andriidrok1/autobroll",
+  "ranking": [
+   {
+    "repo": "heygen-com/hyperframes",
+    "score": 8.5,
+    "why": "It has the highest output ceiling of any candidate, and it wins that on real code. The motion-graphics engine is real: 165 blocks and 223 components, alpha output via ProRes 4444 or VP9, plus a director/builder/verify skill with lint and snapshot gates, and 19 SFX. skills/embedded-captions is the most advanced open-source caption design: 25 themes and 10 DNAs, per-word verbs, a hero word placed behind the speaker using a u2net matte, loudness-coupled hero amplitude, and timing, occlusion and overflow gates. It also has a real WebGL grader with LUTs and a signalstats analyzer, and a cut-list compiler. Use it as a pinned dependency and donor, not as the fork: it has 8k files, several releases a day, 92% of its blocks are 16:9, its caption skill refuses hard-cut footage, and it has no emoji system."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "score": 7,
+    "why": "It has the strongest open, Apache-2.0 pool of per-word caption recipes: 42 recipes (31 at 9:16) plus 6 classic presets, with per-glyph stagger, bigPop, clip-path stars, underline draw and size ladders. It also has pro-grade cut primitives (speech-probe, frame-snapped apply-edl with crossfades) and sidechain ducking. Its renderer is closed and PolyForm-Shield-licensed with a noncompete, so port the recipes into Remotion and never ship the weave binary."
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "score": 7,
+    "why": "It has 38 MIT caption templates, 15 animation primitives, and a clean contract of per-word, line and segment timing CSS variables plus tag classes. It is a frame-deterministic paused-CSS model built for exactly the 'LLM tags words, template renders' split. It covers captions only. Automatic tagging is cloud-only, and the studio and its glue code are AGPL, so write your own Sass shims."
+   },
+   {
+    "repo": "andriidrok1/autobroll",
+    "score": 6.5,
+    "why": "On its own it adds almost nothing to output quality: one minimal caption look, zero motion graphics, zero grading. But it is the best spine for reaching high quality. It is small (about 4.6k lines, MIT), and it already runs Remotion with shared preview and export. It has clip-anchored overlays that survive cuts, face-aware placement, Pexels search with downscaling, music ducking, and a 24-tool MCP server that is already mounted in the user's Claude Code. All the premium layers plug into it."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "score": 6,
+    "why": "It has the best MIT cutting and QC code. autoTrim.ts runs a threshold sweep with a word-midpoint guard, single-pass concat with afades, and residual verification. deadWeight.ts detects filler, stutter, LCS repeat-takes and hesitation, then the LLM approves the candidates. qc.ts gates on loudness, black and freeze frames, safe-area frames and a 409. It also has 14 ffmpeg grade presets with HDR tonemapping and a face-biased ZoomWrapper. Its captions are basic, it is Vietnamese-first, and it is Claude-only."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "score": 5.5,
+    "why": "It has the most complete Claude Code (Agent SDK) and Codex app-server harness abstraction, which it defaults to, plus MCP auto-registration into 9 agent configs. These are MPL-2.0 file-level and can be lifted. It adds nothing on quality: 7 basic caption presets, no motion templates, CSS-filter color, and a closed backend."
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "score": 4.5,
+    "why": "It has MIT Remotion-native vertical overlays (13 spring-animated cards, with SFX wired in). The useZoom snap-and-push zoom grammar and the E() source-time mapper plug straight into autobroll's Remotion. make_sfx.py generates license-clean UI SFX. This is a good cheap fallback for inserts that don't need HyperFrames. Its captions are basic and its visual identity is narrow."
+   },
+   {
+    "repo": "LeonSooLab/openchatcut (upstream 0xsline/OpenChatCut)",
+    "score": 4,
+    "why": "Its motion-graphics architecture is the right shape: the LLM writes Remotion JSX, a sandbox compiles it, and a frame-image verification loop checks it. Upstream has real `claude -p` and Codex app-server runners. It is AGPL with scraped template provenance, so reuse the design only. Its text-based cutting does not cut video, and its captions are basic."
+   },
+   {
+    "repo": "francozanardi/pycaps",
+    "score": 4,
+    "why": "Good caption abstractions to reimplement: tag-conditioned animation and SFX triggers, emoji pacing rules, and overshoot primitives. Its motion is transform-only on static bitmaps, AI features are locked to OpenAI or pycaps.com, and its SFX licensing is unknown."
+   },
+   {
+    "repo": "openreelio/openreelio",
+    "score": 3.5,
+    "why": "MIT donor for supporting quality infrastructure: Whisper DTW word timing with a repair pass, caption contrast and extent QC, frame contact sheets for LLM self-checks, color filter builders with histogram shot matching, and a headless Claude launcher. Its captions are static ASS and its motion-graphics code is dead."
+   },
+   {
+    "repo": "browser-use/video-use",
+    "score": 3.5,
+    "why": "Robust MIT ffmpeg ingest and delivery code: HDR tonemap, rotation-aware portrait detection, fps probing, two-pass loudnorm to -14 LUFS. It also has a clean skill-as-harness pattern. Its captions are below basic, and it has no motion graphics or stock footage."
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "score": 3,
+    "why": "Its MIT providers.js and agent.js are a small, liftable Claude/Codex headless runner, and it has alpha-WebM overlay compositing with crossfade timeline remapping. Everything premium is prompt-only, and it cannot import footage."
+   },
+   {
+    "repo": "calesthio/OpenMontage",
+    "score": 3,
+    "why": "Its CLIP ranking plus MMR diversity for stock B-roll is a good design for relevance, which is where Pexels quality comes from. It is AGPL, so this is design only. Its captions and motion graphics are generic, its tools have bugs, and its best material is vendored from HyperFrames."
+   },
+   {
+    "repo": "kwakseongjae/dawn-cut",
+    "score": 3,
+    "why": "A pattern donor: a zod-validated EditCommand bus with dry-run and an audit log, plus NL selectors so the LLM never computes microseconds. Its captions are PNG frame swaps, its renderer is single-source, and its bundled stickers contain Apple emoji."
+   },
+   {
+    "repo": "mutonby/openshorts",
+    "score": 2.5,
+    "why": "Its edit_builder.py pattern (the LLM emits an EDL and stdlib code compiles clamped FFmpeg) and its word-snapping are worth copying. Its captions are basic karaoke, and main.py imports AGPL YOLO at module level."
+   },
+   {
+    "repo": "krusemediallc/video-editor-agent",
+    "score": 2.5,
+    "why": "It has a rich GSAP vocabulary (36 primitives and a face-origin PUNCH) and seam/loudness QA ideas. It has no license, so it is reference only, and its best code is hard-wired to one project."
+   },
+   {
+    "repo": "mutonby/shortcast",
+    "score": 1.5,
+    "why": "It only extracts moments. It burns in no captions, has no motion graphics, and is macOS MLX-only. At most, its face-follow pan math is worth taking."
+   },
+   {
+    "repo": "itsjwill/vanta",
+    "score": 1,
+    "why": "A marketing repo whose integration stubs never render. The only things worth borrowing are the grain/vignette and clip-path word-wipe patterns."
+   }
+  ],
+  "donor_parts": [
+   {
+    "repo": "andriidrok1/autobroll",
+    "part": "mcp/server.mjs (24 zod tools), src/captions.ts projectCaptions, src/Broll.tsx projectBrolls, src/timeline.ts placeClips/sampleTransform, MusicTrack ducking, server/index.mjs /api/render",
+    "use_for": "The spine of the fork: clip-anchored overlay model, one Remotion composition shared by preview and export, and the MCP tool surface for Claude Code or Codex. First fix three things: the set_keyframes px-vs-percent doc, the `--language en` hard-code, and the missing Inter font in the render bundle. Then add get_transcript, annotate_captions, set_caption_style, caption_proof, add_motion_graphic and set_grade."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "hyperframes CLI and engine (pinned), with registry/blocks/* and registry/components/* (count-up, data-chart, lt-*, chatgpt-exchange, notification-cascade, x-post and others)",
+    "use_for": "The motion-graphics B-roll engine. Render each insert once to ProRes 4444 or VP9-alpha, then place it in autobroll as a clip-anchored overlay layer using Remotion OffthreadVideo `transparent` (the prop exists in the installed 4.0.380). Curate and re-lay out roughly 20-30 blocks into 9:16 once, rather than having the LLM re-lay them out on every reel."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "skills/motion-graphics (director/builder agents, lint/check/snapshot, repair pass) plus skills/talking-head-recut (5 zones, 9:16 canvas)",
+    "use_for": "The agent workflow for authoring motion-graphics inserts from transcript beats, with deterministic gates. Replace `--model small.en` with a multilingual model."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "skills/embedded-captions: lib-dna.cjs heroImpact (RMS loudness), dna/*.json and themes/*.json, check-timing, check-occlusion and check-overflow, safe-zones.cjs, plus packages/cli/src/background-removal (u2net matte, CoreML/CUDA)",
+    "use_for": "The premium caption layer: loudness-driven hero words, a hero word placed behind the speaker via the matte, and caption QA gates. Port the logic into Remotion; do not run it as a second caption engine."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "packages/cli/src/media-use/lib/cutlist.mjs, transcriptCutFade.mjs, packages/core/src/mediaGradeAnalyzer.ts, packages/core/src/colorLuts.ts, skills/media-use/audio/assets/sfx (Pixabay)",
+    "use_for": "Compiling the transcript cut list with anti-click splices, exposure and white-balance suggestions from signalstats, .cube LUT handling, and SFX used only inside rendered output."
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "part": "templates/*/style.scss, templates/_lib/animation/* (15 primitives), engine document/CssVariable.ts, Word.ts, Decoration.ts, rendering/subtitle/SegmentSubtreeHtmlBuilder.ts, BaselineCssComposer.ts, FrozenFrameCss.ts, splitting/BalancedPixelWidthLineSplitter.ts (all MIT)",
+    "use_for": "The Remotion caption preset library. Compute the --on-*-starts/-ends variables from useCurrentFrame, keep animations paused, and copy the MIT DOM builder. Write your own roughly 20-line Sass shims instead of the AGPL ones. Skip Loki (Komika Axis font license). Before committing, run a 1-2 day spike to confirm this works."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "refs/html/*/recipe.ts, refs/html/classic/classic-lib.ts, pipeline/recipes/lib.ts, template-lib.ts, pipeline/design/captions.ts (Apache-2.0)",
+    "use_for": "A second pool of premium caption styles: 31 vertical recipes plus 6 classics, with per-glyph stagger, bigPop, star and underline accents. Port them to Remotion by rewriting with interpolate() or seeking WAAPI currentTime per frame, and re-measure glyph widths in Chrome."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "cli/src/commands/speech-probe.ts, apply-edl.ts, cli/src/edl.ts, retime-transcript.ts, mix-audio.ts, measure-placement.ts",
+    "use_for": "Snapping cuts to the adaptive noise floor, frame-snapped EDL assembly with 40 ms crossfades, retiming captions after cuts, SFX and music sidechain ducking, and an ffmpeg-only head/subject placement estimate."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/autoTrim.ts, deadWeight.ts, jobs/autoTrim.ts approval flow (MIT)",
+    "use_for": "Deterministic silence cutting, plus filler, stutter, repeat-take and hesitation candidates that the Claude or Codex brain approves. Replace the Vietnamese lexicons with ES/EN ones."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/qc.ts + routes/jobs.ts gate, color.ts (14 presets, HDR tonemap), engines/remotion/src/components/SceneClip.tsx ZoomWrapper",
+    "use_for": "A final-render QC gate, a baseline grade baked with ffmpeg (add lut3d with curated .cube looks), and face-biased punch-in zooms."
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "part": "remotion/src/talk/reel-overlays.tsx, Reel.tsx useZoom + E(), remotion/scripts/make_sfx.py (MIT)",
+    "use_for": "Native Remotion vertical overlays, the snap-and-push zoom grammar, and license-clean synthesized SFX. This is the fallback motion-graphics path when HyperFrames or GSAP cannot be used, and it covers cheap inserts."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "part": "packages/agent-chat/src/host/{harness,claude,codex}.ts, apps/desktop/src/mcp-config.ts (MPL-2.0 file-level)",
+    "use_for": "Letting the user choose Claude Code (Agent SDK) or Codex (app-server) as the brain, and auto-registering autobroll's MCP in both. Tighten the default permissions from bypass / danger-full-access."
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "part": "electron/providers.js, electron/agent.js (MIT)",
+    "use_for": "A simpler alternative to the diffusionstudio harness: headless `claude -p` and `codex exec` arguments, session resume, timeouts. Port it away from Electron."
+   },
+   {
+    "repo": "francozanardi/pycaps",
+    "part": "Patterns from tag/tag_condition.py, effect/sound/sound_effect.py and effect/text/emoji_in_segment_effect.py (reimplement; do not reuse its mp3s)",
+    "use_for": "SFX triggered by a word's tier or tag, emoji pacing rules, and boolean tag selectors inside caption presets."
+   },
+   {
+    "repo": "openreelio/openreelio",
+    "part": "src-tauri/src/core/qc/caption_contrast.rs, render/frame_probe/*, captions/whisper.rs DTW repair pass (MIT)",
+    "use_for": "The caption contrast check (stage C), contact sheets for the vision critique (stage D), and more robust word timings."
+   },
+   {
+    "repo": "browser-use/video-use",
+    "part": "helpers/render.py is_hdr_source/TONEMAP_CHAIN/is_portrait_source/probe_source_fps/apply_loudnorm_two_pass (MIT)",
+    "use_for": "Ingesting iPhone HDR vertical footage and delivering loudness at -14 LUFS."
+   },
+   {
+    "repo": "calesthio/OpenMontage",
+    "part": "Design of tools/video/clip_search.py + lib/clip_embedder.py (CLIP ranking + MMR); reimplement, since the code is AGPL",
+    "use_for": "Ranking Pexels candidates by relevance and diversity instead of taking the top hit blindly. An alternative is Claude checking thumbnails via image tool results."
+   }
+  ],
+  "motion_graphics_engine": "HyperFrames (heygen-com/hyperframes, Apache-2.0; HTML/CSS + GSAP rendered deterministically in headless Chrome), pinned and used as a dependency, not forked. Each insert (kinetic type, animated stat, lower third, UI mockup, chart) is authored by the Claude or Codex brain from a curated 9:16 subset of the registry, gated by `hyperframes lint/check/snapshot`, and rendered once to ProRes 4444 or VP9-alpha. It is then composited as a clip-anchored overlay track in autobroll's Remotion timeline via OffthreadVideo `transparent`, together with an SFX hit. Zoom punches stay native in Remotion, using the talking-head-reel useZoom or AIEV ZoomWrapper patterns on the base clip. The fallback, if GSAP licensing or render time blocks this, is Remotion-native TSX inserts seeded from talking-head-reel's vertical overlays, using the OpenChatCut pattern (LLM-written JSX, sandbox compile, frame verification) reimplemented because that code is AGPL.",
+  "captions_engine": "Remotion, by rewriting autobroll's src/CaptionTrack.tsx into the preset and animation engine from the premium-captions spec. That means CaptionWord gains tier, role, emoji and sfx; placement becomes safe-zone and face-aware; and every animation is an f(frame). The preset library is seeded from tscaps' MIT templates (paused-CSS model driven by useCurrentFrame, needing a 1-2 day spike) and open-edit's Apache-2.0 recipes (ported with interpolate or seeked WAAPI). The hero-word, loudness-coupling and text-behind-speaker logic, plus the QA gates, are ported from HyperFrames embedded-captions. The LLM only emits annotate_captions JSON (tiers, emoji, SFX, breaks, text fixes); deterministic code handles paging, timing, layout, budgets and the proof loop (validate, geometry, contrast, vision critique). Emoji use Noto SVG images, and all fonts are OFL. If the tscaps spike fails, fall back to the spec's 8 hand-written TypeScript presets plus open-edit recipes rewritten natively.",
+  "risks": [
+   "Two render engines (Remotion, plus HyperFrames in headless Chrome for motion graphics) add complexity and render time. BeginFrame capture is Linux-only, so macOS falls back to the slower screenshot path. Mitigate by keeping inserts short (2-5 s), caching alpha renders by content hash, and rendering inserts in parallel.",
+   "GSAP's Standard 'no charge' license forbids use in no-code visual animation builders that compete with Webflow. An AI reel editor that generates animations is a gray area, so get a legal read before any commercial launch. The fallback is Remotion-native motion graphics.",
+   "The Remotion License requires a paid Company License for for-profit organizations with more than 3 employees. It covers the base, the captions engine and the renderer, and its terms change in Remotion 5.0.",
+   "It is untested whether tscaps' paused-CSS templates render frame-accurately inside Remotion. This conflicts with the spec's 'no CSS keyframes' rule unless the animations are paused and use negative delays. Fonts, filters.svg defs and the unexported SegmentSubtreeHtmlBuilder also have to be ported. Budget a spike and keep the native-preset fallback ready.",
+   "92% of HyperFrames blocks and all its lower thirds are 16:9. Re-laying them out per reel with the LLM gives variable quality and costs tokens. Instead, do a one-time curated 9:16 template set with typed props.",
+   "HyperFrames hygiene: several pre-1.0 releases a day, and @hyperframes/engine on npm has no license field. The repo commits commercial fonts (TT Norms Pro, ABC Solar Display). PostHog telemetry is on by default, and `init` auto-updates global ~/.claude skills. Pin the version, disable telemetry, never run init globally, and don't copy the fonts.",
+   "Filler removal depends on the transcript keeping disfluencies. Whisper/WhisperX usually drop 'um/eh/este', so a lexicon detector like deadWeight sees nothing. This needs disfluency-prompted transcription or energy-based detection, validated on real Spanish footage.",
+   "Premium caption quality depends on the LLM's emphasis and emoji choices. Budgets and the validator constrain them, but taste still varies. The vision critique relies on image results from MCP tools; Claude Code has this, while Codex support is unverified and would need the Gemini fallback.",
+   "The safe-zone pixel values are all unverified. Calibrate them with per-platform screenshot masks before trusting the geometry gate.",
+   "The text-behind-speaker matte (u2net, about 9 fps on CoreML) costs render time and can halo around hair edges. Keep it opt-in for hero words only.",
+   "Donor license contamination. OpenChatCut, OpenMontage and the tscaps studio are AGPL; OpenShorts pulls in AGPL YOLO; video-editor-agent has no license; open-edit's renderer is PolyForm Shield; AIEV's and pycaps' SFX have non-commercial or unknown licenses; Komika Axis and dawn-cut's Apple-emoji stickers can't be redistributed; diffusionstudio code is MPL file-level. Take only design from these, and copy code only from MIT or Apache files, with attribution.",
+   "Color grading has a low ceiling across every candidate. None does real auto white balance, skin protection or shot matching, so this layer stays preset/LUT plus signalstats, and quality depends on curated .cube looks.",
+   "autobroll has a bus factor of 1, no tests and duplicated logic between the MCP server and the editor store. Forking it means owning it fully and adding tests, starting with the caption validator and the golden SSIM stills."
+  ],
+  "rationale": "Short answer to the user's question: yes. autobroll's captions are the basic tier: one fixed Inter style, an accent flag, a 1.05 scale jump, and no presets, per-word motion, emoji or SFX. No open-source candidate reaches Captions.ai or Submagic on its own. AIEV, OpenChatCut, OpenShorts, diffusionstudio, OpenMontage and talking-head-reel are all the same \"highlight one word\" tier, and video-use and dawn-cut are below it. Premium quality exists only in pieces across three permissively licensed projects: HyperFrames embedded-captions (hero words, loudness coupling, text behind the speaker, gates), tscaps (38 MIT templates with a frame-deterministic timing contract), and open-edit (42 Apache per-glyph recipes). Motion-graphics B-roll is real and reusable in only one of them, HyperFrames (a 388-item registry plus a director/builder/verify pipeline with alpha output).\n\nOn a quality lens, then, forking a single repo leaves quality on the table, and so does starting from scratch. The choice is a hybrid.\n\nFork autobroll as the spine. It is small, MIT, and already on Remotion, where caption preview and export match. Its clip-anchored overlays survive cuts, and its MCP server already lets Claude Code act as the brain.\n\nRebuild captions inside Remotion using the spec's preset engine, seeded from tscaps and open-edit, with HyperFrames' hero and matte logic and a proof loop. That keeps one caption renderer, shared by the editor preview and the final export.\n\nUse HyperFrames, pinned as a dependency, only as the motion-graphics insert engine. It renders alpha clips that Remotion composites. Its landscape defaults, its refusal of multi-shot footage and its daily churn make it a poor base, but as a renderer its ceiling is the highest.\n\nCutting quality comes from AIEV autoTrim/deadWeight with ES/EN lexicons, plus open-edit and HyperFrames splice primitives. Grading is an ffmpeg bake of LUTs and presets, with suggestions from the HyperFrames analyzer. The Claude/Codex switch comes from the diffusionstudio or VibeTube runners.\n\nThe main costs of this choice are two render engines, the GSAP and Remotion license exposure, and an unverified tscaps-in-Remotion spike. Each has a named fallback: Remotion-native motion graphics, and native TypeScript presets."
+ },
+ {
+  "lens": "harness-risk",
+  "strategy": "hybrid",
+  "base_repo": "andriidrok1/autobroll (the user's own local copy at /Users/felipealonzo/autobroll, MIT; keep it as the spine and add donor parts; do not fork any other repo)",
+  "ranking": [
+   {
+    "repo": "andriidrok1/autobroll",
+    "score": 7,
+    "why": "Best starting point for the harness. It is the user's own MIT code, small enough to own (about 4.6k LOC), and already runs on Remotion, the renderer the captions spec settles on. Its 24-tool stdio MCP server is already mounted in Claude Code, and it has the clip-anchored overlay model, a shared preview/export composition and Pexels stock. The weak parts: the internal AI is hard-wired to Gemini (API key sent in the URL), captions have one minimal style, there are no motion graphics and no color grading, Spanish is broken because the language is hard-coded to en, the set_keyframes docs say px while the code uses %, and the backend has no auth and listens on all interfaces, possibly tunneled. All of these are fixable in a codebase the user owns, and none requires adopting someone else's roadmap."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "score": 6.5,
+    "why": "Best donor content of all the candidates: the embedded-captions DNA/theme rules and QA gates, a registry of 389 motion-graphics items, a WebGL grader, and plugin packaging for both Claude Code and Codex. It is a poor base or hard dependency for this lens. It is a second Chromium render engine next to Remotion and ships several releases a day. GSAP is under Webflow's no-charge license, which prohibits competing with Webflow's visual animation builder. It commits commercial fonts, the npm engine package has no license field, PostHog telemetry is on by default, and init auto-rewrites ~/.claude/skills. Use it as an Apache-2.0 design and asset donor, or as a pinned optional sidecar."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "score": 6,
+    "why": "Best caption-style pool that can be copied (42 recipes plus 6 classic presets, Apache-2.0). It uses the harness pattern the user wants: skill plus AGENTS.md, Claude, Codex and Gemini as brains, deterministic CLI tools and no LLM SDK. It is disqualified as a base because rendering, verification and the safe-zone check all run in a closed binary under PolyForm Shield with a noncompete clause, limited to macOS arm64 and Windows. Copy the recipes and patterns, never the engine. Its SessionStart hooks run npx --yes and update themselves, which is a supply-chain risk."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "score": 5.5,
+    "why": "Most complete implementation of a selectable brain: Claude through the Agent SDK, Codex through app-server, a loopback MCP server, and an installer that registers MCP in 9 agent configs. It is MPL-2.0, which is copyleft per file only, so usable. As a base it fails: transcription, listen and generate go to a closed, credit-metered backend that receives the user's audio. It renders only in Electron, relies on an experimental Chromium API, defaults both agents to full trust, has a bus factor of 1 with renames every day, and its captions are basic. Take the harness and MCP-install code, not the app."
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "score": 5.5,
+    "why": "Its engine and 38 caption templates are MIT, built on a paused-CSS timing-variable contract that maps directly onto Remotion. That makes it the strongest donor for caption styling. Its automated tagging exists only in the hosted service, the glue code (Sass functions, cut finders, studio) is AGPL, the Loki font is restricted, and a Remotion port has not been tested. Use it as a donor only."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "score": 5,
+    "why": "Best donor for cutting and QC (MIT): the autoTrim sweep, a deadWeight candidate generator for filler, stutter and repeated takes, a flow where the LLM approves candidates, a QC gate, and FFmpeg grading presets. As a harness it supports only Claude, gives unrestricted Bash plus a curl allowlist (a prompt-injection path to exfiltration), uses Vietnamese filler lexicons, has no tests, and bundles SFX that are not licensed for commercial use."
+   },
+   {
+    "repo": "openreelio/openreelio",
+    "score": 4.5,
+    "why": "Its MIT code has the cleanest headless Claude flag set: -p with stream-json, --tools \"\", an allowlist of mcp__x__*, strict MCP config and an isolated config dir. It also runs a Codex app-server in a read-only sandbox. Its weaknesses are worth learning from: two separate tool surfaces (MCP for Claude, dynamicTools for Codex, plus a third CLI MCP), about 27MB of source that looks AI-generated, a bus factor of 1, static captions, and a gap in its GPL FFmpeg notice. Use it for patterns only."
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "score": 4,
+    "why": "MIT Remotion code on the same engine: about 16 vertical overlay components, useZoom for snap and push zooms, an E() source-time mapper, and SFX synthesized by its own script with a clean license. Its output channel is the LLM hand-editing TSX, which is brittle and has no schema, so it is the wrong harness contract. It is also English-only, macOS-only and one day old. Good seed material for the motion-graphics template registry."
+   },
+   {
+    "repo": "browser-use/video-use",
+    "score": 4,
+    "why": "MIT skill-plus-CLI pattern that runs under Claude Code and Codex, with solid FFmpeg ingest (HDR tonemap, rotation-aware portrait detection, fps, two-pass loudnorm). The contract is prose only: no MCP, no EDL schema, and Hard Rule 10 ties it to Claude's Agent tool. Transcription is locked to paid ElevenLabs, and captions are static. Useful as a donor of helpers."
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "score": 3.5,
+    "why": "Its MIT providers.js and agent.js are a small, tested Node layer for claude -p and codex exec: session resume, JSONL parsing, timeouts, process-group kill. It defaults to bypassPermissions and approval_policy=never with network access, its success check passes on a stale final.mp4, it cannot import existing footage, and its optional matting pulls in GPL code and non-commercial model weights."
+   },
+   {
+    "repo": "kwakseongjae/dawn-cut",
+    "score": 3,
+    "why": "Useful MIT patterns: a zod EditCommand bus with dry-run and invariants, and selectors (findWords, findSilences) so the LLM never computes milliseconds. Its MCP save drops project state, its render is single-source, it is Korean-first, and its stickers contain Apple emoji artwork that cannot be redistributed. Take patterns only."
+   },
+   {
+    "repo": "francozanardi/pycaps",
+    "score": 3,
+    "why": "MIT caption abstractions: CSS per word state, a tag-condition language, emoji pacing rules and SFX triggered by tags. It has stalled, and its LLM is hard-wired to OpenAI or to pycaps.com, whose first hop is cleartext and carries the key and transcript. Its SFX and fonts are unlicensed, the PyPI name belongs to a different package, and custom SFX configs crash."
+   },
+   {
+    "repo": "mutonby/openshorts",
+    "score": 2.5,
+    "why": "A few clean MIT modules: an LLM-EDL-to-FFmpeg compiler with hard caps, a libass karaoke writer, and word snapping. main.py imports Ultralytics (AGPL) at module level, which contaminates anything that imports it. The Docker image adds a GPL yt-dlp plugin, all decisions are hard-wired to Gemini, and its MCP is coarse and hides word transcripts. It is a clip farm, not a polishing editor."
+   },
+   {
+    "repo": "krusemediallc/video-editor-agent",
+    "score": 2,
+    "why": "Good ideas (a VAD residual-gap cut planner, sample-exact cutting, deterministic seam and loudness QA, 36 GSAP motion primitives), but it has no LICENSE file, so all rights are reserved. Any use must be a clean-room reimplementation. It is also wired only to Claude."
+   },
+   {
+    "repo": "calesthio/OpenMontage",
+    "score": 2,
+    "why": "AGPL-3.0, so copying any file would force the user's product to be AGPL, including a hosted SaaS. Its checkpoint and stage gate and its tool-contract design are worth reimplementing from scratch. Its captions are the basic karaoke tier, and the relevant tools are experimental and buggy (inverted grade intensity, overlay not shifted in time)."
+   },
+   {
+    "repo": "LeonSooLab/openchatcut",
+    "score": 1.5,
+    "why": "A dead fork of an AGPL project, 915 commits behind. Its text-based cuts do not apply to video, and ASR is hard-coded to zh. Upstream's claude -p and codex app-server runners are useful only as design reference."
+   },
+   {
+    "repo": "mutonby/shortcast",
+    "score": 1,
+    "why": "A native Swift/MLX macOS app with an in-process LLM and no path for Claude or Codex. It burns no subtitles and cuts nothing inside a clip. Only a few small algorithms (the pan path, tolerant JSON parsing) could be reused."
+   },
+   {
+    "repo": "itsjwill/vanta",
+    "score": 0.5,
+    "why": "A marketing shell. The integration stubs are never imported, the only render is a 16:9 promo, and there is no harness. It is worth nothing beyond a fresh Remotion project."
+   }
+  ],
+  "donor_parts": [
+   {
+    "repo": "andriidrok1/autobroll",
+    "part": "mcp/server.mjs (24 zod-typed stdio MCP tools)",
+    "use_for": "The single, canonical tool surface that both Claude Code and Codex connect to over stdio. Fix the set_keyframes unit docs to %. Add get_transcript (word-level), annotate_captions, set_caption_style, caption_proof, add_graphic, apply_cuts and grade tools. Move the logic now duplicated in editor/store.ts into one shared module."
+   },
+   {
+    "repo": "andriidrok1/autobroll",
+    "part": "src/captions.ts projectCaptions, src/Broll.tsx projectBrolls, src/timeline.ts placeClips/sampleTransform",
+    "use_for": "A clip-anchored model for captions, B-roll and motion-graphics cues, so cuts made as clip splits never require re-timing or re-encoding."
+   },
+   {
+    "repo": "andriidrok1/autobroll",
+    "part": "server/index.mjs render job + scripts/lib-transcribe.mjs",
+    "use_for": "The render service and cached WhisperX transcription. Change --language en to auto/es. Bind to 127.0.0.1 with a per-session token. Replace scripts/gemini.mjs calls with harness-brain steps (Gemini stays only as an optional vision fallback)."
+   },
+   {
+    "repo": "openreelio/openreelio",
+    "part": "src-tauri/src/core/claude_headless.rs (build_claude_headless_args) and the codex app-server launch flags",
+    "use_for": "Reference flags for a headless runner in Node. Claude: -p, stream-json, --tools \"\", --allowedTools mcp__autobroll__*, --strict-mcp-config, isolated CLAUDE_CONFIG_DIR. Codex: read-only sandbox with approval on-request. Do not copy its split between MCP and dynamicTools; both brains should use the same MCP server."
+   },
+   {
+    "repo": "mutonby/vibetube",
+    "part": "electron/providers.js + electron/agent.js (+ test/providers.test.js)",
+    "use_for": "A small, tested Node provider layer for `claude -p` and `codex exec`: session and thread resume, stream-json and JSONL progress parsing, idle and hard timeouts, process-group kill. Change the defaults from bypassPermissions/never-approve to MCP-only tools, and base success on a new output file (mtime or hash), not on the file existing."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "part": "apps/desktop/src/mcp-config.ts + mcp-install.ts + mcp-config.test.ts",
+    "use_for": "One-click registration of the autobroll MCP server in Claude Code (~/.claude.json) and Codex (TOML), with tests. MPL-2.0: keep modified files MPL, or reimplement them."
+   },
+   {
+    "repo": "diffusionstudio/editor",
+    "part": "packages/agent-chat/src/host/harness.ts (Harness/HarnessSession/ResumeCursor interfaces)",
+    "use_for": "The shape of a brain-selection abstraction with one adapter per CLI. Reference only; do not adopt its full-trust permission defaults."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": ".claude/skills/open-edit/SKILL.md + AGENTS.md + CLAUDE.md=@AGENTS.md pattern",
+    "use_for": "One instruction source shared by Claude Code (skill) and Codex (AGENTS.md). Leave out the SessionStart hooks that run `npx --yes` and update themselves."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "refs/html/*/recipe.ts, refs/html/classic/classic-lib.ts, pipeline/recipes/lib.ts, template-lib.ts (Apache-2.0)",
+    "use_for": "Caption preset content and line and size-ladder logic, ported to Remotion interpolate() (or WAAPI currentTime). Re-measure the glyph widths in Chrome, and never download the weave-viewer-cli binary."
+   },
+   {
+    "repo": "veedstudio/open-edit",
+    "part": "cli/src/commands/speech-probe.ts + retime-transcript.ts",
+    "use_for": "Silence and gap probing against an adaptive noise floor, and retiming the transcript after cuts (Apache-2.0)."
+   },
+   {
+    "repo": "francozanardi/tscaps",
+    "part": "templates/* + templates/_lib/animation/* + packages/engine/src/modules/document/CssVariable.ts + rendering/subtitle/SegmentSubtreeHtmlBuilder.ts (MIT)",
+    "use_for": "Caption preset library driven by paused-CSS timing variables computed from useCurrentFrame. Write your own roughly 20-line Sass shims so nothing depends on the AGPL studio scripts. Exclude Loki (Komika Axis). Time-box a 1-2 day spike, since this is untested in Remotion."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "skills/embedded-captions/dna/*.json, lib-dna.cjs heroImpact, check-timing/check-occlusion/check-overflow (Apache-2.0)",
+    "use_for": "Rules for hero words and emphasis tiers, the 80 ms sync-tolerance check, luminance and occlusion QA for caption_proof. Do not copy the committed TT Norms Pro and ABC Solar Display fonts."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "registry/blocks + registry/components (lower thirds, count-up, charts, UI mockups)",
+    "use_for": "Design reference for re-authoring 9:16 Remotion templates. Optionally, a pinned CLI sidecar that renders VP9/ProRes alpha overlays with telemetry off, used only after a GSAP license review."
+   },
+   {
+    "repo": "heygen-com/hyperframes",
+    "part": "packages/cli/src/media-use/lib/cutlist.mjs + transcriptCutFade.mjs",
+    "use_for": "A deterministic compiler from cut ranges to kept segments, with an anti-click fade at each splice."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/deadWeight.ts + autoTrim.ts + jobs/autoTrim.ts (MIT)",
+    "use_for": "Deterministic candidates for filler, stutter, repeated takes and hesitation, plus a silence sweep with a word-midpoint guard. The LLM only approves candidate IDs through MCP. Replace the Vietnamese lexicons with ES/EN ones."
+   },
+   {
+    "repo": "notivn/AIEV",
+    "part": "apps/server/src/qc.ts + routes/jobs.ts 409 gate; apps/server/src/color.ts",
+    "use_for": "A QC gate before the final render (LUFS, black and freeze frames, safe-area frames) that the agent cannot bypass with force:true. FFmpeg grade presets and an HDR tonemap run as a cached pre-grade for each source."
+   },
+   {
+    "repo": "browser-use/video-use",
+    "part": "helpers/grade.py (auto_grade_for_clip), render.py (is_hdr_source, TONEMAP_CHAIN, is_portrait_source, probe_source_fps, apply_loudnorm_two_pass) (MIT)",
+    "use_for": "A bounded, signalstats-based automatic correction, robust ingest of iPhone HLG vertical video, and -14 LUFS delivery."
+   },
+   {
+    "repo": "mariagorskikh/talking-head-reel",
+    "part": "remotion/src/talk/reel-overlays.tsx, Reel.tsx useZoom + E(), remotion/scripts/make_sfx.py (MIT)",
+    "use_for": "Seed components for a typed, zod-props motion-graphics registry that the LLM fills through add_graphic (not by editing TSX), zoom punches, and a license-clean synthesized SFX kit."
+   },
+   {
+    "repo": "kwakseongjae/dawn-cut",
+    "part": "packages/core/src/selectors.ts + dryrun.ts + edit-command.ts (MIT)",
+    "use_for": "Agent tools that select by word ID and phrase rather than raw milliseconds, and return dry-run previews with granular errors so the brain can correct itself."
+   },
+   {
+    "repo": "calesthio/OpenMontage",
+    "part": "lib/checkpoint.py stage-prerequisite gate (AGPL, reimplement from scratch)",
+    "use_for": "Only the idea of deterministic stage ordering plus required approvals before the final render. Do not copy the code."
+   }
+  ],
+  "motion_graphics_engine": "Remotion, the same engine and the same Chromium pass as captions. Build a typed template registry of 9:16 Remotion components with zod props and frame-function animations. Seed it from talking-head-reel's MIT overlays and useZoom, and re-author designs referenced from HyperFrames. The LLM places graphics through an MCP add_graphic({template, props, anchorWordId}) tool. LLM-written JSX is allowed only as an escape hatch, behind lint and a still-render check. HyperFrames stays out of the core path. At most it can run as an optional, version-pinned, telemetry-off CLI sidecar that renders registry blocks to VP9 or ProRes alpha overlays for Remotion to composite, and only after a legal read of GSAP's Webflow noncompete clause.",
+  "captions_engine": "A preset engine native to Remotion, built by rewriting autobroll's src/CaptionTrack.tsx according to the premium-captions spec. It covers 8 presets using OFL fonts, an animation library of frame functions, word tiers (0-3), Noto SVG emoji, SFX in the Remotion timeline, a safe-zone and face-aware placer, and caption_proof stages A to D. Preset content is ported from tscaps' MIT templates (via the paused-CSS timing-variable contract, with your own Sass shims) and from open-edit's Apache-2.0 recipes. HyperFrames' embedded-captions DNA serves as the rulebook for hero words. The brain, Claude Code or Codex, only sends annotate_captions JSON; deterministic code handles paging, layout and validation. ASS is used only to export .srt and .ass files.",
+  "risks": [
+   "Remotion License: free only for individuals and for-profit companies of up to 3 employees; a paid Company License is required beyond that, and a license change is announced for Remotion 5.0. This applies to autobroll now and to every Remotion-based donor. Re-check the terms before any commercial launch, and pin 4.x.",
+   "GSAP (HyperFrames, some donor patterns): Webflow's no-charge license, not OSI-approved, prohibits tools that compete with Webflow's visual animation builder. Keep GSAP out of the core. If the HyperFrames sidecar is ever used, get a legal read first, especially if a visual animation editor ships.",
+   "VEED weave-viewer-cli is PolyForm Shield with a noncompete clause that almost certainly covers an AI reel editor. Never download, bundle or call it. Copy only open-edit's Apache-2.0 TypeScript and markdown.",
+   "AGPL contamination: OpenMontage, openchatcut, the tscaps studio (the Sass function scripts, cut finders, TagName.ts) and OpenShorts' main.py (Ultralytics) must be clean-room reimplemented, never copied. Check the directory of every tscaps file you copy.",
+   "krusemediallc/video-editor-agent has no license (all rights reserved), so ideas only. diffusionstudio files are MPL-2.0, so modified files stay MPL.",
+   "Asset licensing: exclude the commercial fonts committed in HyperFrames (TT Norms Pro, ABC Solar Display), Komika Axis, The Bold Font, dawn-cut's Apple-emoji stickers, AIEV's non-commercial SFX and pycaps' unlicensed SFX. Use OFL fonts, Noto emoji (Apache/OFL), and synthesized or verified-CC0 SFX.",
+   "Codex parity is unverified: Codex connecting to autobroll's stdio MCP through config.toml is inferred but untested, and so is Codex displaying image content from frame_at/caption_proof. Write a smoke test for each brain; for Codex, fall back to Gemini-vision critique that returns text.",
+   "Agent permission surface: several donors default to full trust (bypassPermissions, danger-full-access, approval_policy never, unrestricted Bash plus curl). Headless runs should allow only mcp__autobroll__* and deny shell, file-write and web tools. Treat transcript text as untrusted, since it is a prompt-injection path.",
+   "autobroll security: the backend has no auth and calls server.listen(3333) with no host, so it binds all interfaces. It accepts uploads and project overwrite/DELETE, and the local Vite config allows .trycloudflare.com, which suggests it may be tunneled publicly. Bind it to 127.0.0.1 and add a token before exposing any agent loop. The Gemini key also travels in the URL query string.",
+   "Tool-contract drift: autobroll's set_keyframes docs say px while the code uses % (an agent following the docs pushes clips off-screen); edit_caption discards WhisperX timings; logic is duplicated between the MCP server and the editor store. OpenReelio shows how two tool surfaces diverge. Keep one shared core module, one MCP surface, and contract tests.",
+   "Supply chain and churn: open-edit hooks run `npx --yes` and update themselves, HyperFrames init rewrites the global ~/.claude/skills, and video-use pulls unpinned npx engines. Pin every external CLI and never let a dependency modify the user's agent configuration. Do not fork repos that release several times a day (HyperFrames, diffusion); copy the specific files with attribution instead.",
+   "Bus factor: every candidate except HyperFrames is maintained by one person. That is acceptable only because the plan copies small parts into a codebase the user owns and depends on no one else's release cadence.",
+   "Porting risk: the tscaps paused-CSS approach inside Remotion is untested (plan a 1-2 day spike); open-edit's glyph widths were tuned on VEED's engine; the render cost of blur and glow in Chromium is unmeasured; open-edit's safe-zone pixel values are unverified until calibrated with screenshots of real platforms.",
+   "Paid or closed lock-in to avoid: the Diffusion Studio backend, ElevenLabs Scribe (video-use), HeyGen asset search and the pycaps.com API (whose first hop is cleartext). Keep ASR local (WhisperX) and keep LLM decisions in the chosen brain.",
+   "Scope risk: no candidate delivers premium captions, pro motion graphics, retake detection or color grading as a finished feature. The hybrid plan is real engineering work, not a merge."
+  ],
+  "rationale": "Lens: how well the harness fits and how much risk it carries. The user wants Claude Code or Codex as an interchangeable brain, with deterministic tools doing the work. That calls for one stable tool contract (MCP) that both CLIs can load, owned by the user, with few license traps and no dependence on someone else's release cadence. Judged that way, no third-party repo is a safe base to fork:\n- HyperFrames and diffusionstudio change daily and would pull in a second engine, a closed backend and new license obligations.\n- open-edit's renderer is under a noncompete license.\n- OpenMontage and openchatcut are AGPL.\n- The rest are single-author projects covering one or two of the four problems.\n\nThe one candidate that already has the right shape and is owned by the user is autobroll. It has a working 24-tool stdio MCP server already mounted in Claude Code, a clip-anchored JSON project model, and Remotion shared between preview and export, the same engine the premium-captions spec recommends. Its gaps are scoped work, not architectural dead ends.\n\nDecision: a hybrid. Keep autobroll as the spine and import parts with clean licenses:\n- Harness: runner flag patterns from openreelio and vibetube, MCP auto-registration from diffusionstudio, and the skill/AGENTS.md packaging pattern from open-edit.\n- Cutting: deadWeight and autoTrim from AIEV, the cutlist from HyperFrames, speech-probe from open-edit.\n- Grading and delivery: color.ts and QC from AIEV, grade and loudnorm from video-use.\n- Captions: styles from tscaps and open-edit, hero-word rules from HyperFrames.\n- Motion graphics: seed components and SFX from talking-head-reel.\n\nHarness rules:\n1. autobroll's MCP server is the only tool surface. Do not keep a separate dynamicTools or REST path per brain.\n2. Headless runs start `claude -p` or `codex exec`, restricted to mcp__autobroll__* tools, with no shell access.\n3. The brain decides (word tiers, emoji, which cut candidates to accept, graphics template and props). Deterministic code does timing, paging, layout, validation, rendering and QC gates.\n4. Replace Gemini inside the pipeline with brain steps. Keep Gemini only as a vision fallback for Codex.\n\nOne engine (Remotion) for captions and graphics means one license exposure, one render pass, and captions that can avoid graphics because they share one DOM.\n\nOn the question in the relayed request (\"autobroll has captions but not premium like captions.ai\"): that is correct. It has one hard-coded style (Inter, one accent color, active word at 1.05x). None of the 18 candidates reaches Captions.ai or Submagic level out of the box:\n- AIEV, OpenMontage, diffusionstudio, OpenShorts, dawn-cut and video-use are at the same basic tier or below.\n- pycaps is one step above.\n- HyperFrames, open-edit and tscaps have pro-grade style systems but no free automatic emphasis. That part runs server-side in those products.\n\nIn this design the brain supplies that intelligence through annotate_captions, and the style content is ported from tscaps (MIT) and open-edit (Apache-2.0) into a Remotion preset engine, following the spec. The main risks are Remotion's company license, Codex MCP and image parity, which has not been verified, and fixing autobroll's open backend before any agent loop runs against it."
+ }
+]
