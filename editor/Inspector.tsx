@@ -11,7 +11,7 @@ const ACCENT_SWATCHES = ['#FFB020', '#c2c1ff', '#ffb785', '#adc6ff', '#39d98a', 
 
 // Right "Inspector" panel: tabbed (Captions / B-roll / Styles / Settings), context-aware.
 export const Inspector: React.FC<{
-  playerRef: React.RefObject<PlayerRef>;
+  playerRef: React.RefObject<PlayerRef | null>;
   onGenerate: () => void;
   generating?: boolean;
   progressLabel?: string;
@@ -139,7 +139,7 @@ export const Inspector: React.FC<{
                   const text = c.words.map((w) => w.text).join(' ');
                   return (
                     <div
-                      key={c.id}
+                      key={`${c.id}@${c.startMs}`}
                       onClick={() => { select(c.id); seekMs(c.startMs + 20); }}
                       className={`p-3 rounded cursor-pointer transition-colors relative ${
                         sel ? 'bg-surface-variant/40 border-2 border-primary' : 'bg-surface-variant/20 border border-outline-variant/30 hover:border-primary/30'

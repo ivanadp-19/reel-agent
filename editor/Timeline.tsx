@@ -46,7 +46,7 @@ const slicePeaks = (w: WaveData | undefined, inSec: number, outSec: number): num
   return w.peaks.slice(a, Math.max(a + 1, b));
 };
 
-export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef>}> = ({playerRef}) => {
+export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> = ({playerRef}) => {
   const {
     meta, captions, clips, music, brolls, selectedId, selectedClipId, currentFrame,
     select, selectClip, deleteClip, moveClipTo, trimClip, splitClipAtFrame, pushHistory,
@@ -233,7 +233,7 @@ export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef>}> = ({pla
                 const sel = c.id === selectedId;
                 return (
                   <div
-                    key={c.id}
+                    key={`${c.id}@${c.startMs}`}
                     onPointerDown={(e) => { e.stopPropagation(); select(c.id); seekMs(c.startMs + 20); }}
                     title={c.words.map((w) => w.text).join(' ')}
                     className={`absolute top-2 h-8 rounded px-2 flex items-center clip-gradient overflow-hidden cursor-pointer ${

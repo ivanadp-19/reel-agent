@@ -96,7 +96,7 @@ export const CaptionTrack: React.FC<{
         const from = Math.round((c.startMs / 1000) * fps);
         const dur = Math.max(1, Math.round(((visEnd - c.startMs) / 1000) * fps));
         return (
-          <Sequence key={c.id} from={from} durationInFrames={dur} layout="none" name={c.words.map((w) => w.text).join(' ')}>
+          <Sequence key={`${c.id}@${from}`} from={from} durationInFrames={dur} layout="none" name={c.words.map((w) => w.text).join(' ')}>
             <CaptionPage caption={c} accentColor={accentColor} durationInFrames={dur} />
           </Sequence>
         );

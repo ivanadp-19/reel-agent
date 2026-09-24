@@ -403,9 +403,15 @@ Hecho (commit `449b1fd` y siguientes):
 - Inter empaquetada con `@remotion/google-fonts` (el export usa la misma fuente que el preview).
 - Verificado en `pruebaeditoria.mp4`: transcripción es-MX correcta (129 palabras), 31 páginas, cara detectada (captions al 57 %).
 
+También hecho:
+- Captions anclados a la **fuente** y proyectados **por palabra** (`src/captions.ts`): un corte dentro de una frase quita solo las palabras cortadas; una fuente duplicada muestra sus captions dos veces. Tests en `test/captions.test.mjs` (`npm test`).
+- `split`, `autocut` y `reanchor` viven una sola vez en `src/timeline.ts`; el store del editor y el MCP los importan (Node ≥ 24 ejecuta los `.ts` directamente).
+- `mergeCaptions` compartido, por solape de tiempo y con ids estables (ya no renumera).
+- Compare-and-swap por `updatedAt` en `POST /api/projects/:id`: la escritura con versión vieja recibe 409; el MCP lo reporta al agente y el editor avisa y recarga.
+- Seguridad: `Origin` solo de localhost (CSRF), descargas de B-roll solo desde pexels.com y sin seguir redirects a otros hosts.
+- `tsc` cubre también `editor/`.
+
 Pendiente de la fase 0:
-- Módulo único de mutaciones del proyecto (hoy `editor/store.ts` y `mcp/server.mjs` duplican split, reanchor y autocut) con compare-and-swap por `updatedAt`.
-- Re-anclaje de captions **por palabra** con ids estables, y test `node --test`.
 - Spikes: paridad de Codex con MCP (Codex no está instalado en esta Mac), comparativa visual de captions, muletillas en español (medir contra conteo manual), benchmark de render.
 
 Notas de la máquina de desarrollo:

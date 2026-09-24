@@ -79,3 +79,71 @@ export const placeClips = (clips: Clip[], fps: number): PlacedClip[] => {
 
 export const totalDurationFrames = (clips: Clip[], fps: number): number =>
   Math.max(1, clips.reduce((sum, c) => sum + Math.max(1, Math.round(clipDurationSec(c) * fps)), 0));
+
+// ---- edits shared by the editor store and the MCP server ----
+
+// orig clip → the segments it became, for re-anchoring clip-bound items (B-roll)
+export type SegmentRemap = {origId: string; segId: string; inMs: number; outMs: number}[];
+
+// move clip-anchored items onto the segment that contains them (or the nearest)
+export function reanchor<T extends {clipId?: string; startMs: number}>(items: T[], remap: SegmentRemap): T[] {
+  return items.map((it) => {
+    if (!it.clipId) return it;
+    const segs = remap.filter((r) => r.origId === it.clipId);
+    if (!segs.length) return it;
+    const inside = segs.find((r) => it.startMs >= r.inMs && it.startMs < r.outMs);
+    const target = inside ?? segs.reduce((best, r) => (Math.abs(r.inMs - it.startMs) < Math.abs(best.inMs - it.startMs) ? r : best), segs[0]);
+    return {...it, clipId: target.segId};
+  });
+}
+
+// Split a clip at a source-time into two clips back-to-back; keyframes are
+// pinned at the cut so the animation stays continuous. null = too close to an edge.
+export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {clips: Clip[]; newId: string; remap: SegmentRemap} | null {
+  const clip = clips.find((c) => c.id === clipId);
+  if (!clip || splitSrc - clip.inSec < 0.2 || clip.outSec - splitSrc < 0.2) return null;
+  const newId = `${clip.id}-s${Date.now().toString(36)}`;
+  const kfs = clip.transform;
+  let aK = kfs?.filter((k) => k.t < splitSrc);
+  let bK = kfs?.filter((k) => k.t >= splitSrc);
+  if (kfs?.length) {
+    const pin = {t: splitSrc, ...sampleTransform(kfs, splitSrc)};
+    if (!aK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) aK = [...(aK ?? []), pin];
+    if (!bK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) bK = [{...pin}, ...(bK ?? [])];
+  }
+  const a = {...clip, outSec: splitSrc, transform: aK};
+  const b = {...clip, id: newId, inSec: splitSrc, transform: bK};
+  const remap: SegmentRemap = [
+    {origId: clip.id, segId: clip.id, inMs: clip.inSec * 1000, outMs: splitSrc * 1000},
+    {origId: clip.id, segId: newId, inMs: splitSrc * 1000, outMs: clip.outSec * 1000},
+  ];
+  return {clips: clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c])), newId, remap};
+}
+
+// Autocut: replace clips with their speech segments (ends + internal pauses removed).
+export type AutocutPlan = {id: string; segments: {inSec: number; outSec: number}[]}[];
+export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; remap: SegmentRemap} {
+  const byId = new Map(plan.map((p) => [p.id, p.segments]));
+  const out: Clip[] = [];
+  const remap: SegmentRemap = [];
+  // ids must stay unique across REPEATED autocuts (re-segmenting "X" must not
+  // mint another "X-c1" when one already exists)
+  const taken = new Set(clips.map((c) => c.id));
+  const uniq = (base: string) => {
+    let id = base;
+    let n = 1;
+    while (taken.has(id)) id = `${base}-c${n++}`;
+    taken.add(id);
+    return id;
+  };
+  for (const c of clips) {
+    const segs = byId.get(c.id);
+    if (!segs?.length) { out.push(c); continue; }
+    segs.forEach((seg, k) => {
+      const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
+      out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec});
+      remap.push({origId: c.id, segId: id, inMs: seg.inSec * 1000, outMs: seg.outSec * 1000});
+    });
+  }
+  return {clips: out, remap};
+}

@@ -163,6 +163,7 @@ export function assembleWords(clips, onProgress, lang = 'auto') {
         startMs: Math.round(s), // absolute timeline (current cut)
         endMs: Math.round(e),
         clipId: clip.id, // anchor
+        src: clip.src, // source file the word belongs to
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,
       });

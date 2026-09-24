@@ -6,7 +6,7 @@ import {placeClips, clipDurationSec} from '../src/timeline';
 const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
 
 // Left "Assets" panel: source video clips (thumbnails) + audio.
-export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef>}> = ({playerRef}) => {
+export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> = ({playerRef}) => {
   const {meta, clips, music, brollAssets, selectedClipId, selectClip, setMusic, addClip, addBrollAsset, removeBrollAsset} = useEditor();
   const musicInput = useRef<HTMLInputElement>(null);
   const clipInput = useRef<HTMLInputElement>(null);

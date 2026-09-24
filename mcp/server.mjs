@@ -17,6 +17,8 @@ import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
+import {applyAutocut, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {mergeCaptions, projectCaptions} from '../src/captions.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -50,7 +52,10 @@ async function save(id, p) {
   try {
     const r = await fetch(`${API}/api/projects/${id}`, {method: 'POST', body: JSON.stringify(p)});
     if (r.ok) return (await r.json()).updatedAt;
-  } catch {}
+    if (r.status === 409) throw new Error('project changed since you read it (the editor or another session saved) — call get_project and redo the edit');
+  } catch (e) {
+    if (/changed since you read it/.test(String(e))) throw e;
+  }
   const now = new Date().toISOString();
   fs.mkdirSync(PROJECTS, {recursive: true});
   fs.writeFileSync(projFile(id), JSON.stringify({...p, createdAt: p.createdAt || now, updatedAt: now}, null, 2));
@@ -63,16 +68,8 @@ const needBackend = async () => {
   if (!(await backendUp())) throw new Error(`reel-agent backend is not running at ${API} — run \`npm start\` in the reel-agent folder`);
 };
 
-// ---------- timeline math (mirrors src/timeline.ts) ----------
-const clipDur = (c) => Math.max(0, (c.outSec - c.inSec) / (c.speed ?? 1));
-function place(clips) {
-  let acc = 0;
-  return clips.map((clip) => {
-    const durFrames = Math.max(1, Math.round(clipDur(clip) * FPS));
-    const fromFrame = acc; acc += durFrames;
-    return {clip, startMs: (fromFrame / FPS) * 1000, endMs: ((fromFrame + durFrames) / FPS) * 1000};
-  });
-}
+// ---------- timeline math (shared with the editor: src/timeline.ts) ----------
+const place = (clips) => placeClips(clips, FPS);
 const totalSec = (clips) => place(clips).at(-1)?.endMs / 1000 || 0;
 // absolute timeline second → {clip, sourceSec}
 function locate(p, atSec) {
@@ -105,9 +102,9 @@ function summary(id, p) {
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = accent):');
-  const caps = p.captions.map((c) => ({c, at: c.clipId ? toAbs(p, c.clipId, c.startMs) : c.startMs / 1000})).filter((x) => x.at != null).sort((a, b) => a.at - b.at);
-  for (const {c, at} of caps) out.push(`  ${c.id}  @${f1(at)}s  top ${c.topPct}%${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
-  const hidden = p.captions.length - caps.length;
+  const caps = projectCaptions(p.captions, p.clips, FPS);
+  for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
+  const hidden = p.captions.filter((c) => !caps.some((x) => x.id === c.id)).length;
   if (hidden) out.push(`  (+${hidden} captions on trimmed-away parts, not shown)`);
   out.push('', 'B-ROLL:');
   for (const b of p.brolls) {
@@ -137,39 +134,6 @@ async function runJob(route, body, maxSec = 1800) {
 }
 const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8'));
 
-// mirrors store.applyAutocut
-function applyAutocut(p, plan) {
-  const byId = new Map(plan.map((x) => [x.id, x.segments]));
-  const newClips = []; const remap = []; const taken = new Set(p.clips.map((c) => c.id));
-  const uniq = (base) => { let id = base, n = 1; while (taken.has(id)) id = `${base}-c${n++}`; taken.add(id); return id; };
-  for (const c of p.clips) {
-    const segs = byId.get(c.id);
-    if (!segs?.length) { newClips.push(c); continue; }
-    segs.forEach((seg, k) => {
-      const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
-      newClips.push({...c, id, inSec: seg.inSec, outSec: seg.outSec});
-      remap.push({origId: c.id, segId: id, inMs: seg.inSec * 1000, outMs: seg.outSec * 1000});
-    });
-  }
-  const reanchor = (items) => items.map((it) => {
-    if (!it.clipId) return it;
-    const segs = remap.filter((r) => r.origId === it.clipId);
-    if (!segs.length) return it;
-    const inside = segs.find((r) => it.startMs >= r.inMs && it.startMs < r.outMs);
-    const target = inside ?? segs.reduce((best, r) => (Math.abs(r.inMs - it.startMs) < Math.abs(best.inMs - it.startMs) ? r : best), segs[0]);
-    return {...it, clipId: target.segId};
-  });
-  return {...p, clips: newClips, captions: reanchor(p.captions), brolls: reanchor(p.brolls)};
-}
-// mirrors Editor.generateCaptions merge: keep existing (incl. manual edits), add fresh for uncovered clips
-function mergeCaptions(p, fresh) {
-  const clipById = new Map(p.clips.map((c) => [c.id, c]));
-  const visible = (c) => { if (!c.clipId) return true; const cl = clipById.get(c.clipId); return !!cl && c.startMs < cl.outSec * 1000 && c.endMs > cl.inSec * 1000; };
-  const kept = p.captions.filter((c) => !c.clipId || clipById.has(c.clipId));
-  const covered = new Set(kept.filter(visible).map((c) => c.clipId).filter(Boolean));
-  const added = fresh.filter((c) => c.clipId && !covered.has(c.clipId));
-  return {captions: [...kept, ...added].map((c, i) => ({...c, id: `c${i}`})), added: added.length};
-}
 const renumber = (items, prefix) => items.map((x, i) => ({...x, id: `${prefix}${i}`}));
 
 // retime new words evenly across the old page span
@@ -264,20 +228,16 @@ server.registerTool('set_clip', {description: 'Per-clip playback: speed (0.25–
 
 server.registerTool('delete_clips', {description: 'Remove clips from the timeline (their captions/B-roll go with them).', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {
   const p = load(project_id); const gone = new Set(clip_ids);
-  p.clips = p.clips.filter((c) => !gone.has(c.id)); p.captions = p.captions.filter((c) => !c.clipId || !gone.has(c.clipId)); p.brolls = p.brolls.filter((b) => !b.clipId || !gone.has(b.clipId));
+  p.clips = p.clips.filter((c) => !gone.has(c.id)); p.captions = p.captions.filter((c) => p.clips.some((k) => k.src === c.src)); p.brolls = p.brolls.filter((b) => !b.clipId || !gone.has(b.clipId));
   await save(project_id, p); return text(summary(project_id, p));
 });
 
 server.registerTool('split_clip', {description: 'Split the clip under a timeline time into two (like pressing S at the playhead). To cut a moment out: split twice, then delete_clips the middle piece.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds')}}, async ({project_id, at_sec}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   if (sourceSec - clip.inSec < 0.2 || clip.outSec - sourceSec < 0.2) throw new Error('too close to the clip edge (min 0.2 s each side)');
-  const newId = `${clip.id}-s${Date.now().toString(36)}`;
-  const a = {...clip, outSec: sourceSec, transform: clip.transform?.filter((k) => k.t < sourceSec)};
-  const b = {...clip, id: newId, inSec: sourceSec, transform: clip.transform?.filter((k) => k.t >= sourceSec)};
-  p.clips = p.clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c]));
-  const re = (items) => items.map((it) => (it.clipId === clip.id && it.startMs >= sourceSec * 1000 ? {...it, clipId: newId} : it));
-  p.captions = re(p.captions); p.brolls = re(p.brolls);
-  await save(project_id, p); return text(`Split ${clip.id} at ${f1(at_sec)}s → ${clip.id} + ${newId}\n\n${summary(project_id, p)}`);
+  const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error('could not split');
+  p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); // captions follow their source on their own
+  await save(project_id, p); return text(`Split ${clip.id} at ${f1(at_sec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan keyframes. t = source-time seconds; scale 1 = none; x/y = pan in px of the 1080x1920 frame. Empty list removes the animation. Two keyframes = smooth move between them.', inputSchema: {project_id: pid, clip_id: z.string(), keyframes: z.array(z.object({t: z.number(), scale: z.number().min(0.5).max(4), x: z.number().default(0), y: z.number().default(0)}))}}, async ({project_id, clip_id, keyframes}) => {
@@ -299,7 +259,7 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   const startMs = Math.round(sourceSec * 1000); const endMs = Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000);
-  let cap = retext({id: 'x', clipId: clip.id, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.clipId === clip.id)?.topPct ?? 58, words: []}, t);
+  let cap = retext({id: 'x', src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, accent: set.has(norm(w.text))})); }
   p.captions = renumber([...p.captions, cap], 'c'); await save(project_id, p);
   return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${p.captions.at(-1).id})`);
@@ -387,11 +347,11 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
   if (step === 'autocut') {
     await runJob('/api/trim-silence', {clips: p.clips, lang}); const {plan} = readPublic('trim-silence.json');
     if (!Array.isArray(plan) || !plan.length) return text('Nothing to cut');
-    p = applyAutocut(p, plan); await save(project_id, p);
+    const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments\n\n${summary(project_id, p)}`);
   }
   await runJob('/api/captions', {clips: p.clips, lang}); const fresh = readPublic('captions.multi.json');
-  const {captions, added} = mergeCaptions(p, Array.isArray(fresh) ? fresh : []); p.captions = captions; await save(project_id, p);
+  const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 

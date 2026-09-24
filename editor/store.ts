@@ -1,7 +1,7 @@
 import {create} from 'zustand';
 import type {Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
-import {placeClips, sampleTransform, totalDurationFrames, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 export type Lang = 'auto' | 'es' | 'en';
@@ -184,70 +184,18 @@ export const useEditor = create<EditorState>((set) => ({
       if (!hit) return s;
       const clip = hit.clip;
       const splitSrc = clip.inSec + ((frame - hit.fromFrame) / fps) * (clip.speed ?? 1); // source-time of the cut
-      if (splitSrc - clip.inSec < 0.2 || clip.outSec - splitSrc < 0.2) return s; // too short
-      const newId = `${clip.id}-s${Date.now().toString(36)}`;
-      const kfs = clip.transform;
-      // keep the animation continuous across the cut: pin the sampled transform
-      // at the split point into BOTH halves (unless a keyframe is already there)
-      let aK = kfs?.filter((k) => k.t < splitSrc);
-      let bK = kfs?.filter((k) => k.t >= splitSrc);
-      if (kfs?.length) {
-        const pin = {t: splitSrc, ...sampleTransform(kfs, splitSrc)};
-        if (!aK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) aK = [...(aK ?? []), pin];
-        if (!bK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) bK = [{...pin}, ...(bK ?? [])];
-      }
-      const a = {...clip, outSec: splitSrc, transform: aK};
-      const b = {...clip, id: newId, inSec: splitSrc, transform: bK};
-      const clips = s.clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c]));
-      const splitMs = splitSrc * 1000;
-      const reanchor = <T extends {clipId?: string; startMs: number}>(items: T[]) =>
-        items.map((it) => (it.clipId === clip.id && it.startMs >= splitMs ? {...it, clipId: newId} : it));
-      return {
-        ...withHistory(s),
-        clips,
-        captions: reanchor(s.captions),
-        brolls: reanchor(s.brolls),
-        meta: withMeta(s.meta, clips),
-        selectedClipId: newId,
-      };
+      const r = splitClip(s.clips, clip.id, splitSrc);
+      if (!r) return s; // too short
+      // captions are source-anchored and follow on their own; B-roll is clip-bound
+      return {...withHistory(s), clips: r.clips, brolls: reanchor(s.brolls, r.remap), meta: withMeta(s.meta, r.clips), selectedClipId: r.newId};
     }),
 
   // autocut: replace clips with their speech segments (ends + internal pauses
-  // removed), re-anchoring captions/b-roll to the right segment. One undo step.
+  // removed). Captions follow by source time; B-roll is re-anchored. One undo step.
   applyAutocut: (plan) =>
     set((s) => {
-      const byId = new Map(plan.map((p) => [p.id, p.segments]));
-      const newClips: Clip[] = [];
-      const remap: {origId: string; segId: string; inMs: number; outMs: number}[] = [];
-      // ids must stay unique across REPEATED autocuts (re-segmenting "X" must not
-      // mint another "X-c1" when one already exists)
-      const taken = new Set(s.clips.map((c) => c.id));
-      const uniq = (base: string) => {
-        let id = base;
-        let n = 1;
-        while (taken.has(id)) id = `${base}-c${n++}`;
-        taken.add(id);
-        return id;
-      };
-      for (const c of s.clips) {
-        const segs = byId.get(c.id);
-        if (!segs || !segs.length) { newClips.push(c); continue; }
-        segs.forEach((seg, k) => {
-          const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
-          newClips.push({...c, id, inSec: seg.inSec, outSec: seg.outSec});
-          remap.push({origId: c.id, segId: id, inMs: seg.inSec * 1000, outMs: seg.outSec * 1000});
-        });
-      }
-      const reanchor = <T extends {clipId?: string; startMs: number}>(items: T[]) =>
-        items.map((it) => {
-          if (!it.clipId) return it;
-          const segs = remap.filter((r) => r.origId === it.clipId);
-          if (!segs.length) return it;
-          const inside = segs.find((r) => it.startMs >= r.inMs && it.startMs < r.outMs);
-          const target = inside ?? segs.reduce((best, r) => (Math.abs(r.inMs - it.startMs) < Math.abs(best.inMs - it.startMs) ? r : best), segs[0]);
-          return {...it, clipId: target.segId};
-        });
-      return {...withHistory(s), clips: newClips, captions: reanchor(s.captions), brolls: reanchor(s.brolls), meta: withMeta(s.meta, newClips)};
+      const r = autocutClips(s.clips, plan);
+      return {...withHistory(s), clips: r.clips, brolls: reanchor(s.brolls, r.remap), meta: withMeta(s.meta, r.clips)};
     }),
 
   // upsert a keyframe at source-time t (no history — caller pushes once per gesture)

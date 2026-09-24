@@ -2,7 +2,7 @@ import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'reac
 import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
-import {projectCaptions} from '../src/captions';
+import {projectCaptions, mergeCaptions} from '../src/captions';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
@@ -98,10 +98,13 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, brollAssets, accentColor, lang}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, brollAssets, accentColor, lang, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
-        .then((r) => r.json())
-        .then((x) => { if (x?.updatedAt) lastSeenUpdate.current = x.updatedAt; })
+        .then(async (r) => {
+          if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
+          const x = await r.json();
+          if (x?.updatedAt) lastSeenUpdate.current = x.updatedAt;
+        })
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
@@ -229,25 +232,11 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
         async () => {
           const fresh = await fetch(`/captions.multi.json?_=${Date.now()}`).then((x) => x.json()).catch(() => []);
-          // MERGE: keep existing captions (incl. manual edits) — but a clip only
-          // counts as "covered" if it has a VISIBLE caption (inside its trim
-          // window). Orphans (deleted clips) are dropped; out-of-window leftovers
-          // don't block fresh captions anymore.
-          const clipById = new Map(clips.map((c) => [c.id, c]));
-          const isVisible = (c: {clipId?: string; startMs: number; endMs: number}) => {
-            if (!c.clipId) return true; // legacy absolute caption — keep
-            const cl = clipById.get(c.clipId);
-            if (!cl) return false; // orphan
-            return c.startMs < cl.outSec * 1000 && c.endMs > cl.inSec * 1000;
-          };
-          const kept = captions.filter((c) => !c.clipId || clipById.has(c.clipId)); // drop orphans
-          const covered = new Set(kept.filter(isVisible).map((c) => c.clipId).filter(Boolean));
-          const added = (Array.isArray(fresh) ? fresh : []).filter((c) => c.clipId && !covered.has(c.clipId));
-          const merged = [...kept, ...added].map((c, i) => ({...c, id: `c${i}`}));
+          const {captions: merged, added} = mergeCaptions(captions, Array.isArray(fresh) ? fresh : [], clips);
           pushHistory();
           setCaptions(merged);
           setGenerating(false);
-          notify(added.length ? `Captions ready (+${added.length})` : 'Captions up to date', 'ok');
+          notify(added ? `Captions ready (+${added})` : 'Captions up to date', 'ok');
         },
         (msg) => { setGenerating(false); notify('Captions failed: ' + msg, 'error'); },
       );

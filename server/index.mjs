@@ -210,6 +210,9 @@ const server = createServer(async (req, res) => {
       } catch {
         /* corrupt previous file — overwrite */
       }
+      // compare-and-swap: a writer that read an older version (editor vs agent)
+      // is rejected instead of silently overwriting the other's work
+      if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return json(res, 409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt});
       const now = new Date().toISOString();
       const saved = {...incoming, createdAt: prev.createdAt || now, updatedAt: now};
       fs.writeFileSync(file, JSON.stringify(saved, null, 2));

@@ -110,12 +110,13 @@ function buildCaptions(words, topByClip = {}) {
   const pages = [];
   let cur = [];
   let curClip = null;
+  let curSrc = null;
   let skipParen = false;
-  // store SOURCE-RELATIVE times (srcStartMs/srcEndMs) + clipId so captions stay
-  // anchored to their clip; absolute positions come from projectCaptions later.
+  // store SOURCE-RELATIVE times (srcStartMs/srcEndMs) + the source file so
+  // captions stay anchored to the footage; projectCaptions places them later.
   const flush = () => {
     if (cur.length) {
-      pages.push({clipId: curClip, words: cur, start: cur[0].startMs, end: cur[cur.length - 1].endMs});
+      pages.push({clipId: curClip, src: curSrc, words: cur, start: cur[0].startMs, end: cur[cur.length - 1].endMs});
       cur = [];
     }
   };
@@ -128,6 +129,7 @@ function buildCaptions(words, topByClip = {}) {
 
     if (curClip !== null && w.clipId !== curClip) flush(); // never span two clips
     curClip = w.clipId;
+    curSrc = w.src;
     cur.push({text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, accent: false});
 
     const lastGlue = GLUE.has(display.toLowerCase());
@@ -150,7 +152,7 @@ function buildCaptions(words, topByClip = {}) {
       pages.splice(k, 1);
     }
   }
-  return pages.map((p, i) => ({id: `c${i}`, clipId: p.clipId, words: p.words, startMs: p.start, endMs: p.end, topPct: topByClip[p.clipId] ?? DEFAULT_TOP}));
+  return pages.map((p, i) => ({id: `c${i}`, src: p.src, words: p.words, startMs: p.start, endMs: p.end, topPct: topByClip[p.clipId] ?? DEFAULT_TOP}));
 }
 
 // --- run ---
