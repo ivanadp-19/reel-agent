@@ -20,7 +20,7 @@ export const Inspector: React.FC<{
 }> = ({playerRef, onGenerate, generating, progressLabel, onStyleChange}) => {
   const {
     meta, captions, clips, music, brolls, accentColor, captionStyle, selectedId, selectedClipId,
-    select, selectClip, setText, setTopPct, toggleAccent, pushHistory,
+    select, selectClip, setText, setTopPct, toggleAccent, setEmoji, pushHistory,
     deleteClip, moveClip, setMusic, setAccentColor, setBrollMode, swapBroll, removeBroll,
     setClipVolume, toggleClipMute, setClipSpeed,
   } = useEditor();
@@ -170,18 +170,24 @@ export const Inspector: React.FC<{
                             onChange={(e) => setTopPct(c.id, Number(e.target.value))}
                             className="w-full mt-1 mb-3 accent-primary"
                           />
-                          <label className="text-[11px] text-on-surface-variant">Emphasis (click a word: accent → big → off)</label>
+                          <label className="text-[11px] text-on-surface-variant">Emphasis (click a word: accent → big → off · right-click: emoji)</label>
                           <div className="flex flex-wrap gap-1.5 mt-1.5">
                             {c.words.map((w, i) => (
                               <button
                                 key={i}
                                 onClick={() => { pushHistory(); toggleAccent(c.id, i); }}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  const v = window.prompt(`Emoji after "${w.text}" (empty removes it)`, w.emoji ?? '');
+                                  if (v == null) return;
+                                  pushHistory(); setEmoji(c.id, i, v.trim());
+                                }}
                                 style={w.tier ? {background: accentColor, borderColor: accentColor, color: '#000'} : undefined}
                                 className={`px-2 py-1 rounded text-[12px] border ${
                                   w.tier ? 'font-bold' : 'border-outline-variant/40 bg-surface-container-lowest text-on-surface-variant'
                                 }`}
                               >
-                                {w.text}{w.tier === 2 ? ' ↑' : ''}
+                                {w.text}{w.tier === 2 ? ' ↑' : ''}{w.emoji ? ` ${w.emoji}` : ''}
                               </button>
                             ))}
                           </div>

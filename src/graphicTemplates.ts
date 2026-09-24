@@ -161,8 +161,16 @@ export function parseProps(template: TemplateId, props: unknown): Record<string,
   return r.data as Record<string, unknown>;
 }
 
-// the source spans that need a person matte: every `behind` graphic, padded and merged per source
-export function matteSpans(items: Graphic[], padMs = 300): {src: string; startMs: number; endMs: number}[] {
+// anything drawn behind the presenter: graphics and caption pages with behind=true
+export type Behind = {src: string; startMs: number; endMs: number; behind?: boolean};
+export type Span = {src: string; startMs: number; endMs: number};
+
+// the behind-spans no matte covers yet (what prepare_mattes must compute)
+export const spansWithoutMatte = (items: Behind[], mattes: Span[] = []): Span[] =>
+  matteSpans(items).filter((s) => !mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+
+// the source spans that need a person matte: every `behind` item, padded and merged per source
+export function matteSpans(items: Behind[], padMs = 300): Span[] {
   const bySrc = new Map<string, {startMs: number; endMs: number}[]>();
   for (const g of items) {
     if (!g.behind) continue;

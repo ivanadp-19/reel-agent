@@ -89,10 +89,20 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
   return pages.map((p, i) => ({id: `c${i}`, src: p.src, words: p.words, startMs: p.start, endMs: p.end, topPct: topBySrc[p.src] ?? DEFAULT_TOP}));
 }
 
-// carry per-word annotations (tiers) from old pages onto freshly paged ones, by word id
+// carry annotations from old pages onto freshly paged ones, by word id: word
+// tiers, and page settings (pinned position, size, behind) from the old page
+// that shares the most words with the new one
 export function reapplyTiers(oldPages: Caption[], fresh: Caption[]): Caption[] {
   const tier = new Map<string, number>();
-  for (const c of oldPages) for (const w of c.words) if (w.wid && w.tier) tier.set(w.wid, w.tier);
-  if (!tier.size) return fresh;
-  return fresh.map((c) => ({...c, words: c.words.map((w) => (w.wid && tier.has(w.wid) ? {...w, tier: tier.get(w.wid)!} : w))}));
+  const emoji = new Map<string, string>();
+  const pageOf = new Map<string, Caption>();
+  for (const c of oldPages) for (const w of c.words) if (w.wid) { if (w.tier) tier.set(w.wid, w.tier); if (w.emoji) emoji.set(w.wid, w.emoji); if (c.pin || c.scale || c.behind) pageOf.set(w.wid, c); }
+  if (!tier.size && !emoji.size && !pageOf.size) return fresh;
+  return fresh.map((c) => {
+    const votes = new Map<Caption, number>();
+    for (const w of c.words) { const o = w.wid && pageOf.get(w.wid); if (o) votes.set(o, (votes.get(o) ?? 0) + 1); }
+    const from = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const page = from ? {...c, ...(from.pin ? {pin: true, topPct: from.topPct} : {}), ...(from.scale ? {scale: from.scale} : {}), ...(from.behind ? {behind: true} : {})} : c;
+    return {...page, words: c.words.map((w) => (w.wid && (tier.has(w.wid) || emoji.has(w.wid)) ? {...w, ...(tier.has(w.wid) ? {tier: tier.get(w.wid)!} : {}), ...(emoji.has(w.wid) ? {emoji: emoji.get(w.wid)!} : {})} : w))};
+  });
 }

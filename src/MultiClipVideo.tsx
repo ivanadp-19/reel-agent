@@ -92,6 +92,7 @@ export const MultiClipVideo: React.FC<{
       ))}
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind />
+      <CaptionTrack captions={projectedCaptions} captionStyle={captionStyle} behind />
       <PersonLayer mattes={mattes} clips={clips} />
       </LayoutStage>
 

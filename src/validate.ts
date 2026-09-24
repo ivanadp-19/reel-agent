@@ -4,7 +4,7 @@
 
 import {projectCaptions, type Caption} from './captions.ts';
 import {presetOf} from './captionPresets.ts';
-import {projectGraphics, matteSpans, type Graphic} from './graphicTemplates.ts';
+import {projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import type {Clip} from './timeline.ts';
 
@@ -90,6 +90,8 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   // --- graphics ---
   for (const g of gfx) {
     const band = graphicBand(g);
+  const emoji = words.filter((w) => w.emoji).length;
+  if (totalMs && emoji > Math.max(2, totalMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(totalMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
     if (band) {
       if (band.top < SAFE.topPct && !g.behind) issues.push({level: 'warn', code: 'safe-top', msg: `graphic ${g.id} (${g.template}) starts at ${band.top.toFixed(0)}% — inside the top UI band`, ref: g.id});
       // text over the presenter's face (behind-graphics and stickers are fine there)
@@ -118,8 +120,7 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
     }
   }
   // behind graphics need a matte
-  const missing = matteSpans(p.graphics ?? []).filter((s) => !(p.mattes ?? []).some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
-  for (const s of missing) issues.push({level: 'error', code: 'matte', msg: `behind graphics on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
+  for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
   // hook: something in the first 3 s
   if (totalMs > 5000 && !gfx.some((g) => g.startMs < 3000 && g.template !== 'layout') && !caps.some((c) => c.startMs < 1500)) issues.push({level: 'warn', code: 'hook', msg: 'nothing on screen in the first 3 s — reels need a hook'});
   return issues;

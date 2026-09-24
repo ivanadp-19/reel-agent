@@ -21,7 +21,7 @@ import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/ti
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {TEMPLATES, describeSchema, isTemplate, matteSpans, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
+import {TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
@@ -98,7 +98,9 @@ function toAbs(p, clipId, srcMs, clamp = false) {
   return (pc.startMs + (srcMs - inMs) / (pc.clip.speed ?? 1)) / 1000;
 }
 const f1 = (n) => (Math.round(n * 10) / 10).toFixed(1);
-const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.tier ? `*${w.text}*` : w.text)).join(' ');
+const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.tier ? `*${w.text}*` : w.text) + (w.emoji ?? '')).join(' ');
+// exactly one emoji (flags, skin tones and ZWJ sequences count as one)
+const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).segment(s)].length === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(s);
 
 function summary(id, p) {
   const out = [];
@@ -111,7 +113,7 @@ function summary(id, p) {
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
   const caps = projectCaptions(p.captions, p.clips, FPS);
-  for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.pin ? ' pinned' : ''}${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}  "${capText(c)}"`);
+  for (const c of caps) out.push(`  ${c.id}  @${f1(c.startMs / 1000)}s  top ${c.topPct}%${c.pin ? ' pinned' : ''}${c.scale && c.scale !== 1 ? ` scale ${c.scale}` : ''}${c.behind ? ' behind' : ''}  "${capText(c)}"`);
   const hidden = p.captions.filter((c) => !caps.some((x) => x.id === c.id)).length;
   if (hidden) out.push(`  (+${hidden} captions on trimmed-away parts, not shown)`);
   out.push('', 'B-ROLL:');
@@ -124,7 +126,7 @@ function summary(id, p) {
   out.push('', 'GRAPHICS (timeline time):');
   for (const g of projectGraphics(p.graphics ?? [], p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.behind ? ' (behind the presenter)' : ''}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
   if (!p.graphics?.length) out.push('  none');
-  const need = matteSpans(p.graphics ?? []).filter((s) => !(p.mattes ?? []).some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+  const need = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes);
   if (need.length) out.push(`  ⚠ ${need.length} behind-span(s) have no person matte yet — call prepare_mattes`);
   if (p.brollAssets.length) out.push('', `OWN FOOTAGE (for B-roll): ${p.brollAssets.map((a) => `${a.id} (${a.kind}, ${a.label})`).join(', ')}`);
   return out.join('\n');
@@ -325,15 +327,17 @@ server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan k
   await save(project_id, p); return text(`${clip_id}: ${keyframes.length} keyframes`);
 });
 
-server.registerTool('edit_caption', {description: 'Edit one caption page: new text (words are re-timed evenly across the page), which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default).', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional()}}, async ({project_id, caption_id, text: t, accent_words, top_pct, scale}) => {
+server.registerTool('edit_caption', {description: 'Edit one caption page: new text (words are re-timed evenly across the page), which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default), behind = draw the page BEHIND the presenter (big words over the head/shoulders; needs prepare_mattes afterwards). Position, size and behind follow the words when the style changes.', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional(), behind: z.boolean().optional()}}, async ({project_id, caption_id, text: t, accent_words, top_pct, scale, behind}) => {
   const p = load(project_id); const i = p.captions.findIndex((c) => c.id === caption_id); if (i < 0) throw new Error(`no caption ${caption_id}`);
   let cap = p.captions[i];
   if (t != null) cap = retext(cap, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
   if (top_pct != null) { cap.topPct = top_pct; cap.pin = true; } if (scale != null) cap.scale = scale;
+  if (behind != null) { if (behind) cap.behind = true; else delete cap.behind; }
   p.captions[i] = cap; await save(project_id, p);
   const floats = PRESETS[p.captionStyle]?.position === 'float';
-  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}`);
+  const needMatte = cap.behind && spansWithoutMatte([cap], p.mattes).length;
+  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
 });
 
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
@@ -509,9 +513,9 @@ server.registerTool('generate_asset', {description: 'LAST RESORT: generate an im
   return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
 });
 
-server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic marked behind=true, so those graphics render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic or caption page marked behind=true, so they render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
-  const spans = matteSpans(p.graphics).filter((s) => !p.mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+  const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes);
   if (!spans.length) return text('Nothing to matte: every behind-span already has a matte (or no graphic is marked behind).');
   await runJob('/api/matte', {spans});
   const done = readPublic('mattes.json');
@@ -548,21 +552,24 @@ server.registerTool('set_caption_style', {description: `Caption preset for the w
   return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
 });
 
-server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = accent color — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = big emphasis — rare, at most one per 10 s. Never on function words. Returns what was applied plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2)})).min(1)}}, async ({project_id, items}) => {
+server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = accent color — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = big emphasis — rare, at most one per 10 s. Never on function words. emoji = one emoji that pops in after the word (money → 💰; "" removes it) — a few per reel, on concrete nouns and feelings, never on function words. Returns each word it touched (check the text matches what you meant) plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2).optional(), emoji: z.string().max(16).optional()})).min(1)}}, async ({project_id, items}) => {
   const p = load(project_id);
-  const want = new Map(items.map((x) => [x.wid, x.tier]));
+  for (const x of items) if (x.emoji && !oneEmoji(x.emoji)) throw new Error(`${x.wid}: emoji must be exactly one emoji, got "${x.emoji}"`);
+  const want = new Map(items.map((x) => [x.wid, x]));
   const applied = []; const warn = [];
   for (const c of p.captions) for (const w of c.words) if (w.wid && want.has(w.wid)) {
-    const tier = want.get(w.wid);
-    if (tier && isGlue(w.text)) warn.push(`${w.wid} "${w.text}": emphasis on a function word`);
-    w.tier = tier; applied.push(w.wid); want.delete(w.wid);
+    const {tier, emoji} = want.get(w.wid);
+    if ((tier || emoji) && isGlue(w.text)) warn.push(`${w.wid} "${w.text}": ${emoji ? 'emoji' : 'emphasis'} on a function word`);
+    if (tier != null) w.tier = tier;
+    if (emoji != null) { if (emoji) w.emoji = emoji; else delete w.emoji; }
+    applied.push(`${w.wid} "${w.text}"${tier != null ? ` tier ${tier}` : ''}${emoji != null ? ` ${emoji || 'no emoji'}` : ''}`); want.delete(w.wid);
   }
   for (const wid of want.keys()) warn.push(`${wid}: no caption word with that id (generate captions first, or it was cut away)`);
   const t2 = p.captions.flatMap((c) => c.words).filter((w) => w.tier === 2).length;
   const dur = totalSec(p.clips);
   if (t2 > Math.max(1, dur / 10)) warn.push(`${t2} tier-2 words in ${f1(dur)}s — aim for at most one per 10 s`);
   await save(project_id, p);
-  return text(`Applied ${applied.length} annotation(s).${warn.length ? '\nWARN ' + warn.join('\nWARN ') : ''}\n\n${summary(project_id, p)}`);
+  return text(`Applied ${applied.length}: ${applied.join('; ')}${warn.length ? '\nWARN ' + warn.join('\nWARN ') : ''}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline step on the project, exactly like the editor buttons, and apply the result. autocut = remove silence/pauses (splits clips into segments); captions = WhisperX words → caption pages + face-aware placement (keeps existing captions on clips that already have them). Ordering takes, emphasis and B-roll are YOUR job: use get_transcript, reorder_clips/delete_clips, edit_caption, search_stock/add_broll. Needs the backend (npm start).', inputSchema: {project_id: pid, step: z.enum(['autocut', 'captions'])}}, async ({project_id, step}) => {

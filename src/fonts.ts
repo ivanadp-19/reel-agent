@@ -15,6 +15,7 @@ import {loadFont as marker} from '@remotion/google-fonts/PermanentMarker';
 import {loadFont as courier} from '@remotion/google-fonts/CourierPrime';
 import {loadFont as spaceMono} from '@remotion/google-fonts/SpaceMono';
 import {loadFont as unbounded} from '@remotion/google-fonts/Unbounded';
+import {loadFont as notoEmoji} from '@remotion/google-fonts/NotoColorEmoji';
 
 // 'latin' covers Spanish (accents, ñ); latin-ext is not in every family
 const S = {subsets: ['latin'] as 'latin'[]};
@@ -48,6 +49,15 @@ export const HEAVIEST: Record<FontFamily, number> = {
   'Playfair Display': 700, 'Instrument Serif': 400, Caveat: 700, 'Permanent Marker': 400, 'Courier Prime': 700, 'Space Mono': 700,
 };
 export const FONT_FAMILIES = Object.keys(LOADERS) as FontFamily[];
+
+// Noto Color Emoji (OFL) for per-word emoji: Google splits it into unicode-range
+// chunks, so only the chunks holding the emoji actually used are downloaded.
+// Kept out of FontFamily (it is not a text face a preset or brand may pick).
+let emojiCss: string | null = null;
+export function emojiFamily(): string {
+  emojiCss ??= notoEmoji('normal', {weights: ['400'], subsets: ['[0]', '[1]', '[2]', '[3]', '[4]', '[5]', '[6]', '[7]', '[8]', '[9]'] as unknown as 'emoji'[]}).fontFamily; // the package types say 'emoji', its data is keyed [0]..[9]
+  return emojiCss;
+}
 
 const loaded = new Map<FontFamily, string>();
 // CSS font-family string for a catalog family (loads it on first use)

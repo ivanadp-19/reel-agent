@@ -12,6 +12,7 @@ export type CaptionWord = {
   startMs: number;
   endMs: number;
   tier?: number; // 0 plain · 1 accent color · 2 big emphasis (see captionPresets)
+  emoji?: string; // one emoji that pops in right after the word
 };
 export type Caption = {
   id: string;
@@ -23,6 +24,7 @@ export type Caption = {
   scale?: number; // size multiplier (1 = default), set via the on-preview slider
   pin?: boolean; // explicit vertical position: float presets honor topPct instead of cycling
   covers?: string[]; // hand-edited page: the transcript word ids it stands in for (re-paging skips them)
+  behind?: boolean; // drawn behind the presenter (needs a person matte for its span, like behind graphics)
   // projected only:
   clipId?: string; // the clip this projected page sits on
   holdMaxMs?: number; // clip's end — the visual hold must not bleed into the next clip

@@ -32,3 +32,20 @@ test('reapplyTiers carries tiers onto re-paged captions by word id', () => {
   assert.equal(fresh.find((p) => p.words[0].wid === 'a:5').words[0].tier, 2);
   assert.equal(fresh.find((p) => p.words[0].wid === 'a:4').words[0].tier, 0);
 });
+
+import {reapplyTiers as carry} from '../src/paging.ts';
+
+test('re-paging carries pinned position, size and behind with the words', () => {
+  const w = (wid, text, a) => ({wid, text, startMs: a, endMs: a + 200, tier: 0});
+  const old = [{id: 'c0', src: 's', words: [w('s:0', 'big', 0), {...w('s:1', 'money', 300), tier: 2}], startMs: 0, endMs: 500, topPct: 30, pin: true, scale: 1.5, behind: true}];
+  const fresh = [{id: 'c0', src: 's', words: [w('s:0', 'big', 0)], startMs: 0, endMs: 200, topPct: 58}, {id: 'c1', src: 's', words: [w('s:1', 'money', 300), w('s:2', 'lie', 600)], startMs: 300, endMs: 800, topPct: 58}];
+  const r = carry(old, fresh);
+  assert.deepEqual(r.map((c) => [c.topPct, c.pin, c.scale, c.behind]), [[30, true, 1.5, true], [30, true, 1.5, true]]);
+  assert.equal(r[1].words[0].tier, 2);
+});
+
+test('re-paging keeps per-word emoji', () => {
+  const old = [{id: 'c0', src: 's', words: [{wid: 's:0', text: 'money', startMs: 0, endMs: 300, tier: 0, emoji: '💰'}], startMs: 0, endMs: 300, topPct: 58}];
+  const fresh = [{id: 'c0', src: 's', words: [{wid: 's:0', text: 'money', startMs: 0, endMs: 300, tier: 0}], startMs: 0, endMs: 300, topPct: 58}];
+  assert.equal(carry(old, fresh)[0].words[0].emoji, '💰');
+});

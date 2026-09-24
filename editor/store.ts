@@ -55,6 +55,7 @@ type EditorState = {
   setBrollScale: (id: string, scale: number) => void;
   setText: (id: string, text: string) => void;
   toggleAccent: (id: string, wordIndex: number) => void;
+  setEmoji: (id: string, wordIndex: number, emoji: string) => void;
 
   // clips track (multi-clip timeline)
   addClip: (clip: Clip) => void;
@@ -183,6 +184,10 @@ export const useEditor = create<EditorState>((set) => ({
       }),
     })),
 
+  setEmoji: (id, wi, emoji) =>
+    set((s) => ({
+      captions: mapCap(s.captions, id, (c) => ({...c, words: c.words.map((w, i) => (i !== wi ? w : emoji ? {...w, emoji} : (({emoji: _, ...rest}) => rest)(w)))})),
+    })),
   toggleAccent: (id, wi) =>
     set((s) => ({
       captions: mapCap(s.captions, id, (c) => ({

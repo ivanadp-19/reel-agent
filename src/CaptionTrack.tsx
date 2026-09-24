@@ -2,7 +2,7 @@ import React from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
 import {presetOf, type Preset, type TierStyle} from './captionPresets';
-import {fontFamily} from './fonts';
+import {emojiFamily, fontFamily} from './fonts';
 import {useBrand} from './brand';
 
 export type {Caption} from './captions';
@@ -30,26 +30,31 @@ const Word: React.FC<{w: CaptionWord; preset: Preset; accent: string; active: bo
   // not spoken yet: hidden (space reserved) or dimmed (karaoke)
   const opacity = build && !spoken ? (preset.upcoming === 'dim' ? 1 : 0) : 1;
   const dimmed = build && !spoken && preset.upcoming === 'dim';
+  // the word's emoji pops in at the word's onset, as its own item beside it
+  const ePop = w.emoji ? spring({frame: frame - onsetFrame, fps, config: {damping: 10, stiffness: 200, mass: 0.6}}) : 0;
   return (
-    <span
-      style={{
-        display: 'inline-block',
-        fontWeight: t.weight ?? preset.font.weight,
-        fontStyle: t.italic || preset.font.italic ? 'italic' : undefined,
-        fontFamily: t.font ? fontFamily(t.font) : undefined,
-        color: dimmed ? preset.colors.dim : color,
-        opacity,
-        transform: scale === 1 ? undefined : `scale(${scale})`,
-        transformOrigin: 'center 70%',
-        whiteSpace: 'pre',
-        ...(boxed && !dimmed
-          ? {background: accent, padding: '0.02em 0.28em', borderRadius: t.pill ? '0.4em' : '0.12em', textShadow: 'none', margin: '0.06em 0'}
-          : {}),
-        ...(t.underline ? {borderBottom: `0.08em solid ${accent}`, paddingBottom: '0.02em'} : {}),
-      }}
-    >
-      {w.text}
-    </span>
+    <>
+      <span
+        style={{
+          display: 'inline-block',
+          fontWeight: t.weight ?? preset.font.weight,
+          fontStyle: t.italic || preset.font.italic ? 'italic' : undefined,
+          fontFamily: t.font ? fontFamily(t.font) : undefined,
+          color: dimmed ? preset.colors.dim : color,
+          opacity,
+          transform: scale === 1 ? undefined : `scale(${scale})`,
+          transformOrigin: 'center 70%',
+          whiteSpace: 'pre',
+          ...(boxed && !dimmed
+            ? {background: accent, padding: '0.02em 0.28em', borderRadius: t.pill ? '0.4em' : '0.12em', textShadow: 'none', margin: '0.06em 0'}
+            : {}),
+          ...(t.underline ? {borderBottom: `0.08em solid ${accent}`, paddingBottom: '0.02em'} : {}),
+        }}
+      >
+        {w.text}
+      </span>
+      {w.emoji ? <span style={{display: 'inline-block', fontFamily: emojiFamily(), fontStyle: 'normal', textShadow: 'none', opacity: Math.min(1, ePop * 1.5), transform: `scale(${interpolate(ePop, [0, 1], [0.2, 1])}) rotate(${interpolate(ePop, [0, 1], [-25, 0])}deg)`}}>{w.emoji}</span> : null}
+    </>
   );
 };
 
@@ -155,6 +160,7 @@ export const CaptionTrack: React.FC<{captions: Caption[]; captionStyle?: string;
   return (
     <>
       {captions.map((c, i) => {
+        if (!!c.behind !== behind) return null;
         const nextStart = captions[i + 1]?.startMs ?? Infinity;
         const visEnd = Math.min(nextStart, c.endMs + hold, c.holdMaxMs ?? Infinity);
         const from = Math.round((c.startMs / 1000) * fps);

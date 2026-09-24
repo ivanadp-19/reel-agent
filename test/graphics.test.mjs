@@ -66,3 +66,13 @@ test('validate warns when a text graphic sits on the presenter face', () => {
   assert.ok(!codes(hook, 45).includes('face'));
   assert.ok(!codes({...hook, behind: true}).includes('face'));
 });
+
+import {spansWithoutMatte} from '../src/graphicTemplates.ts';
+
+test('behind caption pages need a matte too; a covering matte satisfies them', () => {
+  const page = {id: 'c0', src: 'clips/a.mp4', startMs: 1000, endMs: 2000, behind: true, words: []};
+  assert.deepEqual(spansWithoutMatte([page], []), [{src: 'clips/a.mp4', startMs: 700, endMs: 2300}]);
+  assert.deepEqual(spansWithoutMatte([page], [{src: 'clips/a.mp4', startMs: 0, endMs: 5000}]), []);
+  assert.deepEqual(spansWithoutMatte([{...page, behind: false}], []), []);
+});
+
