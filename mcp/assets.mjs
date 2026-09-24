@@ -8,6 +8,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import https from 'node:https';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -18,20 +19,41 @@ const UA = 'reel-agent (https://github.com/ivanadp-19/reel-agent)';
 const PRIVATE = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^::1$/, /^f[cd]/i, /^fe80/i, /^::ffff:/i];
 export const isPrivateAddress = (ip) => PRIVATE.some((r) => r.test(ip));
 
-// https only, no IP literals, no private ranges, redirects re-checked hop by hop
+// https only, no IP literals, no private ranges, redirects re-checked hop by
+// hop. The address that passed the check is PINNED for the connection (a
+// rebinding DNS cannot answer differently for the real request); TLS still
+// verifies the hostname.
+function requestPinned(u, address, family) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(u, {
+      method: 'GET',
+      headers: {'User-Agent': UA, Accept: '*/*'},
+      lookup: (_host, _opts, cb) => cb(null, address, family),
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks)}));
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
 export async function fetchPublic(url, hops = 0) {
   const u = new URL(url);
   if (u.protocol !== 'https:') throw new Error(`refusing ${url}: https only`);
   if (net.isIP(u.hostname) || u.hostname === 'localhost') throw new Error(`refusing ${url}: no IP literals`);
-  const {address} = await dns.lookup(u.hostname);
+  const {address, family} = await dns.lookup(u.hostname);
   if (isPrivateAddress(address)) throw new Error(`refusing ${url}: resolves to a private address`);
-  const r = await fetch(u, {redirect: 'manual', headers: {'User-Agent': UA}});
+  const r = await requestPinned(u, address, family);
   if ([301, 302, 303, 307, 308].includes(r.status)) {
     if (hops >= 3) throw new Error('too many redirects');
-    return fetchPublic(new URL(r.headers.get('location') ?? '', u).href, hops + 1);
+    return fetchPublic(new URL(r.headers.location ?? '', u).href, hops + 1);
   }
-  if (!r.ok) throw new Error(`${r.status} fetching ${url}`);
-  return r;
+  if (r.status < 200 || r.status >= 300) throw new Error(`${r.status} fetching ${url}`);
+  // fetch-like surface for the callers
+  return {ok: true, status: r.status, json: async () => JSON.parse(r.body.toString('utf8')), arrayBuffer: async () => r.body};
 }
 async function download(url, dest) {
   if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
