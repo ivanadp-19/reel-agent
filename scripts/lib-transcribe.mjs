@@ -42,8 +42,8 @@ function pickDevice() {
 }
 const computeType = (device) => (device === 'cuda' ? 'float16' : 'int8');
 
-function runWhisperx(wavs, outDir, device, lang) {
-  const prompt = promptFor(lang);
+function runWhisperx(wavs, outDir, device, lang, withPrompt = true) {
+  const prompt = withPrompt ? promptFor(lang) : '';
   return spawnSync(
     '.venv/bin/whisperx',
     [
@@ -134,11 +134,34 @@ export function transcribeClips(clips, onBatch, lang = 'auto') {
     throw new Error(`whisperx failed (exit ${wx.status}): ${tail.slice(-300) || 'no output'}`);
   }
 
+  // The prompt bias makes Whisper loop on one word for some short clips
+  // ("bueno bueno bueno…"); those are re-run once without it.
+  const retry = [];
   for (const key of pending.keys()) {
     const out = path.join(outDir, `${key}.16k.json`);
     if (!fs.existsSync(out)) continue; // ffmpeg failed for this one → transcribeClip will throw
+    const words = parseWhisperxJson(out);
+    if (isDegenerate(words)) { retry.push(path.join(TMP, `${key}.16k.wav`)); continue; }
+    fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
+  }
+  if (!retry.length) return;
+  const outDir2 = path.join(outDir, 'noprompt');
+  fs.mkdirSync(outDir2, {recursive: true});
+  const wx2 = runWhisperx(retry, outDir2, device, lang, false);
+  for (const wav of retry) {
+    const key = path.basename(wav, '.16k.wav');
+    const out = path.join(outDir2, `${key}.16k.json`);
+    if (wx2.status !== 0 || !fs.existsSync(out)) { console.error(`whisperx retry without prompt failed for ${key}`); continue; }
     fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(parseWhisperxJson(out), null, 2));
   }
+}
+
+// A hallucinated loop: 8+ words where one word (case-insensitive, no punctuation) is 60 %+ of them.
+export function isDegenerate(words) {
+  if (words.length < 8) return false;
+  const counts = new Map();
+  for (const w of words) { const k = w.word.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); counts.set(k, (counts.get(k) ?? 0) + 1); }
+  return Math.max(...counts.values()) >= words.length * 0.6;
 }
 
 // Words for one clip (source-relative times). Uses the cache; transcribes on miss.
