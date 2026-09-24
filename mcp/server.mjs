@@ -120,9 +120,9 @@ function summary(id, p) {
   }
   if (!p.brolls.length) out.push('  none');
   out.push('', 'GRAPHICS (timeline time):');
-  for (const g of projectGraphics(p.graphics, p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.behind ? ' (behind the presenter)' : ''}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
-  if (!p.graphics.length) out.push('  none');
-  const need = matteSpans(p.graphics).filter((s) => !p.mattes.some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
+  for (const g of projectGraphics(p.graphics ?? [], p.clips, FPS)) out.push(`  ${g.id}  @${f1(g.startMs / 1000)}–${f1(g.endMs / 1000)}s  ${g.template}${g.behind ? ' (behind the presenter)' : ''}${g.yPct != null ? ` y ${g.yPct}%` : ''}  ${JSON.stringify(g.props)}`);
+  if (!p.graphics?.length) out.push('  none');
+  const need = matteSpans(p.graphics ?? []).filter((s) => !(p.mattes ?? []).some((m) => m.src === s.src && m.startMs <= s.startMs && m.endMs >= s.endMs));
   if (need.length) out.push(`  ⚠ ${need.length} behind-span(s) have no person matte yet — call prepare_mattes`);
   if (p.brollAssets.length) out.push('', `OWN FOOTAGE (for B-roll): ${p.brollAssets.map((a) => `${a.id} (${a.kind}, ${a.label})`).join(', ')}`);
   return out.join('\n');
@@ -205,7 +205,7 @@ server.registerTool('set_accent_color', {description: 'Set the caption accent (h
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {
   await needBackend();
   const id = project_id || `p-${Date.now()}`;
-  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto'};
+  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'};
   const added = [];
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
