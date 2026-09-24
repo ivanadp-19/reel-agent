@@ -150,7 +150,9 @@ async function localizeRemoteBrolls(props) {
   for (const b of items) {
     if (!/^https?:\/\//.test(b.src ?? '')) continue;
     const ext = b.kind === 'video' ? 'mp4' : (b.src.match(/\.(jpe?g|png|webp)(\?|$)/i)?.[1] ?? 'jpg');
-    const name = `px-${Buffer.from(b.src).toString('base64url').slice(-24).replace(/[^\w-]/g, '')}.${ext}`;
+    // named by a hash of the whole URL: Pexels files of one size share their last
+    // characters ("…_1080_1920_30fps.mp4"), and a name from those made two cues share one file
+    const name = `px-${crypto.createHash('sha1').update(b.src).digest('hex').slice(0, 16)}.${ext}`;
     const file = path.join(BROLL_DIR, name);
     if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
       const r = await fetchAllowed(b.src);
