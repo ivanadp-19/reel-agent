@@ -65,6 +65,35 @@ async function download(url, dest) {
 }
 const rel = (abs) => path.relative(PUBLIC, abs).split(path.sep).join('/');
 
+// ---------- the local library ----------
+// Everything searched or generated is registered in public/assets/library.json
+// (per machine, gitignored) so it can be found again without hitting APIs or
+// paying for another generation. Entries: {id, src, format, kind, source,
+// license, credit, tags[], prompt?, title?, addedAt}
+const LIBRARY = path.join(ASSETS, 'library.json');
+const loadLibrary = () => { try { return JSON.parse(fs.readFileSync(LIBRARY, 'utf8')); } catch { return []; } };
+const tokens = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9]{2,}/g) ?? [];
+export function libraryAdd(entry) {
+  const lib = loadLibrary();
+  if (lib.some((e) => e.src === entry.src)) return;
+  fs.mkdirSync(ASSETS, {recursive: true});
+  lib.push({...entry, addedAt: new Date().toISOString()});
+  fs.writeFileSync(LIBRARY, JSON.stringify(lib, null, 1));
+}
+// rank library entries by how many query words hit their tags/title/prompt/id
+export function librarySearch(query, {kind, limit = 6} = {}) {
+  const q = new Set(tokens(query));
+  if (!q.size) return [];
+  return loadLibrary()
+    .filter((e) => fs.existsSync(path.join(PUBLIC, e.src)) && (!kind || e.kind === kind || (kind === 'sticker' && e.kind !== 'texture')))
+    .map((e) => ({e, hits: [...new Set([...tokens(e.tags?.join(' ')), ...tokens(e.title), ...tokens(e.prompt), ...tokens(e.id)])].filter((t) => q.has(t)).length}))
+    .filter((x) => x.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .slice(0, limit)
+    .map((x) => ({...x.e, fromLibrary: true}));
+}
+export const listLibrary = () => loadLibrary();
+
 // ---------- Iconify (icons, emoji, hand-drawn) ----------
 // sets we search, by kind/style; licenses checked live against /collections
 const SETS = {
@@ -121,14 +150,16 @@ async function searchIconify(query, kind, style, limit) {
         if (seen.has(dest)) continue;
         await download(fluentPngUrl(name), dest);
         seen.add(dest);
-        out.push({id: `fluent-3d:${name}`, src: rel(dest), format: 'png', source: 'Fluent Emoji 3D (MIT)', license: 'MIT', credit: null});
+        const row = {id: `fluent-3d:${name}`, src: rel(dest), format: 'png', kind: 'emoji', source: 'Fluent Emoji 3D (MIT)', license: 'MIT', credit: null, tags: [...name.split('-'), ...tokens(query), '3d']};
+        libraryAdd(row); out.push(row);
         if (out.length >= limit) break;
         continue;
       } catch {}
     }
     const dest = path.join(ASSETS, 'iconify', `${prefix}--${name}.svg`);
     try { await download(`https://api.iconify.design/${prefix}/${name}.svg`, dest); } catch { continue; }
-    out.push({id: full, src: rel(dest), format: 'svg', source: `${cols[prefix]?.name ?? prefix} via Iconify`, license: lic, credit});
+    const row = {id: full, src: rel(dest), format: 'svg', kind, source: `${cols[prefix]?.name ?? prefix} via Iconify`, license: lic, credit, tags: [...name.split('-'), ...tokens(query), ...(style ? [style] : [])]};
+    libraryAdd(row); out.push(row);
     if (out.length >= limit) break;
   }
   return out;
@@ -145,13 +176,17 @@ async function searchOpenverse(query, limit) {
     const dest = path.join(ASSETS, 'openverse', `${r.id}.${ext}`);
     try { await download(r.url, dest); } catch { continue; }
     const credit = /^cc0|pdm/i.test(r.license) ? null : r.attribution?.replace(/\s+To view.*$/s, '') ?? `${r.creator ?? 'unknown'} (${r.license.toUpperCase()} ${r.license_version})`;
-    out.push({id: `openverse:${r.id}`, src: rel(dest), format: ext, source: `${r.source} via Openverse`, license: `${r.license.toUpperCase()} ${r.license_version ?? ''}`.trim(), credit, title: r.title});
+    const row = {id: `openverse:${r.id}`, src: rel(dest), format: ext, kind: 'illustration', source: `${r.source} via Openverse`, license: `${r.license.toUpperCase()} ${r.license_version ?? ''}`.trim(), credit, title: r.title, tags: [...tokens(query), ...tokens(r.title), ...(r.tags ?? []).map((t) => t.name).filter(Boolean).slice(0, 12)]};
+    libraryAdd(row); out.push(row);
     if (out.length >= limit) break;
   }
   return out;
 }
 
 export async function searchAssets({query, kind = 'sticker', style, limit = 6}) {
+  // what we already have comes first (free, instant, license already known)
+  const local = librarySearch(query, {kind, limit});
+  if (local.length >= limit) return local;
   const jobs = [];
   if (kind === 'icon' || kind === 'emoji') jobs.push(searchIconify(query, kind, style, limit));
   else {
@@ -159,7 +194,8 @@ export async function searchAssets({query, kind = 'sticker', style, limit = 6}) 
     jobs.push(searchOpenverse(query, Math.ceil(limit / 2)));
   }
   const results = (await Promise.allSettled(jobs)).flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-  return results.slice(0, limit);
+  const seen = new Set(local.map((e) => e.src));
+  return [...local, ...results.filter((r) => !seen.has(r.src))].slice(0, limit);
 }
 
 // ---------- OpenAI Images (generate what does not exist) ----------
@@ -177,6 +213,9 @@ export async function generateAsset({prompt, kind = 'sticker', size = '1024x1024
   const hash = crypto.createHash('sha1').update(`${model}|${size}|${quality}|${full}`).digest('hex').slice(0, 12);
   const dest = path.join(ASSETS, 'gen', `${kind}-${hash}.png`);
   if (fs.existsSync(dest)) return {src: rel(dest), cached: true, model};
+  // same idea already generated (any model/quality)? reuse it instead of paying again
+  const prev = loadLibrary().find((e) => e.kind === kind && e.prompt && tokens(e.prompt).join(' ') === tokens(prompt).join(' ') && fs.existsSync(path.join(PUBLIC, e.src)));
+  if (prev) return {src: prev.src, cached: true, model: prev.model ?? model};
   const r = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',
     headers: {Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json'},
@@ -188,5 +227,6 @@ export async function generateAsset({prompt, kind = 'sticker', size = '1024x1024
   if (!b64) throw new Error('OpenAI returned no image');
   fs.mkdirSync(path.dirname(dest), {recursive: true});
   fs.writeFileSync(dest, Buffer.from(b64, 'base64'));
+  libraryAdd({id: `gen:${kind}-${hash}`, src: rel(dest), format: 'png', kind, source: `OpenAI ${model}`, license: 'generated (owned by the user)', credit: null, prompt, model, tags: [kind, ...tokens(prompt)]});
   return {src: rel(dest), cached: false, model, usage: d.usage};
 }

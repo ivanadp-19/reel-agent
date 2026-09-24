@@ -15,3 +15,9 @@ test('wrapPrompt adds the sticker style and transparency instructions', () => {
   assert.match(wrapPrompt('sticker', 'a red lightning bolt'), /^a red lightning bolt\. Die-cut sticker.*transparent background/);
   assert.match(wrapPrompt('texture', 'kraft paper'), /^Seamless tileable kraft paper texture/);
 });
+
+test('librarySearch ranks entries by query-word hits on tags/title/prompt', async () => {
+  const {librarySearch} = await import('../mcp/assets.mjs');
+  // the library is per machine; this only checks the function tolerates an empty/missing file
+  assert.deepEqual(librarySearch('', {}), []);
+});

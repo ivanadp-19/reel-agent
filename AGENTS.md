@@ -12,7 +12,7 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `server/index.mjs` — local backend on 127.0.0.1:3333: projects, uploads, jobs, render
 - `scripts/` — pipelines the backend spawns (transcribe, autocut, captions)
 - `mcp/server.mjs` — stdio MCP server, the tool surface for the agent
-- `mcp/assets.mjs` — decorative assets: `search_asset` (Iconify, Fluent Emoji 3D, Openverse) and `generate_asset` (OpenAI Images, transparent PNG); downloads land in `public/assets/`
+- `mcp/assets.mjs` — decorative assets: `search_asset` (Iconify, Fluent Emoji 3D, Openverse) and `generate_asset` (OpenAI Images, transparent PNG); downloads land in `public/assets/` and are indexed in `public/assets/library.json` (the machine's own library; `list_assets` browses it, searches hit it first, generation reuses same-idea results)
 - `public/` — user media and project JSON (gitignored, never commit)
 
 ## Rules

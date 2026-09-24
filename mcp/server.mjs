@@ -22,7 +22,7 @@ import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {TEMPLATES, isTemplate, parseProps, projectGraphics} from '../src/graphicTemplates.ts';
-import {searchAssets, generateAsset} from './assets.mjs';
+import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -382,7 +382,13 @@ server.registerTool('add_graphic', {description: `Add a motion-graphics overlay 
 server.registerTool('search_asset', {description: 'Find decorative assets with clean licenses: icons and emoji (Iconify: Fluent Emoji, Noto, Lucide, Phosphor…), stickers and illustrations (Iconify hand-drawn sets + Openverse CC0/CC-BY). Files are downloaded under public/assets/ so you can use them with add_graphic template=sticker. Returns license and, when required, the credit line to keep.', inputSchema: {query: z.string().min(1), kind: z.enum(['icon', 'emoji', 'sticker', 'illustration']).default('sticker'), style: z.enum(['flat', '3d', 'hand-drawn', 'outline']).optional(), limit: z.number().int().min(1).max(12).default(6)}}, async ({query, kind, style, limit}) => {
   const rows = await searchAssets({query, kind, style, limit});
   if (!rows.length) return text(`No assets found for "${query}" — try other words, another kind/style, or generate_asset.`);
-  return text(rows.map((r) => `${r.id}\n  src: ${r.src}  (${r.format}, ${r.license}, ${r.source})${r.credit ? `\n  credit: ${r.credit}` : ''}${r.title ? `\n  title: ${r.title}` : ''}`).join('\n'));
+  return text(rows.map((r) => `${r.id}${r.fromLibrary ? '  [library]' : ''}\n  src: ${r.src}  (${r.format}, ${r.license}, ${r.source})${r.credit ? `\n  credit: ${r.credit}` : ''}${r.title ? `\n  title: ${r.title}` : ''}`).join('\n'));
+});
+
+server.registerTool('list_assets', {description: 'Browse the local asset library (everything ever searched or generated on this machine, with license and credit). Reuse before searching or generating again.', inputSchema: {query: z.string().optional().describe('words to match against tags/title/prompt; omit for the newest 30'), kind: z.enum(['icon', 'emoji', 'sticker', 'illustration', 'doodle', 'texture', 'ui']).optional()}}, async ({query, kind}) => {
+  const rows = query ? librarySearch(query, {kind, limit: 30}) : listLibrary().filter((e) => !kind || e.kind === kind).slice(-30).reverse();
+  if (!rows.length) return text('Library is empty for that query.');
+  return text(rows.map((r) => `${r.id}  src: ${r.src}  (${r.kind}, ${r.license})${r.credit ? `  credit: ${r.credit}` : ''}${r.prompt ? `  prompt: ${r.prompt}` : ''}`).join('\n'));
 });
 
 server.registerTool('generate_asset', {description: 'Generate an image asset that no library has, with the OpenAI Images API (transparent PNG; the user pays with their OPENAI_API_KEY). kind wraps the prompt: sticker (die-cut flat vector), doodle (hand-drawn marker), texture (seamless, opaque), ui (flat mockup). Describe the object only — style comes from kind. Cached by prompt. Then place it with add_graphic template=sticker.', inputSchema: {prompt: z.string().min(3).max(400), kind: z.enum(['sticker', 'doodle', 'texture', 'ui']).default('sticker'), size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'), quality: z.enum(['low', 'medium', 'high']).default('medium')}}, async ({prompt, kind, size, quality}) => {
