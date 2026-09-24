@@ -7,6 +7,7 @@ export {projectBrolls} from './brollModel';
 export type {BrollItem, BrollAsset} from './brollModel';
 import type {BrollItem} from './brollModel';
 import {transitionFx} from './transitions';
+import {cardLanding, ms} from './motion';
 
 // remote (Pexels) URLs load directly; local paths go through staticFile
 const resolveSrc = (s: string) => (/^https?:\/\//.test(s) ? s : staticFile(s));
@@ -15,7 +16,10 @@ const boxByMode: Record<BrollItem['mode'], React.CSSProperties> = {
   fullscreen: {top: 0, left: 0, width: '100%', height: '100%'},
   top: {top: 0, left: 0, width: '100%', height: '45%'},
   inset: {top: '6%', right: '5%', width: '34%', height: '22%', borderRadius: 18, overflow: 'hidden', border: '3px solid rgba(255,255,255,0.9)', boxShadow: '0 20px 50px rgba(0,0,0,0.5)'},
+  // Prism Pro: a square card, 80 % wide, centred a touch above the middle, over the blurred footage
+  card: {top: '28%', left: '10%', width: '80%', height: '45%', overflow: 'hidden', boxShadow: '0 30px 80px rgba(0,0,0,0.35)'},
 };
+const CARD_EXIT_MS = 500; // it leaves upwards, accelerating (12 f at 24 fps)
 
 const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null}> = ({item, panel}) => {
   const frame = useCurrentFrame();
@@ -24,7 +28,7 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   // a split layout owns the B-roll: it fills the panel, whatever the cue's mode
   const box: React.CSSProperties = panel
     ? {top: `${panel.top}%`, left: `${panel.left}%`, width: `${panel.width}%`, height: `${panel.height}%`, borderRadius: 36, overflow: 'hidden'}
-    : item.mode === 'inset' ? boxByMode.inset : item.mode === 'top' ? boxByMode.top : boxByMode.fullscreen;
+    : boxByMode[item.mode] ?? boxByMode.fullscreen;
   const VideoComp = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
   const src = resolveSrc(item.src);
   const scale = item.scale ?? 1;
@@ -33,9 +37,15 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0);
   // scale around a sensible origin per mode (inset hugs its corner, others center)
   const origin = item.mode === 'inset' ? 'top right' : 'center';
+  // card: rises fast then drifts up for a long landing, and leaves upwards accelerating over its last frames
+  const card = item.mode === 'card' && !panel;
+  const dur = Math.max(1, Math.round(((item.endMs - item.startMs) / 1000) * fps));
+  const exitT = card ? Math.min(1, Math.max(0, 1 - (dur - 1 - frame) / ms(fps, CARD_EXIT_MS))) : 0;
+  const cardY = card ? (1 - cardLanding(frame, fps)) * 900 - exitT * exitT * 1500 : 0;
+  const move = [scale === 1 ? '' : `scale(${scale})`, card ? `translateY(${cardY.toFixed(1)}px)` : ''].filter(Boolean).join(' ');
 
   return (
-    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: moving ? 1 : fade, transform: scale === 1 ? undefined : `scale(${scale})`, transformOrigin: origin}}>
+    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: moving || card ? 1 : fade, transform: move || undefined, transformOrigin: origin}}>
       <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${fx.blur.toFixed(1)}px)` : undefined}}>
         {item.kind === 'video' ? (
           <VideoComp src={src} muted style={{width: '100%', height: '100%', objectFit: 'cover'}} />

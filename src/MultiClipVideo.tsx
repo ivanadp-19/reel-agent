@@ -13,10 +13,13 @@ import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
 import {gradeFor, type ProjectGrade} from './grade';
 import {OVERLAP, REVEALS, WHOOSH, type Enter} from './transitions';
+import {ms as msToFrames} from './motion';
 
 // Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
-// screen) while a tier-2 caption word is up — Captions.ai Prism's signature.
-const FocusPull: React.FC<{spans: {startMs: number; endMs: number}[]; blurPx: number; children: React.ReactNode}> = ({spans, blurPx, children}) => {
+// screen) while a tier-2 caption word or a B-roll card is up — Captions.ai
+// Prism's signature. The same wrapper lands the reel's opening: a radial
+// zoom-blur (or a plain blur-in) clearing over the first ~200 ms.
+const FocusPull: React.FC<{spans: {startMs: number; endMs: number}[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', children}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const ms = (frame / fps) * 1000;
@@ -27,8 +30,13 @@ const FocusPull: React.FC<{spans: {startMs: number; endMs: number}[]; blurPx: nu
     const v = Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1);
     k = Math.max(k, Math.min(1, Math.max(0, v)));
   }
-  k = k * k * (3 - 2 * k); // smoothstep
-  return <AbsoluteFill style={k > 0.02 ? {filter: `blur(${(k * blurPx).toFixed(1)}px)`, transform: `scale(${(1 + 0.06 * k).toFixed(3)})`} : undefined}>{children}</AbsoluteFill>;
+  const smooth = (x: number) => x * x * (3 - 2 * x);
+  k = smooth(k);
+  const openF = msToFrames(fps, 210);
+  const o = opening !== 'none' && frame < openF ? 1 - smooth(frame / openF) : 0; // 1 at the first frame, gone by ~200 ms
+  const blur = Math.max(k * blurPx, o * 24);
+  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0);
+  return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)`, transform: `scale(${scale.toFixed(3)})`} : undefined}>{children}</AbsoluteFill>;
 };
 
 // Music layer: start offset, volume, optional end fade-out, and optional
@@ -93,6 +101,8 @@ export const MultiClipVideo: React.FC<{
   const shownCaptions = hideUnder(avoidGraphics(projectedCaptions, projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
   const preset = presetOf(captionStyle);
   const focus = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
+  // a B-roll card sits over blurred footage whatever the pack
+  const cards = projectedBrolls.filter((b) => b.mode === 'card').map((b) => ({startMs: b.startMs, endMs: b.endMs}));
 
   // OffthreadVideo is built for rendering (frame-accurate, but stutters/freezes
   // in the live Player). Use native <Video> in preview for smooth playback,
@@ -105,7 +115,7 @@ export const MultiClipVideo: React.FC<{
       {/* clip layer — trimmed takes back-to-back, with keyframed zoom/pan; a
           layout graphic frames it over a canvas for its span */}
       <LayoutStage items={projectedGraphics} accentColor={accentColor}>
-      <FocusPull spans={focus} blurPx={preset.focusPull}>
+      <FocusPull spans={[...focus, ...cards]} blurPx={preset.focusPull || 18} opening={preset.opening}>
       {/* a clip entered with a card / split reveal shows under the outgoing one: it starts OVERLAP frames early, drawn first */}
       {placed.filter(({clip}) => REVEALS.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
         const early = Math.min(OVERLAP, fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));

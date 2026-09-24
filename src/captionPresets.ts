@@ -56,6 +56,7 @@ export type Preset = {
   holdMs: number; // a page stays this long after its last word (never past the next page)
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
+  opening: 'none' | 'zoomBlur' | 'blurIn'; // the reel's first ~200 ms: a radial zoom-blur landing (Prism, Stack, Impact) or a plain blur-in (Prime)
   tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
   layout: {maxWords: number; maxCharsLine: number};
 };
@@ -78,6 +79,7 @@ const base = {
   holdMs: 700,
   autoScale: false,
   focusPull: 0,
+  opening: 'none',
   tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.15}},
   layout: {maxWords: 6, maxCharsLine: 26},
 } satisfies Omit<Preset, 'id' | 'label' | 'desc' | 'font'>;
@@ -147,6 +149,7 @@ export const PRESETS: Record<string, Preset> = {
     holdMs: 1200,
     autoScale: true,
     focusPull: 18,
+    opening: 'zoomBlur',
     tiers: {1: {weight: 800, italic: true, scale: 1.45, fill: 'gradient'}, 2: {weight: 800, italic: true, scale: 1.9, fill: 'gradient'}},
     layout: {maxWords: 6, maxCharsLine: 24},
   },
@@ -178,6 +181,7 @@ export const PRESETS: Record<string, Preset> = {
     upcoming: 'dim',
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
+    opening: 'zoomBlur',
     active: 'box-jump', // the red pill jumps to each spoken word
     wordIn: 'fade',
     keyIn: 'pop',
@@ -232,6 +236,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'fade', ms: 80},
     pageOut: 'cut',
     keyIn: 'fade',
+    opening: 'blurIn',
     tiers: {1: {font: 'Kaushan Script', weight: 400, scale: 1.7, glow: true}, 2: {font: 'Kaushan Script', weight: 400, scale: 2.1, glow: true}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },
@@ -261,6 +266,7 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'blur', ms: 100},
     pageOut: 'cut',
     keyIn: 'blur',
+    opening: 'zoomBlur',
     tiers: {1: {scale: 1.25}, 2: {scale: 1.6}},
     layout: {maxWords: 3, maxCharsLine: 16},
   },

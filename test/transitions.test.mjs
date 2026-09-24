@@ -37,3 +37,11 @@ test('card / split: the outgoing clip reports an exit over its last frames, a st
   assert.ok(r[0] > 1 && r[1] > r[0] && r[2] === 2.5, JSON.stringify(r));
   assert.deepEqual(speedRamp(2, 1, 2).at(-1), 1);
 });
+
+test('whipDiag: the outgoing clip smears along the diagonal, the incoming lands from 1.3× and clears in 8 frames', () => {
+  const out = transitionFx(c('a'), 59, 60, c('b', 's', 'whipDiag'));
+  assert.ok(out.blur > 15 && out.angle === 60 && out.dx === 0);
+  const in0 = transitionFx(c('b', 's', 'whipDiag'), 0, 60);
+  assert.ok(in0.blur > 10 && in0.scale > 1.2 && in0.angle === 60);
+  assert.deepEqual(transitionFx(c('b', 's', 'whipDiag'), 8, 60), {scale: 1, dx: 0, blur: 0});
+});

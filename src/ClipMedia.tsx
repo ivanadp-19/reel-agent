@@ -20,6 +20,8 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
   const fid = `grade-${clip.id.replace(/[^\w-]/g, '_')}`;
   const fx = transition ? transitionFx(transition.clip, frame + transition.offset, transition.durFrames, transition.next) : null;
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0);
+  // a directional smear: stretch along the angle + a softer blur (no extra video copies)
+  const smear = fx?.angle != null && fx.blur > 0.2 ? `rotate(${fx.angle}deg) scaleX(${(1 + fx.blur / 36).toFixed(3)}) rotate(${-fx.angle}deg) ` : '';
   // outgoing reveal: card = shrink to a rounded card sliding off left; split = four tiles flying to the corners
   const exit = fx?.exit;
   const ease = (t: number) => 1 - (1 - Math.min(1, Math.max(0, t))) ** 3;
@@ -52,7 +54,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
           </div>
         </div>
       )) : null}
-      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${fx.blur.toFixed(1)}px)` : undefined, ...(exitStyle ?? {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
+      <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `${smear}translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: moving && fx.blur > 0.2 ? `blur(${(fx.blur * (smear ? 0.4 : 1)).toFixed(1)}px)` : undefined, ...(exitStyle ?? {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
       <Comp
         src={staticFile(clip.src)}
         playbackRate={speed}

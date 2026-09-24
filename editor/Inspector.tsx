@@ -225,13 +225,13 @@ export const Inspector: React.FC<{
                       </div>
                       <p className="text-body-sm text-on-surface truncate mb-2">{b.query ?? b.id}</p>
                       <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-1">
-                        {(['fullscreen', 'top', 'inset'] as const).map((m) => (
+                        {(['fullscreen', 'top', 'inset', 'card'] as const).map((m) => (
                           <button
                             key={m}
                             onClick={() => setBrollMode(b.id, m)}
                             className={`flex-1 py-1 text-[10px] rounded border ${b.mode === m ? 'border-primary text-primary bg-primary-container/20' : 'border-outline-variant/40 text-on-surface-variant'}`}
                           >
-                            {m === 'fullscreen' ? 'Full' : m === 'top' ? 'Top' : 'Inset'}
+                            {m === 'fullscreen' ? 'Full' : m === 'top' ? 'Top' : m === 'inset' ? 'Inset' : 'Card'}
                           </button>
                         ))}
                         {!!b.alternatives?.length && (
