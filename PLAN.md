@@ -136,9 +136,9 @@ Criterios:
 
 Entregables:
 - Biblioteca de assets: etiquetado por el agente (contact sheet), matching con el transcript, reglas de colocación; Pexels de respaldo.
-- Transiciones (whip blur, zoom blur, speed ramp, split 2×2, card zoom-out, punch-in) y golpes de SFX.
-- Texto detrás del presentador: hecho en fase 1 (`behind=true` + `prepare_mattes`); falta el contorno dibujado (Chalk) y captions detrás.
-- `end-card` y publicación del brand kit.
+- Transiciones: punch-in, zoom y whip blur hechos (`set_transitions`, patrón `punch-alternate`); faltan speed ramp, split 2×2, card zoom-out y golpes de SFX.
+- Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
+- `end-card` hecho (logo del brand kit, título, CTA, handle).
 - Runner headless con selector de cerebro; registro del MCP en `~/.claude.json` y en el `config.toml` de Codex; skills para ambos.
 - Crítica visual completa (contact sheet del render) con ≤ 3 rondas.
 

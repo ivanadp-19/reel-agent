@@ -18,6 +18,7 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `src/cuts.ts` — cut candidates by word id (retakes, off-mic, meta talk, fillers ES/EN); the agent approves them with `cut_words ranges`
 - `src/grade.ts` + `scripts/grade.mjs` — color: bounded per-source correction from signalstats + named looks, applied at render as an SVG filter (`set_grade`); `src/hdr.ts` — HLG/PQ → SDR LUT used at ingest
 - `scripts/qc.mjs` — two-pass loudnorm (−14 LUFS, ≤ −1 dBTP) and the QC gate every final render passes
+- `src/transitions.ts` — how a clip starts (cut, punch, zoom, whip); `set_transitions`
 - `public/` — user media and project JSON (gitignored, never commit)
 
 ## Rules
