@@ -31,7 +31,32 @@ Prioridad de color: brand kit > acento del proyecto (si no es el default) > pale
 
 `scripts/motion-gate.mjs` restiliza el proyecto de la corrida 9 con cada pack a través del MCP (los captions se re-paginan como lo harían con el agente), le pone el título de firma del estilo, su marco si lo tiene, un corte con su familia y un cue de B-roll a su manera, y pone nuestras tiras bajo las del preview en tres momentos: título, palabra clave y corte.
 
-GATE_RESULT
+Los 20 packs rindieron sus tres tiras sin errores (`.captions-tmp/motion-gate/<pack>/{title,key,cut}.jpg`, índice en `.captions-tmp/motion-gate/README.md`). Mi lectura, para que tú decidas sobre las hojas:
+
+| Pack | Lo que ya se ve como el preview | Lo que aún difiere |
+|---|---|---|
+| prism | claves con brillo, focus pull, tarjeta de B-roll, whip diagonal | el smear del whip es más suave que el del preview |
+| focus | banda "FOLLOWERS" que sube y baja, caja azul que se desliza palabra a palabra, franjas | — |
+| stack | "TECHNOLOGY" que cae con zoom-out, píldora roja que salta, flash | el título del preview es bicolor; `big-word` es de un color |
+| lift | tarjeta "Your Team" con wipe angular, caja menta que salta, polígono | la tarjeta es cutaway completo; en el preview el polígono sólo cubre la franja superior con la persona debajo (un `layout` con canvas parcial: pendiente) |
+| evo | marco redondeado sobre degradado, vidrio esmerilado, blur-in por palabra, pop del B-roll | el degradado azul→rosa del preview frente a nuestro azul→blanco |
+| prime | marco neón que se dibuja y oscila, "Progress" en script por letras que crece, spin + flash, carrusel | el brillo del script del preview es más intenso |
+| orbit | "FRIENDS" que baja con punch de cámara, píldora serif azul con blur-in, disco desde la esquina con círculo y anillo | el anillo del preview es más fino |
+| impact | "BALANCE" blanca con blur y punch de cámara, cian condensado con RGB, pulso glitch | — |
+| paper | etiquetas typewriter, caja blanca con karaoke gris→negro, partículas | sin papel rasgado ni stickers de papel (assets) |
+| elevate | "Momentum" caligráfico por letras con estrella y subtítulo, serif con itálica, crossBlur | la caligráfica del preview es más fina |
+| sketch | "MIND MAP" con elipse garabateada, manuscritas palabra a palabra, inset circular | el título del preview se destapa con máscara de rotulador (`markerMask`, no implementada: usa blur-in) |
+| lens | inset con visor y HUD sobre azul marino, mono en barra negra, "Aperture" typewriter, light leak | el typewriter del preview es 4× más lento (knob de velocidad pendiente) |
+| vista | "REALTY" gigante que baja, serif con fade por palabra, bloques escalonados | falta el skyline al pie (bloques como decoración, no como transición) |
+| pop | starburst "PROJECT" como sello, píldoras cómic, marco sobre cuadrícula, cardDrop | sin los stickers alrededor (assets escalonados) |
+| y2k | ventana Mac con estela, "Summer" script amarillo, amarillo sans, reloj | el preview arrastra dos ventanas y el collage de móviles (assets) |
+| form | "RESULTS" que se desmonta letra a letra, bold itálica en claves, persianas, partículas | las líneas naranjas de margen (`rules`) no se pusieron en el gate |
+| bloom | arco con cápsula, "Routine" caligráfico + MOISTURIZE, claves grandes con blur | el arco del preview "respira" (se expande fuera y vuelve): pendiente |
+| chalk | "YOUTH" en muro de tiza por letras, amarillo en etiquetas negras, contorno que hierve, papel crema | la tiza del preview tiene textura; la nuestra es una fuente de rotulador |
+| linen | "WEAR / your style" serif, caja melocotón, bandas diagonales a 20° | el lavado a crema del saliente |
+| align | "COMPUTERS" con tracking, subtítulo por barajado, mono en caja blanca, tiles por escala | — |
+
+Tres cosas que salieron del gate y ya están hechas o anotadas: el gate mismo (`scripts/motion-gate.mjs`) para repetirlo en un minuto por pack cuando cambies algo; la máscara de rotulador de Sketch y el arco que respira de Bloom quedan como los dos únicos movimientos del catálogo sin primitiva propia; y `tear` (Paper II) espera la textura.
 
 ## Archivos
 
