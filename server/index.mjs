@@ -36,11 +36,12 @@ import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, serveFile, tokenOk} from './http.mjs';
+import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
 import {handleReview} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
+import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {projectIssues, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
@@ -258,16 +259,6 @@ const UPLOADS = path.join(ROOT, '.uploads');
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure});
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
 const DIST = path.join(ROOT, 'editor', 'dist');
-function serveStatic(req, res, pathname) {
-  const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
-  for (const base of [PUBLIC, DIST]) {
-    const file = path.join(base, clean);
-    if (file.startsWith(base) && fs.existsSync(file) && fs.statSync(file).isFile()) return serveFile(req, res, file);
-  }
-  const index = path.join(DIST, 'index.html');
-  if (fs.existsSync(index)) return serveFile(req, res, index);
-  return json(res, 404, {error: 'not found'});
-}
 // Where a review link points: REEL_PUBLIC_URL (https://reels.example.com) when set,
 // else the address this request came through (the proxy's forwarded host first).
 function publicBase(req) {
@@ -306,7 +297,8 @@ async function handle(req, res) {
   }
   // self-service CLI tokens for a user signed in with the browser (session cookie or basic auth)
   if (isCliTokenPath(url.pathname)) return handleCliTokens(req, res, url, g, {users: USERS, base: publicBase(req), hops: TRUST_HOPS, publicUrl: process.env.REEL_PUBLIC_URL});
-  if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
+  // public mode: the editor's pages and the media it reads by URL — for a session user too (server/http.mjs servePublic)
+  if (PUBLIC_MODE && servePublic(req, res, url.pathname, {publicDir: PUBLIC, distDir: DIST})) return;
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
 
@@ -379,6 +371,27 @@ async function handle(req, res) {
       .filter(Boolean)
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     return json(res, 200, list);
+  }
+  // ---- the caption pages alone, with a revision (server/captions-revision.mjs; `reel captions get | set`) ----
+  //   GET /api/projects/<id>/captions                          → {project, revision, captionsOff, captionStyle, captions, updatedAt}
+  //   PUT /api/projects/<id>/captions {captions, expectedRevision?} → {changed, revision, updatedAt}; 409 revision_mismatch
+  // Read, check and write in one synchronous step: no other request of this backend runs in between.
+  const cap = url.pathname.match(/^\/api\/projects\/([\w-]+)\/captions$/);
+  if (cap) {
+    const file = path.join(PROJECTS_DIR, `${cap[1]}.json`);
+    if (req.method !== 'GET' && req.method !== 'PUT') return json(res, 405, {error: 'method not allowed'});
+    const incoming = req.method === 'PUT' ? await body(req) : null;
+    if (!fs.existsSync(file)) return json(res, 404, {error: `project ${cap[1]} not found`, code: 'not_found'});
+    const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (req.method === 'GET') return json(res, 200, {project: cap[1], revision: captionsRevision(prev.captions), captionsOff: !!prev.captionsOff, captionStyle: prev.captionStyle ?? null, captions: prev.captions ?? [], updatedAt: prev.updatedAt ?? null});
+    let b;
+    try { b = JSON.parse(incoming || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
+    const r = replaceCaptions(prev, b);
+    if (r.next) {
+      fs.writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(r.next, null, 2));
+      fs.renameSync(`${file}.${process.pid}.tmp`, file);
+    }
+    return json(res, r.status, r.body);
   }
   if (url.pathname.startsWith('/api/projects/')) {
     const id = url.pathname.split('/').pop();

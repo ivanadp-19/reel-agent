@@ -41,6 +41,30 @@ export function serveFile(req, res, file, headers = {}) {
   fs.createReadStream(file).pipe(res);
 }
 
+// The files of public/ and the built editor (editor/dist), for a caller the gate let
+// through in public mode — the team's browsers (session cookie, basic auth) and tokens.
+// GET and HEAD only (players and download managers probe with HEAD); a write to a media
+// path is 405, a missing media file 404 — never the editor's page, which a <video> shows
+// as black. Other paths fall back to the editor's index.html (its client-side routes).
+// → true when it answered, false for a request that is not its (the API routes take it).
+export function servePublic(req, res, pathname, {publicDir, distDir}) {
+  if (pathname.startsWith('/api/')) return false;
+  const media = isMediaPath(pathname);
+  const answer = (status, headers, body) => { res.writeHead(status, {'Content-Type': 'application/json', ...headers}); res.end(JSON.stringify(body)); return true; };
+  if (!mediaMethodOk(req.method)) return media ? answer(405, {Allow: 'GET, HEAD'}, {error: 'media is read-only', code: 'method_not_allowed'}) : false;
+  let clean;
+  try { clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, ''); } catch { return answer(400, {}, {error: 'bad path'}); }
+  for (const base of [publicDir, distDir]) {
+    const file = path.join(base, clean);
+    // a client's footage and renders: never kept by a shared cache between the browser and us
+    if (file.startsWith(base + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) { serveFile(req, res, file, base === publicDir ? {'Cache-Control': 'private'} : {}); return true; }
+  }
+  if (media) return answer(404, {}, {error: 'not found', code: 'not_found'});
+  const index = path.join(distDir, 'index.html');
+  if (fs.existsSync(index)) { serveFile(req, res, index); return true; }
+  return answer(404, {}, {error: 'not found'});
+}
+
 // Is `given` one of `tokens`? In constant time: both sides hashed to equal-length
 // sha256 digests and compared with timingSafeEqual, every entry checked (no early
 // exit), so the answer's timing tells nothing about how much of a token matched.
@@ -91,7 +115,9 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
 // session cookie of the form login (/login, server/session.mjs) or basic auth (failed
 // attempts share the login's limiter: 429 + Retry-After); a browser page load without
 // any is sent to /login, other requests get the 401 basic-auth challenge. Loopback
-// Host + localhost Origin otherwise. public/exports/* is never reachable without it.
+// Host + localhost Origin otherwise. public/exports/* is never reachable without one of
+// those: in public mode a signed-in browser (session cookie or basic auth) reads it and the
+// rest of the editor's media with GET / HEAD (isMediaPath, below), locally only loopback.
 // Per-user tokens (server/tokens.mjs, the `reel` CLI) pass in both modes as x-reel-token
 // and name the caller; a `reel_` token that is unknown or revoked is refused (401), on
 // loopback too. With requireToken (REEL_REQUIRE_TOKEN=1: a box shared over SSH) loopback
@@ -107,6 +133,15 @@ export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
 export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
 export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
+// The media the editor reads by URL from public/: the <video> / <audio> / <img> sources of
+// the preview (staticFile paths: clips, B-roll, music, assets, fonts, sfx…) and the Download
+// links of finished renders (/exports/*). In public mode a signed-in browser — the session
+// cookie of the form login or basic auth — reads them like any other credential that passes
+// the gate; read-only: GET and HEAD, anything else is 405 (mediaMethodOk). Local mode keeps
+// the loopback Host + localhost Origin rule for every caller.
+export const MEDIA_DIRS = ['exports', 'clips', 'broll', 'broll-assets', 'music', 'assets', 'inputs', 'fonts', 'sfx', 'brands', 'catalog', 'reviews'];
+export const isMediaPath = (pathname) => MEDIA_DIRS.some((d) => pathname.startsWith(`/${d}/`));
+export const mediaMethodOk = (method) => method === 'GET' || method === 'HEAD';
 const denyJson = (status, error, code, hint) => ({kind: 'deny', status, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error, code, hint})});
 export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0, users = null, requireToken = false} = {}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};

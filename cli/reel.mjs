@@ -31,7 +31,7 @@ const VIDEO = /\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i;
 export const EXIT = {
   ok: 0, error: 1, bad_usage: 2, confirm_required: 2,
   no_token: 3, bad_token: 3, token_required: 3, token_file_mode: 3, unauthorized: 3, forbidden: 3,
-  not_found: 4, conflict: 5, render_busy: 5, exists: 5, upload_incomplete: 5,
+  not_found: 4, conflict: 5, revision_mismatch: 5, render_busy: 5, exists: 5, upload_incomplete: 5,
   too_large: 6, low_disk: 6, low_memory: 6, backend_unreachable: 7, render_failed: 8, invalid: 9, timeout: 124,
 };
 export class CliError extends Error {
@@ -77,7 +77,7 @@ const netError = (ctx, e) => e.code === 'ETIMEDOUT'
 const parse = (buf) => { const t = buf.toString(); try { return JSON.parse(t || '{}'); } catch { return {error: t.slice(0, 200)}; } };
 export function httpError(status, data) {
   const extra = {status};
-  for (const k of ['jobId', 'size', 'updatedAt']) if (data[k] != null) extra[k] = data[k];
+  for (const k of ['jobId', 'size', 'updatedAt', 'revision']) if (data[k] != null) extra[k] = data[k];
   return new CliError(data.code || STATUS_CODE[status] || (status >= 500 ? 'server_error' : 'http_error'), data.error || `HTTP ${status}`, data.hint || STATUS_HINT[status], extra);
 }
 // JSON in and out; GETs are retried on network errors (safe), writes are not
@@ -105,6 +105,11 @@ const PROJECT_ID = /^[\w-]+$/;
 const needId = (id, what = 'project') => { if (!id || !PROJECT_ID.test(id)) throw new CliError('bad_usage', `a ${what} id is required (letters, digits, _ -)`, 'reel projects list'); return id; };
 export const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 async function getProject(ctx, id) { return api(ctx, 'GET', `/api/projects/${needId(id)}`); }
+// the caption pages with the server's revision of them (server/captions-revision.mjs)
+async function getCaptions(ctx, id) {
+  const r = await api(ctx, 'GET', `/api/projects/${needId(id)}/captions`);
+  return {revision: r.revision, captionsOff: !!r.captionsOff, captionStyle: r.captionStyle ?? null, captions: r.captions ?? []};
+}
 // read → change → write with the backend's compare-and-swap on updatedAt; a writer that
 // lost the race (the editor, an agent) reads again and redoes its change
 async function updateProject(ctx, id, change, tries = 4) {
@@ -453,11 +458,11 @@ export const COMMANDS = [
       });
       return [{...out, changed}, line];
     }},
-  {name: 'captions get', args: '<project>', summary: 'the caption pages (source-relative ms, words with tiers)', output: '{project, captionsOff, captionStyle, captions: [page]}', examples: ['reel captions get promo-cafe --json > caps.json'],
+  {name: 'captions get', args: '<project>', summary: 'the caption pages (source-relative ms, words with tiers) and their revision (changes whenever anyone changes the pages)', output: '{project, revision, captionsOff, captionStyle, captions: [page]}', examples: ['reel captions get promo-cafe --json > caps.json'],
     run: async (ctx, [id]) => {
-      const p = await getProject(ctx, id);
-      const caps = p.captions ?? [];
-      return [{project: id, captionsOff: !!p.captionsOff, captionStyle: p.captionStyle ?? null, captions: caps}, caps.length ? caps.map((c) => `${c.id}  ${fmtMs(c.startMs)}–${fmtMs(c.endMs)}  ${pageText(c)}`).join('\n') : 'no captions (reel captions generate)'];
+      const p = await getCaptions(ctx, id);
+      const caps = p.captions;
+      return [{project: id, revision: p.revision, captionsOff: p.captionsOff, captionStyle: p.captionStyle, captions: caps}, [`revision ${p.revision}`, ...(caps.length ? caps.map((c) => `${c.id}  ${fmtMs(c.startMs)}–${fmtMs(c.endMs)}  ${pageText(c)}`) : ['no captions (reel captions generate)'])].join('\n')];
     }},
   {name: 'captions generate', args: '<project>', flags: {timeout: {type: 'string', description: 'seconds to wait (default 1800)'}},
     summary: 'transcribe and page the speech into captions (the editor\'s / MCP\'s captions step); pages already on a clip are kept',
@@ -475,18 +480,27 @@ export const COMMANDS = [
       });
       return [{project: id, added, captions: project.captions.length}, `${id}: +${added} caption pages (${project.captions.length} total)`];
     }},
-  {name: 'captions set', args: '<project> <file.json|->', summary: 'replace the caption pages with a JSON file (or stdin); only the captions change, so a layers render reuses the cached master; the same pages again change nothing',
-    output: '{project, changed, count, diff: {added, removed, changed}}', examples: ['reel captions set promo-cafe caps.json --json', 'jq ... caps.json | reel captions set promo-cafe - --json'],
-    run: async (ctx, [id, src]) => {
+  {name: 'captions set', args: '<project> <file.json|->', flags: {'expected-revision': {type: 'string', description: 'the revision `captions get` printed: refused (exit 5, revision_mismatch) when the pages changed since'}},
+    summary: 'replace the caption pages with a JSON file (or stdin); only the captions change, so a layers render reuses the cached master; the same pages again change nothing',
+    output: '{project, changed, count, revision, diff: {added, removed, changed}}', examples: ['reel captions set promo-cafe caps.json --expected-revision "$(jq -r .revision caps.json)" --json', 'jq ... caps.json | reel captions set promo-cafe - --json'],
+    run: async (ctx, [id, src], o) => {
       needId(id);
       if (!src) throw new CliError('bad_usage', 'a JSON file (or - for stdin) is required', 'reel captions set <project> caps.json');
+      const expected = o['expected-revision'];
+      if (expected != null && !/^[\w-]{1,64}$/.test(expected)) throw new CliError('bad_usage', '--expected-revision takes the revision `reel captions get --json` prints');
       const next = checkCaptions(readJsonArg(ctx, src));
-      let diff = null;
-      const {changed} = await updateProject(ctx, id, (p) => {
-        diff = diffCaptions(p.captions ?? [], next);
-        return JSON.stringify(p.captions ?? []) === JSON.stringify(next) ? null : {captions: next};
-      });
-      return [{project: id, changed, count: next.length, diff}, changed ? `${id}: ${next.length} pages (+${diff.added.length} −${diff.removed.length} ~${diff.changed.length})` : `${id}: unchanged`];
+      // the server checks the revision and writes in one step; without --expected-revision the one
+      // just read is sent, and a writer that got in between makes us read again and redo the diff
+      for (let i = 1; ; i++) {
+        const cur = await getCaptions(ctx, id);
+        const diff = diffCaptions(cur.captions, next);
+        try {
+          const r = await api(ctx, 'PUT', `/api/projects/${id}/captions`, {json: {captions: next, expectedRevision: expected ?? cur.revision}});
+          return [{project: id, changed: r.changed, count: next.length, revision: r.revision, diff}, r.changed ? `${id}: ${next.length} pages (+${diff.added.length} −${diff.removed.length} ~${diff.changed.length}), revision ${r.revision}` : `${id}: unchanged (revision ${r.revision})`];
+        } catch (e) {
+          if (e.code !== 'revision_mismatch' || expected != null || i >= 4) throw e;
+        }
+      }
     }},
   {name: 'captions diff', args: '<project> <file.json|->', summary: 'what `captions set` of that file would change, page by page', output: '{project, added: [id], removed: [id], changed: [{id, fields, text?: [before, after]}]}', examples: ['reel captions diff promo-cafe caps.json --json'],
     run: async (ctx, [id, src]) => {

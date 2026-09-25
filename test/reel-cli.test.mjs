@@ -10,6 +10,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {main, autocutPlan, checkCaptions, diffCaptions, projectPatch, slug} from '../cli/reel.mjs';
 import {serveFile} from '../server/http.mjs';
+import {captionsRevision, replaceCaptions} from '../server/captions-revision.mjs';
 
 const TOKEN = 'reel_test-secret-0123456789abcdefghij';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-cli-'));
@@ -34,6 +35,17 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/trim-silence' && req.method === 'POST') { S.trimBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '23'}); }
   if (p === '/api/trim-silence/23') return send(res, 200, S.trimFile !== undefined ? {status: 'done', progress: 100, label: 'Ready'} : {status: 'done', progress: 100, label: 'Ready', result: {plan: [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]}});
   if (p === '/trim-silence.json') { S.trimFileToken = req.headers['x-reel-token'] === TOKEN; return S.trimFile ? send(res, 200, S.trimFile) : send(res, 404, {error: 'not found'}); }
+  if ((m = p.match(/^\/api\/projects\/([\w-]+)\/captions$/))) { // the backend's route, over its revision logic
+    const cur = S.projects.get(m[1]);
+    if (!cur) return send(res, 404, {error: 'not found', code: 'not_found'});
+    if (req.method === 'GET') return send(res, 200, {project: m[1], revision: captionsRevision(cur.captions), captionsOff: !!cur.captionsOff, captionStyle: cur.captionStyle ?? null, captions: cur.captions ?? [], updatedAt: cur.updatedAt});
+    const b = JSON.parse(await readBody(req));
+    S.captionPuts = (S.captionPuts ?? 0) + 1;
+    if (S.editorSavesBeforePut > 0) { S.editorSavesBeforePut--; cur.captions = [...(cur.captions ?? []), {id: `ed${S.editorSavesBeforePut}`, src: 'clips/take1.mp4', startMs: 5000, endMs: 5500, words: []}]; } // someone saved in between
+    const r = replaceCaptions(cur, b, `t${process.hrtime.bigint()}`);
+    if (r.next) S.projects.set(m[1], r.next);
+    return send(res, r.status, r.body);
+  }
   if ((m = p.match(/^\/api\/projects\/([\w-]+)$/))) {
     const cur = S.projects.get(m[1]);
     if (req.method === 'GET') return cur ? send(res, 200, cur) : send(res, 404, {error: 'not found'});
@@ -193,6 +205,8 @@ test('captions: set checks the pages, the same pages change nothing, diff page b
   assert.deepEqual([bad.code, bad.out.code], [9, 'invalid']);
   const got = await reel(['captions', 'get', 'promo', '--json']);
   assert.deepEqual(got.out.captions, caps);
+  assert.equal(got.out.revision, captionsRevision(caps));
+  assert.equal(set.out.revision, got.out.revision, 'set prints the revision it wrote');
   const gen = await reel(['captions', 'generate', 'promo', '--json']);
   assert.deepEqual([gen.code, gen.out.added, gen.out.captions], [0, 1, 2], 'fresh pages merged next to the hand-set one');
   assert.deepEqual([S.captionsBody.project_id, S.captionsBody.style, S.captionsBody.clips.length], ['promo', 'palabra', 1]);
@@ -283,4 +297,43 @@ test('autocut: --dry-run prints the plan and saves nothing; then the clips are r
   const none = await reel(['autocut', 'promo', '--json']);
   assert.deepEqual([none.code, none.out.code], [1, 'job_failed']);
   S.trimFile = undefined;
+});
+
+test('captions revision: get prints it, set --expected-revision is refused with 409 revision_mismatch (exit 5) once the pages moved, and writes nothing', async () => {
+  const page = (id, startMs) => ({id, src: 'clips/take1.mp4', startMs, endMs: startMs + 500, topPct: 62, words: [{text: id, startMs, endMs: startMs + 500}]});
+  S.projects.set('rev', {name: 'rev', clips: [], captions: [page('a', 0)], updatedAt: 't0'});
+  const got = await reel(['captions', 'get', 'rev', '--json']);
+  const rev0 = got.out.revision;
+  assert.match(rev0, /^[0-9a-f]{16}$/);
+  assert.match((await reel(['captions', 'get', 'rev'])).stdout, new RegExp(`^revision ${rev0}\n`));
+  fs.writeFileSync(path.join(tmp, 'rev1.json'), JSON.stringify({...got.out, captions: [page('a', 0), page('b', 1000)]}));
+  const ok = await reel(['captions', 'set', 'rev', 'rev1.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([ok.code, ok.out.changed, ok.out.diff.added], [0, true, ['b']]);
+  assert.notEqual(ok.out.revision, rev0);
+  // a second writer that still holds rev0: refused, nothing written
+  fs.writeFileSync(path.join(tmp, 'rev2.json'), JSON.stringify([page('z', 0)]));
+  const before = JSON.stringify(S.projects.get('rev'));
+  const stale = await reel(['captions', 'set', 'rev', 'rev2.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([stale.code, stale.out.code], [5, 'revision_mismatch']);
+  assert.equal(stale.out.revision, ok.out.revision, 'the error names the current revision');
+  assert.ok(stale.out.hint);
+  assert.equal(JSON.stringify(S.projects.get('rev')), before, 'a refused set changes nothing');
+  assert.equal((await reel(['captions', 'set', 'rev', 'rev2.json', '--expected-revision', 'no spaces', '--json'])).code, 2);
+  // retrying the set that went through (its answer lost): the same pages, not a conflict
+  const retry = await reel(['captions', 'set', 'rev', 'rev1.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([retry.code, retry.out.changed, retry.out.revision], [0, false, ok.out.revision]);
+  // without the flag a writer that got in between is read again, not overwritten blindly nor refused
+  S.editorSavesBeforePut = 1;
+  const puts = S.captionPuts;
+  const redo = await reel(['captions', 'set', 'rev', 'rev2.json', '--json']);
+  assert.deepEqual([redo.code, redo.out.changed, S.captionPuts - puts], [0, true, 2]);
+  assert.deepEqual(S.projects.get('rev').captions, [page('z', 0)]);
+  // the pure rule
+  const prev = {captions: [page('a', 0)], updatedAt: 't1'};
+  assert.equal(replaceCaptions(prev, {captions: 'x'}).status, 400);
+  assert.equal(replaceCaptions(prev, {captions: [], expectedRevision: 5}).status, 400);
+  assert.deepEqual(replaceCaptions(prev, {captions: prev.captions, expectedRevision: captionsRevision(prev.captions)}), {status: 200, body: {changed: false, revision: captionsRevision(prev.captions), updatedAt: 't1'}});
+  const mismatch = replaceCaptions(prev, {captions: [], expectedRevision: 'deadbeefdeadbeef'});
+  assert.deepEqual([mismatch.status, mismatch.body.code, mismatch.next], [409, 'revision_mismatch', undefined]);
+  assert.equal(captionsRevision(undefined), captionsRevision([]), 'no captions = an empty list');
 });
