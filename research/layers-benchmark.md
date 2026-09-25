@@ -5,8 +5,7 @@ the layered render (after: cached master + caption layer + composite)? And is th
 layered file the same picture?
 
 Machine: cloud container, 4 vCPU, 15 GB RAM, no GPU (not the production VM). No
-8-vCPU box was available; the 2-vCPU numbers are the same container pinned to two
-cores (`taskset -c 0,1`, `REEL_RENDER_CONCURRENCY=2`).
+2- or 8-vCPU runs yet.
 
 ## Method
 
@@ -85,9 +84,43 @@ time went:
 Remotion's VP9 encode was most of the caption layer's cost; hence the frames-first
 path.
 
-### Final render (1080×1920 + loudness + QC), pack `focus`
+### Final render (1080×1920 + loudness + QC), 4 vCPU, pack `focus` (37 pages)
 
-(pending: the run was in progress when this was written)
+With the fixed composite (frame-exact overlay, master's color range kept):
+
+| | full (before) | layers (after) |
+|---|---|---|
+| first render | 494 s (render 468.9 + QC 24.2) | 626.8 s (master 479.3 + captions 60.8 + composite 63.7 + QC 23) |
+| after a caption edit | **499.8 s** (render 475.2 + QC 24.4) | **150.4 s** (captions 60.7 + composite 64.9 + QC 24.2, master cached) |
+
+Before the composite fix the same edit measured 131.3 s (composite 47.9 s): the
+fixed composite converts the caption layer into the master's full range. Not
+isolated; the master itself varied by ~20 s between runs.
+
+Caption sync, 1821 frames (share of the frame where the caption masks disagree):
+
+| | mean | max | frames > 0.5 % |
+|---|---|---|---|
+| layered vs one-pass | 0.053 % | 0.47 % | 0 |
+| layered shifted by one frame | 6.44 % | 68 % | — |
+
+Before the fix the same measure found a caption one frame late at some page
+changes (max 1.97 %, frame 1130); see the commit `b7b02c9`. SSIM layered vs one-pass
+over the whole reel: mean 0.984, min 0.946 (grain and high-entropy footage re-encoded).
+
+Caption layer formats, 1080p, same PNG frames (60.7 s to draw, 187 MB):
+
+| format | encode | composite | layer file | sync mean / max |
+|---|---|---|---|---|
+| png (default) | — | 82.9 s | (the frames) | 0.053 % / 0.47 % |
+| vp9 (yuva420p, realtime) | 31.1 s | 75.1 s | 2.8 MB | 0.053 % / 0.47 % |
+| prores 4444 | 94.8 s | 66.1 s | 255 MB | 0.053 % / 0.47 % |
+
+These composites ran back to back in the bench script, not through the backend (64.9 s
+there); the three are comparable with each other. PNG stays the default: no encode, no
+temporary file, the lowest total.
+
+Not measured: the 2-vCPU and 8-vCPU boxes.
 
 ## Limitations
 
