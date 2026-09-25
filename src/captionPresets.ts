@@ -161,7 +161,7 @@ export const PRESETS: Record<string, Preset> = {
     wordIn: 'ccSlideUp',
     keyIn: 'highlightRise', // classifier highlights (keywords/questions/CTAs): per-char rise + white->yellow sweep (César 9:27)
     holdMs: 250, // César 9:47: NO captions during silence — page ends ~250ms after its last word; never hold through pauses
-    tiers: {1: {weight: 700, color: 'accent', scale: 1.15}, 2: {weight: 700, color: 'accent', scale: 1.15}}, // highlights: solid #FFE500, slightly bigger, dynamic entry
+    tiers: {1: {weight: 700, color: 'accent', scale: 1}, 2: {weight: 700, color: 'accent', scale: 1}}, // highlights: solid #FFE500 at the SAME size as the white words (César's QC feedback on the render judge; was 1.15×), dynamic entry
     layout: {maxWords: 6, maxCharsLine: 24, unbreakable: true}, // his reels: phrases of 2-5 words, one line when it fits, 2 balanced lines when not; 3 lines / smaller size beat splitting a name (César 10:35)
     titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
   },

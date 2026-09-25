@@ -3,7 +3,7 @@ import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
-import {reapplyTiers} from '../src/paging';
+import {projectTiers, reapplyTiers} from '../src/paging';
 import {chooseRenderMode, type RenderMode} from '../src/layers';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
@@ -232,7 +232,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId, tiers: projectTiers(captions)})}).then((x) => x.json());
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),

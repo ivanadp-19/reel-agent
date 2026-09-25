@@ -14,7 +14,7 @@ import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import {assembleWords, sourceKey} from './lib-transcribe.mjs';
 import {applyHighlights, heuristicClassify, CLASSIFY_PROMPT} from '../src/highlights.ts';
-import {pageWords, DEFAULT_TOP} from '../src/paging.ts';
+import {pageWords, withTiers, DEFAULT_TOP} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
 const ROOT = process.cwd();
@@ -22,7 +22,7 @@ const PUBLIC = path.join(ROOT, 'public');
 
 const progress = (pct, label) => console.log(`PROGRESS:${pct}:${label}`);
 
-const {clips, lang = 'auto', style, offMic = 'mark'} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const {clips, lang = 'auto', style, offMic = 'mark', tiers = {}} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (!clips?.length) {
   console.error('no clips');
   process.exit(1);
@@ -136,6 +136,7 @@ async function classifyHighlights(words) {
 progress(84, 'Classifying highlights');
 const highlights = await classifyHighlights(words);
 const nHl = applyHighlights(words, highlights);
+withTiers(words, tiers); // the project's emphasis pages with the words (a highlighted name is one unit)
 if (nHl) progress(85, `${nHl} highlight words`);
 progress(88, 'Finding faces');
 const faces = detectFaces(clips);

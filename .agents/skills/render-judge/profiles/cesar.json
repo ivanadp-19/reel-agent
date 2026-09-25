@@ -1,0 +1,29 @@
+{
+  "id": "cesar",
+  "name": "César (VIBEM)",
+  "doc": "profiles/cesar.md",
+  "match": {"captionStyle": ["vibem"], "brand": ["vibem", "cesar", "césar"]},
+  "captions": {"pagination": "sentence", "accentSameSize": true, "cascadeMs": 45},
+  "glossary": [
+    {"term": "skypool", "variants": ["sky pool", "sky-pool", "skypul", "sky pul", "escaipul", "skaipul", "skypoll"]},
+    {"term": "solarium", "variants": ["solárium", "solario", "solar ium"], "note": "así lo escribe César; confirmar si prefiere solárium (RAE)"}
+  ],
+  "crewWords": ["listo", "lista", "listos", "acción", "accion", "grabando", "rodando", "corre", "va", "ya", "corte", "tres", "dos", "uno", "sale", "otra", "cuadro", "cámara", "camara", "gracias"],
+  "colorRefs": [
+    {"label": "G1 v2 aprobado", "paths": [".refs/cesar/G1-v2-aprobado.mp4"], "hint": "copy the approved G1 v2 master to .refs/cesar/G1-v2-aprobado.mp4 (.refs/ is gitignored)"},
+    {"label": "Hechos por mí", "paths": [".refs/cesar/hechos-por-mi/"], "hint": "put César's own reels / stills (\"Hechos por mí\") in .refs/cesar/hechos-por-mi/"}
+  ],
+  "requireInserts": true,
+  "deliverables": {"master": "clean (no captions)", "captioned": "same edit + captions", "extras": "each in its own project (duplicate_project), delivered apart"},
+  "reels": {
+    "G1": {
+      "inserts": [
+        {"what": "plazas comerciales", "need": "broll", "keywords": ["plaza", "plazas", "centro comercial", "mall"]},
+        {"what": "hospitales", "need": "broll", "keywords": ["hospital", "hospitales", "clinica", "clínica"]},
+        {"what": "universidades", "need": "broll", "keywords": ["universidad", "universidades", "campus"]},
+        {"what": "super de calle", "need": "super", "keywords": ["calle", "avenida", "av", "blvd", "boulevard"]}
+      ]
+    },
+    "G7": {"phone": "questions (the man's — the non-main speaker)"}
+  }
+}
