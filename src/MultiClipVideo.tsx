@@ -75,7 +75,7 @@ const TransitionOverlay: React.FC<{cuts: {frame: number; kind: Enter; seed: numb
 };
 
 // Music layer: start offset, volume, optional end fade-out, and optional
-// auto-ducking — the music dips while someone is speaking (speech = caption spans).
+// auto-ducking — the music dips while someone is speaking (speech = runs of spoken words, src/layers.ts).
 const MusicTrack: React.FC<{music: NonNullable<Music>; totalFrames: number; speech: Array<[number, number]>}> = ({music, totalFrames, speech}) => {
   const {fps} = useVideoConfig();
   const fadeFrames = Math.round((music.fadeOutSec ?? 0) * fps);
