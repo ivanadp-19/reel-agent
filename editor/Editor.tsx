@@ -8,6 +8,7 @@ import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
+import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
 import {pollJob} from './jobs';
 
@@ -45,6 +46,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   const [playing, setPlaying] = useState(false);
   const [boxRect, setBoxRect] = useState<{left: number; top: number; w: number; h: number} | null>(null);
   const [notice, setNotice] = useState<{msg: string; kind: 'error' | 'ok'} | null>(null);
+  const [left, setLeft] = useState<'assets' | 'transcript'>('assets'); // left column: media, or the words (get_transcript / cut_words)
   const notify = (msg: string, kind: 'error' | 'ok') => {
     setNotice({msg, kind});
     window.setTimeout(() => setNotice(null), kind === 'error' ? 6000 : 3000);
@@ -466,7 +468,20 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
 
 
       <main className="flex-1 flex overflow-hidden">
-        <AssetsSidebar playerRef={playerRef} />
+        <div className={`${left === 'assets' ? 'w-64' : 'w-96'} shrink-0 flex flex-col h-full border-r border-outline-variant bg-surface-container-low`}>
+          <div className="flex border-b border-outline-variant shrink-0">
+            {(['assets', 'transcript'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setLeft(t)}
+                className={`flex-1 py-2 text-[10px] font-label-bold uppercase tracking-wider border-b-2 transition-colors ${left === t ? 'border-primary text-on-primary-container' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          {left === 'assets' ? <AssetsSidebar playerRef={playerRef} /> : <TranscriptPanel playerRef={playerRef} notify={notify} />}
+        </div>
 
         {/* Preview + transport */}
         <section className="flex-1 bg-surface-dim flex flex-col min-w-0">

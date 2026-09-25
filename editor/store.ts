@@ -11,6 +11,7 @@ import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
 import {DEFAULT_TOP} from '../src/paging';
+import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cuts';
 import type {AudioOptions} from '../src/audio';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
@@ -91,6 +92,7 @@ type EditorState = {
   setClipAudioCut: (id: string, cut: {jSec?: number; lSec?: number}) => void;
   setTransitionPattern: (pattern: 'punch-alternate' | 'none') => void;
   applySpeedRamp: (id: string, from: number, to: number, steps: number) => void;
+  cutWords: (tr: TClip[], ranges: CutRange[]) => void; // cut_words: approved word ranges, snapped into the pauses
   setMusic: (music: Music) => void;
   setAccentColor: (color: string) => void;
   setCaptionStyle: (style: PresetId) => void;
@@ -418,6 +420,14 @@ export const useEditor = create<EditorState>((set) => ({
       }
       clips = clips.map((x) => (ids.includes(x.id) ? {...x, speed: speeds[ids.indexOf(x.id)]} : x));
       return {...withHistory(s), clips, brolls, meta: withMeta(s.meta, clips)};
+    }),
+
+  cutWords: (tr, ranges) =>
+    set((s) => {
+      const {spans} = planWordCuts(tr, s.clips, ranges);
+      if (!spans.length) return s;
+      const r = applyWordCuts(s.clips, s.brolls, spans, tr);
+      return {...withHistory(s), clips: r.clips, brolls: r.brolls, meta: withMeta(s.meta, r.clips), selectedClipId: null};
     }),
 
   // push history only on add/remove (not on every volume/fade slider tick)

@@ -26,7 +26,7 @@ import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, proj
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {transcriptIssues, validateProject} from '../src/validate.ts';
-import {findCutCandidates} from '../src/cuts.ts';
+import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
@@ -341,48 +341,18 @@ server.registerTool('split_clip', {description: 'Split a clip in two: at a timel
   await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });
 
-const SNAP_MS = 150; // how far into the neighbouring pause a word cut reaches
 server.registerTool('cut_words', {description: 'Remove speech by word id: from_wid … to_wid (inclusive, same clip), or many stretches in ONE call with ranges (e.g. the ones find_cut_candidates suggested and you approved). Cut points snap into the pauses around the words so no syllable is clipped. Word ids stay valid after cuts; clip ids change (re-read get_transcript before using clip ids).', inputSchema: {project_id: pid, from_wid: z.string().optional().describe('first word to remove, "<source>:<i>"'), to_wid: z.string().optional().describe('last word to remove; defaults to from_wid'), ranges: z.array(z.object({from_wid: z.string(), to_wid: z.string().optional()})).max(80).optional().describe('several stretches at once')}}, async ({project_id, from_wid, to_wid, ranges}) => {
   const p = load(project_id);
   const list = ranges?.length ? ranges : from_wid ? [{from_wid, to_wid}] : null;
   if (!list) throw new Error('give from_wid (and to_wid), or ranges');
   const tr = await transcript(p);
-  // plan every stretch against the timeline as it is now, in source ms
-  const plans = [];
-  for (const r of list) {
-    const a = await wordAt(p, r.from_wid, tr); const b = r.to_wid ? await wordAt(p, r.to_wid, tr) : a;
-    if (a.entry.clipId !== b.entry.clipId) throw new Error(`${r.from_wid} and ${r.to_wid} sit on different clips (${a.entry.clipId}, ${b.entry.clipId}) — give them as two ranges`);
-    if (b.k < a.k) throw new Error(`${r.to_wid} comes before ${r.from_wid}`);
-    const inMs = a.clip.inSec * 1000, outMs = a.clip.outSec * 1000;
-    const startMs = a.prev ? Math.min(a.word.startMs, Math.max(a.prev.endMs + 40, a.word.startMs - SNAP_MS)) : inMs;
-    const endMs = b.next ? Math.max(b.word.endMs, Math.min(b.next.startMs - 40, b.word.endMs + SNAP_MS)) : outMs;
-    plans.push({src: a.clip.src, startMs, endMs, text: a.entry.words.slice(a.k, b.k + 1).map((w) => w.word).join(' ')});
-  }
-  // overlapping stretches become one; each remaining span sits inside one clip
-  // (earlier cuts only removed other spans), found again by source time
-  plans.sort((x, y) => (x.src === y.src ? x.startMs - y.startMs : x.src < y.src ? -1 : 1));
-  const merged = [];
-  for (const c of plans) { const last = merged.at(-1); if (last && last.src === c.src && c.startMs <= last.endMs) { last.endMs = Math.max(last.endMs, c.endMs); last.text += ` ${c.text}`; } else merged.push({...c}); }
-  const lines = [];
-  const pieces = new Set(); // clips this call cut into
-  for (const c of merged) {
-    const clip = p.clips.find((k) => k.src === c.src && k.inSec * 1000 <= c.startMs + 1 && k.outSec * 1000 >= c.endMs - 1);
-    const r = clip && cutRange(p.clips, clip.id, c.startMs / 1000, c.endMs / 1000);
-    if (!r) { lines.push(`skipped "${c.text}" (not on the timeline any more)`); continue; }
-    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap);
-    for (const s of r.remap) pieces.add(s.segId);
-    lines.push(`cut "${c.text}" — ${f1((c.endMs - c.startMs) / 1000)}s of ${path.basename(c.src)} (${f1(c.startMs / 1000)}–${f1(c.endMs / 1000)})`);
-  }
-  // a piece left between two cuts that holds no word at all is dead air: drop it
-  const words = new Map(tr.map((t) => [t.source, []]));
-  for (const t of tr) words.get(t.source).push(...t.words);
-  const silent = p.clips.filter((k) => pieces.has(k.id) && k.outSec - k.inSec < 4 && !(words.get(path.basename(k.src).replace(/\.[^.]+$/, '')) ?? []).some((w) => w.endMs > k.inSec * 1000 && w.startMs < k.outSec * 1000));
-  if (silent.length) {
-    p.clips = p.clips.filter((k) => !silent.includes(k));
-    lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
-  }
+  // the same planner and cutter the editor's Transcript panel uses (src/cuts.ts)
+  const {spans, errors} = planWordCuts(tr, p.clips, list);
+  if (errors.length) throw new Error(errors.join('; '));
+  const r = applyWordCuts(p.clips, p.brolls, spans, tr);
+  p.clips = r.clips; p.brolls = r.brolls;
   await save(project_id, p);
-  return text(`${lines.join('\n')}\n\n${summary(project_id, p)}`);
+  return text(`${r.lines.join('\n')}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, by word id (nothing is cut): retakes — a line the speaker said more than once, including the quiet read-through she does before performing it; the kept take is the LAST complete one (rehearsal first, take last), attempts are whole sentences even when said with a pause inside —, off-mic lines, meta talk ("sorry", "say it again", "otra vez", "corta") and fillers (um, uh, eh, mmm, "you know", "o sea"; "este"/"like" only between pauses). Review the list against the transcript, drop what should stay, then pass the rest to cut_words ranges in one call.', inputSchema: {project_id: pid}}, async ({project_id}) => {

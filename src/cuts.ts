@@ -13,7 +13,7 @@
 
 import {longestSilenceMs, voiceSpans, type Loudness} from './speech.ts';
 
-export type TWord = {i: number; word: string; startMs: number; endMs: number; off?: boolean};
+export type TWord = {i: number; word: string; startMs: number; endMs: number; off?: boolean; speaker?: string};
 export type TClip = {clipId: string; source: string; words: TWord[]};
 export type Candidate = {kind: 'filler' | 'meta' | 'retake' | 'off-mic'; clipId: string; from: string; to: string; text: string; keep?: {from: string; text: string}; note?: string};
 
@@ -214,4 +214,76 @@ export function speechSegments(
       outSec: Math.min(clip.outSec, b / 1000 + (i === grown.length - 1 ? o.trailPad : o.innerPad)),
     }))
     .filter((s) => s.outSec - s.inSec >= o.minLen);
+}
+
+// ---- word cuts: what cut_words and the editor's Transcript panel do with approved ranges ----
+// A range is "<source>:<i>" … "<source>:<i>" on one clip. The cut points snap into the pauses
+// around the words (SNAP_MS into the pause, never closer than 40 ms to a neighbour), so no
+// syllable is clipped; overlapping ranges become one span. Pure: no fs.
+import {cutRange, reanchor, type Clip} from './timeline.ts';
+export type CutRange = {from_wid: string; to_wid?: string};
+export type CutSpan = {src: string; startMs: number; endMs: number; text: string};
+export const SNAP_MS = 150;
+const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
+
+type Hit = {ok: false; error: string} | {ok: true; entry: TClip; clip: Clip; word: TWord; k: number; prev?: TWord; next?: TWord};
+function wordAt(tr: TClip[], clips: Clip[], wid: string): Hit {
+  const k = wid.lastIndexOf(':');
+  const source = wid.slice(0, k), i = wid.slice(k + 1);
+  const entry = tr.filter((t) => t.source === source).find((t) => t.words.some((w) => String(w.i) === i));
+  if (!entry) return {ok: false, error: `no word ${wid} on the timeline (see the transcript)`};
+  const clip = clips.find((c) => c.id === entry.clipId);
+  if (!clip) return {ok: false, error: `clip ${entry.clipId} of ${wid} is not on the timeline any more — transcribe again`};
+  const j = entry.words.findIndex((w) => String(w.i) === i);
+  return {ok: true, entry, clip, word: entry.words[j], k: j, prev: entry.words[j - 1], next: entry.words[j + 1]};
+}
+
+export function planWordCuts(tr: TClip[], clips: Clip[], ranges: CutRange[]): {spans: CutSpan[]; errors: string[]} {
+  const errors: string[] = [];
+  const plans: CutSpan[] = [];
+  for (const r of ranges) {
+    const a = wordAt(tr, clips, r.from_wid);
+    if (!a.ok) { errors.push(a.error); continue; }
+    const b = r.to_wid ? wordAt(tr, clips, r.to_wid) : a;
+    if (!b.ok) { errors.push(b.error); continue; }
+    if (a.entry.clipId !== b.entry.clipId) { errors.push(`${r.from_wid} and ${r.to_wid} sit on different clips (${a.entry.clipId}, ${b.entry.clipId}) — give them as two ranges`); continue; }
+    if (b.k < a.k) { errors.push(`${r.to_wid} comes before ${r.from_wid}`); continue; }
+    const inMs = a.clip.inSec * 1000, outMs = a.clip.outSec * 1000;
+    const startMs = a.prev ? Math.min(a.word.startMs, Math.max(a.prev.endMs + 40, a.word.startMs - SNAP_MS)) : inMs;
+    const endMs = b.next ? Math.max(b.word.endMs, Math.min(b.next.startMs - 40, b.word.endMs + SNAP_MS)) : outMs;
+    plans.push({src: a.clip.src, startMs, endMs, text: a.entry.words.slice(a.k, b.k + 1).map((w) => w.word).join(' ')});
+  }
+  plans.sort((x, y) => (x.src === y.src ? x.startMs - y.startMs : x.src < y.src ? -1 : 1));
+  const spans: CutSpan[] = [];
+  for (const c of plans) {
+    const last = spans[spans.length - 1];
+    if (last && last.src === c.src && c.startMs <= last.endMs) { last.endMs = Math.max(last.endMs, c.endMs); last.text += ` ${c.text}`; }
+    else spans.push({...c});
+  }
+  return {spans, errors};
+}
+
+// Apply the spans (each inside one clip, found again by source time since earlier cuts only
+// removed other spans); B-roll follows its footage; a piece left between two cuts that holds
+// no word at all is dead air and is dropped.
+export function applyWordCuts<B extends {clipId?: string; startMs: number}>(clips: Clip[], brolls: B[], spans: CutSpan[], tr: TClip[]): {clips: Clip[]; brolls: B[]; lines: string[]} {
+  const lines: string[] = [];
+  const pieces = new Set<string>();
+  const f1 = (n: number) => (Math.round(n * 10) / 10).toFixed(1);
+  for (const c of spans) {
+    const clip = clips.find((k) => k.src === c.src && k.inSec * 1000 <= c.startMs + 1 && k.outSec * 1000 >= c.endMs - 1);
+    const r = clip && cutRange(clips, clip.id, c.startMs / 1000, c.endMs / 1000);
+    if (!r) { lines.push(`skipped "${c.text}" (not on the timeline any more)`); continue; }
+    clips = r.clips; brolls = reanchor(brolls, r.remap);
+    for (const s of r.remap) pieces.add(s.segId);
+    lines.push(`cut "${c.text}" — ${f1((c.endMs - c.startMs) / 1000)}s of ${sourceOf(c.src)} (${f1(c.startMs / 1000)}–${f1(c.endMs / 1000)})`);
+  }
+  const words = new Map<string, TWord[]>();
+  for (const t of tr) words.set(t.source, [...(words.get(t.source) ?? []), ...t.words]);
+  const silent = clips.filter((k) => pieces.has(k.id) && k.outSec - k.inSec < 4 && !(words.get(sourceOf(k.src)) ?? []).some((w) => w.endMs > k.inSec * 1000 && w.startMs < k.outSec * 1000));
+  if (silent.length) {
+    clips = clips.filter((k) => !silent.includes(k));
+    lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
+  }
+  return {clips, brolls, lines};
 }

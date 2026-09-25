@@ -172,3 +172,41 @@ test('a swallowed word at the take edge: the segment grows to the voice span', (
   assert.ok(segs[0].inSec <= 0.6, JSON.stringify(segs)); // 0.6 span start - 0.1 lead pad, clamped at 0
   assert.ok(segs[0].outSec >= 2.6, JSON.stringify(segs)); // 2.4 span end + 0.3 trail pad
 });
+
+// ---- word cuts (cut_words / the editor's Transcript panel): plan + apply ----
+test('planWordCuts snaps into the pauses, merges overlaps and rejects a range across clips', async () => {
+  const {planWordCuts} = await import('../src/cuts.ts');
+  const tr = [{clipId: 'a', source: 'S', words: [
+    {i: 0, word: 'uno', startMs: 1000, endMs: 1300}, {i: 1, word: 'dos', startMs: 1400, endMs: 1700}, {i: 2, word: 'tres', startMs: 2500, endMs: 2800}, {i: 3, word: 'cuatro', startMs: 2900, endMs: 3200},
+  ]}, {clipId: 'b', source: 'T', words: [{i: 0, word: 'x', startMs: 0, endMs: 300}]}];
+  const clips = [{id: 'a', src: 'clips/S.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10}, {id: 'b', src: 'clips/T.mp4', inSec: 0, outSec: 5, sourceDurationSec: 5}];
+  // one word in the middle: 150 ms into the pause before it, 40 ms after the previous word's end wins when the pause is short
+  const one = planWordCuts(tr, clips, [{from_wid: 'S:2'}]);
+  assert.deepEqual(one.errors, []);
+  assert.deepEqual(one.spans, [{src: 'clips/S.mp4', startMs: 2350, endMs: 2860, text: 'tres'}]);
+  // first word of the clip: the span starts at the clip's in point
+  assert.equal(planWordCuts(tr, clips, [{from_wid: 'S:0'}]).spans[0].startMs, 0);
+  // overlapping ranges become one span
+  const two = planWordCuts(tr, clips, [{from_wid: 'S:0', to_wid: 'S:1'}, {from_wid: 'S:1', to_wid: 'S:2'}]);
+  assert.equal(two.spans.length, 1);
+  assert.equal(two.spans[0].text, 'uno dos dos tres');
+  // across clips / reversed / unknown
+  assert.match(planWordCuts(tr, clips, [{from_wid: 'S:1', to_wid: 'T:0'}]).errors[0], /different clips/);
+  assert.match(planWordCuts(tr, clips, [{from_wid: 'S:2', to_wid: 'S:1'}]).errors[0], /comes before/);
+  assert.match(planWordCuts(tr, clips, [{from_wid: 'S:9'}]).errors[0], /no word S:9/);
+});
+
+test('applyWordCuts removes the spans, re-anchors B-roll and drops a silent piece left between cuts', async () => {
+  const {applyWordCuts} = await import('../src/cuts.ts');
+  const words = Array.from({length: 10}, (_, i) => ({i, word: `w${i}`, startMs: i * 1000, endMs: i * 1000 + 300}));
+  const tr = [{clipId: 'a', source: 'S', words}];
+  const clips = [{id: 'a', src: 'clips/S.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10}];
+  const brolls = [{id: 'b0', clipId: 'a', startMs: 8000, endMs: 9000, kind: 'image', mode: 'inset', src: 'x.jpg'}];
+  // cut w2 (2.0–2.3) and w3 (3.0–3.3): the piece between them (2.3–3.0) holds no word → dropped
+  const r = applyWordCuts(clips, brolls, [{src: 'clips/S.mp4', startMs: 1850, endMs: 2450, text: 'w2'}, {src: 'clips/S.mp4', startMs: 2850, endMs: 3450, text: 'w3'}], tr);
+  assert.equal(r.clips.length, 2);
+  assert.deepEqual(r.clips.map((c) => [c.inSec, c.outSec]), [[0, 1.85], [3.45, 10]]);
+  assert.ok(r.lines.some((l) => /dropped 1 silent piece/.test(l)), r.lines.join('\n'));
+  assert.equal(r.brolls.length, 1);
+  assert.equal(r.brolls[0].clipId, r.clips[1].id); // the cue followed its footage
+});

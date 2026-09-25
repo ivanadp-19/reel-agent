@@ -78,7 +78,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
-      className={`w-64 bg-surface-container-low border-r flex flex-col h-full shrink-0 relative ${dragOver ? 'border-primary' : 'border-outline-variant'}`}
+      className={`w-full bg-surface-container-low flex flex-col flex-1 min-h-0 relative ${dragOver ? 'border-primary' : ''}`}
     >
       <input ref={clipInput} type="file" accept="video/*" multiple onChange={onPickClips} className="hidden" />
       <div className="p-4 border-b border-outline-variant flex justify-between items-center">
