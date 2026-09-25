@@ -19,6 +19,7 @@
   },
   "scripts": {
     "start": "node scripts/dev.mjs",
+    "stop": "node scripts/stop.mjs",
     "setup": "bash scripts/setup.sh",
     "editor": "vite",
     "editor:server": "node server/index.mjs",

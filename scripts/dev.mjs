@@ -12,6 +12,11 @@ const procs = [
   spawn('npx', ['vite'], {cwd: ROOT, stdio: 'inherit'}),
 ];
 
+// our pid for `npm run stop` (stops by pid, never by a pkill pattern)
+const PID = path.join(ROOT, '.dev.pid');
+fs.writeFileSync(PID, String(process.pid));
+process.once('exit', () => { try { if (fs.readFileSync(PID, 'utf8') === String(process.pid)) fs.rmSync(PID); } catch {} });
+
 const killAll = () => procs.forEach((p) => { try { p.kill('SIGTERM'); } catch {} });
 process.on('SIGINT', () => { killAll(); process.exit(0); });
 process.on('SIGTERM', () => { killAll(); process.exit(0); });

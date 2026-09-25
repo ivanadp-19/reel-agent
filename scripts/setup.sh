@@ -12,7 +12,15 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 miss() { printf '  \033[31m✗\033[0m %s\n' "$1"; }
 
 echo "Checking tools"
-if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then ok "node $(node -v)"; else miss "Node 20+ is required (https://nodejs.org)"; exit 1; fi
+# Node 24 (package.json engines, .nvmrc). On the VM it comes from nvm: load it
+# and install/use 24 when the node on PATH is older or missing.
+node_major() { command -v node >/dev/null && node -p 'process.versions.node.split(".")[0]' || echo 0; }
+if [ "$(node_major)" -lt 24 ]; then
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # shellcheck disable=SC1091
+  if [ -s "$NVM_DIR/nvm.sh" ]; then set +u; . "$NVM_DIR/nvm.sh"; nvm install 24 >/dev/null && nvm use 24 >/dev/null; set -u; fi
+fi
+if [ "$(node_major)" -ge 24 ]; then ok "node $(node -v)"; else miss "Node 24 is required — install nvm (https://github.com/nvm-sh/nvm), then: nvm install 24 && nvm alias default 24"; exit 1; fi
 if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then ok "ffmpeg $(ffmpeg -version | head -1 | awk '{print $3}')"; else miss "ffmpeg/ffprobe not found — apt install ffmpeg | brew install ffmpeg | winget install ffmpeg"; exit 1; fi
 PY=""
 for c in python3.12 python3.11 python3.10 python3; do command -v "$c" >/dev/null && PY="$c" && break; done

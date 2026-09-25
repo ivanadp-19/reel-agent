@@ -16,7 +16,7 @@ type MusicRow = {id: string; title: string; creator: string; license: string; du
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 
 export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => void}> = ({notify}) => {
-  const {meta, clips, music, captions, graphics, mattes, captionStyle, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
+  const {meta, clips, music, captions, graphics, mattes, captionStyle, captionsOff, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mq, setMq] = useState('');
@@ -54,7 +54,7 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
     // face boxes the captions job wrote, per source; the last transcript run for the off-mic / cut-word checks
     const faces = Object.fromEntries(await Promise.all(clips.map(async (c) => [c.src, await fetch(`/clips/faces/${sourceOf(c.src)}.json`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined)])));
     const tr = await fetch(`/transcript.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
-    setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle}, meta.fps, faces), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
+    setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle, captionsOff}, meta.fps, faces), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
   };
   const prepareMattes = async () => {
     setBusy('Starting…');

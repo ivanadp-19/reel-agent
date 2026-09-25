@@ -55,3 +55,20 @@ export function blackSpans(src) {
   fs.writeFileSync(cache, JSON.stringify(spans));
   return spans;
 }
+
+// A B-roll src as the render reads it (add_broll and edit_broll): URLs stay (the
+// backend downloads Pexels at render time), an absolute file is copied into
+// public/broll/ — a cue must never point outside public/, the render cannot read
+// it —, a path inside public/ must exist.
+export function brollSrc(src, publicDir = PUBLIC) {
+  if (/^https?:/.test(src)) return src;
+  if (path.isAbsolute(src)) {
+    if (!fs.existsSync(src)) throw new Error(`file not found: ${src}`);
+    const dir = path.join(publicDir, 'broll'); fs.mkdirSync(dir, {recursive: true});
+    const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name));
+    return `broll/${name}`;
+  }
+  if (!fs.existsSync(path.join(publicDir, src))) throw new Error(`not found in public/: ${src}`);
+  return src;
+}
+export const brollKind = (src) => (/\.(jpe?g|png|webp)(\?|$)/i.test(src) ? 'image' : 'video');

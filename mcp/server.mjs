@@ -31,13 +31,14 @@ import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cu
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
-import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
+import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
+import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
-import {FONT_FAMILIES} from '../src/fonts.ts';
+import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -63,10 +64,20 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= '';
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.captionsOff ??= false;
   return p;
 }
+// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit
+const held = new Set();
+const OWNER = process.env.REEL_AGENT || `mcp pid ${process.pid}`;
+process.once('exit', () => { for (const id of held) releaseLock(PROJECTS, id); });
+function lock(id) {
+  const r = acquireLock(PROJECTS, id, {owner: OWNER});
+  if (!r.ok) throw new Error(lockMessage(id, r.holder));
+  held.add(id);
+}
 async function save(id, p) {
+  lock(id);
   // prefer the backend (single writer, sets updatedAt the same way the UI does)
   try {
     const r = await fetch(`${API}/api/projects/${id}`, {method: 'POST', body: JSON.stringify(p)});
@@ -113,7 +124,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
   if (p.plan) out.push('', 'PLAN (set_plan):', ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
@@ -147,7 +158,7 @@ async function runJob(route, body, maxSec = 1800) {
   await needBackend();
   const {jobId, error} = await fetch(`${API}${route}`, {method: 'POST', body: JSON.stringify(body)}).then((r) => r.json());
   if (!jobId) throw new Error(error || `${route} did not start`);
-  const t0 = Date.now();
+  let t0 = Date.now();
   let misses = 0; // a busy backend may miss a poll or two; only a run of failures is fatal
   for (;;) {
     let s;
@@ -156,6 +167,7 @@ async function runJob(route, body, maxSec = 1800) {
     if (s.status === 'done') return s;
     if (s.status === 'error') throw new Error(s.error || `${route} failed`);
     if (s.status === 'unknown') throw new Error('job vanished (backend restarted?)');
+    if (s.queued) { t0 = Date.now(); await new Promise((r) => setTimeout(r, 3000)); continue; } // waiting in the render queue does not count against the timeout
     if ((Date.now() - t0) / 1000 > maxSec) throw new Error(`${route} timed out`);
     await new Promise((r) => setTimeout(r, 1500));
   }
@@ -224,7 +236,8 @@ const BRANDS = path.join(PUBLIC, 'brands');
 const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
-server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts (OFL catalog): ${FONT_FAMILIES.join(', ')}. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.enum(FONT_FAMILIES).optional(), caption_font: z.enum(FONT_FAMILIES).optional(), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, logo, name, from, save_as, clear}) => {
+const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, name, from, save_as, clear}) => {
   const p = load(project_id);
   if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
   let b;
@@ -236,7 +249,28 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   b.fonts ??= {};
   if (name) b.name = name;
   if (accent) b.colors.accent = accent; if (dark) b.colors.dark = dark; if (light) b.colors.light = light;
-  if (display_font) b.fonts.display = display_font; if (caption_font) b.fonts.body = caption_font;
+  if (drop_fonts?.length) {
+    b.fonts.files = (b.fonts.files ?? []).filter((x) => !drop_fonts.includes(x.family));
+    for (const k of ['display', 'body']) if (drop_fonts.includes(b.fonts[k])) delete b.fonts[k];
+  }
+  for (const ff of font_files ?? []) {
+    if (!FONT_FILE.test(ff.path)) throw new Error(`${ff.path}: a font file is .ttf, .otf, .woff or .woff2`);
+    let rel;
+    if (path.isAbsolute(ff.path)) {
+      if (!fs.existsSync(ff.path)) throw new Error(`file not found: ${ff.path}`);
+      fs.mkdirSync(FONTS_DIR, {recursive: true});
+      const dest = path.join(FONTS_DIR, path.basename(ff.path).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(ff.path, dest);
+      rel = path.relative(PUBLIC, dest);
+    } else {
+      const abs = path.resolve(PUBLIC, ff.path);
+      if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${ff.path}`);
+      rel = path.relative(PUBLIC, abs);
+    }
+    const entry = clientFont(rel.split(path.sep).join('/'), ff.family, ff.weight, ff.italic);
+    b.fonts.files = [...(b.fonts.files ?? []).filter((x) => x.file !== entry.file), entry];
+  }
+  // the name as typed or as the file named it ("DejaVu Sans" = "Deja Vu Sans" = "dejavusans")
+  if (display_font) b.fonts.display = resolveFamily(display_font, b.fonts.files); if (caption_font) b.fonts.body = resolveFamily(caption_font, b.fonts.files);
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
     if (path.isAbsolute(logo)) {
@@ -395,6 +429,11 @@ server.registerTool('add_caption', {description: 'Add a caption page at a timeli
   return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${p.captions.at(-1).id})`);
 });
 
+server.registerTool('set_captions', {description: 'Switch the captions of the reel off (or back on) without deleting them: off = the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on. Use it when the brief asks for a reel without subtitles (instead of duplicating the project or deleting pages). Music still ducks under the speech.', inputSchema: {project_id: pid, off: z.boolean()}}, async ({project_id, off}) => {
+  const p = load(project_id); p.captionsOff = off; await save(project_id, p);
+  return text(`Captions ${off ? `OFF (${p.captions.length} pages kept, none rendered)` : `ON (${p.captions.length} pages)`}`);
+});
+
 server.registerTool('delete_captions', {description: 'Delete caption pages by id. Their words stay uncaptioned even after set_caption_style or regenerating (to change wording use edit_caption instead).', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
   const p = load(project_id); const gone = new Set(caption_ids); const before = p.captions.length;
   const wids = p.captions.filter((c) => gone.has(c.id)).flatMap((c) => c.words.map((w) => w.wid).filter(Boolean));
@@ -419,13 +458,9 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
     const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
     s = a.src; kind = a.kind; query = label ?? a.label;
   } else if (!src) throw new Error('give asset_id or src');
-  else if (!/^https?:/.test(src) && path.isAbsolute(src)) {
-    if (!fs.existsSync(src)) throw new Error(`file not found: ${src}`);
-    const dir = path.join(PUBLIC, 'broll'); fs.mkdirSync(dir, {recursive: true});
-    const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name)); s = `broll/${name}`;
-  } else if (!/^https?:/.test(src) && !fs.existsSync(path.join(PUBLIC, src))) throw new Error(`not found in public/: ${src}`);
+  else s = brollSrc(src);
   if (/^https?:/.test(s)) source = 'pexels';
-  if (!kind) kind = /\.(jpe?g|png|webp)(\?|$)/i.test(s) ? 'image' : 'video';
+  if (!kind) kind = brollKind(s);
   const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
   p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
   const abs = toAbs(p, clip.id, b.startMs) ?? 0;
@@ -493,7 +528,7 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
-  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = src; b.source = /^https?:/.test(src) ? 'pexels' : 'own'; }
+  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
   if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
@@ -750,7 +785,7 @@ const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level ===
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio});
+const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio, captionsOff: p.captionsOff});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
@@ -761,7 +796,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   let times = at_secs;
   if (!times?.length) {
-    const caps = projectCaptions(p.captions, p.clips, FPS);
+    const caps = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, FPS);
     const gfx = projectGraphics(p.graphics, p.clips, FPS).filter((g) => g.template !== 'layout');
     const picks = [...gfx.map((g) => (g.startMs + Math.min(1200, (g.endMs - g.startMs) * 0.6)) / 1000), ...caps.filter((c) => c.words.some((w) => w.tier)).map((c) => (c.startMs + (c.endMs - c.startMs) * 0.7) / 1000)];
     const total = totalSec(p.clips);
@@ -773,7 +808,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
   return {content: [
-    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(allIssues(p))}`},
+    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.\n\nvalidate:\n${issuesText(allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });

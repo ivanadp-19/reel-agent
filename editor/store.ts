@@ -16,7 +16,7 @@ import type {AudioOptions} from '../src/audio';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -49,6 +49,7 @@ type EditorState = {
   grade: ProjectGrade | null; // color (set_grade / Styles tab)
   audio: AudioOptions; // voice cleanup + sfx (set_audio / Settings tab)
   plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
+  captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -118,6 +119,7 @@ type EditorState = {
   setBrand: (brand: Brand | null) => void;
   setGrade: (grade: ProjectGrade | null) => void;
   setAudio: (audio: AudioOptions) => void;
+  setCaptionsOff: (captionsOff: boolean) => void;
   setPlan: (plan: string) => void;
   addMattes: (mattes: Matte[]) => void;
 
@@ -175,6 +177,7 @@ export const useEditor = create<EditorState>((set) => ({
   grade: null,
   audio: null,
   plan: '',
+  captionsOff: false,
   past: [],
   future: [],
 
@@ -201,6 +204,7 @@ export const useEditor = create<EditorState>((set) => ({
         grade: p.grade ?? null,
         audio: p.audio ?? null,
         plan: p.plan ?? '',
+        captionsOff: p.captionsOff ?? false,
         past: [],
         future: [],
       };
@@ -522,6 +526,7 @@ export const useEditor = create<EditorState>((set) => ({
   setBrand: (brand) => set((s) => ({brand, accentColor: brand?.colors.accent ?? s.accentColor})),
   setGrade: (grade) => set({grade}),
   setAudio: (audio) => set({audio}),
+  setCaptionsOff: (captionsOff) => set({captionsOff}),
   setPlan: (plan) => set({plan}),
   addMattes: (mattes) => set((s) => ({mattes: [...s.mattes, ...mattes]})),
 

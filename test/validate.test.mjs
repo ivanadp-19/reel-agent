@@ -66,3 +66,10 @@ test('transcriptIssues: an off-mic word listed on two pieces of one source count
   const off = transcriptIssues({clips}, tr).filter((x) => x.code === 'off-mic');
   assert.match(off.find((x) => x.ref === 'b').msg, /^b: 2 off-mic word\(s\) still in the cut: cut_words S:1…S:2 "w1 w2"/);
 });
+
+test('captions switched off (set_captions): their pages are not checked', () => {
+  const p = {clips: [clip], captionStyle: 'caja', captions: [page('c0', 500, 1500, [W('Todo', 500, 800), W('en', 900, 1500)], 5)], graphics: []};
+  assert.ok(codes(validateProject(p)).includes('glue'));
+  const off = codes(validateProject({...p, captionsOff: true}));
+  assert.ok(!off.includes('glue') && !off.includes('safe-top'), String(off));
+});

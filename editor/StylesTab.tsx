@@ -2,7 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {PRESETS, type PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
-import {FONT_FAMILIES, type FontFamily} from '../src/fonts';
+import {FONT_FAMILIES, type ClientFont} from '../src/fonts';
 import {LOOKS, type ProjectGrade} from '../src/grade';
 import type {Brand} from '../src/brand';
 import {runJob, readPublic} from './jobs';
@@ -31,6 +31,7 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
   const [kits, setKits] = useState<Kit[]>([]);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const logoInput = useRef<HTMLInputElement>(null);
+  const fontInput = useRef<HTMLInputElement>(null);
   const loadKits = () => fetch('/api/brands').then((r) => (r.ok ? r.json() : [])).then((l) => setKits(Array.isArray(l) ? l : [])).catch(() => setKits([]));
   useEffect(() => { loadKits(); }, []);
 
@@ -54,6 +55,22 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
     const r = await fetch('/api/upload-image?name=' + encodeURIComponent(f.name), {method: 'POST', body: f}).then((x) => x.json()).catch(() => null);
     if (r?.src) patchBrand((b) => ({...b, logo: r.src})); else notify('Logo upload failed', 'error');
   };
+
+  // set_brand font_files / drop_fonts: the client's own faces, uploaded to public/fonts/
+  const onFont = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const r = await fetch('/api/upload-font?name=' + encodeURIComponent(f.name), {method: 'POST', body: f}).then((x) => x.json()).catch(() => null) as ClientFont | null;
+    if (r?.file) { patchBrand((b) => ({...b, fonts: {...b.fonts, files: [...(b.fonts?.files ?? []).filter((x) => x.file !== r.file), r]}})); notify(`Font ${r.family} ${r.weight} added — pick it as headline or caption font`, 'ok'); }
+    else notify('Font upload failed (.ttf, .otf, .woff, .woff2)', 'error');
+  };
+  const dropFont = (family: string) => patchBrand((b) => {
+    const {display, body, ...rest} = b.fonts ?? {};
+    return {...b, fonts: {...rest, files: (rest.files ?? []).filter((x) => x.family !== family), ...(display && display !== family ? {display} : {}), ...(body && body !== family ? {body} : {})}};
+  });
+  const clientFamilies = [...new Set((brand?.fonts?.files ?? []).map((x) => x.family))];
+  const fontOptions = [...clientFamilies.map((f) => ({value: f, label: `${f} (client font)`})), ...FONT_FAMILIES.map((f) => ({value: f as string}))];
 
   const analyze = async (g: ProjectGrade) => {
     setAnalyzing('Starting…');
@@ -101,9 +118,20 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
             <ColorField label="Dark canvas" value={brand.colors.dark} fallback="#0b0b0d" clearable onChange={(v) => patchBrand((b) => ({...b, colors: {...b.colors, dark: v}}))} />
             <ColorField label="Light canvas" value={brand.colors.light} fallback="#f3f3f0" clearable onChange={(v) => patchBrand((b) => ({...b, colors: {...b.colors, light: v}}))} />
             <div className="grid grid-cols-2 gap-2">
-              <div><Label>Headline font</Label><Select value={brand.fonts?.display ?? ''} onChange={(v) => patchBrand((b) => ({...b, fonts: {...b.fonts, display: (v || undefined) as FontFamily | undefined}}))} options={[{value: '', label: 'template default'}, ...FONT_FAMILIES.map((f) => ({value: f}))]} /></div>
-              <div><Label>Caption font</Label><Select value={brand.fonts?.body ?? ''} onChange={(v) => patchBrand((b) => ({...b, fonts: {...b.fonts, body: (v || undefined) as FontFamily | undefined}}))} options={[{value: '', label: 'pack default'}, ...FONT_FAMILIES.map((f) => ({value: f}))]} /></div>
+              <div><Label>Headline font</Label><Select value={brand.fonts?.display ?? ''} onChange={(v) => patchBrand((b) => ({...b, fonts: {...b.fonts, display: v || undefined}}))} options={[{value: '', label: 'template default'}, ...fontOptions]} /></div>
+              <div><Label>Caption font</Label><Select value={brand.fonts?.body ?? ''} onChange={(v) => patchBrand((b) => ({...b, fonts: {...b.fonts, body: v || undefined}}))} options={[{value: '', label: 'pack default'}, ...fontOptions]} /></div>
             </div>
+            <div className="flex items-center justify-between gap-2" title="The client's own font files (e.g. Helvetica Bold). They stay in public/fonts/ on this machine, never in the repo.">
+              <Label>Client fonts</Label>
+              <input ref={fontInput} type="file" accept=".ttf,.otf,.woff,.woff2" onChange={onFont} className="hidden" />
+              <Btn onClick={() => fontInput.current?.click()}>Upload font</Btn>
+            </div>
+            {(brand.fonts?.files ?? []).map((x) => (
+              <div key={x.file} className="flex items-center justify-between gap-2 text-[11px] text-on-surface-variant">
+                <span className="truncate" title={x.file}>{x.family} {x.weight}{x.italic ? ' italic' : ''}</span>
+                <IconBtn icon="close" title={`Remove ${x.family}`} onClick={() => dropFont(x.family)} />
+              </div>
+            ))}
             <div className="flex items-center justify-between gap-2">
               <Label>Logo</Label>
               <input ref={logoInput} type="file" accept="image/*" onChange={onLogo} className="hidden" />

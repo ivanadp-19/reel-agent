@@ -120,8 +120,9 @@ function hiddenShare(band: Band, g: Graphic, face: FaceBox): number {
 }
 const SINGLE_WORD = new Set(['big-word', 'oversized', 'fill-title']); // what may sit behind the head
 
-export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
+export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
   const issues: Issue[] = [];
+  if (p.captionsOff) p = {...p, captions: []}; // captions switched off: nothing of them reaches the render
   const gfx = projectGraphics(p.graphics ?? [], p.clips, fps);
   const caps = avoidGraphics(projectCaptions(p.captions, p.clips, fps), gfx, p.captionStyle); // as rendered
   const totalMs = caps.length || gfx.length ? Math.max(...caps.map((c) => c.endMs), ...gfx.map((g) => g.endMs), 0) : 0;
