@@ -35,6 +35,11 @@ BEATS:
 CUTS: retakes, off-mic lines, meta talk, fillers you expect find_cut_candidates to show; which take you keep.
 CAPTIONS: pack + why (table below); key words per sentence (ids, 1–2 each, meaning words only); emoji (a few, concrete nouns / feelings).
 B-ROLL: mentions that want footage (ids) → library tag or stock query; black stretches that must be covered.
+INSERTS: every scene / insert / super the script (guion) names, one per line — the render judge checks each is on screen:
+  - plazas comerciales @ <word id> → broll: plaza, centro comercial
+  - super de calle → super: calle, avenida
+  (none if the brief has no script)
+PHONE: none — or `questions` (the interviewer's questions get the phone filter) / `spk2 questions`.
 MUSIC / SFX / TRANSITIONS: yes or no; where a cut marks a change of topic or place and which kind (the pack's family: prism → whipDiag, focus → bands, lift → polyWipe, stack → flash, prime → spin, impact → rgbFlash, orbit → disc, evo → crossBlur).
 COLOR: none unless the brief, the kit's style or the footage asks; if so: look / knobs / LUT, where (whole reel or which sources) and why.
 LENGTH: expected duration after cuts; if the material is short, say so — never pad with slow motion.

@@ -62,16 +62,22 @@ folder). The plan step is its own skill, `reel-plan`: after the transcript the
 agent writes what it intends (hero word, beats, pack, key words, B-roll) with
 `set_plan`, and every later step follows it.
 
-Every render (draft or final) is judged before it is shown or delivered: the
-`render-judge` skill (`.agents/skills/render-judge/`) — a separate, hostile
-review pass (a subagent, or a cold pass where there is none) with a rubric of
-severities and pass/fail thresholds (`checks.md`), fed by `judge.mjs`, which
-decides by rule what rules can decide (pauses, names split across pages,
-overflow, caption↔audio sync, repeated footage, loudness, music under voice,
-grade jumps) and leaves the rest to the judge's eyes on contact sheets of the
-whole reel. FAIL → fix with the tool calls it names → re-render → re-judge, at
-most 3 iterations, then escalate to the human. Agent tooling, not a product
-feature: it reads the project and the render and never edits either.
+Every delivered render gets technical QC in parallel — the base master ships
+right away, labeled, and is never held back: the `render-judge` skill
+(`.agents/skills/render-judge/`) — a separate, hostile review pass (a
+subagent, or a cold pass where there is none) with a generic rubric of
+severities and thresholds (`checks.md`) plus per-client profiles
+(`profiles/<client>.json|md`, e.g. César's), fed by `judge.mjs`, which decides
+by rule what rules can decide (pauses, names split across pages, overflow,
+caption↔audio sync, repeated footage, script inserts, glossary, loudness,
+music under voice, grade vs the approved references, clean-master parity) and
+leaves the rest to the judge's eyes on contact sheets of the whole reel. Known
+noise (long takes, bright skies, dramatic pauses, capitalized "names") only
+counts once confirmed on the frame. PASS is labeled "QC técnico superado" —
+never "aprobado": only the client approves. FAIL → prioritized findings go out
+with the delivery → fix → next version → re-judge, at most 3 iterations, then
+escalate. Agent tooling, not a product feature: it reads the project and the
+render and never edits either.
 
 ## Headless runners
 
