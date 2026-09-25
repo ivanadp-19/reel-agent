@@ -8,7 +8,7 @@ import {packOf} from './stylePacks';
 import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
-import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
+import {jCutSec, lCutSec, placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
@@ -183,6 +183,32 @@ export const MultiClipVideo: React.FC<{
           <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
         </Sequence>
       ))}
+      {/* J-cuts / L-cuts (audio only): a J-cut leads the clip's first j seconds
+          of audio under the previous clip's tail (its own first frames are muted
+          in ClipMedia so the lead flows through the cut); an L-cut trails the
+          source audio past the video end, under the next clip's head. Both honor
+          mute/volume; a muted clip has no J/L audio. */}
+      {placed.map(({clip, fromFrame, durFrames}, i) => {
+        const speed = clip.speed ?? 1;
+        const vol = clip.muted ? 0 : clip.volume ?? 1;
+        const jF = Math.round(jCutSec(clip, fromFrame / fps) * fps);
+        const lF = Math.round(lCutSec(clip, placed[i + 1] ? placed[i + 1].durFrames / fps : 0) * fps);
+        if (vol <= 0 || (jF <= 0 && lF <= 0)) return null;
+        return (
+          <React.Fragment key={`${clip.id}-jl`}>
+            {jF > 0 ? (
+              <Sequence from={fromFrame - jF} durationInFrames={jF} layout="none" name={`${clip.id} (J-cut lead)`}>
+                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={Math.round(clip.inSec * fps)} trimAfter={Math.round(clip.inSec * fps) + jF * speed} volume={vol} />
+              </Sequence>
+            ) : null}
+            {lF > 0 ? (
+              <Sequence from={fromFrame + durFrames} durationInFrames={lF} layout="none" name={`${clip.id} (L-cut trail)`}>
+                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={Math.round(clip.outSec * fps)} trimAfter={Math.round(clip.outSec * fps) + lF * speed} volume={vol} />
+              </Sequence>
+            ) : null}
+          </React.Fragment>
+        );
+      })}
       {/* a cardDrop lands ON TOP of the outgoing clip: its pre-roll is drawn last */}
       {placed.filter(({clip}) => OVER.has(clip.enter as Enter)).map(({clip, fromFrame}) => {
         const early = Math.min(overlapOf(clip.enter as Enter, fps), fromFrame, Math.round(clip.inSec * fps / (clip.speed ?? 1)));

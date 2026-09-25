@@ -18,6 +18,8 @@ export type Clip = {
   muted?: boolean; // hard-mute the clip's own audio
   speed?: number; // playback rate (0.25..4), 1 = normal; timeline duration = source/speed
   enter?: import('./transitions.ts').Enter; // transition from the previous clip (src/transitions.ts)
+  jSec?: number; // J-cut: the audio leads this many seconds under the previous clip's tail
+  lSec?: number; // L-cut: the audio trails this many seconds under the next clip's head
 };
 
 const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
@@ -58,6 +60,17 @@ export type Project = {
 
 // TIMELINE duration (what the viewer experiences) — source span divided by speed
 export const clipDurationSec = (c: Clip) => Math.max(0, (c.outSec - c.inSec) / (c.speed ?? 1));
+
+// J/L-cuts (timeline seconds, clamped to what actually works):
+// a J-cut plays the clip's first j seconds of audio under the previous clip's
+// tail (the main clip mutes those first frames so the lead flows straight
+// through the cut); it fits when the lead is no longer than the clip itself
+// and no earlier than the previous clip's start. An L-cut keeps the audio
+// going past the video cut, so it is bounded by the source left after outSec
+// (and by the next clip's length, or the spill would outlive it).
+export const jCutSec = (c: Clip, prevDurSec = Infinity) => Math.max(0, Math.min(c.jSec ?? 0, clipDurationSec(c), prevDurSec));
+export const lCutSec = (c: Clip, nextDurSec = Infinity) =>
+  Math.max(0, Math.min(c.lSec ?? 0, Math.max(0, c.sourceDurationSec - c.outSec) / (c.speed ?? 1), nextDurSec));
 
 // Where each clip lands on the assembled timeline (in frames + ms), in order.
 export type PlacedClip = {clip: Clip; fromFrame: number; durFrames: number; startMs: number; endMs: number};

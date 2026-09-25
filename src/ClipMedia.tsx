@@ -1,6 +1,6 @@
 import React from 'react';
 import {staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
-import {sampleTransform, type Clip} from './timeline';
+import {jCutSec, sampleTransform, type Clip} from './timeline';
 import type {Grade} from './grade';
 import {toneColor, transitionFx} from './transitions';
 
@@ -18,6 +18,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
   // keyframe times are source-relative → advance source-time at `speed`
   const {scale, x, y} = sampleTransform(clip.transform, clip.inSec + (frame / fps) * speed);
   const trimBefore = Math.round(clip.inSec * fps);
+  const jMute = Math.round(jCutSec(clip) * fps);
   const fid = `grade-${clip.id.replace(/[^\w-]/g, '_')}`;
   const fx = transition ? transitionFx(transition.clip, frame + transition.offset, transition.durFrames, transition.next, fps) : null;
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0 || !!fx.spin || !!fx.drop);
@@ -102,7 +103,9 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
         trimAfter={trimBefore + Math.round(durFrames * speed)}
         acceptableTimeShiftInSeconds={0.5}
         muted={clip.muted || (clip.volume ?? 1) === 0}
-        volume={clip.muted ? 0 : clip.volume ?? 1}
+        // a J-cut lead already played the first jMute frames of this audio under
+        // the previous clip — mute them here so it flows through the cut, no echo
+        volume={clip.muted ? 0 : jMute > 0 ? (f: number) => (f < jMute ? 0 : clip.volume ?? 1) : clip.volume ?? 1}
         style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}}
       />
       </div>
