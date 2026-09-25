@@ -205,8 +205,10 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[]): Issue[] {
-  const bySource = new Map<string, TClip['words']>();
-  for (const t of tr) bySource.set(t.source, [...(bySource.get(t.source) ?? []), ...t.words]);
+  // one entry per word index: a word on the edge of two pieces of one source is listed in both
+  const byIdx = new Map<string, Map<number, TClip['words'][number]>>();
+  for (const t of tr) { const m = byIdx.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); byIdx.set(t.source, m); }
+  const bySource = new Map([...byIdx].map(([k, m]) => [k, [...m.values()]]));
   const out: Issue[] = [];
   for (const c of p.clips) {
     const source = sourceOf(c.src);
