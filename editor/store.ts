@@ -214,7 +214,8 @@ export const useEditor = create<EditorState>((set) => ({
 
   // the page's text, the way edit_caption does it (src/captions.ts retext)
   setText: (id, text) => set((s) => ({captions: mapCap(s.captions, id, (c) => (text.trim() ? retext(c, text) : c))})),
-  movePageStart: (id, wid) => set((s) => ({...withHistory(s), captions: setPageStart(s.captions, id, wid)})),
+  // throws (worded for the agent) when the move is not possible: the caller shows it (Inspector notify)
+  movePageStart: (id, wid) => set((s) => (s.meta ? {...withHistory(s), captions: setPageStart(s.captions, id, wid, s.clips, s.meta.fps)} : {})),
   shiftCaption: (id, ms) => set((s) => ({...withHistory(s), captions: mapCap(s.captions, id, (c) => shiftPage(c, ms))})),
 
   setEmoji: (id, wi, emoji) =>

@@ -131,22 +131,30 @@ export function retext(cap: Caption, text: string): Caption {
   return handPage(cap, words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: tiers.get(t.toLowerCase()) ?? 0})));
 }
 
-// the page before `cap` on its source: the one whose break with `cap` setPageStart moves
-export const pageBefore = (captions: Caption[], cap: Caption) =>
-  captions.filter((c) => c.src === cap.src && c !== cap && c.startMs < cap.startMs).sort((a, b) => b.startMs - a.startMs)[0];
+// The page before `cap` whose break with it setPageStart moves: the page shown right before it on
+// the timeline that is also the one before it in its source. Only then are their words one run, said
+// and shown in that order; with reordered clips or a duplicated take the page before it in the source
+// can sit anywhere on screen, and none is returned.
+export function pageBefore(captions: Caption[], cap: Caption, clips: Clip[], fps: number): Caption | undefined {
+  const prev = captions.filter((c) => c.src === cap.src && c !== cap && c.startMs < cap.startMs).sort((a, b) => b.startMs - a.startMs)[0];
+  if (!prev) return undefined;
+  const shown = projectCaptions(captions, clips, fps).sort((a, b) => a.startMs - b.startMs);
+  return shown.some((c, i) => i > 0 && c.id === cap.id && shown[i - 1].id === prev.id) ? prev : undefined;
+}
 
 // Move the page break before page `id`: it now starts at transcript word `wid` — a word of the
 // page before it (whose tail joins this page) or of this page (whose head joins the page before).
 // Words keep their ids, times and emphasis. Errors are worded for the agent.
-export function setPageStart(captions: Caption[], id: string, wid: string): Caption[] {
+export function setPageStart(captions: Caption[], id: string, wid: string, clips: Clip[], fps: number): Caption[] {
   const cap = captions.find((c) => c.id === id);
   if (!cap) throw new Error(`no caption ${id}`);
-  const prev = pageBefore(captions, cap);
+  const prev = pageBefore(captions, cap, clips, fps);
   const inCap = cap.words.findIndex((w) => w.wid === wid);
   const inPrev = prev ? prev.words.findIndex((w) => w.wid === wid) : -1;
-  if (inCap < 0 && inPrev < 0) throw new Error(`${wid} is not in ${id} or the page before it${prev ? ` (${prev.id})` : ''} — the break moves between neighbors; a retyped page has no word ids (use text on both pages)`);
+  const alone = `${id} has no page right before it on screen from the same take (first page, or clips reordered)`;
+  if (inCap < 0 && inPrev < 0) throw new Error(`${wid} is not in ${id}${prev ? ` or the page before it (${prev.id})` : `, and ${alone}`} — the break moves between neighbors; a retyped page has no word ids (use text on both pages)`);
   if (inCap === 0) return captions;
-  if (!prev) throw new Error(`${id} is the first page of its source: no page before it to hand words to`);
+  if (!prev) throw new Error(`${alone}: no page to hand words to`);
   if (inPrev === 0) throw new Error(`that would leave ${prev.id} empty — delete_captions ${prev.id} instead`);
   const all = [...prev.words, ...cap.words];
   const k = inCap >= 0 ? prev.words.length + inCap : inPrev;

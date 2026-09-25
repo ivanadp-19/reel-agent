@@ -144,3 +144,18 @@ test('resolveBrand: a brand kit wins, then a project accent that was set, then t
   assert.equal(resolveBrand({colors: {accent: '#abcdef'}, fonts: {}}, '#123456', pack).accent, '#abcdef');
   assert.equal(resolveBrand(null, DEFAULT_ACCENT).accent, DEFAULT_ACCENT);
 });
+
+import {pageBefore, setPageStart} from '../src/captions.ts';
+
+// the break setPageStart moves is the one on screen: with the clips reordered, the page before a
+// page in its source is not the one shown before it, and no word may cross the reel to reach it
+test('setPageStart moves the break with the page shown before, never a page elsewhere on the timeline', () => {
+  const pages = [gen('c0', [wd('a:0', 'uno', 0), wd('a:1', 'dos', 400)]), gen('c1', [wd('a:2', 'tres', 3000), wd('a:3', 'cuatro', 3400)])];
+  const moved = setPageStart(pages, 'c1', 'a:1', [clip], FPS);
+  assert.deepEqual(moved.map((c) => c.words.map((w) => w.text)), [['uno'], ['dos', 'tres', 'cuatro']]);
+  assert.equal(pageBefore(pages, pages[1], [clip], FPS)?.id, 'c0');
+  // the same take in two pieces, the second piece first: c1 opens the reel, c0 comes after it
+  const reordered = [{...clip, id: 'b', inSec: 2, outSec: 10}, {...clip, id: 'a', inSec: 0, outSec: 2}];
+  assert.equal(pageBefore(pages, pages[1], reordered, FPS), undefined);
+  assert.throws(() => setPageStart(pages, 'c1', 'a:1', reordered, FPS), /no page right before it on screen/);
+});

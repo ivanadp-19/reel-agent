@@ -62,6 +62,8 @@ export const Inspector: React.FC<{
   const projBrolls = projectBrolls(brolls, clips, meta.fps);
   const selClip = clips.find((c) => c.id === selectedClipId);
   const placedSel = selClip && placeClips(clips, meta.fps).find((p) => p.clip.id === selClip.id);
+  // a move the data no longer allows (a page changed under the buttons) is reported, never thrown out of the click
+  const movePage = (id: string, wid: string) => { try { movePageStart(id, wid); } catch (e) { notify(String((e as Error)?.message ?? e), 'error'); } };
   const seekMs = (ms: number) => playerRef.current?.seekTo(Math.round((ms / 1000) * meta.fps));
   const packKind = PACKS[captionStyle]?.transition ?? 'whip';
   const assets: BrollAsset[] = [...brollAssets, ...library.filter((a) => !brollAssets.some((b) => b.id === a.id)).map((a) => ({id: a.id, src: a.src, kind: a.kind, label: a.label}))];
@@ -217,9 +219,9 @@ export const Inspector: React.FC<{
                   const text = c.words.map((w) => w.text).join(' ');
                   // the stored page and its neighbor: the page break moves between them (edit_caption starts_at_wid)
                   const page = captions.find((x) => x.id === c.id);
-                  const prev = page && pageBefore(captions, page);
+                  const prev = sel && page ? pageBefore(captions, page, clips, meta.fps) : undefined; // only the selected page shows the buttons
                   const take = prev && prev.words.length > 1 ? prev.words[prev.words.length - 1].wid : undefined;
-                  const give = prev && page.words.length > 1 ? page.words[1].wid : undefined;
+                  const give = prev && page && page.words.length > 1 ? page.words[1].wid : undefined;
                   return (
                     <div
                       key={`${c.id}@${c.startMs}`}
@@ -245,8 +247,8 @@ export const Inspector: React.FC<{
                           />
                           <Label>Page start · timing</Label>
                           <div className="flex gap-1.5 mt-1 mb-3">
-                            <Btn disabled={!take} title={prev ? `Take "${prev.words[prev.words.length - 1].text}" from the page before` : 'First page'} onClick={() => take && movePageStart(c.id, take)}>◂ word</Btn>
-                            <Btn disabled={!give} title={give ? `Give "${page?.words[0].text}" to the page before` : 'No page before, or a retyped page'} onClick={() => give && movePageStart(c.id, give)}>word ▸</Btn>
+                            <Btn disabled={!take} title={prev ? `Take "${prev.words[prev.words.length - 1].text}" from the page before` : 'First page'} onClick={() => take && movePage(c.id, take)}>◂ word</Btn>
+                            <Btn disabled={!give} title={give ? `Give "${page?.words[0].text}" to the page before` : 'No page before, or a retyped page'} onClick={() => give && movePage(c.id, give)}>word ▸</Btn>
                             <Btn title="The page 0.1 s earlier" onClick={() => shiftCaption(c.id, -100)}>−0.1 s</Btn>
                             <Btn title="The page 0.1 s later" onClick={() => shiftCaption(c.id, 100)}>+0.1 s</Btn>
                           </div>
