@@ -29,7 +29,8 @@ import {captionLayout} from '../src/layers.ts';
 export const LAYERS_VERSION = 1;
 // back to front, as MultiClipVideo stacks them; `captions` is the one layer drawn apart
 export const LAYER_ORDER = ['footage', 'focus-pull', 'behind-graphics', 'person-matte', 'broll', 'transitions', 'graphics', 'music', 'sfx', 'captions'];
-const CODE_PATHS = ['src', 'remotion.config.ts', 'package-lock.json', 'scripts/layers.mjs', 'scripts/sfx.mjs'];
+// first-frame.mjs: a master is checked (and repaired) by it before it is cached — a change there is a new master
+const CODE_PATHS = ['src', 'remotion.config.ts', 'package-lock.json', 'scripts/layers.mjs', 'scripts/sfx.mjs', 'scripts/first-frame.mjs'];
 
 // master encode: a touch above Remotion's default (crf 18) — the composite encodes it once more
 export const MASTER_CRF = 16;

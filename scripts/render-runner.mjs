@@ -42,6 +42,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {renderArgs} from './render-queue.mjs';
 import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, probeColor} from './layers.mjs';
+import {blankLead, openingReport, parseStats, repairArgs, statsArgs} from './first-frame.mjs';
 import {chooseRenderMode} from '../src/layers.ts';
 import {linkPublic} from './public-links.mjs';
 import {recordFinal, removeVersion} from './reviews.mjs';
@@ -141,6 +142,9 @@ export const defaultCommands = {
   encode: ({frames, outFile, alpha}) => { const a = alphaEncodeArgs({frames, outFile, alpha, fps: FPS}); return a && ['ffmpeg', a]; }, // null: png, nothing to encode
   composite: ({master, layer, alpha, outFile, draft}) => ['ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile, fps: FPS, draft, color: probeColor(master)})],
   finalize: ({outFile, expectSec, clean}) => ['node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)]],
+  // the blank-first-frame guard (scripts/first-frame.mjs): stats of frames 0–2 on stdout, and the repair
+  frameStats: ({file}) => ['ffmpeg', statsArgs(file)],
+  fixFirstFrame: ({file, outFile, draft}) => ['ffmpeg', repairArgs({file, outFile, fps: FPS, color: probeColor(file), draft})],
 };
 
 export function createRenderRunner({
@@ -266,9 +270,28 @@ export function createRenderRunner({
         const r = await runChild(argv[0], argv[1], {cwd: root, signal, onPid: ctx.setPid});
         if (r.code !== 0) throw new RenderError(`${what} failed: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
       };
+      // a Remotion pass whose frame 0 is a flat, neutral field while frame 1 is footage
+      // (scripts/first-frame.mjs): frame 1 takes its place before anything uses the file
+      // (a master before it enters the cache). An unreadable file is left to the pass's
+      // own checks and to QC. The result and the log say it happened and what was at t = 0.
+      const guardFirstFrame = async (file, where) => {
+        const [scmd, sargs] = commands.frameStats({file});
+        const st = await runChild(scmd, sargs, {cwd: root, signal, onPid: ctx.setPid});
+        const stats = st.code === 0 ? parseStats(st.out) : [];
+        if (!blankLead(stats)) return;
+        // `.part-` keeps the master cache's trim off it while it is written next to a cached master
+        const fixed = file.replace(/\.mp4$/, '') + `.part-ff-${id}.mp4`;
+        tmp.push(fixed);
+        await timed('first-frame', () => ffmpeg(commands.fixFirstFrame({file, outFile: fixed, draft}), 'first-frame repair'));
+        fs.renameSync(fixed, file);
+        const f0 = stats[0];
+        (result.firstFrame ??= []).push({pass: where, repaired: true, frame0: {y: f0.yavg, u: f0.uavg, v: f0.vavg}});
+        log(`render ${id}: frame 0 of the ${where} was a flat field (Y ${f0.ymin}–${f0.ymax}, U ${f0.uavg}, V ${f0.vavg}; frame 1 Y ${stats[1].ymin}–${stats[1].ymax}) — replaced by frame 1. At t = 0: ${JSON.stringify(openingReport(props))}`);
+      };
       try {
         if (!layered) {
           await timed('render', () => pass('render', ranges.render, outFile, props), {videoSec: expectSec});
+          await guardFirstFrame(outFile, 'render');
         } else {
           // ---- the master: cached, being rendered by another job here (wait for it), or rendered now ----
           const key = keyOf(props, {draft});
@@ -277,12 +300,17 @@ export function createRenderRunner({
             tmp.push(part);
             await timed('master', () => pass('master', ranges.master, part, {...props, captionsOff: true}, 'master'), {videoSec: expectSec});
             stop(); // a cancelled master never enters the cache
+            await guardFirstFrame(part, 'master'); // a cached master is always a repaired one
             return masterCache.put(key, part);
           };
           let master = null;
           for (let waited = 0; !master;) {
             const cached = masterCache.get(key);
-            if (cached) { master = cached; result.master ??= 'cached'; break; }
+            if (cached) {
+              // a master cached before the guard existed can hold a blank frame 0: repaired in place (atomic rename), so the cache heals
+              await guardFirstFrame(cached, 'cached master');
+              master = cached; result.master ??= 'cached'; break;
+            }
             const other = inflight.get(key);
             if (other) {
               // same master, other job: wait (the label ticks, so the stall control sees it alive)
@@ -313,6 +341,8 @@ export function createRenderRunner({
             set('compositing', 0.5, {progress: Math.round((ranges.compositing[0] + ranges.compositing[1]) / 2), label: 'Compositing', frames: undefined, etaSec: undefined});
             await timed('composite', () => ffmpeg(commands.composite({master, layer, alpha: captionAlpha, outFile, draft}), 'composite'));
           } else await abortable(fs.promises.copyFile(master, outFile)); // nothing to lay over it: the master is the reel
+          // what ships: the composite or the copy (a caption on frame 0 can hide a flat field from this check — hence the master's own)
+          await guardFirstFrame(outFile, choice.captions ? 'composite' : 'export');
         }
       } finally {
         for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
