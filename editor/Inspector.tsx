@@ -42,6 +42,7 @@ export const Inspector: React.FC<{
     select, selectClip, setText, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
     setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setTransitionPattern, applySpeedRamp,
+    captionsOff, setCaptionsOff,
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
@@ -199,7 +200,11 @@ export const Inspector: React.FC<{
               {generating ? 'Generating…' : 'Generate AI Captions'}
             </button>
             {generating && <p className="text-[11px] text-on-surface-variant mt-2 truncate">{progressLabel}</p>}
-            <Btn onClick={addPage} disabled={!clips.length} title="A hand-typed page on the clip under the playhead" className="w-full mt-2 mb-5"><span className="material-symbols-outlined text-[16px]">add</span>Add page at playhead</Btn>
+            <Btn onClick={addPage} disabled={!clips.length} title="A hand-typed page on the clip under the playhead" className="w-full mt-2 mb-3"><span className="material-symbols-outlined text-[16px]">add</span>Add page at playhead</Btn>
+            <div className="flex items-center justify-between mb-5" title="set_captions: the pages are kept, none is rendered (a reel without subtitles)">
+              <Label>{captionsOff ? 'Captions off — not rendered' : 'Show captions'}</Label>
+              <Toggle on={!captionsOff} onChange={(on) => setCaptionsOff(!on)} />
+            </div>
 
             {!captions.length ? (
               <p className="text-body-sm text-on-surface-variant/60">

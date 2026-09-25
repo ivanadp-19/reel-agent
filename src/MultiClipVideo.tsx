@@ -122,7 +122,9 @@ export const MultiClipVideo: React.FC<{
   brand?: Brand | null;
   grade?: ProjectGrade | null;
   audio?: {clean?: string; sfx?: boolean} | null;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null}) => {
+  captionsOff?: boolean; // the project's captions switch (set_captions): pages are kept, none is drawn
+}> = ({clips = [], music = null, captions: allCaptions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false}) => {
+  const captions = captionsOff ? [] : allCaptions; // the music still ducks under their words (speech spans below)
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
@@ -243,7 +245,7 @@ export const MultiClipVideo: React.FC<{
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} titles={preset.titles} />
 
       {/* music */}
-      {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectedCaptions.map((c) => [c.startMs, c.endMs])} />}
+      {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectCaptions(allCaptions, clips, fps).map((c) => [c.startMs, c.endMs])} />}
 
       {/* sound effects (synthesized, public/sfx): a whoosh on whip / zoom / card / split cuts, a pop on stickers */}
       {audio?.sfx ? [
