@@ -155,10 +155,18 @@ test('composite: frame-exact (renumbered by frame index), libvpx decodes the alp
   assert.ok(png.includes(path.join('frames', '*.png')) && png.includes('glob'), 'the PNG frames by default');
   const a = compositeArgs({master: 'm.mp4', overlays: [{file: 'c.webm', alpha: 'vp9'}], outFile: 'o.mp4', fps: 30});
   const fc = a[a.indexOf('-filter_complex') + 1];
-  assert.match(fc, /\[0:v\]setpts=N\/\(30\*TB\)/);
-  assert.match(fc, /\[1:v\]setpts=N\/\(30\*TB\)/);
+  assert.match(fc, /\[0:v\]settb=1\/30,setpts=N\[/);
+  assert.match(fc, /\[1:v\]settb=1\/30,setpts=N,/);
+  assert.match(fc, /ts_sync_mode=nearest/, 'equal timestamps pair, never the previous frame');
   assert.ok(a.indexOf('libvpx-vp9') < a.indexOf('c.webm'), 'the decoder is named before its input');
   assert.deepEqual(a.slice(a.indexOf('-c:a'), a.indexOf('-c:a') + 2), ['-c:a', 'copy']);
+  // a full-range master (what Remotion writes) stays full range, its layers converted into it, its tags kept
+  const pc = compositeArgs({master: 'm.mp4', overlays: [{file: 'frames'}], outFile: 'o.mp4', fps: 30, color: {range: 'pc', space: 'bt470bg', trc: 'unknown'}});
+  const pfc = pc[pc.indexOf('-filter_complex') + 1];
+  assert.match(pfc, /scale=out_range=pc,format=yuva420p/);
+  assert.match(pfc, /format=yuvj420p\[v\]/);
+  assert.ok(pc.includes('bt470bg') && !pc.includes('-color_trc'));
+  assert.match(fc, /format=yuv420p\[v\]/, 'limited range stays limited');
   const two = compositeArgs({master: 'm.mp4', overlays: [{file: 'frames'}, {file: 'x.mov', alpha: 'prores'}], outFile: 'o.mp4', fps: 30});
   assert.match(two[two.indexOf('-filter_complex') + 1], /\[l1\]\[o1\]overlay/);
 });

@@ -22,7 +22,7 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
-import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey} from '../scripts/layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey, probeColor} from '../scripts/layers.mjs';
 import {chooseRenderMode} from '../src/layers.ts';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -329,7 +329,7 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested, proje
           if (e.code !== 0) { renders[id] = {status: 'error', error: `captions layer encode failed: ${e.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
         }
         renders[id] = {status: 'running', progress: 95, label: 'Compositing', ...info};
-        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft})));
+        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft, color: probeColor(master)})));
         if (c.code !== 0) { renders[id] = {status: 'error', error: `composite failed: ${c.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
       } else fs.copyFileSync(master, outFile); // nothing to lay over it: the master is the reel
     }

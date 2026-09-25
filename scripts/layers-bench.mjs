@@ -27,7 +27,7 @@ import {spawnSync} from 'node:child_process';
 import {pageWords} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
 import {placeClips} from '../src/timeline.ts';
-import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterKey} from './layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterKey, probeColor} from './layers.mjs';
 import {linkPublic} from './public-links.mjs';
 import {renderPlan} from './render-queue.mjs';
 
@@ -224,7 +224,7 @@ if (process.argv.includes('--alpha-compare') && fs.existsSync(master)) {
     const encodeSec = (Date.now() - t) / 1000;
     t = Date.now();
     const comp = path.join(ROOT, '.captions-tmp', `bench-comp-${alpha}.mp4`);
-    const c = spawnSync('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile: comp, fps: FPS, draft: DRAFT}), {encoding: 'utf8'});
+    const c = spawnSync('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile: comp, fps: FPS, draft: DRAFT, color: probeColor(master)}), {encoding: 'utf8'});
     if (c.status !== 0) throw new Error(c.stderr.slice(-800));
     out.alpha[alpha] = {encodeSec: +encodeSec.toFixed(1), compositeSec: +((Date.now() - t) / 1000).toFixed(1), ...(enc ? {layerMB: +(fs.statSync(layer).size / 1e6).toFixed(1)} : {}), sync: syncCheck(fullB.path, comp, master)};
     console.log(`${alpha}: ${JSON.stringify(out.alpha[alpha])}`);

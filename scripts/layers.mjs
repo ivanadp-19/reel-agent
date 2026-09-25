@@ -23,6 +23,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {captionLayout} from '../src/layers.ts';
 
 export const LAYERS_VERSION = 1;
@@ -158,27 +159,44 @@ export function alphaEncodeArgs({frames, outFile, alpha, fps}) {
   return ['-hide_banner', '-nostats', '-y', ...framesInput(frames, fps), ...a.encode, outFile];
 }
 
-// ffmpeg: the layers over the master, frame by frame. Both streams are renumbered
-// by frame index (setpts=N) before the overlay: WebM stores ms timestamps, and
-// frame 2 at 66.667 ms stored as 67 ms would otherwise meet master frame 3. The
-// master's audio is copied (loudness runs on the result). `overlays` is a list so
-// more layers can stack later; each is {file, alpha} (png: `file` is the frames folder).
-export function compositeArgs({master, overlays, outFile, fps, draft = false}) {
+// ffmpeg: the layers over the master, frame by frame. Every stream is put on one
+// timebase of a frame (settb=1/fps) and renumbered by frame index (setpts=N), and the
+// overlay pairs equal timestamps (ts_sync_mode=nearest). Without both, WebM's ms
+// timestamps (66.667 ms stored as 67) or framesync's default mode paired master
+// frame n with layer frame n-1 at some page changes: a caption one frame late,
+// measured on the bench reel (research/layers-benchmark.md).
+// The result keeps the master's pixel format and color tags (`color`, from
+// probeColor: Remotion writes full-range yuvj420p tagged bt470bg), and each layer is
+// converted into that range before the overlay — a limited-range layer over a
+// full-range master would come out washed out. The master's audio is copied
+// (loudness runs on the result). `overlays` is a list so more layers can stack
+// later; each is {file, alpha} (png: `file` is the frames folder).
+export function compositeArgs({master, overlays, outFile, fps, draft = false, color = {}}) {
+  const full = color.range === 'pc';
   const inputs = ['-i', master];
-  const chains = [`[0:v]setpts=N/(${fps}*TB)[l0]`];
+  const renumber = `settb=1/${fps},setpts=N`;
+  const chains = [`[0:v]${renumber}[l0]`];
   let last = 'l0';
   overlays.forEach((o, i) => {
     const alpha = o.alpha ?? 'png';
     inputs.push(...(alpha === 'png' ? framesInput(o.file, fps) : [...ALPHA[alpha].decode, '-i', o.file]));
-    chains.push(`[${i + 1}:v]setpts=N/(${fps}*TB)[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto[l${i + 1}]`);
+    chains.push(`[${i + 1}:v]${renumber},scale=out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
     last = `l${i + 1}`;
   });
-  chains.push(`[${last}]format=yuv420p[v]`);
+  chains.push(`[${last}]format=${full ? 'yuvj420p' : 'yuv420p'}[v]`);
+  const tags = [['-color_range', color.range], ['-colorspace', color.space], ['-color_primaries', color.primaries], ['-color_trc', color.trc]].filter(([, v]) => v && v !== 'unknown').flat();
   return [
     '-hide_banner', '-nostats', '-y', ...inputs,
     '-filter_complex', chains.join(';'),
     '-map', '[v]', '-map', '0:a?',
-    '-c:v', 'libx264', '-preset', draft ? 'ultrafast' : 'veryfast', '-crf', String(COMPOSITE_CRF), '-video_track_timescale', '90000',
+    '-c:v', 'libx264', '-preset', draft ? 'ultrafast' : 'veryfast', '-crf', String(COMPOSITE_CRF), '-video_track_timescale', '90000', ...tags,
     '-c:a', 'copy', '-movflags', '+faststart', outFile,
   ];
+}
+
+// the master's pixel format and color tags, for compositeArgs' `color` (ffprobe)
+export function probeColor(file) {
+  const r = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=pix_fmt,color_range,color_space,color_primaries,color_transfer', '-of', 'json', file], {encoding: 'utf8'});
+  const st = r.status === 0 ? JSON.parse(r.stdout).streams?.[0] ?? {} : {};
+  return {range: st.color_range ?? (st.pix_fmt?.startsWith('yuvj') ? 'pc' : undefined), space: st.color_space, primaries: st.color_primaries, trc: st.color_transfer};
 }
