@@ -1,7 +1,7 @@
 // A new project, a saved project as the tools read it, and the checks before a render — shared by
 // the MCP (load, validate, caption_proof) and the backend's GET /api/validate/<id>
 // (the reel CLI): src/validate.ts over the project, with the face boxes the captions
-// job found and the words of the last transcript run.
+// job found and the words of the project's last transcript run.
 import fs from 'node:fs';
 import path from 'node:path';
 import {normalizeCaption} from '../src/captions.ts';
@@ -19,9 +19,10 @@ export function withDefaults(p) {
 export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(publicDir, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 
 // every issue: layout / timing / emphasis (validateProject), then off-mic words left in
-// the cut and clip edges inside a word, from the last transcript run
-export function projectIssues(p, publicDir, fps = 30) {
+// the cut and clip edges inside a word, from the project's last transcript run
+// (public/projects/transcripts/<id>.json, scripts/transcribe.mjs) — never another project's
+export function projectIssues(p, publicDir, fps = 30, id) {
   let tr = null;
-  try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'transcript.json'), 'utf8')); } catch {}
-  return [...validateProject(p, fps, facesOf(p, publicDir)), ...(tr ? transcriptIssues(p, tr) : [])];
+  if (/^[\w-]+$/.test(id ?? '')) try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'projects', 'transcripts', `${id}.json`), 'utf8')); } catch {}
+  return [...validateProject(p, fps, facesOf(p, publicDir)), ...(Array.isArray(tr) ? transcriptIssues(p, tr) : [])];
 }

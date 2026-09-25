@@ -6,7 +6,7 @@
 //
 // Everything a rule can decide is decided here, from evidence: the rendered mp4
 // (ffprobe / ffmpeg: loudness, clipping, silences, black, per-frame luma/chroma,
-// frame hashes), the project JSON and the aligned transcript (public/transcript.json,
+// frame hashes), the project JSON and the aligned transcript (public/projects/transcripts/<id>.json,
 // written by get_transcript). What needs eyes (hook strength, B-roll fit, look,
 // spelling in context) is left to the judge agent, who gets contact sheets of the
 // WHOLE reel and a list of moments to look at with frame_at.
@@ -1042,12 +1042,12 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const placed = placeClips(p.clips, FPS);
   const total = (placed.at(-1)?.endMs ?? 0) / 1000;
 
-  // transcript: the last get_transcript run must be this project's (every clip id present)
+  // transcript: the project's last get_transcript run (scripts/transcribe.mjs keeps one per project), covering every clip
   let tr = [];
-  try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'transcript.json'), 'utf8')); } catch {}
+  try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'projects', 'transcripts', `${projectId}.json`), 'utf8')); } catch {}
   const {words, missing} = timelineSpeech(p.clips, tr);
   const haveTr = missing.length === 0 && p.clips.length > 0;
-  if (!haveTr) findings.push(F('evidence', 'blocker', 'rule', null, null, `transcript de otro proyecto o desactualizado (faltan ${missing.length} clips): los checks de pausas, sync, cobertura y repeticiones no corrieron`, {missing: missing.slice(0, 6)}, [{tool: 'get_transcript', note: 'then run the judge again', args: {project_id: projectId}}]));
+  if (!haveTr) findings.push(F('evidence', 'blocker', 'rule', null, null, `transcript desactualizado o sin correr — get_transcript lo actualiza (faltan ${missing.length} clips): los checks de pausas, sync, cobertura y repeticiones no corrieron`, {missing: missing.slice(0, 6)}, [{tool: 'get_transcript', note: 'then run the judge again', args: {project_id: projectId}}]));
 
   // --- versions: an extra is its own project, never the master's ---
   if (role === 'extra' && stateDir && fs.existsSync(path.join(stateDir, 'master.json'))) findings.push(F('version', 'major', 'rule', null, null, `versión EXTRA renderizada desde el proyecto del master (${projectId}): el master base cambia con ella`, {}, [{tool: 'duplicate_project', note: 'name it "<reel> — EXTRA n (<what changes>)", redo the extra there, keep the master project as delivered', args: {project_id: projectId}}]));

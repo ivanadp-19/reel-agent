@@ -201,7 +201,7 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   return issues;
 }
 
-// Checks that need the last transcript run (public/transcript.json): off-mic
+// Checks that need the project's last transcript run (public/projects/transcripts/<id>.json): off-mic
 // words still inside the cut, and clip edges that fall inside a word.
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');

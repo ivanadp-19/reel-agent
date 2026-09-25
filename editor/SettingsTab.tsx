@@ -60,7 +60,8 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
   const validate = async () => {
     // face boxes the captions job wrote, per source; the last transcript run for the off-mic / cut-word checks
     const faces = Object.fromEntries(await Promise.all(clips.map(async (c) => [c.src, await fetch(`/clips/faces/${sourceOf(c.src)}.json`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined)])));
-    const tr = await fetch(`/transcript.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
+    // this project's last transcript run (scripts/transcribe.mjs keeps one per project), never another project's
+    const tr = await fetch(`/projects/transcripts/${projectId}.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
     setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle, captionsOff}, meta.fps, faces), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
   };
   const prepareMattes = async () => {

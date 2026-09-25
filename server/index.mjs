@@ -331,7 +331,7 @@ async function handle(req, res) {
     const file = path.join(PROJECTS_DIR, `${id}.json`);
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     try {
-      const issues = projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC);
+      const issues = projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, 30, id);
       return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
     } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
   }
@@ -410,7 +410,7 @@ async function handle(req, res) {
       return json(res, 200, {ok: true, updatedAt: now});
     }
     if (req.method === 'DELETE') {
-      fs.rmSync(file, {force: true});
+      for (const f of [file, path.join(PROJECTS_DIR, 'transcripts', `${id}.json`)]) fs.rmSync(f, {force: true}); // and its last transcript run
       return json(res, 200, {ok: true});
     }
   }
@@ -708,7 +708,7 @@ async function handle(req, res) {
       process.stderr.write(d);
     });
     child.on('close', (code) => {
-      let result; // absent for a job that keeps its output in public/ (transcribe → transcript.json)
+      let result; // absent only when the job wrote nothing readable (the MCP and the editor say so)
       if (code === 0) try { result = JSON.parse(fs.readFileSync(outFile, 'utf8')); } catch {}
       for (const f of [inFile, outFile]) fs.rmSync(f, {force: true});
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
