@@ -68,6 +68,20 @@ script, read it yourself too: the plan's list is a starting point, not the
 truth. A scene the script names that neither list has is a blocker you add
 (judgment).
 
+## Picture integrity and promises (G10 V2)
+
+- **Black flashes.** His `blackdetect d=0.4` missed real blacks of 3–5 frames
+  (G10 V2 at 7.51–7.61 s and 38.34–38.51 s). `black-flash` catches a single
+  frame, in the master's own fps, and it is a blocker. `blackFades` in
+  `cesar.json` is 0 at both ends. If a reel does fade to or from black, set the
+  seconds there, not in the judge.
+- **A cut inside a B-roll** (the garage with a fast pan): `source-cut` is a
+  candidate. It goes to him with the timestamp and the source time; it never
+  fails the QC.
+- **VO promises** ("tope magnético", "acabado en roble"): the judge looks at the
+  insert that plays while it is said. `claim-image` is a heuristic major with the
+  quoted promise and the frame. It is never fixed automatically.
+
 ## Noise he asked us to stop failing on
 
 Never auto-fail on these. They are candidates and count only if the frame

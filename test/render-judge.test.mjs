@@ -360,3 +360,90 @@ test('project tiers: only raised, by word id', () => {
   const w = withTiers([{wid: 'a:1', tier: 2}, {wid: 'a:2'}], {'a:1': 1, 'a:2': 1});
   assert.deepEqual(w.map((x) => x.tier), [2, 1]); // never lowers the classifier's tier
 });
+
+// ---- César, G10 V2: black flashes from one frame, cuts inside a source clip, VO promises ----
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {placeClips} from '../src/timeline.ts';
+import {blackRuns, blackFlashFindings, usedRanges, sourceCutFindings, mergeRanges, missingRanges, claimEvidence, analyzeVideo, sentencesOf as sentences3} from '../.agents/skills/render-judge/judge.mjs';
+
+test('black runs: open runs end at the file end', () => {
+  assert.deepEqual(blackRuns([{t: 1, black_start: 1}, {t: 1.1, black_end: 1.1}, {t: 5, black_start: 5}]), [{start: 1, end: 1.1}, {start: 5, end: null}]);
+});
+
+test('black flashes: 3 and 5 frames are blockers at 30 and 25 fps; allowed fades are nits; long blacks belong to the QC gate', () => {
+  const clips = [clip('a', 'a', 0, 12)];
+  const placed = placeClips(clips, 30);
+  const f30 = blackFlashFindings([{start: 7.5, end: 7.6}, {start: 38.3333, end: 38.5}], {fps: 30, duration: 60, placed});
+  assert.deepEqual(f30.map((f) => [f.severity, f.kind, f.evidence.frames]), [['blocker', 'rule', 3], ['blocker', 'rule', 5]]);
+  assert.match(f30[0].msg, /3 frames \(7\.50–7\.60 s, 30 fps\)/);
+  const f25 = blackFlashFindings([{start: 7.52, end: 7.64}], {fps: 25, duration: 60, placed});
+  assert.equal(f25[0].evidence.frames, 3); // 0.12 s = 3 frames at 25 fps (would be ~4 at 30)
+  const one = blackFlashFindings([{start: 2, end: 2 + 1 / 30}], {fps: 30, duration: 60, placed});
+  assert.equal(one[0].evidence.frames, 1); // from ONE frame
+  // fades allowed by the client profile, with a 1.5-frame margin; nothing is allowed without it
+  const fades = {startSec: 0.5, endSec: 1};
+  const head = [{start: 0, end: 0.3}], tail = [{start: 59.6, end: null}]; // a run still black at the file end
+  assert.deepEqual(blackFlashFindings([...head, ...tail], {fps: 30, duration: 60, fades, placed}).map((f) => f.severity), ['nit', 'nit']);
+  assert.deepEqual(blackFlashFindings(head, {fps: 30, duration: 60, placed}).map((f) => f.severity), ['blocker']);
+  assert.deepEqual(blackFlashFindings([{start: 20, end: 21}], {fps: 30, duration: 60, placed}), []); // ≥ 0.5 s: the QC gate's `black`
+  // on a fullscreen B-roll cue the finding names the cue and its source time
+  const cue = {id: 'b0', src: 'broll/cochera.mp4', kind: 'video', mode: 'fullscreen', startMs: 900, endMs: 4400};
+  const onCue = blackFlashFindings([{start: 3.5, end: 3.6}], {fps: 30, duration: 60, placed, brolls: [cue]});
+  assert.match(onCue[0].msg, /B-roll b0 \(fuente cochera @2\.6 s\)/);
+  assert.ok(!onCue[0].fix.some((x) => x.tool !== 'frame_at')); // inspection only, never an automatic edit
+});
+
+test('black flash detection on a real file: one black frame at 25 fps is caught', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jb-'));
+  const f = path.join(dir, 'm.mp4');
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x568:r=25:d=3', '-vf', "drawbox=c=black:t=fill:enable='between(t,1.2,1.239)'", '-c:v', 'libx264', '-pix_fmt', 'yuv420p', f]);
+  if (r.status !== 0) return; // no ffmpeg with libx264 here
+  const {black} = analyzeVideo(f, {hashes: false, blackFps: 25});
+  fs.rmSync(dir, {recursive: true, force: true});
+  assert.equal(black.length, 1);
+  assert.equal(Math.round((black[0].end - black[0].start) * 25), 1);
+  assert.equal(black[0].start, 1.2);
+});
+
+test('a cut or a whip inside a source clip is a candidate; the edit\'s own edges and long camera moves are not', () => {
+  const clips = [clip('a', 'take', 10, 20)];
+  const brolls = [{id: 'b0', src: 'broll/cochera.mp4', kind: 'video', mode: 'fullscreen', startMs: 2000, endMs: 6000}, {id: 'b1', src: 'broll/foto.jpg', kind: 'image', startMs: 7000, endMs: 8000}];
+  const ranges = usedRanges(clips, brolls);
+  assert.deepEqual(ranges.map((r) => [r.id, r.from, r.to, r.t0]), [['a', 10, 20, 0], ['b0', 0, 4, 2]]); // images are not scanned; a cue plays its file from 0
+  const flat = (a, b, v = 0.01) => Array.from({length: Math.round((b - a) * 30)}, (_, k) => [a + k / 30, v]);
+  const take = [...flat(9.8, 15), [15, 22], ...flat(15.0333, 20.2)]; // a hard cut at 15 s in the take
+  const garage = [...flat(0, 2.5), [2.5333, 3.1], [2.5667, 3.4], [2.6, 2.8], [2.6333, 2.2], ...flat(2.6667, 4.2)]; // a 4-frame whip
+  const f = sourceCutFindings(ranges, new Map([['clips/take.mp4', take], ['broll/cochera.mp4', garage]]));
+  assert.deepEqual(f.map((x) => [x.check, x.kind, x.severity, x.at]), [['source-cut', 'candidate', 'major', 5], ['source-cut', 'candidate', 'major', 4.53]]);
+  assert.match(f[0].msg, /corte aparente/);
+  assert.match(f[1].msg, /whip/);
+  assert.equal(verdictOf(f).verdict, 'PASS'); // candidates never auto-fail
+  // a cut right at the edit's own edge, and a slow 3-second camera move, are not flagged
+  const edges = [[10.05, 30], ...flat(10.1, 20.2)];
+  const pan = [...flat(9.8, 12), ...Array.from({length: 90}, (_, k) => [12 + k / 30, 2.5]), ...flat(15, 20.2)];
+  assert.deepEqual(sourceCutFindings([ranges[0]], new Map([['clips/take.mp4', edges]])), []);
+  assert.deepEqual(sourceCutFindings([ranges[0]], new Map([['clips/take.mp4', pan]])), []);
+});
+
+test('incremental scan: only what is not decoded yet', () => {
+  assert.deepEqual(mergeRanges([[5, 7], [0, 2], [1.5, 3]]), [[0, 3], [5, 7]]);
+  assert.deepEqual(missingRanges([[0, 10]], [[2, 4], [6, 12]]), [[0, 2], [4, 6]]);
+  assert.deepEqual(missingRanges([[2, 3]], [[0, 10]]), []);
+});
+
+test('VO promises: evidence for the judge\'s eyes, proof cues first, the inserts on screen and the frames to look at', () => {
+  const clips = [clip('a', 'a', 0, 20)];
+  const ws = 'La cochera es amplia. Las puertas tienen tope magnético y acabado en roble.'.split(' ').map((w, i) => TW(i, w, i * 500, i * 500 + 400));
+  const s = sentences3(words(clips, [{clipId: 'a', source: 'a', words: ws}]));
+  const brolls = [{id: 'b1', src: 'broll/puertas.mp4', startMs: 3000, endMs: 5000}];
+  const ev = claimEvidence(s, brolls, [{id: 'g0', template: 'layout', startMs: 0, endMs: 9000}]);
+  assert.equal(ev[0].text, 'Las puertas tienen tope magnético y acabado en roble.');
+  assert.deepEqual(ev[0].cues, ['tope', 'magnetico', 'acabado', 'roble']);
+  assert.deepEqual(ev[0].inserts, ['b1 puertas']); // a layout frame is not an insert
+  assert.deepEqual(ev[0].lookAt, [4]); // the middle of b1 (3–5 s), which is on screen while the promise is said
+  assert.equal(ev.length, 1); // "La cochera es amplia." has no proof cue and no insert on screen: nothing to verify
+  assert.ok(claimEvidence(s, [], [], ['amplia'])[0].cues.includes('amplia')); // a client's own proof cues (profile proofCues)
+});
