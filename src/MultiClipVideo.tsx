@@ -8,7 +8,7 @@ import {packOf} from './stylePacks';
 import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {projectGraphics, type Graphic} from './graphicTemplates';
-import {jCutSec, lCutSec, placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
+import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
@@ -21,6 +21,7 @@ import {ms as msToFrames} from './motion';
 // Prism's signature. The same wrapper lands the reel's opening: a radial
 // zoom-blur (or a plain blur-in) clearing over the first ~200 ms.
 type Span = {startMs: number; endMs: number};
+const JL_RAMP_FRAMES = 4; // J/L-cut audio fades over this many frames at its free edge
 const smooth = (x: number) => x * x * (3 - 2 * x);
 // 0→1 inside a span with ramps at both ends (ms)
 const inSpans = (ms: number, spans: Span[], IN: number, OUT: number) => {
@@ -170,7 +171,7 @@ export const MultiClipVideo: React.FC<{
           </Sequence>
         );
       })}
-      {placed.map(({clip, fromFrame, durFrames}, i) => (
+      {placed.map(({clip, fromFrame, durFrames, jFrames}, i) => (
         <Sequence
           key={clip.id}
           from={fromFrame}
@@ -180,30 +181,33 @@ export const MultiClipVideo: React.FC<{
           premountFor={Math.round(fps)}
           name={clip.label ?? clip.id}
         >
-          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} />
+          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} jMuteFrames={jFrames} />
         </Sequence>
       ))}
       {/* J-cuts / L-cuts (audio only): a J-cut leads the clip's first j seconds
           of audio under the previous clip's tail (its own first frames are muted
           in ClipMedia so the lead flows through the cut); an L-cut trails the
           source audio past the video end, under the next clip's head. Both honor
-          mute/volume; a muted clip has no J/L audio. */}
-      {placed.map(({clip, fromFrame, durFrames}, i) => {
+          mute/volume; a muted clip has no J/L audio. The frames come from
+          placeClips (same numbers ClipMedia mutes and set_audio_cut reports). */}
+      {placed.map(({clip, fromFrame, durFrames, jFrames: jF, lFrames: lF}) => {
         const speed = clip.speed ?? 1;
         const vol = clip.muted ? 0 : clip.volume ?? 1;
-        const jF = Math.round(jCutSec(clip, fromFrame / fps) * fps);
-        const lF = Math.round(lCutSec(clip, placed[i + 1] ? placed[i + 1].durFrames / fps : 0) * fps);
         if (vol <= 0 || (jF <= 0 && lF <= 0)) return null;
+        const inF = Math.round(clip.inSec * fps), outF = Math.round(clip.outSec * fps);
+        // a short ramp on the edge that is not a seam: the lead fades in under the
+        // previous clip, the trail fades out under the next (no click mid-word)
+        const ramp = (k: number) => vol * Math.min(1, k / JL_RAMP_FRAMES);
         return (
           <React.Fragment key={`${clip.id}-jl`}>
             {jF > 0 ? (
               <Sequence from={fromFrame - jF} durationInFrames={jF} layout="none" name={`${clip.id} (J-cut lead)`}>
-                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={Math.round(clip.inSec * fps)} trimAfter={Math.round(clip.inSec * fps) + jF * speed} volume={vol} />
+                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={inF} trimAfter={Math.round(inF + jF * speed)} volume={(f: number) => ramp(f + 1)} />
               </Sequence>
             ) : null}
             {lF > 0 ? (
               <Sequence from={fromFrame + durFrames} durationInFrames={lF} layout="none" name={`${clip.id} (L-cut trail)`}>
-                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={Math.round(clip.outSec * fps)} trimAfter={Math.round(clip.outSec * fps) + lF * speed} volume={vol} />
+                <Audio src={staticFile(clip.src)} playbackRate={speed} trimBefore={outF} trimAfter={Math.round(outF + lF * speed)} volume={(f: number) => ramp(lF - f)} />
               </Sequence>
             ) : null}
           </React.Fragment>

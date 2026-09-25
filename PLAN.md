@@ -138,7 +138,7 @@ Criterios:
 
 Entregables:
 - Biblioteca de B-roll propio: hecho (`add_broll_assets` + contact sheet, `tag_broll_asset`, `broll_library`, `suggest_broll` con las reglas de colocación y cobertura del negro; Pexels de respaldo vía `search_stock`).
-- Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`).
+- Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`); J-cuts y L-cuts por clip (`set_audio_cut`: el audio entra antes o sigue después del corte, hasta 4 s; `placeClips` decide los frames una vez para render, mute y herramienta; una pieza nueva de split/autocut nace sin J ni L).
 - Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
 - `end-card` hecho (logo del brand kit, título, CTA, handle).
 - Runners headless: `scripts/claude-edit.sh` y `scripts/codex-edit.sh` (Codex ignora el config del usuario, pre-aprueba solo el servidor `reel` con `default_tools_approval_mode=approve` y corre con sandbox read-only: un `touch` en el repo queda bloqueado, verificado). No hace falta tocar `~/.codex/config.toml`. La skill `.agents/skills/reel-edit` sirve a los dos.

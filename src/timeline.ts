@@ -72,13 +72,16 @@ export const jCutSec = (c: Clip, prevDurSec = Infinity) => Math.max(0, Math.min(
 export const lCutSec = (c: Clip, nextDurSec = Infinity) =>
   Math.max(0, Math.min(c.lSec ?? 0, Math.max(0, c.sourceDurationSec - c.outSec) / (c.speed ?? 1), nextDurSec));
 
-// Where each clip lands on the assembled timeline (in frames + ms), in order.
-export type PlacedClip = {clip: Clip; fromFrame: number; durFrames: number; startMs: number; endMs: number};
+// Where each clip lands on the assembled timeline (in frames + ms), in order,
+// with its J/L-cut audio in frames — decided here once, against the real
+// neighbours, so the render, the mute in ClipMedia and the MCP report agree.
+export type PlacedClip = {clip: Clip; fromFrame: number; durFrames: number; startMs: number; endMs: number; jFrames: number; lFrames: number};
 
 export const placeClips = (clips: Clip[], fps: number): PlacedClip[] => {
+  const durs = clips.map((c) => Math.max(1, Math.round(clipDurationSec(c) * fps)));
   let acc = 0;
-  return clips.map((clip) => {
-    const durFrames = Math.max(1, Math.round(clipDurationSec(clip) * fps));
+  return clips.map((clip, i) => {
+    const durFrames = durs[i];
     const fromFrame = acc;
     acc += durFrames;
     return {
@@ -87,6 +90,8 @@ export const placeClips = (clips: Clip[], fps: number): PlacedClip[] => {
       durFrames,
       startMs: (fromFrame / fps) * 1000,
       endMs: ((fromFrame + durFrames) / fps) * 1000,
+      jFrames: i > 0 ? Math.round(jCutSec(clip, durs[i - 1] / fps) * fps) : 0,
+      lFrames: i < clips.length - 1 ? Math.round(lCutSec(clip, durs[i + 1] / fps) * fps) : 0,
     };
   });
 };
@@ -125,8 +130,9 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
     if (!aK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) aK = [...(aK ?? []), pin];
     if (!bK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) bK = [{...pin}, ...(bK ?? [])];
   }
-  const a = {...clip, outSec: splitSrc, transform: aK};
-  const b = {...clip, id: newId, inSec: splitSrc, transform: bK, enter: undefined}; // a new cut starts plain
+  // a new cut starts plain: the J-cut stays with the head, the L-cut with the tail
+  const a = {...clip, outSec: splitSrc, transform: aK, lSec: undefined};
+  const b = {...clip, id: newId, inSec: splitSrc, transform: bK, enter: undefined, jSec: undefined};
   const remap: SegmentRemap = [
     {origId: clip.id, segId: clip.id, inMs: clip.inSec * 1000, outMs: splitSrc * 1000},
     {origId: clip.id, segId: newId, inMs: splitSrc * 1000, outMs: clip.outSec * 1000},
@@ -191,7 +197,8 @@ export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; 
     if (!segs.length) continue;
     segs.forEach((seg, k) => {
       const id = k === 0 ? c.id : uniq(`${c.id}-c${k}`);
-      out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec, ...(k ? {enter: undefined} : {})});
+      // the J-cut stays with the first piece, the L-cut with the last; the seams between pieces start plain
+      out.push({...c, id, inSec: seg.inSec, outSec: seg.outSec, ...(k ? {enter: undefined, jSec: undefined} : {}), ...(k < segs.length - 1 ? {lSec: undefined} : {})});
       remap.push({origId: c.id, segId: id, inMs: seg.inSec * 1000, outMs: seg.outSec * 1000});
     });
   }

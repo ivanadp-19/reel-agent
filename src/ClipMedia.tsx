@@ -1,6 +1,6 @@
 import React from 'react';
 import {staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
-import {jCutSec, sampleTransform, type Clip} from './timeline';
+import {sampleTransform, type Clip} from './timeline';
 import type {Grade} from './grade';
 import {toneColor, transitionFx} from './transitions';
 
@@ -11,14 +11,14 @@ export type TransitionCtx = {clip: Clip; next?: Clip; offset: number; durFrames:
 
 // one clip's media with its keyframed zoom/pan transform applied, and its color
 // grade (per-channel levels as an SVG filter, then saturation)
-export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: Grade | null; accent?: string; transition?: TransitionCtx}> = ({clip, durFrames, Comp, grade, accent = '#FFB020', transition}) => {
+// jMuteFrames: the J-cut lead that already played under the previous clip (placeClips decides it)
+export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: Grade | null; accent?: string; transition?: TransitionCtx; jMuteFrames?: number}> = ({clip, durFrames, Comp, grade, accent = '#FFB020', transition, jMuteFrames = 0}) => {
   const {fps} = useVideoConfig();
   const frame = useCurrentFrame(); // relative to this clip's Sequence
   const speed = clip.speed ?? 1;
   // keyframe times are source-relative → advance source-time at `speed`
   const {scale, x, y} = sampleTransform(clip.transform, clip.inSec + (frame / fps) * speed);
   const trimBefore = Math.round(clip.inSec * fps);
-  const jMute = Math.round(jCutSec(clip) * fps);
   const fid = `grade-${clip.id.replace(/[^\w-]/g, '_')}`;
   const fx = transition ? transitionFx(transition.clip, frame + transition.offset, transition.durFrames, transition.next, fps) : null;
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0 || !!fx.spin || !!fx.drop);
@@ -103,9 +103,9 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
         trimAfter={trimBefore + Math.round(durFrames * speed)}
         acceptableTimeShiftInSeconds={0.5}
         muted={clip.muted || (clip.volume ?? 1) === 0}
-        // a J-cut lead already played the first jMute frames of this audio under
+        // a J-cut lead already played the first jMuteFrames of this audio under
         // the previous clip — mute them here so it flows through the cut, no echo
-        volume={clip.muted ? 0 : jMute > 0 ? (f: number) => (f < jMute ? 0 : clip.volume ?? 1) : clip.volume ?? 1}
+        volume={clip.muted ? 0 : jMuteFrames > 0 ? (f: number) => (f < jMuteFrames ? 0 : clip.volume ?? 1) : clip.volume ?? 1}
         style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}}
       />
       </div>

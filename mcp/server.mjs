@@ -17,7 +17,7 @@ import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, clipDurationSec, cutRange, jCutSec, lCutSec, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/timeline.ts';
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -321,9 +321,8 @@ server.registerTool('set_audio_cut', {description: 'J-cuts and L-cuts (per clip,
   if (j_sec != null) c.jSec = j_sec > 0 ? j_sec : undefined;
   if (l_sec != null) c.lSec = l_sec > 0 ? l_sec : undefined;
   await save(project_id, p);
-  const prevDur = i > 0 ? clipDurationSec(p.clips[i - 1]) : 0;
-  const nextDur = i < p.clips.length - 1 ? clipDurationSec(p.clips[i + 1]) : 0;
-  const j = jCutSec(c, prevDur), l = lCutSec(c, nextDur);
+  const pc = place(p.clips)[i]; // the same frames the render uses
+  const j = pc.jFrames / FPS, l = pc.lFrames / FPS;
   return text(`${clip_id}: J-cut ${f2(j)}s${j < (c.jSec ?? 0) ? ' (clamped)' : ''}, L-cut ${f2(l)}s${l < (c.lSec ?? 0) ? ' (clamped)' : ''}`);
 });
 
