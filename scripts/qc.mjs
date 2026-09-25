@@ -97,10 +97,16 @@ export const qcText = (r) => r.checks.map((c) => `${c.ok ? '✓' : c.blocking ? 
 
 // CLI:
 //   node scripts/qc.mjs <file.mp4> [expectSec]              → report, exit 1 on failure
+//   node scripts/qc.mjs --json <file.mp4> [expectSec] [--draft] → QC only; JSON on stdout
 //   node scripts/qc.mjs --finalize <file.mp4> <expectSec>   → normalize, then QC; JSON on stdout
 //     (the backend runs this as a child process so its event loop never blocks)
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
+  if (args[0] === '--json') { // node scripts/qc.mjs --json <file.mp4> [expectSec] [--draft] → the qc() report as JSON (the MCP qc tool)
+    const [, file, expect, flag] = args;
+    console.log(JSON.stringify(qc(path.resolve(file), {expectSec: expect ? +expect : undefined, draft: flag === '--draft'})));
+    process.exit(0);
+  }
   if (args[0] === '--finalize') {
     const [, file, expect, clean] = args;
     const ln = normalizeLoudness(path.resolve(file), clean && clean in CLEAN ? clean : 'off');

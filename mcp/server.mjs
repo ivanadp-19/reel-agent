@@ -16,7 +16,6 @@
 //   brolls[]   same anchoring
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -33,7 +32,8 @@ import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {transcriptIssues, validateProject} from '../src/validate.ts';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
-import {qc, qcText} from '../scripts/qc.mjs';
+import {qcText} from '../scripts/qc.mjs';
+import {runCmd} from '../scripts/remote-broll.mjs';
 import {LOOKS, DEFAULTS, autoSources, lutBakes, paramsFor} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
 import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
@@ -635,7 +635,7 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
 });
 
 // ---------- the user's own B-roll library ----------
-const sheetContent = (a) => { const f = sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
+const sheetContent = async (a) => { const f = await sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
 const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationSec)}s` : ''}  "${a.label}"${a.tags?.length ? `  tags: ${a.tags.join(', ')}` : '  (untagged)'}${a.desc ? `  — ${a.desc}` : ''}`;
 
 server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
@@ -647,7 +647,7 @@ server.registerTool('add_broll_assets', {description: "Bring the client's own fo
     const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
     const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
-    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));
+    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, await sheetContent(a));
   }
   content.push({type: 'text', text: 'Now tag each one: tag_broll_asset(id, tags, desc) — what is in the shot (room, object, mood, time of day), in the language of the reel.'});
   return {content};
@@ -662,7 +662,9 @@ server.registerTool('broll_library', {description: "The client's own B-roll libr
   const rows = searchLibrary(query);
   if (!rows.length) return text(query ? `Nothing in the library matches "${query}".` : 'The B-roll library is empty — add_broll_assets with the client footage.');
   if (!sheet) return text(rows.map(assetLine).join('\n'));
-  return {content: rows.flatMap((a) => [{type: 'text', text: assetLine(a)}, sheetContent(a)])};
+  const content = [];
+  for (const a of rows) content.push({type: 'text', text: assetLine(a)}, await sheetContent(a));
+  return {content};
 });
 
 server.registerTool('suggest_broll', {description: 'Where the own library should go, by word id: an asset over the mention its tags match (start on the word, 0.5–8 s, one per ~9 s, never over the hook or the closing line), plus every black stretch of footage — with the best asset, or a search_stock query when nothing in the library fits. Nothing is placed: apply what you approve with add_broll (asset_id + at_wid, or search_stock + src). Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -678,7 +680,7 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   }
   mentions.sort((a, b) => a.startMs - b.startMs);
   const black = [];
-  for (const pc of placed) for (const s of blackSpans(pc.clip.src)) {
+  for (const pc of placed) for (const s of await blackSpans(pc.clip.src)) {
     const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000, speed = pc.clip.speed ?? 1;
     const a = Math.max(s.startMs, inMs), b = Math.min(s.endMs, outMs);
     if (b > a) black.push({startMs: pc.startMs + (a - inMs) / speed, endMs: pc.startMs + (b - inMs) / speed});
@@ -1207,7 +1209,10 @@ server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame
   const f = path.isAbsolute(file) && fs.existsSync(file) ? path.resolve(file) : path.join(PUBLIC, file.replace(/^\//, '')); // absolute (from render) or /exports/…
   if (!f.startsWith(path.join(PUBLIC, 'exports') + path.sep)) throw new Error('file must be a render under public/exports/');
   const draft = /-draft\.mp4$/.test(f);
-  const r = qc(f, {expectSec: totalSec(p.clips), draft});
+  // a child process (scripts/qc.mjs --json): the loudness and black/silence passes decode the whole file,
+  // and over /mcp this runs inside the backend, whose event loop must keep serving
+  const c = await runCmd(process.execPath, [path.join(ROOT, 'scripts', 'qc.mjs'), '--json', f, String(totalSec(p.clips)), ...(draft ? ['--draft'] : [])], {cwd: ROOT});
+  let r; try { r = JSON.parse(c.stdout); } catch { throw new Error(`qc failed: ${c.stderr.trim().split('\n').pop() || `exit ${c.code}`}`); }
   return text(`${r.ok ? 'QC passed' : 'QC FAILED'}${draft ? ' (draft: loudness is normalized on the final render only)' : ''}\n${qcText(r)}`);
 });
 
@@ -1217,8 +1222,8 @@ server.registerTool('frame_at', {description: 'Look at a frame. Without `video`:
   if (video) { file = hostFile(path.isAbsolute(video) && fs.existsSync(video) ? video : path.join(PUBLIC, video.replace(/^\//, ''))); t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
   if (!fs.existsSync(file)) throw new Error(`not found: ${file}`);
   const out = path.join(ROOT, '.captions-tmp', `mcp-frame-${Date.now()}.jpg`); fs.mkdirSync(path.dirname(out), {recursive: true});
-  const ff = spawnSync('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
-  if (ff.status !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
+  const ff = await runCmd('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
+  if (ff.code !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
   const data = fs.readFileSync(out).toString('base64'); fs.rmSync(out, {force: true});
   return {content: [{type: 'text', text: `${video ? 'rendered' : 'source'} frame @${f1(at_sec)}s`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });

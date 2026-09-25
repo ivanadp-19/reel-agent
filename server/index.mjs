@@ -364,7 +364,9 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/broll-library') {
     const rows = searchBrollLibrary(url.searchParams.get('q') || '');
-    return json(res, 200, rows.map((a) => { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, sheetFor(a)).split(path.sep).join('/'); } catch {} return {...a, sheet}; }));
+    const out = [];
+    for (const a of rows) { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, await sheetFor(a)).split(path.sep).join('/'); } catch {} out.push({...a, sheet}); }
+    return json(res, 200, out);
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/broll-library/')) {
     const id = decodeURIComponent(url.pathname.split('/').pop());
@@ -387,7 +389,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/black') {
     const src = url.searchParams.get('src') || '';
     if (!/^clips\/[\w.\-]+\.(mp4|mov|m4v|webm)$/i.test(src) || !fs.existsSync(path.join(PUBLIC, src))) return json(res, 400, {error: 'src must be a clip under public/clips'});
-    try { return json(res, 200, blackSpans(src)); } catch (e) { return fail(e); }
+    try { return json(res, 200, await blackSpans(src)); } catch (e) { return fail(e); }
   }
 
   // ---- brand kits: public/brands/<slug>.json (set_brand from / save_as, the Styles tab) ----

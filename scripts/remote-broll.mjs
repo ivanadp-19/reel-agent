@@ -29,7 +29,8 @@ export async function fetchAllowed(url, {signal, fetchImpl = fetch, allow = ALLO
 }
 
 // a command, killed when the signal aborts; resolves {code, stdout, stderr}
-export function runCmd(cmd, args, {signal, onPid, cwd} = {}) {
+// (stderr: its last stderrMax characters — raise it when the output is parsed)
+export function runCmd(cmd, args, {signal, onPid, cwd, stderrMax = 4000} = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
     const c = spawn(cmd, args, {cwd});
@@ -38,7 +39,7 @@ export function runCmd(cmd, args, {signal, onPid, cwd} = {}) {
     const kill = () => { try { c.kill('SIGKILL'); } catch {} };
     signal?.addEventListener('abort', kill, {once: true});
     c.stdout.on('data', (d) => (out += d));
-    c.stderr.on('data', (d) => (err = (err + d).slice(-4000)));
+    c.stderr.on('data', (d) => (err = (err + d).slice(-stderrMax)));
     const done = (code) => {
       signal?.removeEventListener('abort', kill);
       onPid?.(null);
