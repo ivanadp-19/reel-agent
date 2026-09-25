@@ -147,6 +147,7 @@ async function deepgramTranscribe(wavPath, lang) {
     method: 'POST',
     headers: {Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'audio/wav'},
     body: fs.readFileSync(wavPath),
+    signal: AbortSignal.timeout(10 * 60_000), // a stalled connection must not hang the job
   });
   if (!res.ok) throw new Error(`deepgram ${res.status}: ${(await res.text()).slice(0, 160)}`);
   return parseDeepgramJson(await res.json());
@@ -191,6 +192,12 @@ export async function transcribeClips(clips, onBatch, lang = 'auto') {
       if (fs.existsSync(wav)) wavs.push(wav);
     }
     if (!wavs.length) return;
+    // Deepgram-only setups: the clips it could not do are skipped per clip
+    // (transcribeClip throws for them), not the whole job
+    if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
+      console.error(`WhisperX is not installed — ${wavs.length} clip(s) left untranscribed`);
+      return;
+    }
   }
 
   if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
