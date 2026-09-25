@@ -70,9 +70,10 @@ with (two projects with that name: exit 5, pass the id).
   same compare-and-swap as every other change. `--dry-run` prints the plan (clips
   and duration before / after, the segments kept per clip) and saves nothing. When
   the timeline changes while the analysis runs, autocut stops with exit 5 instead
-  of applying a stale plan — run it again. It needs a backend whose autocut job
-  hands the plan back in its status (`result`); an older one fails with
-  `job_failed`.
+  of applying a stale plan — run it again. The plan is read from the job status
+  when the backend hands it back there, else from `/trim-silence.json` as the
+  editor reads it; that file is shared by the backend's autocuts, so a plan naming
+  clips the project does not have (two autocuts at once) is refused with exit 5.
 
 ## Renders and the layer cache
 

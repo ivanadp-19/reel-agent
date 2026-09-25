@@ -435,8 +435,12 @@ export const COMMANDS = [
       const p = await getProject(ctx, id);
       if (!p.clips?.length) throw new CliError('invalid', `project ${id} has no clips`, 'reel clips add first');
       const s = await runJob(ctx, '/api/trim-silence', {clips: p.clips, lang: p.lang ?? 'auto', offMic: p.offMic ?? 'mark', project_id: id}, {timeout: o.timeout, what: 'autocut', retry: `reel autocut ${id}`});
-      const plan = s.result?.plan;
-      if (!Array.isArray(plan)) throw new CliError('job_failed', 'the autocut job returned no plan', 'the backend must hand the plan back in the job status (result) — update the backend');
+      // the plan comes in the job status when the backend hands it back, else from the file the job writes (as the editor reads it)
+      const plan = s.result?.plan ?? (await api(ctx, 'GET', `/trim-silence.json?_=${Date.now()}`).catch(() => null))?.plan;
+      if (!Array.isArray(plan)) throw new CliError('job_failed', 'the autocut job returned no plan', `reel autocut ${id}`);
+      // the file is shared by every autocut of the backend: a plan for other clips is another job's
+      const ids = new Set(p.clips.map((c) => c.id));
+      if (plan.some((x) => !ids.has(x.id))) throw new CliError('conflict', 'the autocut plan names clips this project does not have (another autocut ran at the same time)', `reel autocut ${id}`);
       const r = autocutPlan(p.clips, plan);
       const out = {project: id, changed: false, dryRun: !!o['dry-run'], before: r.before, after: r.after, removedSec: r.removedSec, plan: r.changed};
       const line = `${id}: ${r.before.clips} clip(s) ${r.before.durationSec}s → ${r.after.clips} clip(s) ${r.after.durationSec}s (−${r.removedSec}s)`;
