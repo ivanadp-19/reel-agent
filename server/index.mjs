@@ -60,7 +60,8 @@ fs.mkdirSync(PROJECTS_DIR, {recursive: true});
 // Per-run secret for calls that touch the local filesystem by path (the MCP
 // server reads it from .backend-token). Other local pages/processes cannot
 // make the backend ingest arbitrary files without it.
-const TOKEN = process.env.REEL_BACKEND_TOKEN || crypto.randomBytes(16).toString('hex');
+const TOKENS = (process.env.REEL_BACKEND_TOKEN || crypto.randomBytes(16).toString('hex')).split(',').map(t => t.trim()).filter(Boolean); // comma-separated: one per client, revocable individually
+const TOKEN = TOKENS[0]; // primary, written to .backend-token for the local MCP client
 fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 // our pid, so `npm run stop` can stop us by pid — never by a pkill pattern (see AGENTS.md)
 fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
@@ -322,7 +323,7 @@ const server = createServer(async (req, res) => {
     const h = req.headers.authorization || '';
     const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
     const i = b.indexOf(':');
-    const tokOK = req.headers['x-reel-token'] === TOKEN; // MCP/backend clients authenticate with the shared backend token instead of basic auth
+    const tokOK = TOKENS.includes(req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
     const ok = tokOK || i > 0 && AUTH[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), AUTH[b.slice(0, i)]);
     if (!ok) { res.writeHead(401, {'WWW-Authenticate': 'Basic realm="reel-agent"'}); return res.end('auth required'); }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
@@ -588,7 +589,7 @@ const server = createServer(async (req, res) => {
     // a local path (same machine, from the MCP server) skips the upload — token-gated, like add-clip
     const local = url.searchParams.get('path');
     if (local) {
-      if (req.headers['x-reel-token'] !== TOKEN) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!TOKENS.includes(req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp|heic)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video or image file'});
     }
     const tmp = local ?? path.join(ROOT, `.upload-broll-${id}.bin`);
@@ -649,7 +650,7 @@ const server = createServer(async (req, res) => {
     // only with the run token, and only video files
     const local = url.searchParams.get('path');
     if (local) {
-      if (req.headers['x-reel-token'] !== TOKEN) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!TOKENS.includes(req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
     }
     const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);
