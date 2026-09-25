@@ -774,7 +774,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
   return {content: [
-    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(allIssues(p))}`},
+    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.\n\nvalidate:\n${issuesText(allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });
