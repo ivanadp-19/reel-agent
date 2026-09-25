@@ -51,7 +51,7 @@ import {createClipIngest} from './ingest.mjs';
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
 import {findOrGenerate, librarySearch, listLibrary, searchAssets} from '../mcp/assets.mjs';
-import {blackSpans, loadLibrary as loadBrollLibrary, searchLibrary as searchBrollLibrary, sheetFor, upsertAsset} from '../mcp/broll.mjs';
+import {blackSpans, createSheetJobs, loadLibrary as loadBrollLibrary, searchLibrary as searchBrollLibrary, upsertAsset, withSheets} from '../mcp/broll.mjs';
 
 // HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
 // through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
@@ -258,6 +258,8 @@ const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
 const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure});
+// B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
+const brollSheets = createSheetJobs();
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
 const DIST = path.join(ROOT, 'editor', 'dist');
 // Where a review link points: REEL_PUBLIC_URL (https://reels.example.com) when set,
@@ -475,10 +477,8 @@ async function handle(req, res) {
     try { return json(res, 200, await findOrGenerate({prompt: String(b.prompt).slice(0, 400), kind: b.kind, size: b.size, quality: b.quality, force: !!b.force, apiKey: e.OPENAI_API_KEY, model: e.REEL_IMAGE_MODEL || 'gpt-image-1.5'})); } catch (e) { return fail(e); }
   }
   if (req.method === 'GET' && url.pathname === '/api/broll-library') {
-    const rows = searchBrollLibrary(url.searchParams.get('q') || '');
-    const out = [];
-    for (const a of rows) { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, await sheetFor(a)).split(path.sep).join('/'); } catch {} out.push({...a, sheet}); }
-    return json(res, 200, out);
+    // a missing contact sheet is null here and made in the background (brollSheets) — never ffmpeg inside the request
+    return json(res, 200, withSheets(searchBrollLibrary(url.searchParams.get('q') || ''), brollSheets));
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/broll-library/')) {
     const id = decodeURIComponent(url.pathname.split('/').pop());
@@ -675,7 +675,9 @@ async function handle(req, res) {
         cleanup();
         const asset = {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`, ...(durationSec ? {durationSec: +durationSec.toFixed(2)} : {})};
         try { upsertAsset({id, src: asset.src, kind, label: asset.label, durationSec: asset.durationSec ?? null}); } catch {}
-        return json(res, 200, asset);
+        json(res, 200, asset);
+        brollSheets.kick(asset); // the contact sheet after the answer, in the background (never rejects)
+        return;
       } catch (e) {
         cleanup();
         return json(res, 500, {error: String(e).slice(0, 200)});

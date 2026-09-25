@@ -33,19 +33,76 @@ export function searchLibrary(query) {
   return lib.map((e) => ({e, n: contentWords([...e.tags, e.desc, e.label].join(' ')).filter((t) => q.has(t)).length})).filter((x) => x.n).sort((a, b) => b.n - a.n).map((x) => x.e);
 }
 
-// 6 frames across a video (or the image itself), 3 × 2, cached
-export async function sheetFor(asset) {
-  fs.mkdirSync(SHEETS, {recursive: true});
-  const out = path.join(SHEETS, `${asset.id}.jpg`);
+// 6 frames across a video (or the image itself), 3 × 2, cached. ffmpeg writes a
+// part file renamed into place, so sheets/<id>.jpg only ever exists complete: a
+// failed pass leaves no sheet (a later trigger retries) and a concurrent reader
+// never sees a half-written one.
+export const sheetPath = (asset, sheetsDir = SHEETS) => path.join(sheetsDir, `${asset.id}.jpg`);
+export async function sheetFor(asset, {publicDir = PUBLIC, sheetsDir = SHEETS} = {}) {
+  fs.mkdirSync(sheetsDir, {recursive: true});
+  const out = sheetPath(asset, sheetsDir);
   if (fs.existsSync(out)) return out;
-  const src = path.join(PUBLIC, asset.src);
-  if (asset.kind === 'image') { await runCmd('ffmpeg', ['-v', 'error', '-y', '-i', src, '-vf', 'scale=540:-2', out]); return out; }
+  const src = path.join(publicDir, asset.src);
+  const part = path.join(sheetsDir, `${asset.id}.${process.pid}.part.jpg`);
   const dur = asset.durationSec || 1;
   const n = 6;
-  const r = await runCmd('ffmpeg', ['-v', 'error', '-y', '-i', src, '-vf', `fps=${(n - 0.01) / dur},scale=300:-2,tile=3x2`, '-frames:v', '1', out]);
-  if (r.code !== 0) throw new Error(`contact sheet failed: ${r.stderr.trim().split('\n').pop()}`);
+  const vf = asset.kind === 'image' ? ['-vf', 'scale=540:-2'] : ['-vf', `fps=${(n - 0.01) / dur},scale=300:-2,tile=3x2`, '-frames:v', '1'];
+  try {
+    const r = await runCmd('ffmpeg', ['-v', 'error', '-y', '-i', src, ...vf, part]);
+    if (r.code !== 0 || !fs.existsSync(part)) throw new Error(`contact sheet failed: ${r.stderr.trim().split('\n').pop() || `ffmpeg exit ${r.code}`}`);
+    fs.renameSync(part, out);
+  } finally { fs.rmSync(part, {force: true}); }
   return out;
 }
+
+// Contact sheets off the request path (GET /api/broll-library, the upload): `kick`
+// starts one in the background and never throws; one pass per asset id at a time
+// (a second trigger while it runs joins it), `concurrency` passes at once over the
+// whole library (a batch of 18 uploads must not start 18 ffmpegs on a 2-vCPU box).
+// A failure is logged and remembered for `retryAfterMs` only — no permanent failure
+// is cached, the next trigger after that tries again.
+export function createSheetJobs({publicDir = PUBLIC, sheetsDir = SHEETS, generate = (a) => sheetFor(a, {publicDir, sheetsDir}), exists = (a) => fs.existsSync(sheetPath(a, sheetsDir)), concurrency = 1, retryAfterMs = 30_000, log = (m) => console.error(m), now = Date.now} = {}) {
+  const inflight = new Map(); // id → promise (queued or running)
+  const failedAt = new Map(); // id → ms of the last failure
+  const waiting = [];
+  let running = 0;
+  const pump = () => {
+    while (running < concurrency && waiting.length) {
+      const {asset, resolve} = waiting.shift();
+      running++;
+      const settle = (f) => { running--; inflight.delete(asset.id); resolve(f); pump(); }; // free the id first: a trigger right after retries
+      Promise.resolve().then(() => generate(asset)).then(
+        (f) => { failedAt.delete(asset.id); settle(f); },
+        (e) => { failedAt.set(asset.id, now()); settle(null); try { log(`broll sheet ${asset.id}: ${String(e?.message ?? e).slice(0, 300)}`); } catch {} },
+      ).catch(() => {});
+    }
+  };
+  const has = (a) => { try { return !!exists(a); } catch { return false; } };
+  const kick = (asset) => {
+    if (!asset?.id) return Promise.resolve(null);
+    const cur = inflight.get(asset.id);
+    if (cur) return cur;
+    if (has(asset)) return Promise.resolve(sheetPath(asset, sheetsDir));
+    const t = failedAt.get(asset.id);
+    if (t != null && now() - t < retryAfterMs) return Promise.resolve(null);
+    const p = new Promise((resolve) => waiting.push({asset, resolve}));
+    inflight.set(asset.id, p);
+    pump();
+    return p; // resolves to the sheet's path, or null when it failed — never rejects
+  };
+  // the sheet's public URL when it is cached, else null
+  const url = (a) => (has(a) ? '/' + path.relative(publicDir, sheetPath(a, sheetsDir)).split(path.sep).join('/') : null);
+  return {kick, url, pending: (id) => inflight.has(id)};
+}
+
+// The library as GET /api/broll-library answers it: each asset with `sheet`, its
+// public URL when the cached sheet exists, else null — and a background pass for
+// every missing one. Never waits on ffmpeg.
+export const withSheets = (rows, jobs) => rows.map((a) => {
+  const sheet = jobs.url(a);
+  if (!sheet) jobs.kick(a);
+  return {...a, sheet};
+});
 
 // black stretches (≥ 0.4 s) of a source, source-relative ms, cached per file
 export async function blackSpans(src) {
