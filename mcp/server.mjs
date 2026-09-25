@@ -31,7 +31,7 @@ import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cu
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
-import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
+import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
@@ -424,13 +424,9 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
     const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
     s = a.src; kind = a.kind; query = label ?? a.label;
   } else if (!src) throw new Error('give asset_id or src');
-  else if (!/^https?:/.test(src) && path.isAbsolute(src)) {
-    if (!fs.existsSync(src)) throw new Error(`file not found: ${src}`);
-    const dir = path.join(PUBLIC, 'broll'); fs.mkdirSync(dir, {recursive: true});
-    const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name)); s = `broll/${name}`;
-  } else if (!/^https?:/.test(src) && !fs.existsSync(path.join(PUBLIC, src))) throw new Error(`not found in public/: ${src}`);
+  else s = brollSrc(src);
   if (/^https?:/.test(s)) source = 'pexels';
-  if (!kind) kind = /\.(jpe?g|png|webp)(\?|$)/i.test(s) ? 'image' : 'video';
+  if (!kind) kind = brollKind(s);
   const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
   p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
   const abs = toAbs(p, clip.id, b.startMs) ?? 0;
@@ -498,7 +494,7 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
-  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = src; b.source = /^https?:/.test(src) ? 'pexels' : 'own'; }
+  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
   if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
