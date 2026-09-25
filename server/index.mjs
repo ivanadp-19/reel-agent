@@ -237,12 +237,26 @@ function publicBase(req) {
   const proto = first(req.headers['x-forwarded-proto']) || 'http';
   return `${/^https?$/.test(proto) ? proto : 'http'}://${host}`;
 }
+// The MCP over HTTP (/mcp, server/mcp-http.mjs): the tools of mcp/server.mjs, loaded on
+// the first /mcp request. They talk to this backend over loopback with the primary
+// token (.backend-token), exactly as the stdio server does.
+let mcpHttpP = null;
+const mcpHttp = () => mcpHttpP ??= (async () => {
+  process.env.REEL_API ||= `http://127.0.0.1:${BIND_PORT}`;
+  const [{createReelServer, releaseSession}, {createMcpHttp}] = await Promise.all([import('../mcp/server.mjs'), import('./mcp-http.mjs')]);
+  return createMcpHttp({createServer: createReelServer, onSessionClosed: releaseSession, idleMs: +(process.env.REEL_MCP_IDLE_MIN || 60) * 60e3});
+})();
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const g = gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
+  if (g.kind === 'mcp') { // token-gated MCP for remote agents
+    try { return await (await mcpHttp()).handle(req, res); }
+    catch (e) { console.error('mcp:', e); if (!res.headersSent) return json(res, 500, {error: 'mcp failed'}); return res.end(); }
+  }
   if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());

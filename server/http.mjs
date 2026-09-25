@@ -44,12 +44,19 @@ export function serveFile(req, res, file, headers = {}) {
 // token in the URL is the credential — and read-only; everything else keeps the
 // gate it had: basic auth or the backend token in public mode (Railway), loopback
 // Host + localhost Origin otherwise. public/exports/* is never reachable without it.
-// → {kind: 'review' | 'ping' | 'ok'} or {kind: 'deny', status, headers, body}
+// The MCP over HTTP (/mcp, server/mcp-http.mjs) takes only the backend token, in
+// both modes — never the editor's basic auth: an agent is a client with its own
+// token (REEL_BACKEND_TOKEN lists one per client), revoked by removing it.
+// → {kind: 'review' | 'ping' | 'mcp' | 'ok'} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
+export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
 export function gate(req, url, {publicMode, auth = {}, tokens = []}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
+  const mcp = isMcpPath(url.pathname);
+  if (mcp && !tokens.includes(req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
+  if (mcp && publicMode) return {kind: 'mcp'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
   if (publicMode) {
     const h = req.headers.authorization || '';
@@ -63,5 +70,5 @@ export function gate(req, url, {publicMode, auth = {}, tokens = []}) {
   const host = (req.headers.host || '').replace(/:\d+$/, '');
   if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};
   if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'bad origin'})};
-  return {kind: 'ok'};
+  return {kind: mcp ? 'mcp' : 'ok'};
 }
