@@ -20,7 +20,8 @@
 //       owner? (backend pid), pid? (render process pid), attempts, result?, error?}
 //   status   queued → running → done | failed | cancelled
 //   progress 0–100 over the whole job (stage weights in scripts/render-runner.mjs)
-//   result   {file (/exports/…), path (absolute), renderSec, qc?, version?, versionError?, master?}
+//   mode     full | layers (scripts/render-runner.mjs; a reel layers cannot carry runs full, result.fallback says why)
+//   result   {file (/exports/…), path (absolute), renderSec, mode, fallback?, master? ('cached' | 'rendered'), stages, qc?, version?, versionError?}
 //
 // Queue: serial by default (one render at a time on the whole machine, counted over
 // every backend sharing public/); REEL_RENDER_WORKERS = N allows N at once. FIFO by seq.
@@ -174,7 +175,7 @@ export function describeJob(job, {ahead = 0, now = Date.now()} = {}) {
   }
   if (job.status === 'done') {
     const r = job.result ?? {};
-    return `${head} → ${r.path || r.file}${r.renderSec != null ? ` (${fmtDuration(r.renderSec)} for ${f1(job.expectSec ?? 0)}s of video)` : ''}${r.master?.hit ? ' [cached master]' : ''}${r.version ? ` · review version v${r.version}` : ''}${r.versionError ? ` · review version NOT recorded: ${r.versionError}` : ''}`;
+    return `${head} → ${r.path || r.file}${r.renderSec != null ? ` (${fmtDuration(r.renderSec)} for ${f1(job.expectSec ?? 0)}s of video)` : ''}${r.mode ? ` [${r.mode}${r.master ? `, master ${r.master}` : ''}]` : ''}${r.fallback?.length ? ` (layers → full: ${r.fallback.join('; ')})` : ''}${r.version ? ` · review version v${r.version}` : ''}${r.versionError ? ` · review version NOT recorded: ${r.versionError}` : ''}`;
   }
   return `${head}${job.error ? ` — ${job.error}` : ''}`;
 }
@@ -220,14 +221,14 @@ export function createRenderJobs({
   };
   const cancelRequested = (id) => fs.existsSync(fileOf(dir, id, '.cancel'));
 
-  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', label} = {}) {
+  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label} = {}) {
     if (typeof props !== 'string') props = JSON.stringify(props ?? {});
     const t = now();
     const id = newJobId(t);
     // seq orders the queue: time-based so the order holds across backends and restarts
     const seq = Math.max(t * 1000, seqLast + 1); seqLast = seq;
     fs.writeFileSync(fileOf(dir, id, '.props.json'), props);
-    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, expectSec, clean, createdAt: iso(), attempts: 0});
+    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
     pump();
     const jobs = listJobs(dir);
     return {job: readJob(dir, id) ?? job, ahead: aheadOf(jobs, id)};

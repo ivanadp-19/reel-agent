@@ -12,28 +12,37 @@
 // Progress is one 0–100 number over the whole job (STAGES below: the share of each
 // stage), plus the stage, a label, frames {done, total} and etaSec.
 //
-// MASTER CACHE HOOK (the layered pipeline, "Paso 1", caches masters by hash — built on
-// another branch). A master = the Remotion render of a set of composition props,
-// BEFORE loudness and QC. When `scripts/master-cache.mjs` exists the backend passes it
-// here as `master`; its contract:
-//   lookupMaster({props, raw, draft}) → {file, key} | null   file = an absolute mp4 path
-//   storeMaster({props, raw, draft, file, key?}) → void       COPY file (finalize rewrites
-//                                                            it in place after this call)
-// A hit copies the master to the export and skips bundling + rendering (the final still
-// goes through loudness + QC + review version); the job result says master {hit, key}.
-// A miss renders and then offers the fresh master to storeMaster. A hook that throws is
-// logged and treated as a miss: the cache can never fail a render.
+// TWO MODES (src/layers.ts chooseRenderMode picks, scripts/layers.mjs builds — #17):
+//   full    one Remotion pass, captions included
+//   layers  the master (the reel without captions) from the cache in .render-cache/masters/,
+//           keyed by masterKey (the code, the frame format, every prop and media file it
+//           draws), rendered only when it is not there; a transparent caption layer (PNG
+//           frames, or VP9 / ProRes with REEL_CAPTION_ALPHA); an ffmpeg composite. A reel
+//           the caption layer cannot carry (captions that blur or scale the footage, or sit
+//           behind the presenter) falls back to full, and the job says why (fallback).
+// The queue and the cache work together, never rendering one master twice: jobs are
+// serial by default, so the next one finds the master cached; with REEL_RENDER_WORKERS > 1
+// a job that needs a master another job of this backend is rendering waits for it
+// (single flight per key) instead of rendering it again. A master enters the cache only
+// when it is complete (rename of its .part-<job> file); a cancelled or failed one never.
+// The job result says {mode, fallback?, master: 'cached' | 'rendered', stages (s)}, and
+// every stage goes to the project's timing log (scripts/timing.mjs, logStage): queue,
+// prepare, render | master / captions / encode / composite, qc.
 //
 // CANCEL (or the stall control) aborts ctx.signal. Every stage follows it: prepare gets
 // the signal (and is raced against it, so a step that ignores it still frees the queue
 // slot), the child processes are killed, and on the way out the job's files are removed
-// (every exports/edited-<id>*: the render, finalize's .loudnorm.mp4) — and a review
+// (every exports/edited-<id>*: the render, finalize's .loudnorm.mp4; the master's .part,
+// the caption frames) — and a review
 // version recorded while the cancel came in is taken back (unrecord): a cancelled job
 // leaves no file and no version.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {renderArgs} from './render-queue.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, probeColor} from './layers.mjs';
+import {chooseRenderMode} from '../src/layers.ts';
 import {linkPublic} from './public-links.mjs';
 import {recordFinal, removeVersion} from './reviews.mjs';
 import {killTree} from './render-jobs.mjs';
@@ -43,7 +52,21 @@ export const STAGES = {
   final: {preparing: [0, 4], master: [4, 5], bundling: [5, 10], rendering: [10, 84], encoding: [84, 88], finalizing: [88, 96], review: [96, 99]},
   draft: {preparing: [0, 4], master: [4, 5], bundling: [5, 10], rendering: [10, 96], encoding: [96, 99.5]},
 };
-export const STAGE_LABEL = {preparing: 'Preparing media', master: 'Using cached master', bundling: 'Bundling', rendering: 'Rendering', encoding: 'Encoding', finalizing: 'Loudness + QC', review: 'Review proxy'};
+export const STAGE_LABEL = {preparing: 'Preparing media', master: 'Master from the cache', bundling: 'Bundling', rendering: 'Rendering', encoding: 'Encoding', compositing: 'Compositing', finalizing: 'Loudness + QC', review: 'Review proxy'};
+export const FPS = 30;
+// where each Remotion pass sits in the overall %, per mode: [from, to] (inside a pass:
+// bundling the first 7 %, frames up to 95 %, the encode the rest); then compositing
+export function passRanges({mode, captions, draft}) {
+  const end = draft ? 99 : STAGES.final.encoding[1];
+  const start = STAGES.final.bundling[0];
+  if (mode !== 'layers') return {render: [start, end]};
+  if (!captions) return {master: [start, end]};
+  return {master: [start, 60], captions: [60, end - 5], compositing: [end - 5, end]};
+}
+const inPass = ([a, b], stage, frac) => {
+  const [x, y] = stage === 'bundling' ? [0, 0.07] : stage === 'rendering' ? [0.07, 0.95] : [0.95, 1];
+  return Math.min(99, Math.round(a + (b - a) * (x + (y - x) * Math.max(0, Math.min(1, frac)))));
+};
 export function overall(stage, frac = 0, draft = false) {
   const r = STAGES[draft ? 'draft' : 'final'][stage];
   if (!r) return 0;
@@ -109,9 +132,14 @@ function runChild(cmd, args, {cwd, signal, onLine, onPid, env}) {
   });
 }
 
-// the defaults: the real remotion render and the real finalize; tests pass their own
+// the defaults: the real remotion passes, ffmpeg and the real finalize; tests pass their own
+const passOpts = ({outFile, propsFile, publicDir, draft, plan}) => ({outFile, propsFile, publicDir, draft, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes});
 export const defaultCommands = {
-  render: ({outFile, propsFile, publicDir, draft, plan}) => ['npx', renderArgs({outFile, propsFile, publicDir, draft, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes})],
+  render: (o) => ['npx', renderArgs(passOpts(o))],
+  master: (o) => ['npx', masterArgs(passOpts(o))],
+  captions: (o) => ['npx', captionArgs(passOpts(o))],
+  encode: ({frames, outFile, alpha}) => { const a = alphaEncodeArgs({frames, outFile, alpha, fps: FPS}); return a && ['ffmpeg', a]; }, // null: png, nothing to encode
+  composite: ({master, layer, alpha, outFile, draft}) => ['ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile, fps: FPS, draft, color: probeColor(master)})],
   finalize: ({outFile, expectSec, clean}) => ['node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)]],
 };
 
@@ -123,7 +151,11 @@ export function createRenderRunner({
   tmpDir = path.join(root, '.captions-tmp'),
   plan = {concurrency: 1, cacheBytes: 5e8},
   prepare = async (raw) => raw, // (raw props, jobId, {signal, setPid, progress(frac, label)}) → raw props: localize remote B-roll, bake LUTs
-  master = null, // {lookupMaster, storeMaster} — see MASTER CACHE HOOK above
+  masterCache = null, // scripts/layers.mjs createMasterCache (get / put / file / dir); no cache → every render is full
+  captionAlpha = 'png', // REEL_CAPTION_ALPHA: png | vp9 | prores
+  chooseMode = (requested, props) => chooseRenderMode(requested, props, FPS),
+  keyOf = (props, {draft}) => masterKey(props, {code: codeVersion(root), fps: FPS, draft, publicDir}),
+  logStage = () => {}, // (project, stage, ms, extra) → the project's timing log
   commands = defaultCommands,
   record = recordFinal,
   unrecord = ({projectId, v}) => removeVersion(reviewsDir, projectId, v, publicDir), // a version recorded by a job cancelled meanwhile
@@ -131,6 +163,8 @@ export function createRenderRunner({
   now = Date.now,
 } = {}) {
   fs.mkdirSync(exportsDir, {recursive: true});
+  commands = {...defaultCommands, ...commands};
+  const inflight = new Map(); // master key → the promise of the job of this backend rendering it (single flight)
   return async function runRender(job, ctx) {
     const {id, draft} = job;
     const {signal} = ctx;
@@ -168,73 +202,135 @@ export function createRenderRunner({
     }
 
     async function work() {
+      const project = job.projectId ?? null;
+      const stages = {}; // seconds per stage, in the result and the timing log
+      const timed = async (name, fn, extra = {}) => {
+        const t = now();
+        let ok = true;
+        try { return await fn(); } catch (e) { ok = false; throw e; } finally {
+          const ms = now() - t;
+          stages[name] = +(ms / 1000).toFixed(1);
+          if (!signal.aborted) logStage(project, name, ms, {job: id, mode: result.mode, draft, ...extra, ...(ok ? {} : {ok: false})});
+        }
+      };
+      const queuedMs = Date.parse(job.startedAt ?? '') - Date.parse(job.createdAt ?? '');
+      if (queuedMs > 1000) logStage(project, 'queue', queuedMs, {job: id});
+
       set('preparing', 0);
+      const tPrep = now();
       const raw = await abortable(prepare(ctx.props, id, {signal, setPid: ctx.setPid, progress: (frac, label) => set('preparing', frac, {label})}));
       stop();
+      if (now() - tPrep > 1000) logStage(project, 'prepare', now() - tPrep, {job: id});
       const props = JSON.parse(raw);
 
-      // ---- the master: from the cache, or rendered now ----
-      let hit = null;
-      if (master?.lookupMaster) {
-        try { hit = await abortable(master.lookupMaster({props, raw, draft})); } catch (e) { stop(); log(`render ${id}: master cache lookup failed (${e.message}) — rendering`); }
-        if (hit && !fs.existsSync(hit.file ?? '')) hit = null;
-      }
-      if (hit) {
-        set('master', 0);
-        await abortable(fs.promises.copyFile(hit.file, outFile));
-        result.master = {hit: true, key: hit.key ?? null};
-        set('master', 1);
-      } else {
-        const propsFile = path.join(root, `.props-${id}.json`);
-        // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-        const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
-        fs.writeFileSync(propsFile, raw);
-        set('bundling', 0);
+      const choice = chooseMode(job.mode === 'layers' ? 'layers' : 'full', props);
+      result.mode = choice.mode;
+      if (choice.reasons?.length) { result.fallback = choice.reasons; log(`render ${id}: layers → full (${choice.reasons.join('; ')})`); }
+      const layered = choice.mode === 'layers' && masterCache;
+      if (choice.mode === 'layers' && !masterCache) { result.mode = 'full'; result.fallback = ['no master cache on this backend']; }
+      const ranges = passRanges({mode: layered ? 'layers' : 'full', captions: choice.captions, draft});
+
+      // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+      const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
+      const tmp = [links]; // removed whatever happens: props files, the master's .part, the caption frames
+      const propsFile = (name, p) => { const f = path.join(root, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
+      // one Remotion pass: progress mapped into its range, frames and an ETA, the pid watched
+      const pass = async (kind, range, outPath, pProps, what) => {
+        set('bundling', 0, {progress: inPass(range, 'bundling', 0), label: `Bundling${what ? ` (${what})` : ''}`});
         let firstFrameAt = null, lastErr = '';
-        try {
-          const [cmd, args] = commands.render({outFile, propsFile, publicDir: links, draft, plan, id});
-          const r = await runChild(cmd, args, {
-            cwd: root, signal, onPid: ctx.setPid,
-            onLine: (l) => {
-              if (/error/i.test(l)) lastErr = l.trim();
-              const p = parseRemotion(l);
-              if (!p) return;
-              const extra = {};
-              if (p.frames) {
-                extra.frames = p.frames;
-                if (p.stage === 'rendering' && p.frames.done > 0) {
-                  firstFrameAt ??= now();
-                  extra.etaSec = etaFor({done: p.frames.done, total: p.frames.total, sinceFirstFrameSec: (now() - firstFrameAt) / 1000, draft, expectSec});
-                }
-                if (p.stage === 'rendering') extra.label = `Rendering frame ${p.frames.done}/${p.frames.total}`;
+        const [cmd, args] = commands[kind]({outFile: outPath, propsFile: propsFile(kind === 'render' ? '' : `-${kind}`, pProps), publicDir: links, draft, plan, id});
+        const r = await runChild(cmd, args, {
+          cwd: root, signal, onPid: ctx.setPid,
+          onLine: (l) => {
+            if (/error/i.test(l)) lastErr = l.trim();
+            const p = parseRemotion(l);
+            if (!p) return;
+            const extra = {progress: inPass(range, p.stage, p.frac), label: `${STAGE_LABEL[p.stage]}${what ? ` ${what}` : ''}`};
+            if (p.frames) {
+              extra.frames = p.frames;
+              if (p.stage === 'rendering' && p.frames.done > 0) {
+                firstFrameAt ??= now();
+                extra.etaSec = etaFor({done: p.frames.done, total: p.frames.total, sinceFirstFrameSec: (now() - firstFrameAt) / 1000, draft, expectSec});
               }
-              set(p.stage, p.frac, extra);
-            },
-          });
-          if (r.code !== 0 || !fs.existsSync(outFile)) {
-            fs.rmSync(outFile, {force: true});
-            log(`render ${id} failed:\n${r.tail.slice(-1200)}`);
-            throw new RenderError(lastErr.slice(0, 300) || (r.signal ? `the render process was killed (${r.signal})` : `render exited ${r.code}`));
+              if (p.stage === 'rendering') extra.label = `Rendering ${what ? `${what} ` : ''}frame ${p.frames.done}/${p.frames.total}`;
+            }
+            set(p.stage, p.frac, extra);
+          },
+        });
+        if (r.code !== 0 || !fs.existsSync(outPath)) {
+          log(`render ${id} ${kind} failed:\n${r.tail.slice(-1200)}`);
+          throw new RenderError(lastErr.slice(0, 300) || (r.signal ? `the render process was killed (${r.signal})` : `render exited ${r.code}`));
+        }
+      };
+      const ffmpeg = async (argv, what) => {
+        const r = await runChild(argv[0], argv[1], {cwd: root, signal, onPid: ctx.setPid});
+        if (r.code !== 0) throw new RenderError(`${what} failed: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
+      };
+      try {
+        if (!layered) {
+          await timed('render', () => pass('render', ranges.render, outFile, props), {videoSec: expectSec});
+        } else {
+          // ---- the master: cached, being rendered by another job here (wait for it), or rendered now ----
+          const key = keyOf(props, {draft});
+          const renderMaster = async () => {
+            const part = path.join(masterCache.dir, `${key}.part-${id}.mp4`);
+            tmp.push(part);
+            await timed('master', () => pass('master', ranges.master, part, {...props, captionsOff: true}, 'master'), {videoSec: expectSec});
+            stop(); // a cancelled master never enters the cache
+            return masterCache.put(key, part);
+          };
+          let master = null;
+          for (let waited = 0; !master;) {
+            const cached = masterCache.get(key);
+            if (cached) { master = cached; result.master ??= 'cached'; break; }
+            const other = inflight.get(key);
+            if (other) {
+              // same master, other job: wait (the label ticks, so the stall control sees it alive)
+              const tick = setInterval(() => set('master', 0, {label: `Waiting for the same master (another render) · ${++waited * 5}s`}), 5000);
+              set('master', 0, {label: 'Waiting for the same master (another render)'});
+              try { await abortable(other); } catch { stop(); } finally { clearInterval(tick); }
+              continue; // cached now — or its job failed: render it here
+            }
+            const mine = renderMaster();
+            inflight.set(key, mine);
+            mine.catch(() => {});
+            try { master = await mine; result.master = 'rendered'; } finally { inflight.delete(key); }
           }
-        } finally {
-          fs.rmSync(propsFile, {force: true});
-          fs.rmSync(links, {recursive: true, force: true});
+          if (result.master === 'cached') set('master', 1, {progress: ranges.master[1], label: 'Master reused from the cache'});
+          if (choice.captions) {
+            // Remotion reads any dot in a sequence folder's path as an extension and refuses it (.captions-tmp would): the OS temp dir
+            const frames = path.join(os.tmpdir(), `reel-captions-${id}`);
+            tmp.push(frames);
+            await timed('captions', () => pass('captions', ranges.captions, frames, {...props, layer: 'captions'}, 'captions layer'));
+            let layer = frames;
+            const ext = ALPHA[captionAlpha]?.ext;
+            const enc = ext && commands.encode({frames, outFile: (layer = `${frames}.${ext}`), alpha: captionAlpha});
+            if (enc) {
+              tmp.push(layer);
+              set('compositing', 0, {progress: ranges.compositing[0], label: `Encoding captions layer (${captionAlpha})`});
+              await timed('encode', () => ffmpeg(enc, 'captions layer encode'));
+            }
+            set('compositing', 0.5, {progress: Math.round((ranges.compositing[0] + ranges.compositing[1]) / 2), label: 'Compositing', frames: undefined, etaSec: undefined});
+            await timed('composite', () => ffmpeg(commands.composite({master, layer, alpha: captionAlpha, outFile, draft}), 'composite'));
+          } else await abortable(fs.promises.copyFile(master, outFile)); // nothing to lay over it: the master is the reel
         }
-        if (master?.storeMaster) {
-          try { await abortable(master.storeMaster({props, raw, draft, file: outFile})); } catch (e) { stop(); log(`render ${id}: master cache store failed (${e.message})`); }
-        }
-        result.master = master ? {hit: false} : undefined;
+      } finally {
+        for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
       }
+      result.stages = stages;
       result.renderSec = Math.round((now() - t0) / 1000);
       stop();
-      if (draft) { log(`render ${id} draft took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`); return result; }
+      if (draft) { log(`render ${id} draft [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`); return result; }
 
       // ---- final: loudness + QC, in a child process (a few seconds of ffmpeg must not block the backend) ----
       set('finalizing', 0, {frames: undefined, etaSec: Math.round(8 + expectSec * 0.35)});
       const [fcmd, fargs] = commands.finalize({outFile, expectSec, clean: job.clean ?? 'off'});
-      const fin = await runChild(fcmd, fargs, {cwd: root, signal, onPid: ctx.setPid});
       let qc;
-      try { qc = JSON.parse(fin.out.trim().split('\n').pop()); } catch { qc = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+      await timed('qc', async () => {
+        const fin = await runChild(fcmd, fargs, {cwd: root, signal, onPid: ctx.setPid});
+        try { qc = JSON.parse(fin.out.trim().split('\n').pop()); } catch { qc = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+        if (!qc.ok) throw new Error('qc'); // logged as ok: false
+      }).catch((e) => { if (signal.aborted || !qc) throw e; });
       result.qc = qc.text;
       result.renderSec = Math.round((now() - t0) / 1000);
       if (!qc.ok) {
@@ -242,7 +338,7 @@ export function createRenderRunner({
         const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
         try { fs.renameSync(outFile, path.join(exportsDir, failed)); } catch {}
         const why = [qc.error, ...(qc.checks ?? []).filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ');
-        throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed)});
+        throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed), mode: result.mode, stages});
       }
       stop();
       // ---- a final that passed QC for a project becomes its next review version ----
@@ -257,7 +353,7 @@ export function createRenderRunner({
         }
         stop(); // the cancel came in while it was being recorded: cleanUp takes the version back
       }
-      log(`render ${id} took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`);
+      log(`render ${id} [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`);
       return result;
     }
   };

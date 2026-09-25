@@ -15,7 +15,6 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {pathToFileURL} from 'node:url';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
@@ -26,7 +25,10 @@ import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
+import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
+import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, serveFile} from './http.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -76,6 +78,8 @@ fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
 process.once('exit', () => { try { if (fs.readFileSync(path.join(ROOT, '.backend.pid'), 'utf8') === String(process.pid)) fs.rmSync(path.join(ROOT, '.backend.pid')); } catch {} });
 
+// backend work into the project's timing log (scripts/timing.mjs), when the request names the project
+const logStage = (project, stage, ms, extra = {}) => project && logTiming(PROJECTS_DIR, project, {kind: 'stage', stage, ms, ...extra});
 const captionJobs = {}; // jobId -> {status, progress, label, error}
 const transcribeJobs = {}; // jobId -> {status, progress, label, error}
 const trimJobs = {}; // jobId -> {status, progress, label, error}
@@ -94,17 +98,17 @@ const json = (res, code, obj) => {
 
 const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
-  '/api/captions': {route: '/api/captions', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
-  '/api/trim-silence': {route: '/api/trim-silence', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
-  '/api/transcribe': {route: '/api/transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
-  '/api/matte': {route: '/api/matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
-  '/api/grade': {route: '/api/grade', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
-  '/api/lut': {route: '/api/lut', name: 'LUT', prefix: 'lut', script: 'scripts/lut.mjs', store: {}},
+  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
+  '/api/trim-silence': {route: '/api/trim-silence', stage: 'autocut', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
+  '/api/transcribe': {route: '/api/transcribe', stage: 'transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
+  '/api/matte': {route: '/api/matte', stage: 'matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
+  '/api/grade': {route: '/api/grade', stage: 'grade-analysis', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
+  '/api/lut': {route: '/api/lut', stage: 'lut', name: 'LUT', prefix: 'lut', script: 'scripts/lut.mjs', store: {}},
 };
 
 // Turn a stderr tail into one line a user can act on.
 function explainFailure(tail, fallback) {
-  const lines = tail.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !/^PROGRESS:/.test(l));
+  const lines = tail.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !/^(PROGRESS|TIMING):/.test(l));
   const known = [
     [/WhisperX is not installed|whisperx could not start|spawnSync \.venv\/bin\/whisperx/i, 'WhisperX is not installed — run `npm run setup` (creates .venv and installs whisperx)'],
     [/whisperx failed \(exit/i, null], // keep the script's own message (has the real whisperx error)
@@ -162,6 +166,11 @@ const BROLL_DIR = path.join(PUBLIC, 'broll');
 // (render, start_render, render_status, list_render_jobs, cancel_render) and the CLI
 // (scripts/render-cli.mjs) all go through the routes below.
 const PLAN = renderPlan();
+// layered renders (scripts/layers.mjs, run by scripts/render-runner.mjs): masters cached outside public/ (never bundled, never committed)
+const masterCache = createMasterCache(path.join(ROOT, '.render-cache', 'masters'));
+const CAPTION_ALPHA = process.env.REEL_CAPTION_ALPHA in ALPHA ? process.env.REEL_CAPTION_ALPHA : 'png';
+// the mode a render runs in when the request names none (full = the one-pass render)
+const DEFAULT_MODE = process.env.REEL_RENDER_MODE === 'layers' ? 'layers' : 'full';
 // LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
 // baked here, before the render, so no clip silently plays ungraded
 async function bakeMissing(raw, id, {signal, setPid, progress} = {}) {
@@ -189,18 +198,16 @@ async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
   await localizeRemoteBrolls(props, {dir: BROLL_DIR, signal, onPid: setPid, progress: (f, label) => progress?.(f * 0.8, label)});
   return bakeMissing(JSON.stringify(props), id, {signal, setPid, progress});
 }
-// the layered pipeline's master cache (another branch), when it is there — contract in scripts/render-runner.mjs
-const MASTER_HOOK = path.join(ROOT, 'scripts', 'master-cache.mjs');
-const masterCache = fs.existsSync(MASTER_HOOK) ? await import(pathToFileURL(MASTER_HOOK).href).catch((e) => { console.error(`master cache hook: ${e.message}`); return null; }) : null;
 const RENDER_JOBS = jobsDir(PUBLIC);
 const renderJobs = createRenderJobs({
   dir: RENDER_JOBS,
   workers: PLAN.workers,
-  run: createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, master: masterCache}),
+  // full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version
+  run: createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage}),
 }).start();
 // stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
 for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
-console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}${masterCache ? ', master cache on' : ''} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
+console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
 
 // Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
 // locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
@@ -351,6 +358,17 @@ const server = createServer(async (req, res) => {
     let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
     const tags = Array.isArray(b.tags) ? b.tags.map((t) => String(t).trim()).filter((t) => t.length >= 2 && t.length <= 30).slice(0, 12) : undefined;
     return json(res, 200, upsertAsset({id, ...(tags ? {tags} : {}), ...(typeof b.desc === 'string' ? {desc: b.desc.trim().slice(0, 200)} : {})}));
+  }
+  // asset catalog (scripts/catalog.mjs): read-only here — building it is `node scripts/catalog.mjs` or MCP catalog_assets, never the backend
+  if (req.method === 'GET' && url.pathname === '/api/catalog') {
+    const q = url.searchParams;
+    const bool = (k) => (q.has(k) ? q.get(k) === 'true' : undefined);
+    const num = (k) => (q.has(k) && q.get(k) !== '' && Number.isFinite(+q.get(k)) ? +q.get(k) : undefined);
+    const dir = q.get('dir') || undefined;
+    if (dir && !/^[\w-]+(\/[\w-]+)*$/.test(dir)) return json(res, 400, {error: 'bad dir'});
+    const list = (k) => (q.get(k) ? q.get(k).split(',').map((t) => t.trim()).filter(Boolean) : undefined);
+    const rows = searchCatalog(loadEntries(PUBLIC, dir ? [dir] : undefined), {dir, kind: q.get('kind') || undefined, minSec: num('min_sec'), maxSec: num('max_sec'), daylight: q.get('daylight') || undefined, orientation: q.get('orientation') || undefined, hasBlack: bool('has_black'), maxBlackRatio: num('max_black_ratio'), hasSpeech: bool('has_speech'), tags: list('tags'), excludeTags: list('exclude_tags'), text: q.get('text') || undefined, limit: Math.min(500, num('limit') ?? 200)});
+    return json(res, 200, rows);
   }
   if (req.method === 'GET' && url.pathname === '/api/black') {
     const src = url.searchParams.get('src') || '';
@@ -632,11 +650,20 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && job) {
     const id = String(Date.now());
     const inFile = path.join(ROOT, `.${job.prefix}-${id}.json`);
-    fs.writeFileSync(inFile, await body(req));
+    const raw = await body(req);
+    fs.writeFileSync(inFile, raw);
+    let project = null;
+    try { const p = JSON.parse(raw).project_id; if (typeof p === 'string') project = p; } catch {}
+    const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
     const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
     let errTail = '';
+    let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
+      for (const m of String(d).matchAll(/TIMING:transcribe:(\d+):(\d+)/g)) {
+        innerMs += +m[1];
+        if (job.stage !== 'transcribe') logStage(project, 'transcribe', +m[1], {job: id, sources: +m[2], in: job.stage});
+      }
       for (const m of String(d).matchAll(/PROGRESS:(\d+):([^\n]+)/g)) {
         job.store[id] = {status: 'running', progress: +m[1], label: m[2].trim()};
       }
@@ -649,6 +676,9 @@ const server = createServer(async (req, res) => {
     });
     child.on('close', (code) => {
       fs.rmSync(inFile, {force: true});
+      // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
+      const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
+      logStage(project, job.stage, ms, {job: id, ...(code === 0 ? {} : {ok: false})});
       job.store[id] = code === 0
         ? {status: 'done', progress: 100, label: 'Ready'}
         : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
@@ -689,8 +719,14 @@ const server = createServer(async (req, res) => {
     return json(res, 405, {error: 'method not allowed'});
   }
 
+  // where a project's time went (scripts/timing.mjs) — the MCP's timing_report reads the same log
+  if (req.method === 'GET' && url.pathname.startsWith('/api/timing/')) {
+    const s = summarize(readTiming(PROJECTS_DIR, decodeURIComponent(url.pathname.split('/').pop())));
+    return json(res, 200, {...s, text: timingText(s)});
+  }
+
   // ---- render jobs ----
-  //   POST   /api/render {…props, draft?, project_id?} → {jobId, status: 'queued', ahead} at once
+  //   POST   /api/render {…props, draft?, mode?, project_id?} → {jobId, status: 'queued', ahead} at once
   //   GET    /api/render/<id>                → the job in the shape pollers read (running / done / error)
   //   GET    /api/render-jobs?project=&status=&limit= → {jobs (newest first, each with ahead), workers}
   //   GET    /api/render-jobs/<id>           → the job as stored + ahead
@@ -699,10 +735,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?}
     let draft = false;
-    let expectSec, clean = 'off', projectId = null;
+    let expectSec, clean = 'off', projectId = null, mode = DEFAULT_MODE;
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
+      if (props.mode === 'full' || props.mode === 'layers') mode = props.mode;
       // project_id (editor, MCP render): a final that passes QC is recorded as a review version of that project
       if (props.project_id != null) {
         if (!/^[\w-]+$/.test(String(props.project_id))) throw new Error('bad project_id');
@@ -716,8 +753,8 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
-    // drafts keep their project for the job list; only finals become review versions (the runner checks draft)
-    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId});
+    // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode});
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {})});
   }

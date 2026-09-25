@@ -9,7 +9,7 @@ export type RenderJob = {
   id: string; status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'; draft: boolean; projectId: string | null;
   stage?: string; label?: string; progress?: number; frames?: {done: number; total: number}; etaSec?: number | null; ahead?: number;
   createdAt: string; startedAt?: string; finishedAt?: string; error?: string;
-  result?: {file?: string; renderSec?: number; qc?: string; version?: number; versionError?: string; master?: {hit: boolean}};
+  result?: {file?: string; renderSec?: number; qc?: string; version?: number; versionError?: string; mode?: 'full' | 'layers'; master?: 'cached' | 'rendered'; stages?: Record<string, number>; fallback?: string[]};
 };
 
 export const fmtSec = (s?: number | null) => (s == null || !Number.isFinite(s) ? '' : s >= 60 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s` : `${Math.round(s)}s`);
@@ -73,7 +73,7 @@ export const RenderJobs: React.FC<{projectId: string | null; refreshKey?: unknow
                 {j.status === 'failed' && <div className="text-[11px] text-error break-words">{j.error}</div>}
                 <div className="flex gap-3 text-[11px]">
                   {j.status === 'done' && j.result?.file && <a href={j.result.file} download className="text-[#39d98a] hover:underline">↓ Download</a>}
-                  {j.status === 'done' && j.result?.renderSec != null && <span className="text-on-surface-variant">{fmtSec(j.result.renderSec)}{j.result.master?.hit ? ' · cached master' : ''}</span>}
+                  {j.status === 'done' && j.result?.renderSec != null && <span className="text-on-surface-variant">{fmtSec(j.result.renderSec)}{j.result.mode === 'layers' ? ` · layers${j.result.master === 'cached' ? ' (master reused)' : ''}` : ''}</span>}
                   {j.status === 'done' && j.result?.version && <span className="text-on-surface-variant">review v{j.result.version}</span>}
                   {j.status === 'done' && j.result?.qc && <span title={j.result.qc} className="text-on-surface-variant cursor-help">QC ✓</span>}
                   {(j.status === 'queued' || j.status === 'running') && <button onClick={() => cancel(j.id)} className="text-error hover:underline">Cancel</button>}

@@ -6,6 +6,7 @@ import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
 import {aheadOf, createRenderJobs, descendants, describeJob, killTree, legacyView, listJobs, pidAlive, prune, readJob, writeJob} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, etaFor, overall, parseRemotion} from '../scripts/render-runner.mjs';
+import {createMasterCache} from '../scripts/layers.mjs';
 
 const tmps = [];
 const tmpdir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'render-jobs-')); tmps.push(d); return d; };
@@ -35,7 +36,7 @@ for (let i = 1; i <= frames; i++) {
   console.log('Rendered ' + i + '/' + frames + ', time remaining: 1s');
   if (mode === 'die' && i === 2) process.kill(process.pid, 'SIGKILL');
   if (mode === 'fail' && i === 3) { console.error('Error: boom in frame 3'); process.exit(1); }
-  if (mode === 'hang' && i === 2) setInterval(() => {}, 1e6);
+  if (mode === 'hang' && i === 2) { fs.writeFileSync(outFile, 'partial'); setInterval(() => {}, 1e6); } // like Remotion: a half-written file, then stuck
   // 'gate': stop after frame 4 until the test writes <outFile>.go (a mid-render state it can read at leisure)
   if (mode === 'gate' && i === 4) while (!fs.existsSync(outFile + '.go')) await sleep(5);
 }
@@ -51,19 +52,25 @@ if (process.argv[3] === 'hang') {
 `;
 
 // a public/ + root with the fakes, a job store and a runner over them
-function setup({workers = 1, master = null, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner} = {}) {
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner} = {}) {
   const root = tmpdir();
   const pub = path.join(root, 'public');
   fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
   fs.writeFileSync(path.join(root, 'fake-render.mjs'), FAKE_RENDER);
   fs.writeFileSync(path.join(root, 'fake-finalize.cjs'), FAKE_FINALIZE);
-  const calls = {render: 0, record: [], updates: []};
+  const calls = {render: 0, master: 0, captions: 0, composite: 0, record: [], updates: [], timing: []};
+  const fake = (kind) => ({outFile, propsFile}) => { calls[kind]++; return [process.execPath, [path.join(root, 'fake-render.mjs'), outFile, propsFile]]; };
   const commands = {
-    render: ({outFile, propsFile}) => { calls.render++; return [process.execPath, [path.join(root, 'fake-render.mjs'), outFile, propsFile]]; },
+    render: fake('render'),
+    master: fake('master'),
+    captions: fake('captions'),
+    // the composite: the master (the fake caption "layer" is a file) copied to the export
+    composite: ({master, outFile}) => { calls.composite++; return [process.execPath, ['-e', 'require("fs").copyFileSync(process.argv[1], process.argv[2])', master, outFile]]; },
     finalize: ({outFile}) => [process.execPath, [path.join(root, 'fake-finalize.cjs'), outFile, finalizeMode]],
   };
   const run = runner ?? createRenderRunner({
-    root, publicDir: pub, commands, master, log: quiet, ...(prepare ? {prepare} : {}),
+    root, publicDir: pub, commands, masterCache, log: quiet, ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
+    logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
     record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
     unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; }),
   });
@@ -332,34 +339,93 @@ test('QC failure keeps the file as -qcfail and fails the job; drafts are never r
   assert.equal(r.result.qc, '✗ loudness');
 });
 
-test('master cache hook: a hit skips the render; a miss renders and offers the master', async () => {
+// ---- layered renders (#17): the queue and the master cache together ----
+// the mode as asked; captions per props.fake.captions (default on); the master key from props.fake.key
+const layered = (over = {}) => {
   const cacheDir = tmpdir();
-  const cached = path.join(cacheDir, 'master-abc.mp4');
-  fs.writeFileSync(cached, 'cached master');
-  const seen = {lookups: 0, stored: []};
-  const master = {
-    lookupMaster: async ({props: p}) => { seen.lookups++; return p.fake?.cached ? {file: cached, key: 'abc'} : null; },
-    storeMaster: async ({file}) => { seen.stored.push(fs.readFileSync(file, 'utf8')); },
+  return {
+    masterCache: createMasterCache(cacheDir),
+    chooseMode: (requested, p) => ({mode: requested, reasons: [], captions: p.fake?.captions !== false, ...(p.fake?.blocked ? {mode: 'full', reasons: [p.fake.blocked]} : {})}),
+    keyOf: (p, {draft}) => `k-${p.fake?.key ?? 'same'}-${draft ? 'd' : 'f'}`,
+    cacheDir,
+    ...over,
   };
-  const {jobs, dir, calls} = setup({master});
-  const hit = jobs.submit({props: props({cached: true}), draft: false, projectId: 'p1'}).job;
-  await jobs.idle();
-  const h = readJob(dir, hit.id);
-  assert.equal(h.status, 'done');
-  assert.deepEqual(h.result.master, {hit: true, key: 'abc'});
-  assert.equal(calls.render, 0, 'no remotion render on a hit');
-  assert.equal(fs.readFileSync(h.result.path, 'utf8'), 'cached master');
-  assert.equal(h.result.version, 1, 'a cached final still becomes a review version');
-  const miss = jobs.submit({props: props({frames: 2}), draft: true}).job;
-  await jobs.idle();
-  assert.deepEqual(readJob(dir, miss.id).result.master, {hit: false});
-  assert.equal(calls.render, 1);
-  assert.deepEqual(seen.stored, ['fake mp4']);
-  // a broken cache never fails a render
-  const broken = setup({master: {lookupMaster: async () => { throw new Error('disk gone'); }, storeMaster: async () => { throw new Error('nope'); }}});
-  const b = broken.jobs.submit({props: props({frames: 1}), draft: true}).job;
-  await broken.jobs.idle();
-  assert.equal(readJob(broken.dir, b.id).status, 'done');
+};
+
+test('layers: the master is rendered once, cached, and the next render of the reel only redoes the caption layer', async () => {
+  const L = layered();
+  const s = setup(L);
+  const first = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s.jobs.idle();
+  const a = readJob(s.dir, first.id);
+  assert.equal(a.status, 'done');
+  assert.equal(a.mode, 'layers');
+  assert.deepEqual([a.result.mode, a.result.master], ['layers', 'rendered']);
+  assert.ok(['master', 'captions', 'composite', 'qc'].every((k) => k in a.result.stages), JSON.stringify(a.result.stages));
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4'], 'the complete master is in the cache, no .part');
+  assert.deepEqual([s.calls.master, s.calls.captions, s.calls.composite, s.calls.render], [1, 1, 1, 0]);
+  const second = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s.jobs.idle();
+  const b = readJob(s.dir, second.id);
+  assert.equal(b.result.master, 'cached');
+  assert.equal(s.calls.master, 1, 'no second master render');
+  assert.equal(s.calls.captions, 2);
+  // every stage in the project's timing log (drafts too, the finals here)
+  const stages = s.calls.timing.filter((t) => t.job === second.id).map((t) => t.stage);
+  assert.deepEqual(stages, ['captions', 'composite', 'qc']);
+  assert.ok(s.calls.timing.every((t) => t.project === 'p1'));
+  assert.equal(b.result.version, 2, 'a layered final is a review version like any other');
+});
+
+test('layers with 2 workers: two jobs needing one master render it once (single flight), the other waits for it', async () => {
+  const L = layered();
+  const s = setup({...L, workers: 2});
+  const a = s.jobs.submit({props: props({frames: 6, delayMs: 20}), draft: true, mode: 'layers'}).job;
+  const b = s.jobs.submit({props: props({frames: 6, delayMs: 20}), draft: true, mode: 'layers'}).job;
+  await until(() => [a.id, b.id].every((id) => ['done', 'failed'].includes(readJob(s.dir, id).status)), 8000);
+  assert.deepEqual([readJob(s.dir, a.id).status, readJob(s.dir, b.id).status], ['done', 'done']);
+  assert.equal(s.calls.master, 1);
+  assert.deepEqual([readJob(s.dir, a.id).result.master, readJob(s.dir, b.id).result.master].sort(), ['cached', 'rendered']);
+  assert.ok(s.calls.updates.some((u) => /Waiting for the same master/.test(u.label ?? '')));
+});
+
+test('layers: a master cancelled mid-pass never enters the cache and leaves no .part; the next job renders it', async () => {
+  const L = layered();
+  const s = setup(L);
+  const {job} = s.jobs.submit({props: props({mode: 'hang', frames: 5}), draft: true, mode: 'layers'});
+  await until(() => readJob(s.dir, job.id).frames?.done >= 2);
+  assert.match(readJob(s.dir, job.id).label, /master/);
+  assert.ok(fs.readdirSync(L.cacheDir).some((f) => f.includes('.part-')), 'the master is written as .part');
+  s.jobs.cancel(job.id);
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'cancelled');
+  assert.deepEqual(fs.readdirSync(L.cacheDir), [], 'nothing cached, no .part');
+  assert.deepEqual(exportsOf(s), []);
+  const next = s.jobs.submit({props: props({frames: 1}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, next.id).result.master, 'rendered');
+});
+
+test('layers falls back to full when the captions reach into the footage, and says why; no captions → the master is the reel', async () => {
+  const L = layered();
+  const s = setup(L);
+  const blocked = s.jobs.submit({props: props({frames: 1, blocked: 'hero punch on key words'}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  const r = readJob(s.dir, blocked.id).result;
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(r.fallback, ['hero punch on key words']);
+  assert.deepEqual([s.calls.render, s.calls.master], [1, 0]);
+  assert.match(describeJob(readJob(s.dir, blocked.id)), /\[full\] \(layers → full: hero punch on key words\)/);
+  const bare = s.jobs.submit({props: props({frames: 1, captions: false, key: 'bare'}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  const r2 = readJob(s.dir, bare.id).result;
+  assert.deepEqual([r2.mode, r2.master], ['layers', 'rendered']);
+  assert.equal(s.calls.captions + s.calls.composite, 0);
+  assert.equal(fs.readFileSync(r2.path, 'utf8'), 'fake mp4');
+  // full by default: a job that names no mode renders in one pass
+  const plain = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, plain.id).result.mode, 'full');
 });
 
 test('prune drops the state of old finished jobs only — never an active job, never an mp4', () => {

@@ -3,7 +3,7 @@
 // button and the MCP start_render / render_status / list_render_jobs / cancel_render
 // (the backend's /api/render and /api/render-jobs; scripts/render-jobs.mjs).
 //
-//   npm run render -- start <project_id> [--draft] [--wait]   → prints the job id at once (--wait: follow it to the end)
+//   npm run render -- start <project_id> [--draft] [--mode full|layers] [--wait]   → prints the job id at once (--wait: follow it to the end)
 //   npm run render -- status <job_id> [--watch]              → progress %, stage, frames, ETA; the file when done
 //   npm run render -- list [--project <id>] [--active] [--limit 20]
 //   npm run render -- cancel <job_id>
@@ -26,7 +26,8 @@ const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileS
 const DIR = jobsDir(PUBLIC);
 
 const USAGE = `usage: npm run render -- <command>
-  start <project_id> [--draft] [--wait]    queue an export, print its job id at once
+  start <project_id> [--draft] [--mode full|layers] [--wait]
+                                           queue an export, print its job id at once
   status <job_id> [--watch]                progress / file of a job
   list [--project <id>] [--active] [--limit n]
   cancel <job_id>
@@ -36,7 +37,7 @@ const USAGE = `usage: npm run render -- <command>
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith('--')));
 const opt = (name, dflt) => { const i = argv.indexOf(`--${name}`); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : dflt; };
-const optValues = new Set(['project', 'limit', 'days'].map((n) => opt(n)).filter(Boolean));
+const optValues = new Set(['project', 'limit', 'days', 'mode'].map((n) => opt(n)).filter(Boolean));
 const [cmd, arg] = argv.filter((a) => !a.startsWith('--') && !optValues.has(a));
 const asJson = flags.has('--json');
 
@@ -94,7 +95,9 @@ switch (cmd) {
     if (!p.clips?.length) die(`project ${arg} has no clips`);
     await needBackend();
     const draft = flags.has('--draft');
-    const r = await api('/api/render', {method: 'POST', body: JSON.stringify({...projectRenderProps(p), draft, project_id: arg})});
+    const mode = opt('mode');
+    if (mode && !['full', 'layers'].includes(mode)) die('--mode is full or layers', 2);
+    const r = await api('/api/render', {method: 'POST', body: JSON.stringify({...projectRenderProps(p), draft, project_id: arg, ...(mode ? {mode} : {})})});
     if (!asJson || !flags.has('--wait')) out(r, `${r.jobId}  ${draft ? 'draft' : 'final'} ${arg}  ${r.ahead ? `QUEUED — ${r.ahead} render${r.ahead === 1 ? '' : 's'} ahead` : 'STARTED'}\n  follow: npm run render -- status ${r.jobId} --watch\n  cancel: npm run render -- cancel ${r.jobId}`);
     if (flags.has('--wait')) await follow(r.jobId);
     break;
