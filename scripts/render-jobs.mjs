@@ -16,7 +16,7 @@
 //                    writes never overwrite it)
 //
 // JOB: {id, seq, status, stage, label, progress, frames?, etaSec?, draft, projectId,
-//       expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
+//       user? (who submitted it with a per-user token), propsHash?, expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
 //       owner? (backend pid), pid? (render process pid), attempts, result?, error?}
 //   status   queued → running → done | failed | cancelled
 //   progress 0–100 over the whole job (stage weights in scripts/render-runner.mjs)
@@ -155,6 +155,25 @@ export function legacyView(job, ahead = 0) {
   return {...base, status: 'error', error: job.status === 'cancelled' ? `cancelled${job.error ? `: ${job.error}` : ''}` : job.error || 'render failed', ...(job.result?.qc ? {qc: job.result.qc} : {})};
 }
 
+// Before a render is queued (POST /api/render): one active render per user — a retry
+// with the same props gets that job back (reuse), different props are refused until it
+// ends or is cancelled — and none while the disk or the memory is under its floor, so a
+// burst of renders is refused instead of taking the box down. Memory counts only when
+// nothing is rendering: a job queued behind a running one waits for its memory to free.
+// ponytail: the floors are checked at submit, not again when a queued job starts.
+export const propsHash = (props, mode = 'full') => crypto.createHash('sha256').update(`${mode === 'layers' ? 'layers' : 'full'}\n${typeof props === 'string' ? props : JSON.stringify(props)}`).digest('hex').slice(0, 16);
+export function admitRender(jobs, {user = null, props, mode}, {freeMemMb = null, freeDiskMb = null, minMemMb = 0, minDiskMb = 0} = {}) {
+  const mine = user && jobs.find((j) => j.user === user && ACTIVE.has(j.status));
+  if (mine) {
+    if (mine.propsHash && mine.propsHash === propsHash(props, mode)) return {reuse: mine};
+    return {status: 409, code: 'render_busy', jobId: mine.id, error: `${user} already has render ${mine.id} ${mine.status} — one render at a time per user`, hint: `reel render wait ${mine.id}, or reel render cancel ${mine.id}`};
+  }
+  if (minDiskMb > 0 && freeDiskMb != null && freeDiskMb < minDiskMb) return {status: 507, code: 'low_disk', error: `only ${Math.round(freeDiskMb)} MB free on the render disk (floor ${minDiskMb} MB)`, hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'};
+  const busy = jobs.some((j) => j.status === 'running');
+  if (minMemMb > 0 && freeMemMb != null && !busy && freeMemMb < minMemMb) return {status: 503, code: 'low_memory', error: `only ${Math.round(freeMemMb)} MB of memory available (floor ${minMemMb} MB)`, hint: 'retry later, when the box is less loaded'};
+  return null;
+}
+
 // One line per job for the MCP tools and the CLI.
 const f1 = (x) => (Math.round(x * 10) / 10).toFixed(1);
 export function fmtDuration(sec) {
@@ -221,14 +240,14 @@ export function createRenderJobs({
   };
   const cancelRequested = (id) => fs.existsSync(fileOf(dir, id, '.cancel'));
 
-  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label} = {}) {
+  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null} = {}) {
     if (typeof props !== 'string') props = JSON.stringify(props ?? {});
     const t = now();
     const id = newJobId(t);
     // seq orders the queue: time-based so the order holds across backends and restarts
     const seq = Math.max(t * 1000, seqLast + 1); seqLast = seq;
     fs.writeFileSync(fileOf(dir, id, '.props.json'), props);
-    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
+    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, ...(user ? {user} : {}), propsHash: propsHash(props, mode), expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
     pump();
     const jobs = listJobs(dir);
     return {job: readJob(dir, id) ?? job, ahead: aheadOf(jobs, id)};

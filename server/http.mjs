@@ -90,31 +90,47 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
 // attempts share the login's limiter: 429 + Retry-After); a browser page load without
 // any is sent to /login, other requests get the 401 basic-auth challenge. Loopback
 // Host + localhost Origin otherwise. public/exports/* is never reachable without it.
+// Per-user tokens (server/tokens.mjs, the `reel` CLI) pass in both modes as x-reel-token
+// and name the caller; a `reel_` token that is unknown or revoked is refused (401), on
+// loopback too. With requireToken (REEL_REQUIRE_TOKEN=1: a box shared over SSH) loopback
+// /api/* calls need a token as well — a user token or the backend token.
 // Async: basic auth runs bcrypt off the event loop.
-// → {kind: 'review' | 'ping' | 'login' | 'ok'} or {kind: 'deny', status, headers, body}
+// → {kind: 'review' | 'ping' | 'login' | 'ok', user?, admin?, uid?, via?} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
 export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
-export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0} = {}) {
+const denyJson = (status, error, code, hint) => ({kind: 'deny', status, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error, code, hint})});
+export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0, users = null, requireToken = false} = {}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
   if (publicMode && isLoginPath(url.pathname)) return {kind: 'login'};
+  if (!publicMode) {
+    const host = (req.headers.host || '').replace(/:\d+$/, '');
+    if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};
+    if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'bad origin'})};
+  }
+  const given = req.headers['x-reel-token'];
+  const u = users?.find(given);
+  if (u) return {kind: 'ok', user: u.user, admin: u.admin, uid: u.uid, via: 'user-token'};
+  const backend = tokenOk(tokens, given);
+  if (!backend && typeof given === 'string' && given.startsWith('reel_')) return denyJson(401, 'invalid or revoked token', 'bad_token', 'ask an admin for a new one (reel token create)');
   if (publicMode) {
     const h = req.headers.authorization || '';
     // MCP/backend clients authenticate with the shared backend token instead of basic auth
-    if (tokenOk(tokens, req.headers['x-reel-token']) || sessionUser(req, sessionSecret, auth)) return {kind: 'ok'};
+    if (backend) return {kind: 'ok', admin: true, via: 'backend-token'};
+    const su = sessionUser(req, sessionSecret, auth);
+    if (su) return {kind: 'ok', user: su, via: 'session'};
     if (h.startsWith('Basic ')) {
       const {user, wait} = await basicUser(h, auth, {limiter, ip: clientIp(req, hops)});
-      if (user) return {kind: 'ok'};
+      if (user) return {kind: 'ok', user, via: 'basic'};
       if (wait) return {kind: 'deny', status: 429, headers: {'Retry-After': String(wait), 'Content-Type': 'text/plain'}, body: 'too many attempts'};
     }
     const pageLoad = (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/') && !h && /text\/html/.test(req.headers.accept || '');
     if (pageLoad) return {kind: 'deny', status: 303, headers: {Location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`, 'Cache-Control': 'no-store'}, body: ''};
     return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
   }
-  const host = (req.headers.host || '').replace(/:\d+$/, '');
-  if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};
-  if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'bad origin'})};
-  return {kind: 'ok'};
+  if (backend) return {kind: 'ok', admin: true, via: 'backend-token'};
+  if (requireToken && url.pathname.startsWith('/api/')) return denyJson(401, 'token required', 'token_required', 'put your token in ~/.config/reel/token (0600) or REEL_TOKEN');
+  return {kind: 'ok', via: 'loopback'};
 }

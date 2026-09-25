@@ -80,6 +80,13 @@ async function saveBody(r, file, {signal, onBytes}) {
 // download remote B-roll srcs into dir and rewrite props.brolls[].src in place (to `broll/<name>`)
 //   signal     the job's: cancel / stall → everything stops, no .part left behind
 //   progress   (frac 0–1, label) per downloaded MB and per file
+// where a remote cue lands in public/broll/: named by a hash of the whole URL — Pexels
+// files of one size share their last characters ("…_1080_1920_30fps.mp4"), and a name
+// from those made two cues share one file
+export function localBrollName(b) {
+  const ext = b.kind === 'video' ? 'mp4' : (b.src.match(/\.(jpe?g|png|webp)(\?|$)/i)?.[1] ?? 'jpg');
+  return `px-${crypto.createHash('sha1').update(b.src).digest('hex').slice(0, 16)}.${ext}`;
+}
 export async function localizeRemoteBrolls(props, {dir, signal, timeoutMs = DOWNLOAD_MS, fetchImpl = fetch, allow = ALLOWED_REMOTE, run = runCmd, onPid, progress} = {}) {
   const items = (Array.isArray(props?.brolls) ? props.brolls : []).filter((b) => /^https?:\/\//.test(b.src ?? ''));
   if (!items.length) return props;
@@ -87,10 +94,8 @@ export async function localizeRemoteBrolls(props, {dir, signal, timeoutMs = DOWN
   let n = 0;
   for (const b of items) {
     n++;
-    const ext = b.kind === 'video' ? 'mp4' : (b.src.match(/\.(jpe?g|png|webp)(\?|$)/i)?.[1] ?? 'jpg');
-    // named by a hash of the whole URL: Pexels files of one size share their last
-    // characters ("…_1080_1920_30fps.mp4"), and a name from those made two cues share one file
-    const name = `px-${crypto.createHash('sha1').update(b.src).digest('hex').slice(0, 16)}.${ext}`;
+    const name = localBrollName(b);
+    const ext = name.split('.').pop();
     const file = path.join(dir, name);
     if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
       const label = `Downloading B-roll ${n}/${items.length}`;
