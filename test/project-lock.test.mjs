@@ -33,3 +33,17 @@ test('a dead holder or a silent one past the TTL is taken over; release frees it
   releaseLock(d2, 'p'); // not ours: stays
   assert.ok(fs.existsSync(path.join(d2, 'p.lock')));
 });
+
+test('sessions of one process (MCP over HTTP) are separate agents: each holds and frees only its own lock', () => {
+  const d = dir();
+  assert.ok(acquireLock(d, 'p', {owner: 'mcp http session a', session: 'a'}).ok);
+  const r = acquireLock(d, 'p', {owner: 'mcp http session b', session: 'b'});
+  assert.equal(r.ok, false, 'another session of the same process is refused');
+  assert.equal(r.holder.owner, 'mcp http session a');
+  assert.equal(acquireLock(d, 'p').ok, false, 'so is a caller with no session');
+  assert.ok(acquireLock(d, 'p', {session: 'a'}).ok, 'the holding session refreshes it');
+  releaseLock(d, 'p', process.pid, 'b');
+  assert.ok(fs.existsSync(path.join(d, 'p.lock')), 'another session cannot free it');
+  releaseLock(d, 'p', process.pid, 'a');
+  assert.ok(acquireLock(d, 'p', {session: 'b'}).ok, 'freed when its session ends');
+});
