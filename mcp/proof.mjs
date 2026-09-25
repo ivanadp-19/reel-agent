@@ -12,17 +12,20 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const TMP = path.join(ROOT, '.captions-tmp');
 // one bundle per MCP process, in its own dir with public/ as symlinks; removed on exit
 const WORK = path.join(TMP, `proof-bundle-${process.pid}`);
+// the promise, not its result: proofs asked in parallel (caption_proof + motion_proof in one turn)
+// share one bundle instead of writing two into one folder (EEXIST); a failed bundle is retried
 let bundled = null;
-async function getBundle() {
-  if (!bundled) {
+function getBundle() {
+  bundled ??= (async () => {
     sweepDead(TMP, 'proof-bundle-');
     ensureSfx(); // the composition references public/sfx/*.wav
     const links = linkPublic(path.join(ROOT, 'public'), path.join(WORK, 'public-links'));
-    bundled = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
+    const b = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
     const clean = () => fs.rmSync(WORK, {recursive: true, force: true});
     process.once('exit', clean);
     for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { clean(); process.exit(0); });
-  }
+    return b;
+  })().catch((e) => { bundled = null; throw e; });
   return bundled;
 }
 

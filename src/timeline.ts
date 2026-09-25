@@ -113,6 +113,10 @@ export const totalDurationFrames = (clips: Clip[], fps: number): number =>
 
 // ---- edits shared by the editor store and the MCP server ----
 
+// id for a new page / cue / graphic (k-th of a batch): one past the highest number in use, never a
+// gap left by a deleted one — an id the agent still holds must not come back naming another item
+export const nextId = (items: {id: string}[], prefix: string, k = 0) => `${prefix}${items.reduce((m, x) => Math.max(m, +(x.id.match(/(\d+)$/)?.[1] ?? -1) + 1), 0) + k}`;
+
 // orig clip → the segments it became, for re-anchoring clip-bound items (B-roll)
 export type SegmentRemap = {origId: string; segId: string; inMs: number; outMs: number}[];
 
