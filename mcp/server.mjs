@@ -44,6 +44,14 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const PROJECTS = path.join(PUBLIC, 'projects');
 const API = process.env.REEL_API || 'http://127.0.0.1:3333';
+// Railway public mode (REEL_API pointing at the hosted backend): the server
+// accepts the shared backend token instead of basic auth - send it on every call.
+const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+const _fetch = globalThis.fetch;
+globalThis.fetch = (u, o = {}) => {
+  if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
+  return _fetch(u, o);
+};
 const FPS = 30;
 
 // ---------- .env ----------
@@ -330,7 +338,7 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
     // same machine: hand the backend the path instead of streaming the file through memory
-    const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+    const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
     const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...clip} = r;
@@ -502,7 +510,7 @@ const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationS
 
 server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
   await needBackend();
-  const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+  const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
   const content = [];
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
