@@ -304,3 +304,59 @@ test('caption layout is one function: measured as rendered (case, tier scale), s
   assert.equal(captionPreset('prism', 'Poppins').font.family, 'Poppins');
   assert.equal(captionPreset('vibem', 'Poppins').font.family, presetOf('vibem').font.family);
 });
+
+// ---- re-review of PR #15: the split-name recipe really re-pages; "no." ends a sentence ----
+import {pageWords, projectTiers, withTiers, endsSentence} from '../src/paging.ts';
+
+const tw = (arr) => arr.map((w, i) => ({wid: `a:${i}`, word: w, startMs: i * 400, endMs: i * 400 + 350, srcStartMs: i * 400, srcEndMs: i * 400 + 350, clipId: 'a', src: 'clips/a.mp4'}));
+const pagesText = (ps) => ps.map((p) => p.words.map((w) => w.text).join(' '));
+
+test('split-name recipe end to end: the judge flags "Playa | del Carmen", its annotation reaches the pager, re-paging joins the name', () => {
+  const words = tw(['Vivir', 'junto', 'al', 'mar', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']);
+  const before = pageWords(words, presetOf('vibem'));
+  assert.deepEqual(pagesText(before), ['Vivir junto al mar en Playa', 'del Carmen es fácil']);
+  const pages = before.map((c) => ({...c, clipId: 'a'}));
+  const [f] = splitNameFindings(pages, [], 'vibem');
+  assert.equal(f.kind, 'candidate');
+  assert.deepEqual(f.fix.map((x) => x.tool), ['annotate_captions', 'set_caption_style']);
+  assert.deepEqual(f.fix[0].args.items.map((x) => x.wid), ['a:5', 'a:6', 'a:7']); // the whole name, connector included
+  // apply the recipe: annotate (project tiers) → set_caption_style passes them to the pager
+  const tiers = Object.fromEntries(f.fix[0].args.items.map((x) => [x.wid, x.tier]));
+  const annotated = pages.map((c) => ({...c, words: c.words.map((w) => (tiers[w.wid] ? {...w, tier: tiers[w.wid]} : w))}));
+  const after = pageWords(withTiers(tw(['Vivir', 'junto', 'al', 'mar', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']), projectTiers(annotated)), presetOf('vibem'));
+  assert.deepEqual(pagesText(after), ['Vivir junto al mar en Playa del Carmen', 'es fácil']);
+  assert.deepEqual(splitNameFindings(after.map((c) => ({...c, clipId: 'a'})), [], 'vibem'), []); // fixed: no longer repeats until "stuck"
+});
+
+test('a glossary term of any length split across pages is found as a whole', () => {
+  const pages = [page('c0', 'a', [CW('a:0', 'en', 0, 200), CW('a:1', 'Playa', 250, 500)]), page('c1', 'a', [CW('a:2', 'del', 520, 700), CW('a:3', 'Carmen', 720, 900), CW('a:4', 'hoy', 950, 1100)])];
+  const [f] = splitNameFindings(pages, [{term: 'Playa del Carmen'}], 'vibem');
+  assert.equal(f.kind, 'rule');
+  assert.deepEqual(f.evidence.words, ['a:1', 'a:2', 'a:3']);
+});
+
+test('"no." ends a sentence; "No. 5" does not; a one-word page never rejoins across a sentence end', () => {
+  assert.equal(endsSentence('no.'), true);
+  assert.equal(endsSentence('no.', 'Vamos'), true);
+  assert.equal(endsSentence('No.', '5'), false);
+  assert.equal(endsSentence('Sr.', 'Pérez'), false);
+  assert.deepEqual(pagesText(pageWords(tw(['Te', 'dije', 'que', 'no.', 'Vamos', 'ya.']), presetOf('vibem'))), ['Te dije que no', 'Vamos ya']);
+  assert.deepEqual(pagesText(pageWords(tw(['Es', 'el', 'No.', '5', 'de', 'la', 'calle.']), presetOf('vibem'))), ['Es el No 5', 'de la calle']);
+  assert.deepEqual(pagesText(pageWords(tw(['¿Vienes?', 'Sí.']), presetOf('vibem'))), ['Vienes?', 'Sí']);
+});
+
+test('the judge reads sentence ends from the transcript (captions lose their periods)', () => {
+  const c = page('c0', 'a', [CW('a:0', 'Tiene', 0, 300), CW('a:1', 'alberca', 350, 800), CW('a:2', 'Y', 900, 1000), CW('a:3', 'gym', 1050, 1400)]); // "alberca." shown without its period
+  const raw = {'a:1': 'alberca.'};
+  assert.deepEqual(paginationFindings([c], 'vibem'), []); // from the caption text alone the period is gone
+  assert.equal(paginationFindings([c], 'vibem', (w) => raw[w.wid] ?? w.text).length, 1);
+  // and a boundary after a full stop is not a split name ("Carmen. | Está")
+  const pages = [page('c1', 'a', [CW('a:0', 'en', 0, 200), CW('a:1', 'Carmen', 250, 500)]), page('c2', 'a', [CW('a:2', 'Está', 520, 700), CW('a:3', 'cerca', 720, 900)])];
+  assert.equal(splitNameFindings(pages, [], 'vibem', (w) => ({'a:1': 'Carmen.'})[w.wid] ?? w.text).length, 0);
+});
+
+test('project tiers: only raised, by word id', () => {
+  assert.deepEqual(projectTiers([{words: [{wid: 'a:1', tier: 1}, {wid: 'a:2', tier: 0}, {text: 'x', tier: 2}]}]), {'a:1': 1});
+  const w = withTiers([{wid: 'a:1', tier: 2}, {wid: 'a:2'}], {'a:1': 1, 'a:2': 1});
+  assert.deepEqual(w.map((x) => x.tier), [2, 1]); // never lowers the classifier's tier
+});

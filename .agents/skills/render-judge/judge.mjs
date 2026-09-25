@@ -189,32 +189,43 @@ function pauseFix(a, b, byId) {
 // is a rule; a capitalized pair is only a candidate — capitals are a poor signal for
 // compounds (sentence starts, "pet park" in lowercase), so the judge confirms on the frame.
 const phraseKey = (s) => String(s).split(/\s+/).map(fold).filter(Boolean).join(' ');
-export function splitNameFindings(pages, glossary = [], style) {
+// rawOf(word) → the transcript word with its punctuation (a caption's text has lost its periods)
+const rawText = (w) => w.text;
+const CONNECTORS = new Set(['de', 'del', 'la', 'las', 'los', 'el', 'y']);
+export function splitNameFindings(pages, glossary = [], style, rawOf = rawText) {
   const out = [];
   const preset = presetOf(style);
-  const terms = new Set(glossary.flatMap((g) => [g.term, ...(g.variants ?? [])]).map(phraseKey).filter((k) => k.includes(' ')));
+  const terms = glossary.flatMap((g) => [g.term, ...(g.variants ?? [])]).map((t) => String(t).split(/\s+/).map(fold).filter(Boolean)).filter((t) => t.length > 1);
+  const consecutive = (ws) => ws.every((w, i) => i === 0 || (w.wid && ws[i - 1].wid && w.wid.split(':')[0] === ws[i - 1].wid.split(':')[0] && +w.wid.split(':')[1] === +ws[i - 1].wid.split(':')[1] + 1));
   for (let k = 1; k < pages.length; k++) {
     const A = pages[k - 1], B = pages[k];
     if (A.clipId !== B.clipId || B.startMs - A.endMs > 500) continue;
     const a = A.words.at(-1), b = B.words[0];
-    if (!a?.wid || !b?.wid || SENT_END.test(a.text)) continue;
-    const [sa, ia] = a.wid.split(':'), [sb, ib] = b.wid.split(':');
-    if (sa !== sb || +ib !== +ia + 1) continue; // only two words said one after the other
+    if (!a?.wid || !b?.wid || !consecutive([a, b]) || endsSentence(rawOf(a), rawOf(b))) continue;
     const at = clean(a.text), bt = clean(b.text);
-    let why = null, kind = 'rule';
-    if (terms.has(phraseKey(`${at} ${bt}`))) why = `término del glosario "${at} ${bt}" partido`;
-    else if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) why = 'frase resaltada partida';
+    let why = null, kind = 'rule', span = [a, b];
+    // a glossary term that runs across the page change, whatever its length
+    for (const t of terms) for (let cut = 1; cut < t.length && !why; cut++) {
+      const left = A.words.slice(-cut), right = B.words.slice(0, t.length - cut);
+      if (left.length !== cut || right.length !== t.length - cut) continue;
+      const ws = [...left, ...right];
+      if (consecutive(ws) && ws.every((w, i) => fold(w.text) === t[i])) { why = `término del glosario "${ws.map((w) => clean(w.text)).join(' ')}" partido`; span = ws; }
+    }
+    if (why) { /* glossary term found above */ } else if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) why = 'frase resaltada partida';
     else if (CAP.test(at) && /^\d/.test(bt)) { why = 'nombre + número partido'; kind = 'candidate'; }
     else if (CAP.test(at) && CAP.test(bt)) { why = 'posible nombre compuesto partido'; kind = 'candidate'; }
+    else if (CONNECTORS.has(fold(at)) && CAP.test(bt) && A.words.length > 1 && CAP.test(clean(A.words.at(-2).text)) && consecutive([A.words.at(-2), a, b])) { why = 'posible nombre compuesto partido'; kind = 'candidate'; span = [A.words.at(-2), a, b]; } // "Playa del | Carmen"
+    else if (CAP.test(at) && CONNECTORS.has(fold(bt)) && B.words.length > 1 && CAP.test(clean(B.words[1].text)) && consecutive([a, b, B.words[1]])) { why = 'posible nombre compuesto partido'; kind = 'candidate'; span = [a, b, B.words[1]]; } // "Playa | del Carmen"
     if (!why) continue;
     // Never delete_captions / add_caption to reshape pages: a deleted page hides its words for
     // good and a typed page loses word ids, accents and real timing. In an unbreakable pack a
-    // highlighted span never splits, so: highlight both words, then re-page with the same pack.
+    // highlighted span is one unit for the pager, and re-paging hands the pager the project's
+    // tiers (projectTiers → captions job) BEFORE it pages: highlight the whole name, re-page.
     const fix = preset.layout.unbreakable
-      ? [{tool: 'annotate_captions', note: 'a highlighted span is one unit for the pager (and names are key words anyway)', args: {items: [{wid: a.wid, tier: Math.max(1, a.tier ?? 0)}, {wid: b.wid, tier: Math.max(1, b.tier ?? 0)}]}},
-         {tool: 'set_caption_style', note: 're-pages generated pages with the shared pager; keeps word ids, tiers, emoji, real timing and hand-made pages', args: {style: preset.id}}]
+      ? [{tool: 'annotate_captions', note: 'the whole name as one highlighted span (names are key words anyway)', args: {items: span.map((w) => ({wid: w.wid, tier: Math.max(1, w.tier ?? 0)}))}},
+         {tool: 'set_caption_style', note: 're-pages with the shared pager, which now sees those tiers; keeps word ids, emoji, real timing and hand-made pages', args: {style: preset.id}}]
       : [{tool: 'escalate', note: `pack "${preset.id}" does not bond names across pages and no tool moves a word between pages without re-timing; last resort: edit_caption both pages (re-times them evenly, drops their word ids — re-judge sync)`, args: {}}];
-    out.push(F('split-name', 'major', kind, A.startMs / 1000, B.endMs / 1000, `${why} entre páginas: "${A.words.map((w) => w.text).join(' ')}" | "${B.words.map((w) => w.text).join(' ')}"${kind === 'candidate' ? ' — confirmar en el frame del cambio de página' : ''}`, {pages: [A.id, B.id], words: [a.wid, b.wid], lookAt: [r2(A.endMs / 1000 - 0.1), r2(B.startMs / 1000 + 0.1)]}, fix));
+    out.push(F('split-name', 'major', kind, A.startMs / 1000, B.endMs / 1000, `${why} entre páginas: "${A.words.map((w) => w.text).join(' ')}" | "${B.words.map((w) => w.text).join(' ')}"${kind === 'candidate' ? ' — confirmar en el frame del cambio de página' : ''}`, {pages: [A.id, B.id], words: span.map((w) => w.wid), lookAt: [r2(A.endMs / 1000 - 0.1), r2(B.startMs / 1000 + 0.1)]}, fix));
   }
   return out;
 }
@@ -435,10 +446,10 @@ export function offMicFindings(words, crewWords = CREW_WORDS) {
 // one page = one sentence at most: a page that ends a sentence before its last word mixes two.
 // The shared pager (src/paging.ts) ends a page at every sentence, so re-paging fixes a generated
 // page without losing anything; a hand-typed page is rewritten by hand.
-export function paginationFindings(pages, style) {
+export function paginationFindings(pages, style, rawOf = rawText) {
   const out = [];
   for (const c of pages) {
-    const k = c.words.findIndex((w, i) => i < c.words.length - 1 && endsSentence(w.text));
+    const k = c.words.findIndex((w, i) => i < c.words.length - 1 && endsSentence(rawOf(w), rawOf(c.words[i + 1])));
     if (k < 0) continue;
     const A = c.words.slice(0, k + 1), B = c.words.slice(k + 1);
     const generated = c.words.every((w) => w.wid) && !c.covers;
@@ -916,9 +927,11 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const glossary = profile?.glossary ?? [];
   if (p.captionsOff) skipped.push(role === 'master' ? 'captions (clean master: none on screen by design)' : 'captions (switched off with set_captions — check the brief wants that)');
   else {
-    findings.push(...splitNameFindings(pages, glossary, p.captionStyle), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body));
+    const rawWord = new Map(words.map((w) => [w.wid, w.word]));
+    const rawOf = (w) => (w.wid && rawWord.get(w.wid)) || w.text; // the transcript keeps the periods captions drop
+    findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body));
     if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? [])));
-    if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle));
+    if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle, rawOf));
     if (profile?.captions?.accentSameSize) findings.push(...accentSizeFindings(p.captionStyle));
   }
   const texts = [
@@ -976,7 +989,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const planInserts = parseInserts(p.plan);
   const inserts = [...(planInserts ?? []), ...(reel?.inserts ?? []).filter((r) => !(planInserts ?? []).some((x) => fold(x.what) === fold(r.what)))];
   if (inserts.length) findings.push(...insertFindings(inserts, words, brolls, gfx, lib));
-  else if (profile?.requireInserts) findings.push(F('insert-missing', 'major', 'rule', null, null, 'el plan no lista los INSERTS del guion: no se puede verificar que cada escena/inserto esté cubierto', {}, [{tool: 'set_plan', note: 'add an INSERTS: block (reel-plan template) with every scene / insert the script names', args: {}}]));
+  else if (profile?.requireInserts) findings.push(F('insert-missing', 'major', 'rule', null, null, 'el plan no lista los INSERTS del guion: no se puede verificar que cada escena/inserto esté cubierto', {}, [{tool: 'set_plan', note: 'add an INSERTS: block (reel-plan template) with every scene / insert the script names — in review mode an edited plan needs the user\'s approval again (src/plan.ts)', args: {}}]));
 
   // --- color: per A-roll clip (B-roll spans left out), rendered frames ---
   const stats = video.stats;
