@@ -106,8 +106,10 @@ Then judge, with a timestamp for everything:
     the line), never an edit. A promise the picture keeps is not listed.
 - **Black flashes and cuts inside a source.** `frame0-black` and `black-flash` are rules: look at the
   frames on both sides only to say whether the black is in the footage or a gap
-  in the edit, never to dismiss it. `source-cut` is a candidate: confirm it on the
-  `motion_proof` only if it really reads as a cut the plan does not have.
+  in the edit, never to dismiss it. `source-cut` is an advisory: say on the
+  `motion_proof` whether it reads as a cut the plan does not have. It goes to the
+  client either way, under AVISOS, and never counts toward the verdict, even
+  confirmed.
 - **B-roll**: under each cue, does the shot show what is said at that moment?
   The report lists the words. Wrong room, wrong city, or generic stock over a
   specific claim is a major. Judge the picture, not whether the library tags

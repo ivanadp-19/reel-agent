@@ -657,17 +657,24 @@ export function blackRuns(events) {
 // a run inside that window, with a 1.5-frame margin, is a nit. Runs from T.blackLongSec on are the
 // QC gate's `black` check. A run on a clip edge names the clip and its source time, so a human can
 // tell a black frame in the source from a gap in the edit.
-export function blackFlashFindings(runs, {fps = FPS, duration, fades = {}, placed = [], brolls = [], video = null} = {}) {
+export function blackFlashFindings(runs, {fps = FPS, duration, fades = {}, placed = [], brolls = [], video = null, qcBlack = []} = {}) {
   const out = [];
   const frame = 1 / fps, margin = 1.5 * frame;
   for (const r0 of runs) {
     const r = {start: r0.start, end: r0.end ?? duration};
     const len = r.end - r.start;
-    if (!(len > 0) || len >= T.blackLongSec) continue;
+    if (!(len > 0)) continue;
     const frames = Math.max(1, Math.round(len * fps));
     const at = `${r.start.toFixed(2)}–${r.end.toFixed(2)} s`;
     if (fades.startSec && r.start <= margin && r.end <= fades.startSec + margin) { out.push(F('black-flash', 'nit', 'rule', r.start, r.end, `fundido desde negro al inicio (${frames} frames, ${at}) — permitido por el perfil`, {frames}, [])); continue; }
     if (fades.endSec && duration != null && r.end >= duration - margin && r.start >= duration - fades.endSec - margin) { out.push(F('black-flash', 'nit', 'rule', r.start, r.end, `fundido a negro al final (${frames} frames, ${at}) — permitido por el perfil`, {frames}, [])); continue; }
+    if (len >= T.blackLongSec) {
+      // a long run is the QC gate's `black` — but only if the gate saw it: it measures at 8 % luma, the
+      // judge at 10 %, so a dirty black (8–10 %) would fall between the two. Report those here.
+      if (qcBlack.some((b) => b.start < r.end && b.end > r.start)) continue;
+      out.push(F('black', r.start < margin ? 'blocker' : 'major', 'rule', r.start, r.end, `negro de ${len.toFixed(2)} s (${r.start.toFixed(2)}–${r.end.toFixed(2)} s) que el QC gate no reporta — un negro sucio (gris muy oscuro, bajo el 10 % de luma)`, {lookAt: [r2(r.start + len / 2)]}, [{tool: 'frame_at', note: 'look at it; black footage must be covered (suggest_broll) or trimmed — never automatically', args: {at_sec: r2(r.start + len / 2), ...(video ? {video} : {})}}]));
+      continue;
+    }
     // what is on screen there: a fullscreen B-roll cue over the take, else the take; the source time
     // tells whether the black is in the footage itself or a gap in the edit
     const cue = brolls.find((b) => b.kind === 'video' && b.mode !== 'inset' && r.start * 1000 >= b.startMs && r.start * 1000 < b.endMs);
@@ -737,7 +744,7 @@ export function sourceCutFindings(ranges, scores) {
       if (pts[k][1] >= hi) run.push(pts[k]); else flush();
     }
     flush();
-    for (const h of hits) out.push(F('source-cut', 'major', 'candidate', toTl(h.t), h.end != null ? toTl(h.end) : null, `${h.why} DENTRO ${r.kind === 'broll' ? 'del B-roll' : 'de la toma'} ${r.id} (fuente ${sourceOf(r.src)} @${h.t.toFixed(2)} s): se ve como un corte que el plan no tiene`, {[r.kind === 'broll' ? 'broll' : 'clip']: r.id, sourceSec: r2(h.t), lookAt: [r2(toTl(h.t) - 0.2), r2(toTl(h.t) + 0.1)]},
+    for (const h of hits) out.push(F('source-cut', 'minor', 'candidate', toTl(h.t), h.end != null ? toTl(h.end) : null, `${h.why} DENTRO ${r.kind === 'broll' ? 'del B-roll' : 'de la toma'} ${r.id} (fuente ${sourceOf(r.src)} @${h.t.toFixed(2)} s): se ve como un corte que el plan no tiene`, {[r.kind === 'broll' ? 'broll' : 'clip']: r.id, sourceSec: r2(h.t), lookAt: [r2(toTl(h.t) - 0.2), r2(toTl(h.t) + 0.1)]},
       [{tool: 'motion_proof', note: 'watch the 24 frames around it; if it reads as a cut, shorten the range before it (trim_clip / edit_broll) or use another asset — a human decision, never automatic', args: {at_sec: r2(Math.max(0, toTl(h.t) - 0.4))}}]));
   }
   return out;
@@ -787,7 +794,12 @@ export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x 
 // verdict: 0 blockers and 0 majors; 3+ minors of one check count as a major (a pattern, not a nit).
 // Candidates count only once the judge confirms them on the frame (`confirmed`).
 // The label never says "aprobado": only the client approves.
-export const counts = (f) => !f.dismissed && (f.kind !== 'candidate' || f.confirmed);
+// Advisory checks go to the client for a decision and NEVER count toward the verdict — not when the
+// judge confirms them, not as a pattern of minors. source-cut: César's rule, a whip / blur inside a
+// source clip never auto-fails. Matched by check name, so a finding written by hand is covered too.
+export const ADVISORY = new Set(['source-cut']);
+export const isAdvisory = (f) => !!f.advisory || ADVISORY.has(f.check);
+export const counts = (f) => !f.dismissed && !isAdvisory(f) && (f.kind !== 'candidate' || f.confirmed);
 export function verdictOf(findings, {reduced = false} = {}) {
   const live = findings.filter(counts);
   const n = Object.fromEntries(SEVERITIES.map((s) => [s, live.filter((f) => f.severity === s).length]));
@@ -795,9 +807,10 @@ export function verdictOf(findings, {reduced = false} = {}) {
   for (const f of live) if (f.severity === 'minor') byCheck[f.check] = (byCheck[f.check] ?? 0) + 1;
   const patterns = Object.entries(byCheck).filter(([, k]) => k >= 3).map(([c]) => c);
   const pass = n.blocker === 0 && n.major === 0 && patterns.length === 0;
-  const toConfirm = findings.filter((f) => !f.dismissed && f.kind === 'candidate' && !f.confirmed).length;
+  const toConfirm = findings.filter((f) => !f.dismissed && f.kind === 'candidate' && !f.confirmed && !isAdvisory(f)).length;
+  const advisories = findings.filter((f) => !f.dismissed && isAdvisory(f)).length;
   const label = pass ? `QC técnico superado${reduced ? ' (evidencia reducida)' : ''}` : `QC técnico: ${n.blocker + n.major + patterns.length} hallazgo(s) que corregir (${n.blocker} bloqueantes, ${n.major} mayores${patterns.length ? `, ${patterns.length} patrones` : ''})`;
-  return {verdict: pass ? 'PASS' : 'FAIL', label, counts: n, patterns, toConfirm};
+  return {verdict: pass ? 'PASS' : 'FAIL', label, counts: n, patterns, toConfirm, advisories};
 }
 
 // compare with the previous iteration's report: new / still open / fixed / regressions
@@ -818,12 +831,12 @@ export function diffWithPrev(findings, prev) {
 export const ID_CHANGERS = new Set(['add_caption', 'delete_captions', 'set_caption_style', 'run_ai_step', 'cut_words', 'split_clip', 'delete_clips', 'set_speed_ramp', 'reorder_clips', 'duplicate_project']);
 function F(check, severity, kind, at, end, msg, evidence = {}, fix = []) {
   const ref = evidence.page ?? evidence.broll ?? evidence.clip ?? evidence.wid ?? evidence.from ?? null;
-  return {id: `${check}@${at == null ? '-' : at.toFixed(1)}`, check, severity, kind, at: at == null ? null : r2(at), end: end == null ? null : r2(end), msg, ref, evidence, fix: fix.map((x) => (ID_CHANGERS.has(x.tool) ? {...x, changesIds: true} : x))};
+  return {id: `${check}@${at == null ? '-' : at.toFixed(1)}`, check, severity, kind, ...(ADVISORY.has(check) ? {advisory: true} : {}), at: at == null ? null : r2(at), end: end == null ? null : r2(end), msg, ref, evidence, fix: fix.map((x) => (ID_CHANGERS.has(x.tool) ? {...x, changesIds: true} : x))};
 }
 
 // ---------- evidence from the mp4 ----------
 function probe(file) {
-  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
+  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels,duration:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
   return r.status === 0 ? JSON.parse(r.stdout) : null;
 }
 // One decode per file, not one per measurement (the VM has 2 vCPU): every video number comes
@@ -861,19 +874,19 @@ export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, bla
       ? [`[0:v]scale=160:-2,split=${full.length + 1}${labels}[v0]`, ...full, `[v0]fps=${rate},split=2[st][h]`]
       : [`[0:v]fps=${rate},scale=270:-2,split=2[st][h]`])
       .concat([`[st]signalstats,metadata=print:file=${fesc(stats)},nullsink`, '[h]scale=9:8:flags=area,format=gray[out]']).join(';');
-    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 28});
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const frames = readMeta(stats, /lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);
     const buf = r.stdout ?? Buffer.alloc(0);
     const hs = [];
     if (hashes) for (let i = 0, k = 0; i + 72 <= buf.length; i += 72, k++) hs.push({t: frames[k]?.t ?? k / rate, h: dhash(buf.subarray(i, i + 72))});
-    return {stats: frames, hashes: hs, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : [], black: blackFps ? blackRuns(readMeta(black, /lavfi\.(black_start|black_end)=([\d.]+)/)) : []};
+    return {timedOut: timedOut(r), stats: frames, hashes: hs, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : [], black: blackFps ? blackRuns(readMeta(black, /lavfi\.(black_start|black_end)=([\d.]+)/)) : []};
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
 // signalstats of the first `n` frames (frame 0 is the thumbnail): a decode of n frames, nothing more
 export function firstFrames(file, n = 2) {
   const dir = tmpDir(), meta = path.join(dir, 'f0.txt');
   try {
-    spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-vf', `select='lt(n\\,${n})',signalstats,metadata=print:file=${fesc(meta)}`, '-frames:v', String(n), '-f', 'null', '-']);
+    spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-vf', `select='lt(n\\,${n})',signalstats,metadata=print:file=${fesc(meta)}`, '-frames:v', String(n), '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     return readMeta(meta, /lavfi\.signalstats\.(YAVG|YMIN|YMAX|UMIN|UMAX|VMIN|VMAX)=([\d.]+)/).map((f, i) => ({...f, n: i}));
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
@@ -886,7 +899,7 @@ function analyzeAudio(file, {bands = true} = {}) {
     const legs = bands ? 4 : 2;
     const g = [`[0:a]aresample=48000,asplit=${legs}${['[full]', '[pk]', '[low]', '[high]'].slice(0, legs).join('')}`, `[full]${meter('full', '')}`, '[pk]astats=metadata=0[out]',
       ...(bands ? [`[low]${meter('low', 'lowpass=f=300,lowpass=f=300,')}`, `[high]${meter('high', 'highpass=f=3400,highpass=f=3400,')}`] : [])].join(';');
-    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-filter_complex', g, '-map', '[out]', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 1 << 28});
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-filter_complex', g, '-map', '[out]', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const o = r.stderr.slice(r.stderr.lastIndexOf('Overall'));
     const num = (re) => { const m = o.match(re); return m ? (m[1] === '-inf' ? -Infinity : +m[1]) : NaN; };
     const series = (name) => readMeta(path.join(dir, `${name}.txt`), /(lavfi\.r128\.M)=(-?[\d.]+|-inf)/).map((x) => ({t: r2(x.t + 0.1), M: x['lavfi.r128.M'] ?? -Infinity}));
@@ -897,7 +910,7 @@ function analyzeAudio(file, {bands = true} = {}) {
       const low = byT(series('low')), high = byT(series('high'));
       phone = M.map((x) => ({t: x.t, full: x.M, low: low.get(Math.round(x.t * 10)) ?? -Infinity, high: high.get(Math.round(x.t * 10)) ?? -Infinity}));
     }
-    return {M, bands: phone, peaks: {peakDb: num(/Peak level dB:\s*(-?[\d.]+|-inf)/), peakCount: num(/Peak count:\s*([\d.]+)/), flat: num(/Flat factor:\s*([\d.]+)/)}};
+    return {timedOut: timedOut(r), M, bands: phone, peaks: {peakDb: num(/Peak level dB:\s*(-?[\d.]+|-inf)/), peakCount: num(/Peak count:\s*([\d.]+)/), flat: num(/Flat factor:\s*([\d.]+)/)}};
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
 // scdet over the used ranges of the source files, incremental: per file (path + size + mtime) the
@@ -905,7 +918,7 @@ function analyzeAudio(file, {bands = true} = {}) {
 // new (an edit that moves a cut decodes a few seconds, not the take). One decoder thread
 // (REEL_JUDGE_THREADS) and the judge's own nice (REEL_JUDGE_NICE) keep the shared VM rendering.
 const SRC_CACHE = path.join(ROOT, '.captions-tmp', 'judge', 'source-scan.json');
-function scanSources(ranges, publicDir, skipped) {
+export function scanSources(ranges, publicDir, skipped) {
   let cache = {};
   try { cache = JSON.parse(fs.readFileSync(SRC_CACHE, 'utf8')); } catch {}
   const out = new Map();
@@ -923,7 +936,8 @@ function scanSources(ranges, publicDir, skipped) {
     for (const [a, b] of missingRanges(need, entry.covered)) {
       const dir = tmpDir(), meta = path.join(dir, 'scd.txt');
       try {
-        spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-threads', THREADS(), '-ss', a.toFixed(3), '-t', (b - a).toFixed(3), '-copyts', '-i', file, '-an', '-vf', `scale=160:-2,scdet=threshold=0,metadata=print:file=${fesc(meta)}`, '-f', 'null', '-']);
+        const run = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-threads', THREADS(), '-ss', a.toFixed(3), '-t', (b - a).toFixed(3), '-copyts', '-i', file, '-an', '-vf', `scale=160:-2,scdet=threshold=0,metadata=print:file=${fesc(meta)}`, '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+        if (timedOut(run)) { skipped.push(`source-cut: ${src} ${a.toFixed(1)}–${b.toFixed(1)} s did not finish in ${Math.round(TIMEOUT() / 1000)} s (corrupt file?) — not scanned`); continue; } // not cached: tried again next run
         const pts = readMeta(meta, /lavfi\.scd\.(score)=([\d.]+)/).filter((x) => x.score != null).map((x) => [r2(x.t * 1000) / 1000, Math.round(x.score * 1000) / 1000]);
         entry.scores.push(...pts.slice(1)); // the first frame of a range has nothing before it
       } finally { fs.rmSync(dir, {recursive: true, force: true}); }
@@ -938,6 +952,9 @@ function scanSources(ranges, publicDir, skipped) {
   return out;
 }
 const THREADS = () => String(process.env.REEL_JUDGE_THREADS || 1);
+// every ffmpeg the judge starts has a deadline (a corrupt file must not hang it; the catalog's 10 min)
+const TIMEOUT = () => Number(process.env.REEL_JUDGE_TIMEOUT_MS || 600000);
+const timedOut = (r) => !!(r.error?.code === 'ETIMEDOUT' || r.signal);
 const MEDIA = /\.(mp4|mov|m4v|mkv|webm|jpe?g|png|webp|tiff?)$/i;
 function refFiles(paths) {
   const out = [], missing = [];
@@ -1041,14 +1058,17 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const v = info?.streams.find((s) => s.codec_type === 'video');
   const a = info?.streams.find((s) => s.codec_type === 'audio');
   const q = timed('qc gate', () => qc(file, {expectSec: total, draft}));
+  const qcBlack = []; // the black stretches the QC gate reported (pix_th 0.08): the judge's long runs defer to these only
   for (const c of q.checks) {
     if (c.ok) continue;
     if (c.name === 'silence') { findings.push(F('audio-silence', 'major', 'rule', null, null, `silencio en el render: ${c.value}`, {qc: c.value}, [{tool: 'run_ai_step', args: {step: 'autocut'}}])); continue; }
-    if (c.name === 'black') { for (const m of String(c.value).matchAll(/([\d.]+)–([\d.]+) s/g)) findings.push(F('black', +m[1] < 0.1 ? 'blocker' : 'major', 'heuristic', +m[1], +m[2], `negro en pantalla ${m[1]}–${m[2]} s${+m[1] < 0.1 ? ' (el primer frame / miniatura es negro)' : ''}`, {}, [{tool: 'suggest_broll', note: 'black footage must be covered', args: {}}])); continue; }
+    if (c.name === 'black') { for (const m of String(c.value).matchAll(/([\d.]+)–([\d.]+) s/g)) qcBlack.push({start: +m[1], end: +m[2]}), findings.push(F('black', +m[1] < 0.1 ? 'blocker' : 'major', 'heuristic', +m[1], +m[2], `negro en pantalla ${m[1]}–${m[2]} s${+m[1] < 0.1 ? ' (el primer frame / miniatura es negro)' : ''}`, {}, [{tool: 'suggest_broll', note: 'black footage must be covered', args: {}}])); continue; }
     const sev = c.blocking ? 'blocker' : draft && /loudness|true peak/.test(c.name) ? 'nit' : 'minor';
     findings.push(F(`tech-${c.name.replace(/\s+/g, '-')}`, sev, 'rule', null, null, `${c.name}: ${c.value} (want ${c.want})${sev === 'nit' ? ' — draft sin normalizar; el final lo normaliza' : ''}${c.name === 'duration' ? ' — ¿el proyecto cambió después del render?' : ''}`, {}, c.name === 'duration' ? [{tool: 'render', args: {draft}}] : []));
   }
   const fps = v?.r_frame_rate ? v.r_frame_rate.split('/').reduce((n, d) => n / +d) : null; // "30/1"
+  // the VIDEO stream's length: AAC padding makes the container 20–40 ms longer, which would push an allowed tail fade out of its margin
+  const videoDur = +v?.duration || +info?.format?.duration || total;
   if (fps && Math.abs(fps - FPS) > 0.5) findings.push(F('tech-fps', 'major', 'rule', null, null, `${fps.toFixed(2)} fps (want ${FPS})`, {}, []));
 
   // --- audio ---
@@ -1058,6 +1078,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (a) {
     const au = timed('audio', () => analyzeAudio(file, {bands: haveTr && (!!(parsePhone(p.plan) ?? reel?.phone) || profile?.detectPhone !== false)}));
     const pk = au.peaks;
+    if (au.timedOut) skipped.push(`audio analysis did not finish in ${Math.round(TIMEOUT() / 1000)} s — its checks are partial`);
     if (pk.peakDb >= -0.1 && (pk.flat > 0 || pk.peakCount > 8)) findings.push(F('clipping', 'major', 'rule', null, null, `clipping: pico ${pk.peakDb.toFixed(2)} dBFS, ${pk.peakCount} muestras en el pico`, pk, [{tool: 'set_clip', note: 'lower the hot clip (volume 0.8) or the music (set_music volume)', args: {}}]));
     M = au.M;
     audioBands = au.bands;
@@ -1166,11 +1187,13 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? FPS}));
   const hashes = video.hashes;
   // black flashes from one frame, in this file's own frame rate (César: 3–5-frame blacks slipped through)
-  // frame 0 (the thumbnail) black: measured on its own, so a one-frame black at t = 0 is named for what it is
+  if (video.timedOut) skipped.push(`video analysis did not finish in ${Math.round(TIMEOUT() / 1000)} s — its checks are partial`);
+  // frame 0 (the thumbnail) black, measured on its own. One black opening, one finding: a single black
+  // frame is frame0-black (the renderer's bug), a longer black opening is the black-flash that covers it
+  const flashes = blackFlashFindings(video.black, {fps: fps ?? FPS, duration: videoDur, fades: profile?.blackFades ?? {}, placed, brolls, video: file, qcBlack});
+  const opening = flashes.find((f) => f.at === 0 && f.check === 'black-flash');
   const f0 = frameZeroFindings(firstFrames(file), {fades: profile?.blackFades ?? {}, video: file});
-  findings.push(...f0);
-  findings.push(...blackFlashFindings(video.black, {fps: fps ?? FPS, duration: +info?.format?.duration || total, fades: profile?.blackFades ?? {}, placed, brolls, video: file})
-    .filter((f) => !(f0.length && f.at === 0 && f.evidence.frames === 1)));
+  findings.push(...(opening && opening.evidence.frames > 1 ? [] : f0), ...flashes.filter((f) => !(f0.length && f === opening && f.evidence.frames === 1)));
   // a cut or a whip inside a source clip (candidates): scdet over the used ranges, cached per file
   if (sourceScan) {
     const ranges = usedRanges(p.clips, brolls);
@@ -1302,11 +1325,11 @@ const line = (f) => `[${f.severity.toUpperCase()}] ${f.kind !== 'rule' ? `(${f.k
 export function reportText(r) {
   const L = [];
   L.push(`QC TÉCNICO (reglas): ${r.label}  — iteración ${r.iteration}, ${r.role ?? 'render'} ${r.draft ? 'draft' : 'final'}, ${r.durationSec} s${r.profile ? `, perfil ${r.profile}${r.reel ? ` (${r.reel})` : ''}` : ''}`);
-  L.push(`  ${r.counts.blocker} bloqueantes · ${r.counts.major} mayores · ${r.counts.minor} menores · ${r.counts.nit} nits · ${r.toConfirm} por confirmar en frame${r.patterns.length ? ` · patrones (3+ menores = mayor): ${r.patterns.join(', ')}` : ''}`);
+  L.push(`  ${r.counts.blocker} bloqueantes · ${r.counts.major} mayores · ${r.counts.minor} menores · ${r.counts.nit} nits · ${r.toConfirm} por confirmar en frame${r.advisories ? ` · ${r.advisories} aviso(s) que no cuentan` : ''}${r.patterns.length ? ` · patrones (3+ menores = mayor): ${r.patterns.join(', ')}` : ''}`);
   L.push('  Etiqueta para la entrega: la de arriba. Nunca "aprobado": solo el cliente aprueba. El master base se entrega igual; esto acompaña a la entrega.');
   L.push(`render: ${r.render}${r.pair ? `  (vs ${r.pair})` : ''}`);
   if (r.diff) L.push(`vs previous: fixed ${r.diff.fixed.length}, regressions ${r.diff.regressions.length ? r.diff.regressions.join(', ') : 'none'}, stuck (3+ iterations) ${r.diff.stuck.length ? r.diff.stuck.join(', ') : 'none'}`);
-  const live = r.findings.filter(counts), cand = r.findings.filter((f) => !counts(f) && !f.dismissed);
+  const live = r.findings.filter(counts), cand = r.findings.filter((f) => !counts(f) && !f.dismissed && !isAdvisory(f)), advice = r.findings.filter((f) => !f.dismissed && isAdvisory(f));
   const top = live.filter((f) => f.severity === 'blocker' || f.severity === 'major');
   if (top.length) L.push('', 'PRIORIDAD (lo que corrige la siguiente iteración, en orden):', ...top.slice(0, 8).map((f, i) => `  ${i + 1}. ${f.check} @${tc(f.at)} — ${f.msg.slice(0, 110)}`));
   L.push('');
@@ -1322,6 +1345,10 @@ export function reportText(r) {
   if (cand.length) {
     L.push('', 'POR CONFIRMAR EN EL FRAME (no cuentan hasta que el juez las confirme; ruido conocido):');
     for (const f of cand) { L.push(`  ${line(f)}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'fix if confirmed')}`); }
+  }
+  if (advice.length) {
+    L.push('', 'AVISOS PARA EL CLIENTE (nunca cuentan para el veredicto, ni confirmados: él decide):');
+    for (const f of advice) { L.push(`  ${line(f)}${f.confirmed ? ' — confirmado en el frame' : ''}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'if he wants it changed')}`); }
   }
   if (r.skipped.length) L.push('', 'SKIPPED (no evidence — not checked, so not passed):', ...r.skipped.map((s) => `  - ${s}`));
   L.push('', 'EVIDENCE FOR THE JUDGE (snapshot of the project when the render was judged' + (r.projectUpdatedAt ? `, updatedAt ${r.projectUpdatedAt}` : '') + ')');

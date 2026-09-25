@@ -367,7 +367,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {placeClips} from '../src/timeline.ts';
-import {blackRuns, blackFlashFindings, usedRanges, sourceCutFindings, mergeRanges, missingRanges, claimEvidence, analyzeVideo, sentencesOf as sentences3} from '../.agents/skills/render-judge/judge.mjs';
+import {scanSources, blackRuns, blackFlashFindings, usedRanges, sourceCutFindings, mergeRanges, missingRanges, claimEvidence, analyzeVideo, sentencesOf as sentences3} from '../.agents/skills/render-judge/judge.mjs';
 
 test('black runs: open runs end at the file end', () => {
   assert.deepEqual(blackRuns([{t: 1, black_start: 1}, {t: 1.1, black_end: 1.1}, {t: 5, black_start: 5}]), [{start: 1, end: 1.1}, {start: 5, end: null}]);
@@ -388,7 +388,17 @@ test('black flashes: 3 and 5 frames are blockers at 30 and 25 fps; allowed fades
   const head = [{start: 0, end: 0.3}], tail = [{start: 59.6, end: null}]; // a run still black at the file end
   assert.deepEqual(blackFlashFindings([...head, ...tail], {fps: 30, duration: 60, fades, placed}).map((f) => f.severity), ['nit', 'nit']);
   assert.deepEqual(blackFlashFindings(head, {fps: 30, duration: 60, placed}).map((f) => f.severity), ['blocker']);
-  assert.deepEqual(blackFlashFindings([{start: 20, end: 21}], {fps: 30, duration: 60, placed}), []); // ≥ 0.5 s: the QC gate's `black`
+  assert.deepEqual(blackFlashFindings([{start: 20, end: 21}], {fps: 30, duration: 60, placed, qcBlack: [{start: 20, end: 21}]}), []); // ≥ 0.5 s the QC gate reported: its `black`
+  // …but a long DIRTY black the gate did not see (it measures at 8 % luma, the judge at 10 %) is not lost
+  const dirty = blackFlashFindings([{start: 20, end: 21}], {fps: 30, duration: 60, placed});
+  assert.deepEqual(dirty.map((f) => [f.check, f.severity, f.kind]), [['black', 'major', 'rule']]);
+  assert.match(dirty[0].msg, /QC gate no reporta/);
+  // an allowed tail fade longer than 0.5 s is still a fade (checked before the long-run rule)
+  assert.equal(blackFlashFindings([{start: 59, end: null}], {fps: 30, duration: 60, fades: {endSec: 1}, placed})[0].severity, 'nit');
+  // the tail fade is measured against the VIDEO stream: AAC padding makes the container ~40 ms longer
+  const tailRun = [{start: 11.7, end: 11.9667}]; // black to the last frame of a 12.0 s video
+  assert.equal(blackFlashFindings(tailRun, {fps: 30, duration: 12.0, fades: {endSec: 0.3}, placed})[0].severity, 'nit');
+  assert.equal(blackFlashFindings(tailRun, {fps: 30, duration: 12.08, fades: {endSec: 0.3}, placed})[0].severity, 'blocker'); // what the container duration did
   // on a fullscreen B-roll cue the finding names the cue and its source time
   const cue = {id: 'b0', src: 'broll/cochera.mp4', kind: 'video', mode: 'fullscreen', startMs: 900, endMs: 4400};
   const onCue = blackFlashFindings([{start: 3.5, end: 3.6}], {fps: 30, duration: 60, placed, brolls: [cue]});
@@ -417,10 +427,15 @@ test('a cut or a whip inside a source clip is a candidate; the edit\'s own edges
   const take = [...flat(9.8, 15), [15, 22], ...flat(15.0333, 20.2)]; // a hard cut at 15 s in the take
   const garage = [...flat(0, 2.5), [2.5333, 3.1], [2.5667, 3.4], [2.6, 2.8], [2.6333, 2.2], ...flat(2.6667, 4.2)]; // a 4-frame whip
   const f = sourceCutFindings(ranges, new Map([['clips/take.mp4', take], ['broll/cochera.mp4', garage]]));
-  assert.deepEqual(f.map((x) => [x.check, x.kind, x.severity, x.at]), [['source-cut', 'candidate', 'major', 5], ['source-cut', 'candidate', 'major', 4.53]]);
+  assert.deepEqual(f.map((x) => [x.check, x.kind, x.severity, x.advisory, x.at]), [['source-cut', 'candidate', 'minor', true, 5], ['source-cut', 'candidate', 'minor', true, 4.53]]);
   assert.match(f[0].msg, /corte aparente/);
   assert.match(f[1].msg, /whip/);
   assert.equal(verdictOf(f).verdict, 'PASS'); // candidates never auto-fail
+  // César's rule: a whip / blur inside a source NEVER fails the QC — not confirmed, not as a pattern of minors
+  assert.equal(verdictOf([{...f[0], confirmed: true}]).verdict, 'PASS');
+  assert.equal(verdictOf([0, 1, 2].map((k) => ({...f[1], at: k, confirmed: true}))).verdict, 'PASS');
+  assert.equal(verdictOf([{check: 'source-cut', severity: 'major', kind: 'candidate', confirmed: true}]).verdict, 'PASS'); // written by hand, no flag
+  assert.equal(verdictOf([{...f[0], confirmed: true}]).advisories, 1);
   // a cut right at the edit's own edge, and a slow 3-second camera move, are not flagged
   const edges = [[10.05, 30], ...flat(10.1, 20.2)];
   const pan = [...flat(9.8, 12), ...Array.from({length: 90}, (_, k) => [12 + k / 30, 2.5]), ...flat(15, 20.2)];
@@ -479,4 +494,23 @@ test('frame 0 black: flat AND dark — a dark but textured frame (night) is not;
   assert.deepEqual(frameZeroFindings([{n: 0, YAVG: 200, YMIN: 200, YMAX: 201}]), []); // flat but white: not black
   assert.equal(frameZeroFindings(production, {fades: {startSec: 0.5}})[0].severity, 'nit');
   assert.equal(verdictOf(frameZeroFindings(production)).verdict, 'FAIL');
+});
+
+test('source scan: a range that hits the deadline is skipped and not cached (a corrupt file must not hang the judge)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-'));
+  const f = path.join(dir, 'broll', 'x.mp4');
+  fs.mkdirSync(path.dirname(f));
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x568:r=30:d=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', f]);
+  if (r.status !== 0) return;
+  const before = process.env.REEL_JUDGE_TIMEOUT_MS;
+  process.env.REEL_JUDGE_TIMEOUT_MS = '1';
+  const skipped = [];
+  try {
+    const out = scanSources([{kind: 'broll', id: 'b0', src: 'broll/x.mp4', from: 0, to: 3, speed: 1, t0: 0}], dir, skipped);
+    assert.deepEqual(out.get('broll/x.mp4'), []);
+    assert.match(skipped.join(' '), /did not finish/);
+  } finally {
+    if (before == null) delete process.env.REEL_JUDGE_TIMEOUT_MS; else process.env.REEL_JUDGE_TIMEOUT_MS = before;
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
 });

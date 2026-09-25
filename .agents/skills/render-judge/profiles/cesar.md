@@ -78,9 +78,10 @@ truth. A scene the script names that neither list has is a blocker you add
 - **Frame 0 black.** 14 of 18 real masters opened on one solid black frame
   (the thumbnail). `frame0-black` measures frame 0 with `signalstats`, and a flat,
   dark frame is a blocker. The renderer fix is in another PR; this is the net.
-- **A cut inside a B-roll** (the garage with a fast pan): `source-cut` is a
-  candidate. It goes to him with the timestamp and the source time; it never
-  fails the QC.
+- **A cut inside a B-roll** (the garage with a fast pan): `source-cut` is an
+  advisory. It goes to him with the timestamp and the source time and never
+  counts toward the verdict: not unconfirmed, not confirmed by the judge, and
+  not as a pattern of minors. He decides.
 - **VO promises** ("tope magnético", "acabado en roble"): the judge looks at the
   insert that plays while it is said. `claim-image` is a heuristic major with the
   quoted promise and the frame. It is never fixed automatically.
