@@ -25,7 +25,8 @@ live in `profiles/` (see the end of this file).
 | **nit** | Taste, or a draft-only artefact | No |
 
 **PASS**: 0 blockers, 0 majors and no minor pattern, after dismissals and
-confirmations. The label is **`QC técnico superado`**, or
+confirmations. **Advisory** checks (`source-cut`) never count toward the
+verdict, whatever their state: the client decides on them. The label is **`QC técnico superado`**, or
 `… (evidencia reducida)` when a rule check was skipped. Otherwise the label
 is `QC técnico: n hallazgos` with the prioritized list.
 
@@ -55,6 +56,12 @@ them. On a final they are blockers (the QC gate).
 
 So the J/L overlap is not a `cut-tight`. When captions lag a J/L voice, the fix is the J/L-cut, not regenerating the captions.
 
+## What the voice-over promises to show (heuristic, the judge's eyes)
+
+| Check | Detection | Severity | Fix |
+|---|---|---|---|
+| `claim-image` | **heuristic — not a rule.** The VO promises a specific proof ("tope magnético", "acabado en roble") and the insert or graphic on screen at that moment does not show it. Code only gathers the evidence, in the report's **PROMESAS DEL VO A VERIFICAR** section: every sentence with a proof cue (the generic list plus the profile's `proofCues`) or an insert on screen, the inserts up while it is said, and the frames to look at. The judge **reads the promise, looks at those frames with `frame_at`**, and raises `claim-image` only when the picture does not show it. It is tagged `(heuristic)`, with a timestamp, the promise quoted and the frame as evidence | major | **none — flag and evidence only.** A human decides: re-cut the insert, request the shot, or reword the claim |
+
 ## Speech that is not the presenter
 
 The words the speech model flags as a quieter voice (`off`) are classified
@@ -74,6 +81,14 @@ before anything is called off-mic:
 | `hook-text` | rule: nothing written (a caption page or a graphic) before 1.0 s. Not checked on a clean master | major | `add_graphic` hook-stack / big-word at the first word (reel-edit step 5) |
 | `black` at 0 | heuristic: `blackdetect` from the first frame (the thumbnail) | blocker | cover it / `trim_clip` |
 | judgment | on the hook sheet: does frame 0 say what the reel is about, sound off? Off the face, inside the safe zone, readable in under 1 s? | up to major | `add_graphic` / `edit_graphic` |
+
+## Picture integrity (César, G10 V2)
+
+| Check | Detection | Severity | Fix |
+|---|---|---|---|
+| `black-flash` | **rule, deterministic.** A black flash inside the reel, **from one frame on**. The detector runs in the same decode as the other video checks, at full frame rate: `blackdetect` with d = half a frame, a pixel counted black under 10 % luma, a frame black at ≥ 98 % black pixels. It is fps-aware: the file's own fps (ffprobe) gives the frame (1/30 = 0.033 s, 1/25 = 0.04 s), and the report counts the frames. Why: a `d=0.4 s` blackdetect missed real 3–5-frame blacks (G10 V2 at 7.51–7.61 s and 38.34–38.51 s). A run inside the profile's `blackFades` (`startSec` at the head, `endSec` at the tail, with a 1.5-frame margin) is an intended fade: nit. Runs of 0.5 s and more are the QC gate's `black` **only when the gate reported them**: it measures at 8 % luma, the judge at 10 %, so a dirty black (8–10 %) the gate missed is reported here as `black` (rule; blocker at the start, major elsewhere). The tail fade is measured against the **video stream's** duration (AAC padding makes the container 20–40 ms longer). The finding names what is on screen (the fullscreen B-roll cue, the clip, or the cut between two clips) and its **source** time, so a human can tell black in the footage from a gap in the edit | blocker | none automatic: `frame_at` both sides, then trim the source black out (`trim_clip`) or close the gap — a human decision |
+| `frame0-black` | **rule, deterministic.** Frame 0 (t = 0, the thumbnail) is solid black. Seen in production on 14 of 18 real masters: YMIN ≈ YMAX, U = V flat at 127/128, frames 1+ normal. A 0.4 s `blackdetect` never sees one frame. Measured on its own: `signalstats` of frames 0 and 1 (a two-frame decode). Luma flat (YMAX − YMIN < 2) **and** dark (YAVG < 30) = blocker; the numbers of both frames are the evidence. A dark but textured first frame (a night shot) is not flat, so it is not flagged. A fade from black the profile allows (`blackFades.startSec`) makes it a nit. One black opening, one finding: a single black frame 0 is `frame0-black`; a longer black opening is the `black-flash` that covers it. The root cause is in the renderer (a separate PR); this is the safety net | blocker | none automatic: `frame_at` t = 0; re-render or trim the first frame by hand |
+| `source-cut` | **rule-measured, reported as an advisory candidate.** An **advisory**: it goes to the client with the timestamp and the source time and **never counts toward the verdict** — not while unconfirmed, not when the judge confirms it, not as a pattern of minors (`ADVISORY` in `judge.mjs`, matched by check name). A cut or a whip **inside** a source clip, which reads as a cut the plan never made (a garage B-roll with a fast pan). Every used range is scanned with ffmpeg `scdet` (0–100 per frame): each clip's `inSec → outSec`, and each B-roll video cue's first seconds of its file, which is where the render plays it from. One frame ≥ 10 = a hard cut inside the take. A run of ≥ 3 frames ≥ max(1.5, 20 × the range's own median) = a whip / snap pan / blur, unless it lasts over 1.5 s (a camera move). The edit's own edges (0.15 s) are ignored. The scan is incremental: per file (path + size + mtime) only the ranges not yet decoded are read (`.captions-tmp/judge/source-scan.json`), with one decoder thread; remote stock files are skipped | advisory (minor; never counts) | none automatic: `motion_proof` around it; if it reads as a cut, shorten the range before it (`trim_clip` / `edit_broll`) or use another asset |
 
 ## Cuts and pace
 
@@ -163,6 +178,8 @@ JSON keys (all optional):
 - `captions` — `{pagination: 'sentence', accentSameSize: true, cascadeMs: 45}`.
 - `glossary` — `[{term, variants: [...], note}]`.
 - `crewWords` — words added to the crew-talk list.
+- `blackFades` — `{startSec, endSec}`: black allowed at the head and tail (an intended fade); 0 = none, so every black frame inside the master is a flash.
+- `proofCues` — words added to the VO proof cues (`claim-image` evidence).
 - `colorRefs` — `[{label, paths: [file or folder under the repo, e.g. .refs/<client>/…], hint}]`.
 - `requireInserts` — true: the plan must list the script's inserts.
 - `detectPhone` — false turns off phone-filter detection.
