@@ -6,8 +6,8 @@
 // Uses the shared (cached) per-clip transcripts.
 import fs from 'node:fs';
 import path from 'node:path';
-import {transcribeClip, transcribeClips} from './lib-transcribe.mjs';
-import {speechSegments} from '../src/cuts.ts';
+import {loudnessFor, transcribeClip, transcribeClips} from './lib-transcribe.mjs';
+import {AUTOCUT, speechSegments} from '../src/cuts.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -30,10 +30,13 @@ clips.forEach((clip, i) => {
     console.error(`SKIP ${clip.id}: ${String(e).slice(0, 120)}`);
     return;
   }
-  if (offMic === 'cut') words = words.filter((w) => !w.off); // off-camera voice = silence
-  if (!words.length) return; // no speech → leave untouched (likely B-roll)
+  const keep = offMic === 'cut' ? words.filter((w) => !w.off) : words; // off-camera voice = silence
+  if (!keep.length) return; // no speech → leave untouched (likely B-roll)
 
-  const segments = speechSegments(words, clip); // only the words under this clip's trim window
+  // voice activity: a transcript gap with a voice still in it is not a cut
+  // point (WhisperX drops words it cannot align); dropped off-mic words explain
+  // their own energy, so their gaps are never bridged back (see src/cuts.ts)
+  const segments = speechSegments(words, clip, {...AUTOCUT, loud: loudnessFor(clip) ?? undefined, dropOff: offMic === 'cut'});
 
   // a piece of a talking take with no word left in it is dead air: an empty plan drops it
   if (!segments.length) { plan.push({id: clip.id, segments: []}); return; }

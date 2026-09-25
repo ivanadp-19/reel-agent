@@ -63,3 +63,29 @@ test('one speaker, or two at the same level: nothing is off-mic by speaker; a so
   const mono = assignSpeakers(dialogue, [[0.9, 7.8, 'SPEAKER_00']]);
   assert.deepEqual(offMicSpeakers(mono, t), []);
 });
+
+
+import {voiceInGap, voiceSpans} from '../src/speech.ts';
+
+test('voiceSpans: speech above the noise floor, silence skipped, short dips bridged', () => {
+  const t = track(12); // 50 windows/s at -60
+  paint(t, 1, 3, -25); // phrase
+  paint(t, 5, 5.05, -20); // a 50 ms click: too short, dropped
+  paint(t, 7, 7.5, -24); paint(t, 7.6, 8.2, -23); // two words with a 100 ms dip: one span
+  const spans = voiceSpans(t);
+  assert.deepEqual(spans, [[1, 3], [7, 8.2]]);
+  assert.ok(voiceInGap(spans, 7000, 7400));
+  assert.ok(!voiceInGap(spans, 3000, 6900));
+});
+
+test('voiceSpans: a flat track has no voice (nothing stands out from the floor)', () => {
+  const t = track(4);
+  paint(t, 0, 4, -30);
+  assert.deepEqual(voiceSpans(t), []);
+});
+
+test('voiceSpans: quiet speech still counts when it clears the floor', () => {
+  const t = track(6);
+  paint(t, 2, 4, -44); // soft presenter, but the floor is -60
+  assert.deepEqual(voiceSpans(t), [[2, 4]]);
+});

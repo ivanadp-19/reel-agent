@@ -39,7 +39,7 @@ test('Spanish: eh, o sea, and "este" only between pauses', () => {
   assert.deepEqual(brief(findCutCandidates([{clipId: 'c', source: 'S', words}])), ['filler Eh', 'filler este (between pauses)', 'filler o sea']);
 });
 
-import {speechSegments} from '../src/cuts.ts';
+import {AUTOCUT, speechSegments} from '../src/cuts.ts';
 
 test('autocut plans a piece of a take from its own words only (run 6: 11 pieces → 143 clips)', () => {
   const words = [[1000, 1400], [1500, 1900], [5000, 5400], [9000, 9500], [9600, 9900]].map(([startMs, endMs]) => ({startMs, endMs}));
@@ -88,4 +88,61 @@ test('a take split by a short pause is one attempt: "Y" + "si necesitas…" beat
   const c = seq([['Contra, barra, cocina', 0], ['y despensa.', 1000], ['Y si necesitas chef o mesero, aquí mismo te los conseguimos.', 100], ['Tiene barra, contra, barra,', 900], ['cocina y despensa.', 300], ['Y', 0], ['si necesitas chef o mesero, aquí mismo te los conseguimos.', 500]]);
   const out = brief(findCutCandidates([c]));
   assert.deepEqual(out, ['retake Contra, barra, cocina y despensa.', 'retake Y si necesitas chef o mesero, aquí mismo te los conseguimos.']);
+});
+
+
+// loudness track at 50 windows/s for autocut voice-activity tests
+const loud = (sec) => ({fps: 50, db: new Array(Math.round(sec * 50)).fill(-60)});
+const paint = (t, a, b, db) => { for (let i = Math.round(a * 50); i < Math.round(b * 50); i++) t.db[i] = db; };
+const W2 = (a, b, off) => ({startMs: a * 1000, endMs: b * 1000, ...(off ? {off: true} : {})});
+const CLIP = {inSec: 0, outSec: 20};
+
+test('autocut without loudness keeps the old behavior: words only', () => {
+  const words = [W2(1, 1.5), W2(2.4, 2.9)]; // 900 ms gap
+  const segs = speechSegments(words, CLIP);
+  assert.equal(segs.length, 2);
+});
+
+test('a pause with a voice still in it is not a cut point (WhisperX dropped the words)', () => {
+  const t = loud(20);
+  paint(t, 0.8, 3.1, -25); // the presenter talks straight through; the transcript has a hole
+  const words = [W2(1, 1.5), W2(2.4, 2.9)]; // 900 ms transcript gap
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
+  assert.equal(segs.length, 1, JSON.stringify(segs));
+  assert.ok(segs[0].outSec > 2.9, JSON.stringify(segs));
+});
+
+test('a silent pause is still cut, even with a loudness track', () => {
+  const t = loud(20);
+  paint(t, 0.9, 1.6, -25); paint(t, 2.3, 3.0, -25); // two phrases, real silence between
+  const words = [W2(1, 1.5), W2(2.4, 2.9)];
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
+  assert.equal(segs.length, 2, JSON.stringify(segs));
+});
+
+test('a pause longer than bridgeMaxMs is cut even if something rustles in it', () => {
+  const t = loud(20);
+  paint(t, 0.9, 1.6, -25); paint(t, 2.0, 2.5, -30); paint(t, 4.4, 5.1, -25); // 2.9 s gap with noise
+  const words = [W2(1, 1.5), W2(4.5, 5)];
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
+  assert.equal(segs.length, 2, JSON.stringify(segs));
+});
+
+test('dropOff: the off-mic voice explains its energy — its gap is never bridged back', () => {
+  const t = loud(20);
+  paint(t, 0.9, 3.1, -25); // presenter, then the director inside the same loud stretch
+  const words = [W2(1, 1.5), W2(1.7, 2.6, true), W2(2.8, 3.1)]; // off-mic line in the middle
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t, dropOff: true});
+  assert.equal(segs.length, 2, JSON.stringify(segs)); // cut around the off-mic line
+  assert.ok(segs[0].outSec <= 1.7 && segs[1].inSec >= 2.6, JSON.stringify(segs));
+});
+
+test('a swallowed word at the take edge: the segment grows to the voice span', () => {
+  const t = loud(20);
+  paint(t, 0.6, 2.4, -25); // "…eh, esta casa" — WhisperX only aligned from 1.0
+  const words = [W2(1, 1.5), W2(1.55, 1.9)];
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
+  assert.equal(segs.length, 1);
+  assert.ok(segs[0].inSec <= 0.6, JSON.stringify(segs)); // 0.6 span start - 0.1 lead pad, clamped at 0
+  assert.ok(segs[0].outSec >= 2.6, JSON.stringify(segs)); // 2.4 span end + 0.3 trail pad
 });

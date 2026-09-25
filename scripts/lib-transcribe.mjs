@@ -63,7 +63,7 @@ const cacheFile = (clip, lang) => path.join(TRANSCRIPTS, `${sourceKey(clip)}.${l
 
 // Loudness sidecar per source (20 ms windows): tells the presenter's takes from
 // a quieter voice off camera (a director feeding lines). See src/speech.ts.
-function loudnessFor(clip) {
+export function loudnessFor(clip) {
   const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.loud.json`);
   if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
   const ff = spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(PUBLIC, clip.src), '-vn', '-f', 'f32le', '-ac', '1', '-ar', '16000', '-'], {cwd: ROOT, maxBuffer: 1 << 29});
