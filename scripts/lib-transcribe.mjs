@@ -139,18 +139,54 @@ export function parseDeepgramJson(data) {
     .filter((w) => w.word.length > 0);
 }
 
-async function deepgramTranscribe(wavPath, lang) {
-  const params = new URLSearchParams({model: 'nova-3', smart_format: 'false', filler_words: 'true'});
+const DEEPGRAM_TIMEOUT_MS = 60_000; // + ~1 s per 50 KB of audio: a slow uplink still makes it, a stalled one does not hold the job
+const DEEPGRAM_RETRY_MS = 500; // one retry on 429 / 5xx
+const DEEPGRAM_PARALLEL = 4; // uploads in flight at once
+
+// punctuate: the sentence ends that retakes (cuts.ts), caption pages (paging.ts), off-mic takes
+// (speech.ts) and B-roll placement key on — Deepgram is unpunctuated by default. smart_format stays
+// off so tokens stay 1:1 with spoken words. filler_words only exists for English (Deepgram docs).
+async function deepgramTranscribe(wavPath, lang, attempt = 0) {
+  const body = fs.readFileSync(wavPath);
+  const params = new URLSearchParams({model: 'nova-3', punctuate: 'true', smart_format: 'false', filler_words: 'true'});
   if (lang === 'auto') params.set('detect_language', 'true');
   else params.set('language', lang);
   const res = await fetch(`https://api.deepgram.com/v1/listen?${params}`, {
     method: 'POST',
     headers: {Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'audio/wav'},
-    body: fs.readFileSync(wavPath),
-    signal: AbortSignal.timeout(10 * 60_000), // a stalled connection must not hang the job
+    body,
+    signal: AbortSignal.timeout(DEEPGRAM_TIMEOUT_MS + Math.ceil(body.length / 50)),
   });
-  if (!res.ok) throw new Error(`deepgram ${res.status}: ${(await res.text()).slice(0, 160)}`);
-  return parseDeepgramJson(await res.json());
+  if (res.ok) return parseDeepgramJson(await res.json());
+  if ((res.status === 429 || res.status >= 500) && attempt < 1) {
+    await new Promise((r) => setTimeout(r, DEEPGRAM_RETRY_MS));
+    return deepgramTranscribe(wavPath, lang, attempt + 1);
+  }
+  throw Object.assign(new Error(`deepgram ${res.status}: ${(await res.text()).slice(0, 160)}`), {status: res.status});
+}
+
+// Deepgram for every wav (key → path), DEEPGRAM_PARALLEL at a time; good transcripts land in `dir`
+// in the cache format. Returns what is left for WhisperX (failures, degenerate results) and the last
+// error, so the caller can name it. A 401/403 ends the batch: a bad key is bad for every clip alike.
+export async function deepgramAll(wavs, lang, dir = TRANSCRIPTS) {
+  const left = new Map(wavs);
+  let lastError = null, dead = false;
+  const one = async ([key, wav]) => {
+    if (dead) return;
+    try {
+      const words = await deepgramTranscribe(wav, lang);
+      if (isDegenerate(words)) throw new Error('degenerate transcript');
+      fs.writeFileSync(path.join(dir, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
+      left.delete(key);
+    } catch (e) {
+      lastError = e;
+      if (e.status === 401 || e.status === 403) dead = true;
+      console.error(`deepgram failed for ${key} (${String(e).slice(0, 140)}); WhisperX takes it`);
+    }
+  };
+  const entries = [...wavs];
+  for (let i = 0; i < entries.length; i += DEEPGRAM_PARALLEL) await Promise.all(entries.slice(i, i + DEEPGRAM_PARALLEL).map(one));
+  return {left, lastError};
 }
 
 // Transcribe every not-yet-cached source among `clips` (Deepgram when a key is
@@ -163,39 +199,25 @@ export async function transcribeClips(clips, onBatch, lang = 'auto') {
   for (const c of clips) if (!fs.existsSync(cacheFile(c, lang))) pending.set(sourceKey(c), c);
   if (!pending.size) return;
 
-  const wavs = [];
+  let wavs = new Map(); // key → wav, the sources ffmpeg could convert
   for (const [key, clip] of pending) {
     const wav = path.join(TMP, `${key}.16k.wav`);
     const ff = spawnSync('ffmpeg', ['-y', '-i', path.join(PUBLIC, clip.src), '-ar', '16000', '-ac', '1', wav], {cwd: ROOT});
     if (ff.status !== 0) console.error(`ffmpeg failed for ${key}`);
-    else wavs.push(wav);
+    else wavs.set(key, wav);
   }
-  if (!wavs.length) return;
+  if (!wavs.size) return;
 
   if (useDeepgram()) {
-    onBatch?.(`Transcribing ${wavs.length} clip${wavs.length === 1 ? '' : 's'} (Deepgram)`);
-    for (const wav of wavs) {
-      const key = path.basename(wav, '.16k.wav');
-      try {
-        const words = await deepgramTranscribe(wav, lang);
-        if (isDegenerate(words)) throw new Error('degenerate transcript');
-        fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
-        pending.delete(key);
-      } catch (e) {
-        console.error(`deepgram failed for ${key} (${String(e).slice(0, 140)}); WhisperX takes it`);
-      }
-    }
-    if (!pending.size) return;
-    wavs.length = 0;
-    for (const key of pending.keys()) {
-      const wav = path.join(TMP, `${key}.16k.wav`);
-      if (fs.existsSync(wav)) wavs.push(wav);
-    }
-    if (!wavs.length) return;
+    onBatch?.(`Transcribing ${wavs.size} clip${wavs.size === 1 ? '' : 's'} (Deepgram)`);
+    const r = await deepgramAll(wavs, lang);
+    if (!r.left.size) return;
+    wavs = r.left;
+    for (const key of [...pending.keys()]) if (!wavs.has(key)) pending.delete(key);
     // Deepgram-only setups: the clips it could not do are skipped per clip
-    // (transcribeClip throws for them), not the whole job
+    // (transcribeClip throws for them), not the whole job — the log names why
     if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
-      console.error(`WhisperX is not installed — ${wavs.length} clip(s) left untranscribed`);
+      console.error(`WhisperX is not installed — ${wavs.size} clip(s) left untranscribed after Deepgram failed: ${String(r.lastError).slice(0, 160)}`);
       return;
     }
   }
@@ -204,16 +226,17 @@ export async function transcribeClips(clips, onBatch, lang = 'auto') {
     throw new Error('WhisperX is not installed (.venv/bin/whisperx missing) — run `npm run setup`');
   }
   let device = pickDevice();
-  onBatch?.(`Transcribing ${wavs.length} clip${wavs.length === 1 ? '' : 's'} (${device === 'cuda' ? 'GPU' : 'CPU'})`);
+  const wavList = [...wavs.values()];
+  onBatch?.(`Transcribing ${wavList.length} clip${wavList.length === 1 ? '' : 's'} (${device === 'cuda' ? 'GPU' : 'CPU'})`);
   const outDir = path.join(TMP, `batch-${Date.now()}`);
   fs.mkdirSync(outDir, {recursive: true});
-  let wx = runWhisperx(wavs, outDir, device, lang);
+  let wx = runWhisperx(wavList, outDir, device, lang);
   if (wx.status !== 0 && device === 'cuda') {
     // e.g. CUDA out of memory / driver mismatch → fall back for this process
     console.error(`whisperx on cuda failed (${wx.stderr?.toString().trim().split('\n').pop()?.slice(0, 160)}); retrying on cpu`);
     DEVICE = device = 'cpu';
-    onBatch?.(`Transcribing ${wavs.length} clip${wavs.length === 1 ? '' : 's'} (CPU fallback)`);
-    wx = runWhisperx(wavs, outDir, device, lang);
+    onBatch?.(`Transcribing ${wavList.length} clip${wavList.length === 1 ? '' : 's'} (CPU fallback)`);
+    wx = runWhisperx(wavList, outDir, device, lang);
   }
   if (wx.error) throw new Error(`whisperx could not start: ${wx.error.message}`);
   if (wx.status !== 0) {
