@@ -17,8 +17,9 @@ import {pipeline} from 'node:stream/promises';
 import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
 import {mergeCaptions} from '../src/captions.ts';
-import {projectTiers} from '../src/paging.ts';
-import {totalDurationFrames} from '../src/timeline.ts';
+import {PRESETS} from '../src/captionPresets.ts';
+import {projectTiers, reapplyTiers} from '../src/paging.ts';
+import {applyAutocut, reanchor, totalDurationFrames} from '../src/timeline.ts';
 import {newProject} from '../mcp/checks.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -117,6 +118,58 @@ async function updateProject(ctx, id, change, tries = 4) {
     } catch (e) {
       if (e.extra?.status !== 409 || i >= tries) throw e;
     }
+  }
+}
+// a project by id, or by its name (`projects create` keeps the name the user typed)
+async function resolveProject(ctx, ref) {
+  if (!ref) throw new CliError('bad_usage', 'a project id or name is required', 'reel projects list');
+  if (PROJECT_ID.test(ref)) {
+    try { await getProject(ctx, ref); return ref; } catch (e) { if (e.code !== 'not_found') throw e; }
+  }
+  const hits = (await api(ctx, 'GET', '/api/projects')).filter((p) => p.name === ref);
+  if (hits.length === 1) return hits[0].id;
+  if (hits.length > 1) throw new CliError('conflict', `${hits.length} projects are named "${ref}": ${hits.map((p) => p.id).join(', ')}`, 'pass the id');
+  throw new CliError('not_found', `no project with id or name "${ref}"`, 'reel projects list');
+}
+// `projects set` flags → the project fields they write (the MCP's set_language / set_caption_style / rename_project)
+export const LANGS = ['auto', 'es', 'en'];
+export function projectPatch(o) {
+  const patch = {};
+  if (o.lang != null) {
+    const lang = o.lang.trim().toLowerCase();
+    if (!LANGS.includes(lang)) throw new CliError('bad_usage', `--lang takes a language code, not "${o.lang}"`, `one of: ${LANGS.join(', ')} (auto = detect per clip)`);
+    patch.lang = lang;
+  }
+  if (o['caption-style'] != null) {
+    if (!Object.hasOwn(PRESETS, o['caption-style'])) throw new CliError('bad_usage', `no caption style "${o['caption-style']}"`, `one of: ${Object.keys(PRESETS).join(', ')}`);
+    patch.captionStyle = o['caption-style'];
+  }
+  if (o.name != null) {
+    if (!o.name.trim()) throw new CliError('bad_usage', '--name cannot be empty');
+    patch.name = o.name;
+  }
+  return patch;
+}
+// the autocut plan against the clips it was made for: the clips after it and what it removes
+export function autocutPlan(clips, plan) {
+  const {clips: after, remap} = applyAutocut(clips, plan);
+  const sec = (cs) => +(totalDurationFrames(cs, FPS) / FPS).toFixed(2);
+  return {clips: after, remap, before: {clips: clips.length, durationSec: sec(clips)}, after: {clips: after.length, durationSec: sec(after)}, removedSec: +(sec(clips) - sec(after)).toFixed(2),
+    changed: plan.map((x) => ({id: x.id, segments: x.segments.map((g) => ({inSec: +g.inSec.toFixed(3), outSec: +g.outSec.toFixed(3)}))}))};
+}
+// a backend pipeline job (captions, autocut): start it, poll it, hand back its status when done
+async function runJob(ctx, route, body, {timeout, what, retry}) {
+  const {jobId} = await api(ctx, 'POST', route, {json: body});
+  const limit = +(timeout ?? 1800), t0 = Date.now();
+  let last = '';
+  for (;;) {
+    const s = await api(ctx, 'GET', `${route}/${jobId}`);
+    if (!ctx.json && s.label && s.label !== last) { ctx.err(`${s.progress ?? 0}% ${s.label}`); last = s.label; }
+    if (s.status === 'done') return s;
+    if (s.status === 'error') throw new CliError('job_failed', s.error || `${what} failed`);
+    if (s.status === 'unknown') throw new CliError('job_failed', `the ${what} job vanished (backend restarted?)`, retry);
+    if ((Date.now() - t0) / 1000 > limit) throw new CliError('timeout', `${what} still running after ${limit}s`, 'retry with a longer --timeout');
+    await sleep(ctx.pollMs);
   }
 }
 const durationSec = (p) => +(totalDurationFrames(p.clips ?? [], FPS) / FPS).toFixed(2);
@@ -310,6 +363,34 @@ export const COMMANDS = [
       await api(ctx, 'POST', `/api/projects/${id}`, {json: newProject(name)});
       return [{id, name, created: true}, `created ${id}`];
     }},
+  {name: 'projects set', args: '<project|name>', flags: {lang: {type: 'string', description: `transcription language code: ${LANGS.join(', ')} (auto = detect per clip)`}, 'caption-style': {type: 'string', description: 'the caption style pack (reel help projects set --json lists them)', choices: Object.keys(PRESETS)}, name: {type: 'string', description: 'rename the project'}, timeout: {type: 'string', description: 'seconds to wait for the re-paging (default 1800)'}},
+    summary: 'set the language, the caption style pack or the name of a project (the project by id or name); a new style re-pages the generated captions, keeping tiers and hand-made pages; setting what is already set changes nothing',
+    output: '{project, changed, set: {lang?, captionStyle?, name?}, captions}', examples: ['reel projects set promo-cafe --lang es --json', 'reel projects set "Promo café" --caption-style caja --json'],
+    run: async (ctx, [ref], o) => {
+      const patch = projectPatch(o);
+      if (!Object.keys(patch).length) throw new CliError('bad_usage', 'nothing to set', 'reel projects set <project> --lang es | --caption-style <pack> | --name "<name>"');
+      const id = await resolveProject(ctx, ref);
+      const p = await getProject(ctx, id);
+      // a new pack re-pages the generated captions, as the MCP's set_caption_style does
+      let fresh = null;
+      if (patch.captionStyle && patch.captionStyle !== p.captionStyle && p.clips?.length && p.captions?.length) {
+        const s = await runJob(ctx, '/api/captions', {clips: p.clips, lang: patch.lang ?? p.lang ?? 'auto', style: patch.captionStyle, offMic: p.offMic ?? 'mark', tiers: projectTiers(p.captions), project_id: id}, {timeout: o.timeout, what: 'captions', retry: `reel projects set ${id} --caption-style ${patch.captionStyle}`});
+        if (!Array.isArray(s.result)) throw new CliError('job_failed', 'the captions job returned no pages', 'is the backend up to date?');
+        fresh = s.result;
+      }
+      const {project, changed} = await updateProject(ctx, id, (cur) => {
+        const next = {...patch};
+        if (fresh) {
+          // a project from before word ids cannot tell generated pages from hand-made ones: all are re-paged
+          const legacy = !(cur.captions ?? []).some((c) => c.words.some((w) => w.wid));
+          const merged = mergeCaptions(legacy ? [] : cur.captions ?? [], fresh, cur.clips ?? [], {hidden: cur.hiddenWids ?? [], replace: true});
+          next.captions = reapplyTiers(cur.captions ?? [], merged.captions);
+        }
+        return Object.entries(next).every(([k, v]) => JSON.stringify(cur[k]) === JSON.stringify(v)) ? null : next;
+      });
+      const set = Object.fromEntries(Object.keys(patch).map((k) => [k, project[k]]));
+      return [{project: id, changed, set, captions: (project.captions ?? []).length}, `${id}: ${Object.entries(set).map(([k, v]) => `${k} ${v}`).join(', ')}${changed ? '' : ' (already set)'}${fresh ? ` — ${project.captions.length} caption pages re-paged` : ''}`];
+    }},
   {name: 'projects delete', args: '<project>', flags: {yes: {type: 'boolean', description: 'required: deleting cannot be undone'}}, summary: 'delete a project (its media stays); deleting one that is gone is not an error', output: '{id, deleted}', examples: ['reel projects delete old-test --yes --json'],
     run: async (ctx, [id], o) => {
       needId(id);
@@ -346,6 +427,28 @@ export const COMMANDS = [
       return [{project: id, added, skipped, clips: (p.clips ?? []).length}, `${id}: ${added.length} added, ${skipped.length} already there, ${(p.clips ?? []).length} clips on the timeline`];
     }},
 
+  {name: 'autocut', args: '<project|name>', flags: {'dry-run': {type: 'boolean', description: 'print the plan (clips before / after, segments kept) and change nothing'}, timeout: {type: 'string', description: 'seconds to wait for the analysis (default 1800)'}},
+    summary: 'remove the silence at the ends of each clip and the long pauses inside it (the editor\'s / MCP\'s autocut step): clips are split into their speech segments, B-roll follows them; the project by id or name',
+    output: '{project, changed, dryRun, before: {clips, durationSec}, after: {clips, durationSec}, removedSec, plan: [{id, segments: [{inSec, outSec}]}]}', examples: ['reel autocut promo-cafe --dry-run --json', 'reel autocut promo-cafe --json'],
+    run: async (ctx, [ref], o) => {
+      const id = await resolveProject(ctx, ref);
+      const p = await getProject(ctx, id);
+      if (!p.clips?.length) throw new CliError('invalid', `project ${id} has no clips`, 'reel clips add first');
+      const s = await runJob(ctx, '/api/trim-silence', {clips: p.clips, lang: p.lang ?? 'auto', offMic: p.offMic ?? 'mark', project_id: id}, {timeout: o.timeout, what: 'autocut', retry: `reel autocut ${id}`});
+      const plan = s.result?.plan;
+      if (!Array.isArray(plan)) throw new CliError('job_failed', 'the autocut job returned no plan', 'the backend must hand the plan back in the job status (result) — update the backend');
+      const r = autocutPlan(p.clips, plan);
+      const out = {project: id, changed: false, dryRun: !!o['dry-run'], before: r.before, after: r.after, removedSec: r.removedSec, plan: r.changed};
+      const line = `${id}: ${r.before.clips} clip(s) ${r.before.durationSec}s → ${r.after.clips} clip(s) ${r.after.durationSec}s (−${r.removedSec}s)`;
+      if (!plan.length) return [out, `${id}: nothing to cut`];
+      if (o['dry-run']) return [out, `${line} — dry run, nothing saved`];
+      const {changed} = await updateProject(ctx, id, (cur) => {
+        // the plan is by clip id and source seconds: a timeline edited meanwhile needs a new analysis
+        if (JSON.stringify(cur.clips ?? []) !== JSON.stringify(p.clips)) throw new CliError('conflict', `the clips of ${id} changed while autocut ran`, `reel autocut ${id}`);
+        return {clips: r.clips, brolls: reanchor(cur.brolls ?? [], r.remap)};
+      });
+      return [{...out, changed}, line];
+    }},
   {name: 'captions get', args: '<project>', summary: 'the caption pages (source-relative ms, words with tiers)', output: '{project, captionsOff, captionStyle, captions: [page]}', examples: ['reel captions get promo-cafe --json > caps.json'],
     run: async (ctx, [id]) => {
       const p = await getProject(ctx, id);
@@ -358,18 +461,7 @@ export const COMMANDS = [
     run: async (ctx, [id], o) => {
       const p = await getProject(ctx, id);
       if (!p.clips?.length) throw new CliError('invalid', `project ${id} has no clips`, 'reel clips add first');
-      const {jobId} = await api(ctx, 'POST', '/api/captions', {json: {clips: p.clips, lang: p.lang ?? 'auto', style: p.captionStyle ?? 'palabra', offMic: p.offMic ?? 'mark', tiers: projectTiers(p.captions ?? []), project_id: id}});
-      const limit = +(o.timeout ?? 1800), t0 = Date.now();
-      let s, last = '';
-      for (;;) {
-        s = await api(ctx, 'GET', `/api/captions/${jobId}`);
-        if (!ctx.json && s.label && s.label !== last) { ctx.err(`${s.progress ?? 0}% ${s.label}`); last = s.label; }
-        if (s.status === 'done') break;
-        if (s.status === 'error') throw new CliError('job_failed', s.error || 'captions failed');
-        if (s.status === 'unknown') throw new CliError('job_failed', 'the captions job vanished (backend restarted?)', `reel captions generate ${id}`);
-        if ((Date.now() - t0) / 1000 > limit) throw new CliError('timeout', `captions still running after ${limit}s`, 'retry with a longer --timeout');
-        await sleep(ctx.pollMs);
-      }
+      const s = await runJob(ctx, '/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style: p.captionStyle ?? 'palabra', offMic: p.offMic ?? 'mark', tiers: projectTiers(p.captions ?? []), project_id: id}, {timeout: o.timeout, what: 'captions', retry: `reel captions generate ${id}`});
       if (!Array.isArray(s.result)) throw new CliError('job_failed', 'the captions job returned no pages', 'is the backend up to date?');
       let added = 0;
       const {project} = await updateProject(ctx, id, (cur) => {
@@ -537,7 +629,7 @@ export function helpDoc() {
     env: {REEL_URL: 'backend address (default http://127.0.0.1:3333)', REEL_TOKEN: 'your token (else ~/.config/reel/token, mode 0600)'},
     output: 'with --json: one JSON document on stdout — the command\'s output, or {error, code, hint, ...} with a non-zero exit code',
     exitCodes: {0: 'ok', 1: 'other error', 2: 'bad usage / confirmation required', 3: 'no or bad token, not allowed', 4: 'not found', 5: 'conflict: exists, busy (one render per user), changed meanwhile', 6: 'resources: disk, memory, size', 7: 'backend unreachable', 8: 'render failed or cancelled', 9: 'validation errors', 124: 'timeout (the work goes on)'},
-    flow: ['reel projects create "<name>"', 'reel clips add <project> <files|folder>', 'reel captions generate <project>', 'reel captions get <project> --json > caps.json  (edit)  reel captions diff/set <project> caps.json', 'reel captions validate <project>', 'reel render start <project> --wait', 'reel review-link <project>'],
+    flow: ['reel projects create "<name>"', 'reel projects set <project> --lang es --caption-style <pack>', 'reel clips add <project> <files|folder>', 'reel autocut <project> [--dry-run]', 'reel captions generate <project>', 'reel captions get <project> --json > caps.json  (edit)  reel captions diff/set <project> caps.json', 'reel captions validate <project>', 'reel render start <project> --wait', 'reel review-link <project>'],
     commands: COMMANDS.map(describe),
   };
 }
