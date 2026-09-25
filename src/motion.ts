@@ -20,7 +20,7 @@ export const ms = (fps: number, millis: number) => Math.max(1, Math.round((fps *
 //   band     rises from below the frame in 170 ms (Focus's title band)
 //   slideDown drops in from above the frame in 210 ms, no scale (Orbit's FRIENDS)
 //   wipe     a slanted sweep from the left uncovers it in 210 ms (Lift's card title)
-export type ArriveKind = 'cut' | 'fade' | 'ghost' | 'blur' | 'rgb' | 'pop' | 'drop' | 'slideBlur' | 'band' | 'slideDown' | 'wipe';
+export type ArriveKind = 'cut' | 'fade' | 'ghost' | 'blur' | 'rgb' | 'pop' | 'drop' | 'slideBlur' | 'band' | 'slideDown' | 'wipe' | 'stomp' | 'ccSlideUp' | 'highlightRise' | 'trackingIn' | 'focusBlur' | 'appleMask';
 export type Arrival = {opacity: number; scale: number; dx: number; dy: number; blur: number; rgb: number; shine: number; clip?: string}; // px; shine 0..1 = where the highlight is; clip = a clip-path while arriving
 const THERE: Arrival = {opacity: 1, scale: 1, dx: 0, dy: 0, blur: 0, rgb: 0, shine: 1};
 
@@ -30,11 +30,30 @@ export function arrive(kind: ArriveKind, frame: number, fps: number): Arrival {
   const t = (millis: number) => interpolate(frame, [0, ms(fps, millis)], [0, 1], {...CLAMP, easing: OUT});
   switch (kind) {
     case 'cut': return THERE;
+    case 'highlightRise': return THERE; // rendered per-char in CaptionTrack (classifier highlights, César 9:27)
+    case 'trackingIn': return THERE; // letter-spacing snap rendered in CaptionTrack (Remocn TrackingIn)
+    case 'appleMask': return THERE; // masked rise + blur settle rendered in CaptionTrack (Apple-keynote kinetic type)
+    case 'focusBlur': { // Remocn FocusBlurResolve: heavy blur pulls to crisp
+      const a = t(420);
+      return {...THERE, opacity: Math.min(1, a * 1.7), blur: (1 - a) * 14};
+    }
     case 'fade': { const a = t(170); return {...THERE, opacity: a, dy: (1 - a) * 6}; }
     case 'ghost': { const a = t(250); return {...THERE, opacity: 0.4 + 0.6 * a, shine: a}; }
     case 'blur': { const a = t(100); return {...THERE, opacity: a, blur: (1 - a) * 15}; }
     case 'rgb': { const a = t(125); return {...THERE, opacity: Math.min(1, a * 1.5), blur: (1 - a) * 10, rgb: (1 - a) * 6}; }
     case 'pop': { const s = spring({frame, fps, config: {damping: 12, stiffness: 220, mass: 0.6}}); return {...THERE, scale: 0.7 + 0.3 * s}; }
+    case 'ccSlideUp': { // César's Premiere "CC slide up" caption entry (his .prproj keyframes, ~0.77x per his 9:57
+      // "aumenta la velocidad" + motion blur on entry): 91 px rise in 160 ms, cubic-bezier(0.1667,0.1667,0,1);
+      // opacity 0->1 in 64 ms; blur settles with the rise; no exit (hard cut)
+      const a = interpolate(frame, [0, ms(fps, 64)], [0, 1], CLAMP);
+      const r = interpolate(frame, [0, ms(fps, 160)], [0, 1], {...CLAMP, easing: Easing.bezier(0.1667, 0.1667, 0, 1)});
+      return {...THERE, opacity: a, dy: (1 - r) * 91, blur: (1 - r) * 8};
+    }
+    case 'stomp': { // WithSubtitles 'stomp': word punches in from ~2.2x down to 1 with a hard settle
+      const s = spring({frame, fps, config: {damping: 11, stiffness: 260, mass: 0.7}});
+      const a = t(80);
+      return {...THERE, scale: 1 + 1.2 * (1 - s), opacity: a};
+    }
     case 'drop': { const a = t(125); return {...THERE, scale: 1.3 - 0.3 * a, dy: -(1 - a) * 40}; }
     case 'slideBlur': { const a = t(250); return {...THERE, dx: (1 - a) * 600, blur: (1 - a) * 30}; }
     case 'band': { const a = t(170); return {...THERE, dy: (1 - a) * 600}; }
@@ -75,15 +94,68 @@ export function cardLanding(frame: number, fps: number): number {
 // how a title's characters arrive: letters (Elevate, Prime: one every ~42 ms, the leading one blurred),
 // typewriter (Paper II, Lens, Align: ~30 ms per char, no blur), shuffle (Align: random glyphs that resolve
 // left → right in 290 ms), tracking (Align, Elevate: all shown, letter-spacing settles 0.7 → 0.38 em in 375 ms)
-export type TextReveal = 'letters' | 'typewriter' | 'shuffle' | 'tracking';
-export const TEXT_REVEALS = new Set<string>(['letters', 'typewriter', 'shuffle', 'tracking']);
-export function revealText(kind: TextReveal, frame: number, fps: number, n: number): {shown: number; blur: number; tracking: number; scramble: boolean} {
+export type TextReveal = 'letters' | 'typewriter' | 'shuffle' | 'tracking' | 'trackingSnap' | 'bounceChars' | 'bounceCharsBlue' | 'riseChars';
+export const TEXT_REVEALS = new Set<string>(['letters', 'typewriter', 'shuffle', 'tracking', 'trackingSnap', 'bounceChars', 'bounceCharsBlue', 'riseChars']);
+
+// per-character transform while a continuous reveal (bounceChars, riseChars) is running
+export type CharFx = {opacity: number; dy: number; scale: number; blur: number; rotate: number};
+
+// ---- César's .aegraphic text presets, measured from the .aep keyframes ----
+// (FAST / CLEAN_BLUE / TRIPLE_ELEGANT_TEXT; expressions and keyframes pulled
+// straight out of the projects). Two families:
+//
+// bounceChars = the "Rebote" / "Glass" / "blue" / "apple style" expression
+// selector: amount = amp·cos(freq·2πt)/e^(decay·t) per character, delayed
+// `delayPer` s per char. At t<0 the amount sits at 100 (char fully displaced:
+// below, scale 0, rotated, blurred); it then oscillates past rest and settles
+// — the damped spring of the originals. Rebote: dy 91, rot 65, blur 94,
+// delay 0.05, amp 80, freq 2, decay 8. blue/apple: dy 310, blur 0/192,
+// delay 0.1, amp 20, freq 3, decay 8.
+export type BounceOpts = {delayPer: number; freq: number; amp: number; decay: number; dyPx: number; blurPx: number; rotateDeg: number};
+export const BOUNCE_REBOTE: BounceOpts = {delayPer: 0.05, freq: 2, amp: 80, decay: 8, dyPx: 91, blurPx: 94, rotateDeg: 65};
+// CLEAN BLUE / apple style: the big one — chars drop from 310px below with heavy blur, slower stagger
+export const BOUNCE_BLUE: BounceOpts = {delayPer: 0.1, freq: 3, amp: 20, decay: 8, dyPx: 310, blurPx: 192, rotateDeg: 0};
+export function bounceChar(i: number, frame: number, fps: number, o: BounceOpts = BOUNCE_REBOTE): CharFx {
+  const t = frame / fps - i * o.delayPer;
+  const amount = t < 0 ? 100 : o.amp * Math.cos(o.freq * t * 2 * Math.PI) / Math.exp(o.decay * t);
+  return {
+    opacity: 1,
+    dy: (o.dyPx * amount) / 100,
+    scale: Math.max(0, 1 - amount / 100),
+    blur: Math.max(0, (o.blurPx * amount) / 100),
+    rotate: (o.rotateDeg * amount) / 100,
+  };
+}
+
+// riseChars = "Smooth up" / "Futurist" / "Gold text": a range-selector sweep
+// (offset −100→100 in ~1.32 s) lifts each character from +100 px below with
+// blur 100→0 and fade, ease-low 90 (fast settle). Approximated per char with
+// a staggered ease-out; the sweep is continuous in AE, this is the frame
+// equivalent.
+export function riseChar(i: number, n: number, frame: number, fps: number): CharFx {
+  const total = 1.32; // s, the AE offset sweep
+  const stagger = total * 0.55;
+  const dur = total * 0.45;
+  const t = frame / fps - (n > 1 ? (i / (n - 1)) * stagger : 0);
+  if (t <= 0) return {opacity: 0, dy: 100, scale: 1, blur: 100, rotate: 0};
+  const a = interpolate(t, [0, dur], [0, 1], {...CLAMP, easing: Easing.out(Easing.cubic)});
+  return {opacity: a, dy: (1 - a) * 100, scale: 1, blur: (1 - a) * 100, rotate: 0};
+}
+
+export function revealText(kind: TextReveal, frame: number, fps: number, n: number): {shown: number; blur: number; tracking: number; scramble: boolean; charFx?: (i: number) => CharFx} {
   const t = Math.max(0, frame) * (1000 / fps); // ms since the onset
   switch (kind) {
     case 'letters': { const shown = Math.min(n, t / 42); return {shown, blur: shown < n ? 10 : 0, tracking: 0, scramble: false}; }
     case 'typewriter': return {shown: Math.min(n, t / 30), blur: 0, tracking: 0, scramble: false};
     case 'shuffle': { const k = Math.min(1, t / 290); return {shown: n * k, blur: 0, tracking: 0, scramble: k < 1}; }
     case 'tracking': { const a = interpolate(t, [0, 375], [0, 1], {...CLAMP, easing: OUT}); return {shown: n, blur: 0, tracking: 0.7 - 0.32 * a, scramble: false}; }
+    case 'trackingSnap': { // César's Apple-style pick 2 (9:51): letter-spacing collapses wide -> normal with a spring snap
+      const s = spring({frame: Math.max(0, frame), fps, config: {damping: 14, stiffness: 180, mass: 0.7}});
+      return {shown: n, blur: 0, tracking: (1 - s) * 0.35, scramble: false};
+    }
+    case 'bounceChars': return {shown: n, blur: 0, tracking: 0, scramble: false, charFx: (i) => bounceChar(i, frame, fps)};
+    case 'bounceCharsBlue': return {shown: n, blur: 0, tracking: 0, scramble: false, charFx: (i) => bounceChar(i, frame, fps, BOUNCE_BLUE)};
+    case 'riseChars': return {shown: n, blur: 0, tracking: 0, scramble: false, charFx: (i) => riseChar(i, n, frame, fps)};
   }
 }
 // a deterministic random glyph for the shuffle (same seed, index and frame → same glyph in every renderer)

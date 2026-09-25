@@ -238,6 +238,13 @@ export const TEMPLATES = {
       fromYPct: z.number().min(0).max(100).default(38).describe('unfold only: where the ball starts, % of frame height'),
     }),
   },
+  // César's CLEAN BLUE .aegraphic: white sentence-case line over a huge #FFE500 ALL-CAPS Helvetica Bold line
+  'clean-blue': {
+    desc: "César's CLEAN BLUE title: white sentence-case line over a huge accent ALL-CAPS line, both Helvetica Bold with his strong soft black drop shadow down-right, no box, lower-middle; per-char CLEAN BLUE bounce in (bounceCharsBlue)",
+    defaultMs: 2600,
+    y: 58,
+    schema: z.object({line1: short(40), line2: short(24), upper2: z.boolean().default(true)}),
+  },
 } as const;
 
 export type TemplateId = keyof typeof TEMPLATES;
@@ -252,7 +259,7 @@ export const DECOR_FULL = new Set<string>(['outline-rect', 'frame-light', 'rules
 export const MATTE_TEMPLATES = new Set<string>(['person-outline']);
 
 // how a graphic arrives, leaves and lives (src/motion.ts); 'auto' = the template's own entrance / a short fade out
-export const REVEAL_KINDS = ['auto', 'blur', 'fade', 'letters', 'typewriter', 'shuffle', 'tracking', 'drop', 'slideBlur', 'slideDown', 'band', 'wipe'] as const;
+export const REVEAL_KINDS = ['auto', 'blur', 'fade', 'letters', 'typewriter', 'shuffle', 'tracking', 'bounceChars', 'bounceCharsBlue', 'riseChars', 'trackingSnap', 'drop', 'slideBlur', 'slideDown', 'band', 'wipe'] as const;
 export const OUT_KINDS = ['auto', 'cut', 'fade', 'blur', 'letters', 'slideUp', 'band'] as const;
 export const LIFE_KINDS = ['none', 'grow', 'marquee', 'drift', 'oscillate'] as const;
 export type Reveal = (typeof REVEAL_KINDS)[number];
