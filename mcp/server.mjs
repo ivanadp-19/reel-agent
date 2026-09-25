@@ -23,7 +23,7 @@ import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
 import {applyAutocut, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
 import {mergeCaptions, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
-import {isGlue, projectTiers, reapplyTiers} from '../src/paging.ts';
+import {isGlue, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
@@ -227,6 +227,13 @@ async function runJobUntimed(route, body, maxSec) {
   }
 }
 const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8'));
+// what a pipeline job made: the backend hands it back in the job's status (a file of that job's own,
+// never one every job shares — two jobs at once used to read each other's captions)
+async function jobResult(route, body) {
+  const {result} = await runJob(route, body);
+  if (result == null) throw new Error(`${route} finished without its result — restart the backend (npm start) so it runs this version`);
+  return result;
+}
 
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
@@ -926,13 +933,11 @@ async function settleGrade(p) {
   const g = p.grade;
   const need = autoSources(g, p.clips).filter((s) => !g.bySrc?.[s]);
   if (need.length) {
-    await runJob('/api/grade', {clips: need.map((src) => ({src}))});
-    g.bySrc = {...g.bySrc, ...(readPublic('grade.json').bySrc ?? {})};
+    g.bySrc = {...g.bySrc, ...((await jobResult('/api/grade', {clips: need.map((src) => ({src}))})).bySrc ?? {})};
   }
   const bakes = lutBakes(g, p.clips, p.mattes).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
   if (bakes.length) {
-    await runJob('/api/lut', {bake: bakes});
-    g.baked = {...g.baked, ...(readPublic('lut.json').baked ?? {})};
+    g.baked = {...g.baked, ...((await jobResult('/api/lut', {bake: bakes})).baked ?? {})};
   }
 }
 const f2s = (v) => (v > 0 ? `+${f2(v)}` : f2(v));
@@ -973,8 +978,7 @@ server.registerTool('create_lut', {description: 'Make a .cube LUT from reference
     if (path.isAbsolute(f)) { hostFile(f); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
     const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
   });
-  await runJob('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
-  const lut = readPublic('lut.json').lut;
+  const {lut} = await jobResult('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
   if (!apply) return text(`LUT ${lut} made from ${refs.length} reference(s). Apply it with set_grade lut: "${name}".`);
   p.grade ??= {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
   p.grade.lut = lut;
@@ -987,8 +991,7 @@ server.registerTool('prepare_mattes', {description: 'Cut the presenter out of th
   const p = load(project_id);
   const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes, p.clips);
   if (!spans.length) return text('Nothing to matte: every behind-span already has a matte (or no graphic is marked behind).');
-  await runJob('/api/matte', {spans});
-  const done = readPublic('mattes.json');
+  const done = await jobResult('/api/matte', {spans});
   p.mattes = [...p.mattes, ...(Array.isArray(done) ? done : [])];
   await save(project_id, p);
   return text(`Matted ${done.length} span(s): ${done.map((m) => `${path.basename(m.src)} ${f1(m.startMs / 1000)}–${f1(m.endMs / 1000)}s`).join(', ')}`);
@@ -1011,13 +1014,9 @@ server.registerTool('delete_graphics', {description: 'Delete graphics by id.', i
 server.registerTool('set_caption_style', {description: `The STYLE PACK of the reel — one of the 20 Captions.ai looks, or the three real-estate references. A pack sets the caption look, the palette and faces (unless a brand kit or a project accent is set), the family of transitions, how B-roll cues arrive and leave, and the frame the style lives in. Packs: ${Object.values(PACKS).map((x) => `${x.id} = ${x.desc} [cuts: ${x.transition}${x.brollMode ? `, B-roll: ${x.brollMode}` : ''}${x.layout ? `, frame: ${x.layout.shape} on ${x.layout.canvas}` : ''}]`).join('; ')}. References: ${['palabra', 'caja', 'tracked'].map((id) => `${id} = ${PRESETS[id].desc}`).join('; ')}. Re-pages the generated captions for the new pack, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); p.captionStyle = style;
   if (p.clips.length && p.captions.length) {
-    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions)}); // the pager sees the project's emphasis (a highlighted name stays one unit)
-    const fresh = readPublic('captions.multi.json');
-    // generated pages are re-paged; hand-made ones, deleted words and tiers survive
-    // (a project from before word ids has no way to tell: everything is re-paged)
-    const legacy = !p.captions.some((c) => c.words.some((w) => w.wid));
-    const merged = mergeCaptions(legacy ? [] : p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true});
-    p.captions = reapplyTiers(p.captions, merged.captions);
+    const fresh = await jobResult('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions)}); // the pager sees the project's emphasis (a highlighted name stays one unit)
+    // generated pages are re-paged; hand-made ones, deleted words and tiers survive (src/paging.ts, shared with the editor)
+    p.captions = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, p.hiddenWids).captions;
   }
   await save(project_id, p);
   return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
@@ -1047,12 +1046,12 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
   let p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const lang = p.lang ?? 'auto';
   if (step === 'autocut') {
-    await runJob('/api/trim-silence', {clips: p.clips, lang, offMic: p.offMic}); const {plan} = readPublic('trim-silence.json');
+    const {plan} = await jobResult('/api/trim-silence', {clips: p.clips, lang, offMic: p.offMic});
     if (!Array.isArray(plan) || !plan.length) return text('Nothing to cut');
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions)}); const fresh = readPublic('captions.multi.json');
+  const fresh = await jobResult('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions)});
   const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });

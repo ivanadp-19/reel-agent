@@ -5,7 +5,7 @@ import {spansWithoutMatte} from '../src/graphicTemplates';
 import {validateProject, transcriptIssues, type Issue} from '../src/validate';
 import type {TClip} from '../src/cuts';
 import type {Matte} from '../src/Person';
-import {runJob, readPublic} from './jobs';
+import {jobResult} from './jobs';
 import {Btn, Label, Row, Section, Select, TextInput, Toggle} from './ui';
 
 type MusicRow = {id: string; title: string; creator: string; license: string; durationSec: number; url: string; page?: string; source?: string};
@@ -66,8 +66,7 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
   const prepareMattes = async () => {
     setBusy('Starting…');
     try {
-      await runJob('/api/matte', {spans: needMatte}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const done = await readPublic<Matte[]>('mattes.json');
+      const done = await jobResult<Matte[]>('/api/matte', {spans: needMatte}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       addMattes(Array.isArray(done) ? done : []);
       notify(`Matted ${done.length} span(s)`, 'ok');
     } catch (e) { notify('Mattes failed: ' + (e as Error).message, 'error'); }

@@ -5,7 +5,8 @@
 // Steps : 1) transcribe each source clip with WhisperX (cached per source),
 //         2) map words onto the assembled/trimmed timeline,
 //         3) face-aware vertical placement (local YuNet),
-//         4) page words per the caption preset (src/paging.ts) → public/captions.multi.json
+//         4) page words per the caption preset (src/paging.ts) → argv[3] (the backend's
+//            file for this job; public/captions.multi.json when run by hand)
 // Accents/emphasis are NOT decided here: the agent annotates via MCP.
 // Output: PROGRESS:<pct>:<label> lines on stdout for the server to relay.
 import fs from 'node:fs';
@@ -142,5 +143,5 @@ progress(88, 'Finding faces');
 const faces = detectFaces(clips);
 const topBySrc = Object.fromEntries(clips.map((c) => [c.src, faceToTop(faces[sourceKey(c)])]));
 const captions = pageWords(words, presetOf(style), topBySrc);
-fs.writeFileSync(path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2));
+fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2)); // argv[3]: the backend's file for this job
 progress(100, `Done — ${captions.length} captions`);

@@ -2,7 +2,7 @@
 //
 // Input : JSON (argv[2]) = {spans:[{src, startMs, endMs}]}  (source-relative)
 // Output: public/mattes/<source>-<startMs>-<endMs>.webm (VP9 + alpha) per span,
-//         public/mattes.json = [{src, startMs, endMs, file}]
+//         argv[3] (public/mattes.json by hand) = [{src, startMs, endMs, file}]
 // Runs scripts/matte.py (MediaPipe selfie segmenter, CPU, ~30 fps at 1080p).
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,5 +30,5 @@ spans.forEach((s, i) => {
   }
   done.push({src: s.src, startMs: s.startMs, endMs: s.endMs, file});
 });
-fs.writeFileSync(path.join(PUBLIC, 'mattes.json'), JSON.stringify(done));
+fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'mattes.json'), JSON.stringify(done)); // argv[3]: the backend's file for this job
 progress(100, `Done — ${done.length} matte(s)`);

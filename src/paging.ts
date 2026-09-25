@@ -2,7 +2,8 @@
 // Shared by the captions pipeline (scripts/captions-multiclip.mjs) and the MCP
 // server, so re-styling re-pages exactly the same way.
 
-import type {Caption, CaptionWord} from './captions.ts';
+import {mergeCaptions, type Caption, type CaptionWord} from './captions.ts';
+import type {Clip} from './timeline.ts';
 import type {Preset} from './captionPresets.ts';
 
 // a transcript word as assembleWords() emits it (absolute + source-relative times)
@@ -152,4 +153,13 @@ export function reapplyTiers(oldPages: Caption[], fresh: Caption[]): Caption[] {
     const page = from ? {...c, ...(from.pin ? {pin: true, topPct: from.topPct} : {}), ...(from.scale ? {scale: from.scale} : {}), ...(from.behind ? {behind: true} : {})} : c;
     return {...page, words: c.words.map((w) => (w.wid && (tier.has(w.wid) || emoji.has(w.wid)) ? {...w, ...(tier.has(w.wid) ? {tier: tier.get(w.wid)!} : {}), ...(emoji.has(w.wid) ? {emoji: emoji.get(w.wid)!} : {})} : w))};
   });
+}
+
+// Re-page for a new style (set_caption_style, the editor's style switch): the generated pages give
+// way to the fresh ones; hand-made pages and deleted words stay; tiers, emoji and page settings carry
+// over by word id. A project from before word ids has no way to tell: everything is re-paged.
+export function repage(captions: Caption[], fresh: Caption[], clips: Clip[], hidden: string[] = []): {captions: Caption[]; added: number} {
+  const legacy = !captions.some((c) => c.words.some((w) => w.wid));
+  const merged = mergeCaptions(legacy ? [] : captions, fresh, clips, {hidden, replace: true});
+  return {captions: reapplyTiers(captions, merged.captions), added: merged.added};
 }

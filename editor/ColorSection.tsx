@@ -1,7 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
-import {runJob, readPublic} from './jobs';
+import {jobResult} from './jobs';
 import {Btn, Label, Section, Select, Toggle} from './ui';
 
 // Color (set_grade / create_lut): the whole reel or one source / clip (an
@@ -45,12 +45,10 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
     try {
       const next = {...g};
       if (need.length) {
-        await runJob('/api/grade', {clips: need.map((src) => ({src}))}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-        next.bySrc = {...next.bySrc, ...((await readPublic<{bySrc?: ProjectGrade['bySrc']}>('grade.json')).bySrc ?? {})};
+        next.bySrc = {...next.bySrc, ...((await jobResult<{bySrc?: ProjectGrade['bySrc']}>('/api/grade', {clips: need.map((src) => ({src}))}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`))).bySrc ?? {})};
       }
       if (bakes.length) {
-        await runJob('/api/lut', {bake: bakes}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-        next.baked = {...next.baked, ...((await readPublic<{baked?: Record<string, string>}>('lut.json')).baked ?? {})};
+        next.baked = {...next.baked, ...((await jobResult<{baked?: Record<string, string>}>('/api/lut', {bake: bakes}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`))).baked ?? {})};
       }
       setGrade(next);
     } catch (e) { notify('Color: ' + (e as Error).message, 'error'); }
@@ -90,8 +88,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
         if (!r?.file) throw new Error(r?.error ?? 'upload failed');
         refs.push(r.file);
       }
-      await runJob('/api/lut', {make: {name, refs, clips: clips.map((c) => ({src: c.src})), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const {lut} = await readPublic<{lut?: string}>('lut.json');
+      const {lut} = await jobResult<{lut?: string}>('/api/lut', {make: {name, refs, clips: clips.map((c) => ({src: c.src})), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       await loadLuts();
       setBusy(null);
       if (lut) { patch((l) => ({...l, lut})); notify(`LUT ${name} made from ${refs.length} photo(s)`, 'ok'); }
