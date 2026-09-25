@@ -145,7 +145,7 @@ The production box is a small Linux VM (2 vCPU) shared by several agent sessions
 - **Remote agents (MCP over HTTP).** A collaborator's Claude Code connects to the hosted backend with no shell on it:
   `claude mcp add --transport http reel https://<host>/mcp --header "x-reel-token: <their token>"`
   (or in `.mcp.json`: `{"type": "http", "url": "https://<host>/mcp", "headers": {"x-reel-token": "${REEL_TOKEN}"}}`).
-  One token per client: append it to `REEL_BACKEND_TOKEN` (comma-separated; the first stays the primary the backend and its own MCP use) and restart; revoke by removing it — its open sessions stop at once, since every request is gated. Paths the tools take (`add_clips files`, `add_broll_assets`, `set_brand font_files`) are paths on the server, not on the client's machine: upload media through the editor first.
+  One token per client: append it to `REEL_BACKEND_TOKEN` (comma-separated; the first stays the primary the backend and its own MCP use) and restart; revoke by removing it — its open sessions stop at once, since every request is gated. Paths the tools take (`add_clips files`, `add_broll_assets`, `set_brand font_files`) are paths on the server, not on the client's machine: upload media through the editor first. Over `/mcp` a tool accepts only files under `public/` (symlinks resolved — never `.env` or anything else of the server; stdio keeps any path).
 - **One agent per project.** The MCP server takes `public/projects/<id>.lock` on
   its first write to a project and refreshes it on every write
   (`scripts/project-lock.mjs`); a second agent that tries to write gets an error

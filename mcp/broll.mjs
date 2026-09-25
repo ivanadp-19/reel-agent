@@ -68,7 +68,7 @@ export function brollSrc(src, publicDir = PUBLIC) {
     const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name));
     return `broll/${name}`;
   }
-  if (!fs.existsSync(path.join(publicDir, src))) throw new Error(`not found in public/: ${src}`);
+  if (!path.resolve(publicDir, src).startsWith(path.resolve(publicDir) + path.sep) || !fs.existsSync(path.join(publicDir, src))) throw new Error(`not found in public/: ${src}`);
   return src;
 }
 export const brollKind = (src) => (/\.(jpe?g|png|webp)(\?|$)/i.test(src) ? 'image' : 'video');

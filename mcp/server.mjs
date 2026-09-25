@@ -110,6 +110,18 @@ export function releaseSession(sessionId) {
   for (const id of held.get(tag) ?? []) releaseLock(PROJECTS, id, process.pid, tag);
   held.delete(tag); clocks.delete(tag); lastProject.delete(tag);
 }
+// A file on this machine that a tool reads or copies in, given as an absolute path.
+// stdio is a local agent that has a shell here anyway: any existing file. Over HTTP
+// the caller is a remote client with no shell: only files under public/ (uploaded
+// through the editor), resolved through symlinks — never .env, .backend-token or
+// anything else of the server's.
+function hostFile(f) {
+  if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+  if (!callCtx.getStore()?.tag) return f;
+  const real = fs.realpathSync(f), pub = fs.realpathSync(PUBLIC);
+  if (!real.startsWith(pub + path.sep)) throw new Error(`over HTTP a file must be under public/ on the server (upload it through the editor first): ${f}`);
+  return f;
+}
 async function save(id, p) {
   lock(id);
   // prefer the backend (single writer, sets updatedAt the same way the UI does)
@@ -363,6 +375,7 @@ const BRANDS = path.join(PUBLIC, 'brands');
 const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
+const AUDIO = /\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i;
 const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
 server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio to this project (apply_style false = only store it) and tells you the pack to set; reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, apply_style, name, from, save_as, clear}) => {
   const p = load(project_id);
@@ -384,7 +397,7 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
     if (!FONT_FILE.test(ff.path)) throw new Error(`${ff.path}: a font file is .ttf, .otf, .woff or .woff2`);
     let rel;
     if (path.isAbsolute(ff.path)) {
-      if (!fs.existsSync(ff.path)) throw new Error(`file not found: ${ff.path}`);
+      hostFile(ff.path);
       fs.mkdirSync(FONTS_DIR, {recursive: true});
       const dest = path.join(FONTS_DIR, path.basename(ff.path).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(ff.path, dest);
       rel = path.relative(PUBLIC, dest);
@@ -401,7 +414,7 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
     if (path.isAbsolute(logo)) {
-      if (!fs.existsSync(logo)) throw new Error(`file not found: ${logo}`);
+      hostFile(logo);
       const dir = path.join(BRANDS, 'logos'); fs.mkdirSync(dir, {recursive: true});
       const dest = path.join(dir, path.basename(logo).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(logo, dest);
       b.logo = path.relative(PUBLIC, dest);
@@ -454,7 +467,7 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'};
   const added = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     // same machine: hand the backend the path instead of streaming the file through memory
     const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
@@ -612,7 +625,7 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
     const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
     s = a.src; kind = a.kind; query = label ?? a.label;
   } else if (!src) throw new Error('give asset_id or src');
-  else s = brollSrc(src);
+  else s = brollSrc(path.isAbsolute(src) ? hostFile(src) : src);
   if (/^https?:/.test(s)) source = 'pexels';
   if (!kind) kind = brollKind(s);
   const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
@@ -629,7 +642,7 @@ server.registerTool('add_broll_assets', {description: "Bring the client's own fo
   await needBackend();
   const content = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
     const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
@@ -714,7 +727,7 @@ server.registerTool('search_catalog', {description: 'Find footage by CONTENT in 
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
-  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
+  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(path.isAbsolute(src) ? hostFile(src) : src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
   if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
@@ -743,8 +756,9 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
     const entry = row.src && fs.existsSync(path.join(PUBLIC, row.src)) ? row : await downloadMusic(row);
     src = entry.src; credit = entry.credit ?? creditOf(entry);
   } else if (!file) throw new Error('give music_id or file');
-  else if (path.isAbsolute(file)) { if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
-  else if (!fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
+  else if (!AUDIO.test(file)) throw new Error(`${file}: music is an audio file (${AUDIO.source})`);
+  else if (path.isAbsolute(file)) { hostFile(file); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
+  else if (!path.resolve(PUBLIC, file).startsWith(PUBLIC + path.sep) || !fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
   else src = file;
   p.music = {src, volume, startSec: 0, fadeOutSec: fade_out_sec, duck, duckLevel: 0.25, ...(credit ? {credit} : {})}; await save(project_id, p);
   return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}`);
@@ -882,6 +896,7 @@ const savedLuts = () => { try { return fs.readdirSync(LUTS).filter((f) => f.ends
 function lutPath(lut) {
   if (path.isAbsolute(lut)) {
     if (!/\.cube$/i.test(lut) || !fs.existsSync(lut)) throw new Error(`not an existing .cube file: ${lut}`);
+    hostFile(lut);
     fs.mkdirSync(LUTS, {recursive: true});
     const dest = path.join(LUTS, path.basename(lut).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(lut, dest);
     return path.relative(PUBLIC, dest);
@@ -947,7 +962,7 @@ server.registerTool('create_lut', {description: 'Make a .cube LUT from reference
   const dir = path.join(LUTS, 'refs', name); fs.mkdirSync(dir, {recursive: true});
   const refs = reference_images.map((f) => {
     if (!IMAGE.test(f) && !/\.(heic|tiff?)$/i.test(f)) throw new Error(`${f}: a reference must be an image`);
-    if (path.isAbsolute(f)) { if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
+    if (path.isAbsolute(f)) { hostFile(f); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
     const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
   });
   await runJob('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
@@ -1199,7 +1214,7 @@ server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame
 server.registerTool('frame_at', {description: 'Look at a frame. Without `video`: the raw source frame at that timeline time (no captions/B-roll). With `video` = a rendered mp4 path from render: the finished frame with everything on it.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds'), video: z.string().optional()}}, async ({project_id, at_sec, video}) => {
   const p = load(project_id);
   let file, t;
-  if (video) { file = video; t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
+  if (video) { file = hostFile(path.isAbsolute(video) && fs.existsSync(video) ? video : path.join(PUBLIC, video.replace(/^\//, ''))); t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
   if (!fs.existsSync(file)) throw new Error(`not found: ${file}`);
   const out = path.join(ROOT, '.captions-tmp', `mcp-frame-${Date.now()}.jpg`); fs.mkdirSync(path.dirname(out), {recursive: true});
   const ff = spawnSync('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
