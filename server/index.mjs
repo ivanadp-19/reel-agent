@@ -23,7 +23,7 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
-import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
+import {aheadOf, createRenderJobs, jobsDir, newJobId} from '../scripts/render-jobs.mjs';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
@@ -653,18 +653,22 @@ async function handle(req, res) {
   // ---- pipeline jobs: transcribe / captions / autocut ----
   // Each spawns one pipeline script with the request body as its input file and
   // relays PROGRESS lines; on failure the LAST meaningful stderr line is returned
-  // to the UI instead of "see server logs".
+  // to the UI instead of "see server logs". What the job makes goes to a file of
+  // its own (argv[3]) and comes back in the job's status (`result`): two jobs at
+  // once (two agents, the editor and an agent) never read each other's output.
   const job = JOBS[url.pathname];
   if (req.method === 'POST' && job) {
-    const id = String(Date.now());
+    const id = newJobId(); // two jobs started in one ms must not share files
     const inFile = path.join(ROOT, `.${job.prefix}-${id}.json`);
+    const outFile = path.join(ROOT, '.captions-tmp', `${job.prefix}-${id}.out.json`);
+    fs.mkdirSync(path.dirname(outFile), {recursive: true});
     const raw = await body(req);
     fs.writeFileSync(inFile, raw);
     let project = null;
     try { const p = JSON.parse(raw).project_id; if (typeof p === 'string') project = p; } catch {}
     const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
-    const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
+    const child = spawn('node', [job.script, inFile, outFile], {cwd: ROOT, env: process.env});
     let errTail = '';
     let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
@@ -683,13 +687,16 @@ async function handle(req, res) {
       process.stderr.write(d);
     });
     child.on('close', (code) => {
-      fs.rmSync(inFile, {force: true});
+      let result; // absent for a job that keeps its output in public/ (transcribe → transcript.json)
+      if (code === 0) try { result = JSON.parse(fs.readFileSync(outFile, 'utf8')); } catch {}
+      for (const f of [inFile, outFile]) fs.rmSync(f, {force: true});
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
       const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
       logStage(project, job.stage, ms, {job: id, ...(code === 0 ? {} : {ok: false})});
       job.store[id] = code === 0
-        ? {status: 'done', progress: 100, label: 'Ready'}
+        ? {status: 'done', progress: 100, label: 'Ready', result}
         : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
+      setTimeout(() => delete job.store[id], 30 * 60e3).unref(); // its poller reads it within seconds
     });
     return json(res, 200, {jobId: id});
   }

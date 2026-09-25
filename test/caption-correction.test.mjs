@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
+import {spawn} from 'node:child_process';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {pageWords} from '../src/paging.ts';
@@ -19,22 +21,22 @@ import {createMasterCache} from '../scripts/layers.mjs';
 // "Hola soy Ana, | hoy te enseño la casa | en Playa del Carmen. | Tiene tres recámaras y alberca. | Llámame hoy."
 const SAID = 'Hola soy Ana, hoy te enseño la casa en Playa del Carmen. Tiene tres recámaras y alberca. Llámame hoy.'.split(' ');
 const SRC = 'clips/t.mp4';
+// SAID as the pager takes it, word ids "<source>:<i>"
+const said = (src = SRC) => { let t = 200; return SAID.map((w, i) => { const s = t; t += 180 + (w.endsWith('.') ? 400 : 60); return {wid: `${path.basename(src, '.mp4')}:${i}`, word: w, src, clipId: 'k0', startMs: s, endMs: s + 170, srcStartMs: s, srcEndMs: s + 170}; }); };
 function reel() {
-  let t = 200;
-  const words = SAID.map((w, i) => { const s = t; t += 180 + (w.endsWith('.') ? 400 : 60); return {wid: `t:${i}`, word: w, src: SRC, clipId: 'k0', startMs: s, endMs: s + 170, srcStartMs: s, srcEndMs: s + 170}; });
-  return {name: 'caption correction', clips: [{id: 'k0', src: SRC, inSec: 0, outSec: 6, sourceDurationSec: 6}], captions: pageWords(words, PRESETS.vibem), brolls: [], graphics: [], mattes: [],
+  return {name: 'caption correction', clips: [{id: 'k0', src: SRC, inSec: 0, outSec: 6, sourceDurationSec: 6}], captions: pageWords(said(), PRESETS.vibem), brolls: [], graphics: [], mattes: [],
     music: {src: 'music/m.mp3', volume: 0.25, startSec: 0, fadeOutSec: 1.5, duck: true, duckLevel: 0.25}, captionStyle: 'vibem', lang: 'es'};
 }
 const textOf = (c) => c.words.map((w) => w.text).join(' ');
 
-// the project in public/projects/ (where the MCP server reads it), the server on stdio, no backend
-async function withProject(fn) {
+// the project in public/projects/ (where the MCP server reads it), the server on stdio, no backend (or `api`)
+async function withProject(fn, api = 'http://127.0.0.1:9') {
   const id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const file = path.join('public', 'projects', `${id}.json`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, JSON.stringify(reel()));
   const client = new Client({name: 'test', version: '0'});
-  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'caption-test'}}));
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: api, REEL_AGENT: 'caption-test'}}));
   const call = async (name, args) => { const r = await client.callTool({name, arguments: {project_id: id, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   try { await fn(call, read); } finally {
@@ -137,4 +139,63 @@ test('ids stay put: adding a page never renames the others', async () => {
     assert.equal(byId.c5, 'hoy te muestro la casa');
     assert.match((await call('edit_caption', {caption_id: 'c1', text: 'x'})).text, /no caption c1/);
   });
+});
+
+// a backend whose captions job is done at once and hands back `result` (null: a backend from before job results)
+async function fakeBackend(result) {
+  const srv = http.createServer((req, res) => {
+    const send = (code, o) => { res.writeHead(code, {'Content-Type': 'application/json'}); res.end(JSON.stringify(o)); };
+    if (req.url === '/api/projects') return send(200, []);
+    if (req.method === 'POST' && req.url === '/api/captions') return send(200, {jobId: 'j1'});
+    if (req.url === '/api/captions/j1') return send(200, {status: 'done', progress: 100, ...(result ? {result} : {})});
+    send(404, {error: 'not found'}); // a project save falls back to the file
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return {url: `http://127.0.0.1:${srv.address().port}`, close: () => { srv.closeAllConnections(); srv.close(); }};
+}
+
+test('re-paging takes the pages its own job made (never a file every job writes); none → a clear error, nothing lost', async () => {
+  const caja = pageWords(said(), PRESETS.caja);
+  const [B, old] = [await fakeBackend(caja), await fakeBackend(null)];
+  try {
+    await withProject(async (call, read) => {
+      const r = await call('set_caption_style', {style: 'caja'});
+      assert.ok(!r.err, r.text);
+      assert.deepEqual(read().captions.map(textOf), caja.map(textOf));
+      assert.ok(read().captions.every((c) => +c.id.slice(1) >= 5), 'the re-paged pages get new ids');
+    }, B.url);
+    await withProject(async (call, read) => {
+      const before = read();
+      const r = await call('set_caption_style', {style: 'caja'});
+      assert.ok(r.err && /without its result — restart the backend/.test(r.text), r.text);
+      assert.deepEqual(read(), before, 'no page lost to an empty re-page');
+    }, old.url);
+  } finally { B.close(); old.close(); }
+});
+
+test('two caption jobs at once (two projects): each one gets its own pages', async () => {
+  const transcripts = path.join('public', 'clips', 'transcripts');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'caption-jobs-'));
+  fs.mkdirSync(transcripts, {recursive: true});
+  // a source that said the first n words of SAID (a cached transcript: no WhisperX), paged by the real job
+  const job = (name, n) => {
+    const src = `clips/${name}.mp4`;
+    fs.writeFileSync(path.join(transcripts, `${name}.es.json`), JSON.stringify(said(src).slice(0, n).map(({word, startMs, endMs}) => ({word, startMs, endMs}))));
+    const [inFile, out] = [path.join(tmp, `${name}.in.json`), path.join(tmp, `${name}.out.json`)];
+    fs.writeFileSync(inFile, JSON.stringify({clips: [{id: 'k0', src, inSec: 0, outSec: 6, sourceDurationSec: 6}], lang: 'es', style: 'vibem'}));
+    const child = spawn(process.execPath, ['scripts/captions-multiclip.mjs', inFile, out], {env: {...process.env, REEL_FACE_AWARE: '0', OPENAI_API_KEY: '', HF_TOKEN: ''}, stdio: 'ignore'});
+    return new Promise((resolve) => child.on('close', (code) => resolve({code, out, src, n})));
+  };
+  const names = [`cj-a-${process.pid}`, `cj-b-${process.pid}`];
+  try {
+    for (const r of await Promise.all([job(names[0], 12), job(names[1], 19)])) {
+      assert.equal(r.code, 0);
+      const pages = JSON.parse(fs.readFileSync(r.out, 'utf8'));
+      assert.ok(pages.length && pages.every((c) => c.src === r.src), `${r.src}: only its own pages`);
+      assert.equal(pages.flatMap((c) => c.words).length, r.n);
+    }
+  } finally {
+    for (const n of names) fs.rmSync(path.join(transcripts, `${n}.es.json`), {force: true});
+    fs.rmSync(tmp, {recursive: true, force: true});
+  }
 });

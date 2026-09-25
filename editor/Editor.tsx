@@ -3,7 +3,7 @@ import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
-import {projectTiers, reapplyTiers} from '../src/paging';
+import {projectTiers, repage} from '../src/paging';
 import {chooseRenderMode, type RenderMode} from '../src/layers';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
@@ -11,7 +11,7 @@ import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
 import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
-import {pollJob} from './jobs';
+import {made, pollJob} from './jobs';
 import {SharePanel} from './SharePanel';
 import {RenderJobs, cancelRender, fmtSec} from './RenderJobs';
 
@@ -236,12 +236,12 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
-        async () => {
-          const fresh = await fetch(`/captions.multi.json?_=${Date.now()}`).then((x) => x.json()).catch(() => []);
+        (result) => {
+          let fresh;
+          try { fresh = made('/api/captions', result); } catch (e) { setGenerating(false); notify('Captions failed: ' + (e as Error).message, 'error'); return; }
           const freshPages = Array.isArray(fresh) ? fresh : [];
-          const {captions: merged, added} = replace
-            ? {captions: [...captions.filter((c) => !c.words.some((w) => w.wid)), ...reapplyTiers(captions, freshPages)], added: freshPages.length}
-            : mergeCaptions(captions, freshPages, clips);
+          // the same merge as set_caption_style / run_ai_step captions: hand-made pages and deleted words stay
+          const {captions: merged, added} = replace ? repage(captions, freshPages, clips, hiddenWids) : mergeCaptions(captions, freshPages, clips, {hidden: hiddenWids});
           pushHistory();
           setCaptions(merged);
           setGenerating(false);
@@ -264,8 +264,9 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       pollJob(
         '/api/trim-silence', jobId,
         (s) => setTrimLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
-        async () => {
-          const {plan} = await fetch(`/trim-silence.json?_=${Date.now()}`).then((x) => x.json()).catch(() => ({plan: null}));
+        (result) => {
+          let plan;
+          try { ({plan} = made<{plan: {id: string; segments: {inSec: number; outSec: number}[]}[] | null}>('/api/trim-silence', result)); } catch (e) { setTrimming(false); notify('Autocut failed: ' + (e as Error).message, 'error'); return; }
           if (Array.isArray(plan) && plan.length) applyAutocut(plan);
           setTrimming(false);
           const cuts = Array.isArray(plan) ? plan.reduce((n, p) => n + (p.segments?.length ?? 0), 0) : 0;

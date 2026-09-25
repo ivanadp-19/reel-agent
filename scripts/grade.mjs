@@ -3,7 +3,7 @@
 // → bounded automatic correction (src/grade.ts). Cached per source.
 //
 // Input : JSON (argv[2]) = {clips:[{src,...}]}
-// Output: public/grade.json = {bySrc: {<src>: Grade}, stats: {<src>: Stats}}
+// Output: argv[3] (public/grade.json by hand) = {bySrc: {<src>: Grade}, stats: {<src>: Stats}}
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -47,6 +47,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     out.stats[src] = stats;
     out.bySrc[src] = autoGrade(stats);
   });
-  fs.writeFileSync(path.join(PUBLIC, 'grade.json'), JSON.stringify(out, null, 2));
+  fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'grade.json'), JSON.stringify(out, null, 2)); // argv[3]: the backend's file for this job
   progress(100, `Done — ${Object.keys(out.bySrc).length} source(s)`);
 }
