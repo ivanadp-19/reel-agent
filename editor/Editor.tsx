@@ -12,6 +12,7 @@ import {AssetsSidebar} from './AssetsSidebar';
 import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
 import {pollJob} from './jobs';
+import {SharePanel} from './SharePanel';
 
 const fmt = (sec: number) => {
   const s = Math.max(0, sec);
@@ -39,7 +40,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]} | null>(null);
+  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string} | null>(null);
   // full = one pass; layers = cached master + caption layer + composite (scripts/layers.mjs); remembered per browser
   const [renderMode, setRenderMode] = useState<RenderMode>(() => { try { return localStorage.getItem('reel.renderMode') === 'layers' ? 'layers' : 'full'; } catch { return 'full'; } });
   const [generating, setGenerating] = useState(false);
@@ -189,7 +190,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         async () => {
           const s = await fetch('/api/render/' + r.jobId).then((x) => x.json());
           setExp(s);
-          notify('Export ready', 'ok');
+          notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
         },
         (msg) => { setExp({status: 'error'}); notify('Export failed: ' + msg, 'error'); },
         2400, // renders can take a while — allow up to ~1h
@@ -461,6 +462,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
               {exp.mode === 'layers' ? `Layers${exp.master === 'cached' ? ' (master reused)' : ''}` : 'Full'}
             </span>
           )}
+          <SharePanel projectId={projectId} refreshKey={exp?.version} notify={notify} />
           {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
           <select
             value={renderMode}

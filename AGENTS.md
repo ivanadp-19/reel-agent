@@ -18,6 +18,8 @@ heavy lifting. Plan and decisions: `PLAN.md`. Research: `research/`.
 - `src/brand.ts` — brand kit (client colors, OFL fonts or the client's own font files, logo) that captions, templates and canvases read through `BrandContext`; the agent sets it with `set_brand`, kits are reusable from `public/brands/`
 - Client fonts (`src/fonts.ts` `clientFont` / `registerClientFonts`): `set_brand font_files` (or the Styles tab's Upload font) copies a .ttf/.otf/.woff/.woff2 into `public/fonts/` — gitignored, the client's license, never committed — and the kit lists it in `fonts.files`; `caption_font` / `display_font` then name it like a catalog family. The render waits for the file and fails if it is missing (no silent fallback face)
 - Style kits (`src/brand.ts` `styleSchema`): a brand kit carries `style` — how a client edits, written from their words and adjustable by prompt (`set_brand style` merges key by key; notes, captions on/off, pack, grade knobs, pace, transitions, music, B-roll rules, audio, plus any other named preference). Saved with the kit in `public/brands/`; `style_kits` lists / shows them, `get_project` prints the project's, the `reel-plan` skill plans inside it. Loading a kit (`set_brand from`, the Styles tab) applies its captions / color / audio and names the pack to set. Deliberately not a profile extracted from reference videos
+- Review links (`scripts/reviews.mjs`, `server/review.mjs`, the editor's Share link, MCP `share_version` / `list_versions` / `revoke_review_link`): every FINAL render that passes QC for a project (`project_id` in `POST /api/render`) becomes version n in `public/reviews/<projectId>.json` — outside the project JSON, so the editor's compare-and-swap never sees it — with a 720p proxy (H.264 CRF 26, faststart) and a poster under `public/reviews/<projectId>/`; drafts never. A link is `/r/<token>`: 128-bit token stored only as sha256, 30 days max, revocable; the one path outside the auth gate (`server/http.mjs` `gate`), read-only, serving only files a version names — never `/exports/*`. `REEL_PUBLIC_URL` sets the address links carry. Retention: `public/reviews/` and every file a version references (`file`, `proxy`, `poster`; `generated` marks the ones this feature made) must not be purged while a link of that project lives — `retainedFiles()` lists them
+- `scripts/catalog.mjs` — the asset catalog: what is IN each media file of `public/` (`inputs/`, `clips/`, `broll/`, `broll-assets/`, `music/` by default), so the agent picks footage by content and not by a file name that lies. Measured by ffprobe + one ffmpeg decode (32×32 frames at 4 fps, silencedetect/volumedetect), no model: duration, resolution/fps, black stretches (luma ≈ 0, ±0.25 s), silence, loudness; heuristics, labelled as such in the JSON (`legend`) and in every line the agent reads: day/night (median luma of the non-black frames, a sky-like bright top band), static/moving (frame difference) and the tags; the description comes from the transcript cache or the dir's `library.json` / container tags when there are any (`descSource`), else from the tags alone. Writes `public/catalog/<dir>.json` + contact sheets in `public/catalog/sheets/<dir>/`. Incremental (a file is decoded again only when its size or mtime changed; transcripts and library tags are re-read every run). Runs ONLY when asked — `node scripts/catalog.mjs [dir …] [--force] [--limit N]` or MCP `catalog_assets` — never on server start; MCP `search_catalog` and `GET /api/catalog` only read it
 - `scripts/timing.mjs` — where a project's time goes, logged per project to `public/projects/<id>.timing.jsonl`: every MCP tool call (its duration, the part spent waiting on backend jobs, and the gap since the previous call = the agent's own turn) and every backend stage (transcription, other pipeline jobs, render by stage — full, or master / captions / encode / composite —, loudness + QC, render queue wait). `timing_report` (MCP), the Settings tab's Timing section and `node scripts/timing.mjs <id>` fold it into buckets (agent decisions, inspection, transcription, render, QC, queue, other tools, idle)
 - `scripts/run-report.mjs` — metrics of a headless agent run (duration, off-mic left, cuts by seconds, schema rejections, validate warnings, turns, cost)
 - `src/cuts.ts` — cut candidates by word id (retakes incl. the quiet read-through before a take — attempts are sentences, the last one wins; off-mic, meta talk ES/EN, fillers); the agent approves them with `cut_words ranges`. The word-cut planner and cutter (`planWordCuts` / `applyWordCuts`: snap into the pauses, merge, drop dead pieces) live here too, used by `cut_words` and the editor's Transcript panel. Why the last take and what the others do: `research/retakes.md`
@@ -62,14 +64,29 @@ labels → assets → framing → validate → caption_proof → render) is the 
 skill: `.agents/skills/reel-edit/SKILL.md` (`.claude/skills` links to the same
 folder). The plan step is its own skill, `reel-plan`: after the transcript the
 agent writes what it intends (hero word, beats, pack, key words, B-roll) with
-`set_plan`, and every later step follows it.
+`set_plan`, and every later step follows it. The plan is mandatory and always
+shown to the user in the chat; by default (plan mode `auto`, what unattended runs
+need) the agent then keeps editing without waiting. Waiting for approval is
+opt-in, only when the user asks for it: `set_plan_mode review` → the agent
+presents the plan and stops, the user's "ok" is recorded with `approve_plan`
+(changes: `request_plan_changes`, then a new `set_plan`). The project JSON keeps
+`planMode` (+ `planModeLog`: who switched it, quoted), `planApproved` (a changed
+plan resets it) and the user's answers (`planReviews`). Only in review mode, while
+the plan is unapproved or not written yet, the MCP tools
+that edit the project and the final render refuse to run (`src/plan.ts`
+`planGate`, default-deny list in `mcp/server.mjs`); reads, proofs, searches and
+draft renders stay open. No plan screen in the editor for now.
 
 ## Headless runners
 
 - `scripts/claude-edit.sh <project> "<brief>"` — Claude Code with only `mcp__reel__*`, Read and Skill
 - `scripts/codex-edit.sh <project> "<brief>"` — Codex CLI with the user's config ignored, the reel server pre-approved and a read-only shell sandbox
 
-Both take the same brief; `scripts/run-report.mjs` measures a run from its JSONL log.
+Both take the same brief; the agent shows its plan and edits through to a draft.
+If the brief asks to review the plan first, the run stops after it; answer with
+`<runner> <project> --reply "ok"` (or the changes you want): Claude resumes the
+same conversation, Codex (ephemeral) starts a run that reads the plan back from the
+project. `scripts/run-report.mjs` measures a run from its JSONL log.
 
 ## Commands
 
@@ -95,6 +112,7 @@ The production box is a small Linux VM (2 vCPU) shared by several agent sessions
   lines contain those words) and kill it mid-edit — it happened twice in one day.
   Stop the app with `npm run stop` (by pid file); anything else: `pgrep -af <pattern>`
   first, read the list, then `kill <pid>` of exactly the process you mean.
+- **The asset catalog runs niced.** `scripts/catalog.mjs` renices itself to 15 (`REEL_CATALOG_NICE`; ffmpeg inherits it) and decodes with one thread (`REEL_CATALOG_THREADS`), so a render or another session keeps the CPU. Run it by hand as `nice -n 15 ionice -c3 node scripts/catalog.mjs` on the VM, and only when there are new files — it is incremental, a second run over the same folder decodes nothing. Never put it on server start or a tight cron. One run per folder: `public/catalog/<dir>.lock` (`scripts/project-lock.mjs`); a second run over a locked folder skips it instead of decoding it again. `catalog_assets` stops its child (and the ffmpeg under it) when the MCP request is cancelled or after `REEL_CATALOG_TIMEOUT_MS` (10 min); what was analyzed stays saved.
 - **One agent per project.** The MCP server takes `public/projects/<id>.lock` on
   its first write to a project and refreshes it on every write
   (`scripts/project-lock.mjs`); a second agent that tries to write gets an error
