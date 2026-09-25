@@ -94,6 +94,22 @@ Then judge, with a timestamp for everything:
   insert it names and find each one on screen. A named scene with no shot, or
   a named place with no super, is a **blocker**, whether or not the plan's
   `INSERTS` listed it.
+- **VO promises (`claim-image`, heuristic).** For each line of **PROMESAS DEL VO
+  A VERIFICAR**, name the specific proof the voice promises (a material, a finish,
+  a mechanism, an amenity: "tope magnético", "acabado en roble"). Then call
+  `frame_at video=<render>` at the times listed and look at the insert or graphic
+  up at that moment.
+  - If the picture does not show the proof, raise `claim-image`: major, tagged
+    `(heuristic)`, with the timestamp, the promise quoted, what the frame shows
+    instead, and the frame time as evidence.
+  - No fix: say what a human could do (re-cut the insert, request the shot, reword
+    the line), never an edit. A promise the picture keeps is not listed.
+- **Black flashes and cuts inside a source.** `frame0-black` and `black-flash` are rules: look at the
+  frames on both sides only to say whether the black is in the footage or a gap
+  in the edit, never to dismiss it. `source-cut` is an advisory: say on the
+  `motion_proof` whether it reads as a cut the plan does not have. It goes to the
+  client either way, under AVISOS, and never counts toward the verdict, even
+  confirmed.
 - **B-roll**: under each cue, does the shot show what is said at that moment?
   The report lists the words. Wrong room, wrong city, or generic stock over a
   specific claim is a major. Judge the picture, not whether the library tags
