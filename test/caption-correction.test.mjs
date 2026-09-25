@@ -16,7 +16,7 @@ import {projectRenderProps} from '../src/renderProps.ts';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {createMasterCache} from '../scripts/layers.mjs';
 
-// "Hola soy Ana, | hoy te enseño la casa | en Playa del Carmen. | Tiene tres recámaras y alberca. | Llámame hoy."
+// "Hola soy Ana, | hoy te enseño la casa | en Playa del Carmen. | Tiene tres recámaras | y alberca. | Llámame hoy."
 const SAID = 'Hola soy Ana, hoy te enseño la casa en Playa del Carmen. Tiene tres recámaras y alberca. Llámame hoy.'.split(' ');
 const SRC = 'clips/t.mp4';
 function reel({duck = true} = {}) {
@@ -67,7 +67,7 @@ test('rendered reel, one word changed → the re-render redoes the caption layer
   const R = renderer();
   await withProject(async (call, read) => {
     assert.equal((await R.render(read())).master, 'rendered');
-    const r = await call('edit_caption', {caption_id: 'c3', text: 'Tiene TRES recámaras y alberca'});
+    const r = await call('edit_caption', {caption_id: 'c3', text: 'Tiene TRES recámaras'});
     assert.ok(!r.err, r.text);
     const again = await R.render(read());
     assert.deepEqual([again.mode, again.master], ['layers', 'cached']);
@@ -113,13 +113,13 @@ test('a page nudged in time keeps the master; a timing the tool does not take is
   const R = renderer();
   await withProject(async (call, read) => {
     await R.render(read());
-    const shown = (p) => projectCaptions(p.captions, p.clips, 30).find((c) => c.id === 'c4');
-    const [said, was] = [read().captions[4].words, shown(read())];
+    const shown = (p) => projectCaptions(p.captions, p.clips, 30).find((c) => c.id === 'c5');
+    const [said, was] = [read().captions[5].words, shown(read())];
     // the last page: where the voice (and the music's dip) ends — the nudge moves the text, not the voice
-    assert.ok(!(await call('edit_caption', {caption_id: 'c4', shift_ms: -150})).err);
+    assert.ok(!(await call('edit_caption', {caption_id: 'c5', shift_ms: -150})).err);
     const now = shown(read());
     assert.deepEqual([now.startMs, now.endMs, now.words[0].startMs], [was.startMs - 150, was.endMs - 150, was.words[0].startMs - 150]);
-    assert.deepEqual(read().captions[4].words, said, 'the words keep the time they are said');
+    assert.deepEqual(read().captions[5].words, said, 'the words keep the time they are said');
     assert.equal((await R.render(read())).master, 'cached');
     const bad = await call('edit_caption', {caption_id: 'c1', start_sec: 2.4});
     assert.ok(bad.err && /start_sec/.test(bad.text), bad.text);
@@ -131,10 +131,10 @@ test('ids stay put: adding a page never renames the others', async () => {
   await withProject(async (call, read) => {
     await call('delete_captions', {caption_ids: ['c1']});
     const r = await call('add_caption', {at_sec: 0.9, duration_sec: 1.1, text: 'hoy te muestro la casa'});
-    assert.match(r.text, /\(id c5\)/);
+    assert.match(r.text, /\(id c6\)/);
     const byId = Object.fromEntries(read().captions.map((c) => [c.id, textOf(c)]));
-    assert.equal(byId.c4, 'Llámame hoy', 'c4 is still the page it was');
-    assert.equal(byId.c5, 'hoy te muestro la casa');
+    assert.equal(byId.c5, 'Llámame hoy', 'c5 is still the page it was');
+    assert.equal(byId.c6, 'hoy te muestro la casa');
     assert.match((await call('edit_caption', {caption_id: 'c1', text: 'x'})).text, /no caption c1/);
   });
 });
@@ -147,7 +147,7 @@ test('a project read while the agent saves it is never half a file', async () =>
   await withProject(async (call, read) => {
     let reads = 0, torn = 0, saving = true;
     const saves = (async () => {
-      for (let n = 0; n < 12; n++) assert.ok(!(await call('edit_caption', {caption_id: 'c4', text: `Llámame ${n % 2 ? 'hoy' : 'ya'}`})).err);
+      for (let n = 0; n < 12; n++) assert.ok(!(await call('edit_caption', {caption_id: 'c5', text: `Llámame ${n % 2 ? 'hoy' : 'ya'}`})).err);
       saving = false;
     })();
     while (saving) {
@@ -157,7 +157,7 @@ test('a project read while the agent saves it is never half a file', async () =>
     await saves;
     assert.equal(torn, 0, `${torn} of ${reads + torn} reads got half a project`);
     assert.ok(reads > 0);
-    assert.equal(textOf(read().captions[4]), 'Llámame hoy');
+    assert.equal(textOf(read().captions[5]), 'Llámame hoy');
     assert.equal(read().notes.length, 4e6);
   }, big);
 });
