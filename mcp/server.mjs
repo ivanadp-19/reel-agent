@@ -35,6 +35,7 @@ import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, u
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
+import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
@@ -66,7 +67,17 @@ function load(id) {
   p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.captionsOff ??= false;
   return p;
 }
+// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit
+const held = new Set();
+const OWNER = process.env.REEL_AGENT || `mcp pid ${process.pid}`;
+process.once('exit', () => { for (const id of held) releaseLock(PROJECTS, id); });
+function lock(id) {
+  const r = acquireLock(PROJECTS, id, {owner: OWNER});
+  if (!r.ok) throw new Error(lockMessage(id, r.holder));
+  held.add(id);
+}
 async function save(id, p) {
+  lock(id);
   // prefer the backend (single writer, sets updatedAt the same way the UI does)
   try {
     const r = await fetch(`${API}/api/projects/${id}`, {method: 'POST', body: JSON.stringify(p)});

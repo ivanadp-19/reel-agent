@@ -58,6 +58,9 @@ fs.mkdirSync(PROJECTS_DIR, {recursive: true});
 // make the backend ingest arbitrary files without it.
 const TOKEN = crypto.randomBytes(16).toString('hex');
 fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
+// our pid, so `npm run stop` can stop us by pid — never by a pkill pattern (see AGENTS.md)
+fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
+process.once('exit', () => { try { if (fs.readFileSync(path.join(ROOT, '.backend.pid'), 'utf8') === String(process.pid)) fs.rmSync(path.join(ROOT, '.backend.pid')); } catch {} });
 
 const renders = {}; // jobId -> {status, progress, file, error}
 const captionJobs = {}; // jobId -> {status, progress, label, error}
@@ -123,7 +126,7 @@ async function health() {
   }
   const forced = (env.REEL_DEVICE || '').toLowerCase();
   const checks = [
-    {id: 'node', ok: +process.versions.node.split('.')[0] >= 20, label: `Node ${process.versions.node}`, hint: 'Node 20 or newer is required'},
+    {id: 'node', ok: +process.versions.node.split('.')[0] >= 24, label: `Node ${process.versions.node}`, hint: 'Node 24 is required (nvm install 24 && nvm use 24)'},
     {id: 'ffmpeg', ok: ff.code === 0 && fp.code === 0, label: ff.code === 0 ? `ffmpeg ${ff.stdout.match(/version (\S+)/)?.[1] ?? ''}` : 'ffmpeg', hint: 'Install ffmpeg (apt install ffmpeg / brew install ffmpeg) — needed for uploads, waveforms, exports'},
     {id: 'whisperx', ok: venv, label: venv ? `WhisperX (${forced || gpuProbe || 'cpu'})` : 'WhisperX', hint: 'Run `npm run setup` to create .venv and install WhisperX — needed for captions, autocut, transcripts'},
     {id: 'matte', ok: fs.existsSync(path.join(ROOT, '.models', 'selfie_segmenter.tflite')), label: 'Person segmenter (MediaPipe)', hint: 'Run `npm run setup` to install mediapipe + .models/selfie_segmenter.tflite — optional, needed for text behind the presenter', optional: true},

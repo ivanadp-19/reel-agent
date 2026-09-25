@@ -71,6 +71,31 @@ Both take the same brief; `scripts/run-report.mjs` measures a run from its JSONL
 
 - `npm run setup` — checks tools, creates the WhisperX venv, seeds `.env`
 - `npm start` — backend + editor at http://localhost:5173
+- `npm run stop` — stops them by the pid they wrote (`.dev.pid`, `.backend.pid`)
 - `npm run typecheck` — `tsc --noEmit`
 - `node --test` — unit tests
 - `npm run mcp` — the MCP server on stdio (Claude Code picks it up via `.mcp.json`)
+
+## Operating the VM
+
+The production box is a small Linux VM (2 vCPU) shared by several agent sessions.
+
+- **Node 24 through nvm.** `npm run setup` loads `~/.nvm/nvm.sh` and runs
+  `nvm install 24 && nvm use 24` when the node on PATH is older (`.nvmrc` says 24);
+  a login shell must get it too: `nvm alias default 24`. Non-interactive shells
+  (cron, `nohup`, the headless runners) do not read `.bashrc` — source nvm or call
+  `~/.nvm/versions/node/v24.*/bin/node` explicitly.
+- **Never `pkill -f` / `killall` with a pattern.** `pkill -f node`, `pkill -f reel`,
+  `pkill -f remotion`, `pkill -f claude`, `pkill -f mcp` also match the agent's own
+  session (Claude Code, Codex and the MCP server are node processes whose command
+  lines contain those words) and kill it mid-edit — it happened twice in one day.
+  Stop the app with `npm run stop` (by pid file); anything else: `pgrep -af <pattern>`
+  first, read the list, then `kill <pid>` of exactly the process you mean.
+- **One agent per project.** The MCP server takes `public/projects/<id>.lock` on
+  its first write to a project and refreshes it on every write
+  (`scripts/project-lock.mjs`); a second agent that tries to write gets an error
+  naming the holder and should `duplicate_project` or wait. The lock frees itself
+  when the holding process exits, dies, or goes 15 min without a write. Different
+  projects in parallel are fine. The headless runners name the holder
+  (`REEL_AGENT`). The editor is not locked out: a human and an agent are kept apart
+  by the backend's compare-and-swap on `updatedAt`.

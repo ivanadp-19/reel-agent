@@ -12,6 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT="$1"; BRIEF="$2"; LOG="${3:-.captions-tmp/codex-$(date +%s).jsonl}"
 mkdir -p "$(dirname "$LOG")"
+# who holds the project lock while this run edits it (scripts/project-lock.mjs)
+export REEL_AGENT="codex-edit ${PROJECT} ${LOG}"
 ROOT="$(pwd)"
 
 PROMPT="First read .agents/skills/reel-edit/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. Brief: ${BRIEF}

@@ -8,6 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT="$1"; BRIEF="$2"; LOG="${3:-.captions-tmp/agent-$(date +%s).jsonl}"
 mkdir -p "$(dirname "$LOG")"
+# who holds the project lock while this run edits it (scripts/project-lock.mjs)
+export REEL_AGENT="claude-edit ${PROJECT} ${LOG}"
 
 PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. Brief: ${BRIEF}
 Work only through the reel MCP tools. Finish with validate + caption_proof, then render a draft and say what you did and what you would still improve."
