@@ -272,7 +272,7 @@ test('HTTP: a file outside public/ is refused — by path, through a symlink in 
     ['set_music', {file: outside}],
     ['set_music', {file: link}], // inside public/ by name, outside by target
     ['set_brand', {logo}],
-    ['frame_at', {at_sec: 0, video: '/etc/hostname'}],
+    ['frame_at', {at_sec: 0, video: outside}], // a file that exists on any OS (/etc/hostname is Linux only)
   ]) {
     const r = await call(name, args);
     assert.ok(r.err, `${name} ${JSON.stringify(args)} was accepted`);
