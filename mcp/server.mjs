@@ -21,8 +21,8 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, cutRange, locateSec, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, projectCaptions} from '../src/captions.ts';
+import {applyAutocut, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {mergeCaptions, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, projectTiers, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
@@ -133,7 +133,9 @@ async function save(id, p) {
   }
   const now = new Date().toISOString();
   fs.mkdirSync(PROJECTS, {recursive: true});
-  fs.writeFileSync(projFile(id), JSON.stringify({...p, createdAt: p.createdAt || now, updatedAt: now}, null, 2));
+  // write + rename: a reader (the editor, another tool call) never sees half a project
+  fs.writeFileSync(`${projFile(id)}.${process.pid}.tmp`, JSON.stringify({...p, createdAt: p.createdAt || now, updatedAt: now}, null, 2));
+  fs.renameSync(`${projFile(id)}.${process.pid}.tmp`, projFile(id));
   return now;
 }
 async function backendUp() {
@@ -226,20 +228,6 @@ async function runJobUntimed(route, body, maxSec) {
 }
 const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8'));
 
-const renumber = (items, prefix) => items.map((x, i) => ({...x, id: `${prefix}${i}`}));
-
-// New text for a page. Same word count → each word keeps its id, timing and
-// tier (a spelling fix stays anchored); otherwise the words are re-timed evenly.
-// Either way the page is now hand-edited: `covers` remembers the transcript
-// words it stands for, so re-paging never duplicates it.
-function retext(cap, text) {
-  const words = text.split(/\s+/).filter(Boolean);
-  if (!words.length) throw new Error('empty caption text');
-  const covers = [...new Set([...(cap.covers ?? []), ...cap.words.map((w) => w.wid).filter(Boolean)])];
-  if (words.length === cap.words.length) return {...cap, covers, words: cap.words.map((w, i) => ({...w, text: words[i]}))};
-  const step = (cap.endMs - cap.startMs) / words.length;
-  return {...cap, covers, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: 0}))};
-}
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
 // ---------- Pexels (mcp/stock.mjs, shared with /api/stock) ----------
@@ -293,15 +281,35 @@ const OPEN_BEFORE_APPROVAL = new Set([
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
   'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs',
 ]);
+// Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
+// and the last save would drop the others: a call that may write a project waits for the one before
+// it on that project. Default-serial: a new tool queues unless it is listed here as read-only.
+// Limits: the queue lives in this process only (the stdio server, or the backend that hosts every
+// HTTP session). Between it and the editor or another MCP process the only guard is the backend's
+// compare-and-swap on updatedAt — and with the backend down save() writes the file directly, with no
+// CAS, so the editor and an agent can still overwrite each other. A call that waits on a long job
+// (set_caption_style, run_ai_step, prepare_mattes) holds every other edit of its project meanwhile.
+const READ_ONLY = new Set([
+  'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
+  'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link',
+]);
+const queues = new Map(); // project id → its last queued call
+const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
+// Caption corrections take no argument they do not know: it is an error, never dropped (edit_caption
+// start_sec used to answer ok and do nothing). Other tools still ignore extra arguments.
+const STRICT = new Set(['edit_caption', 'add_caption']);
 // on top of the timing wrapper above: a call the gate refuses is still logged (as failed)
 const registerTimed = server.registerTool.bind(server);
-server.registerTool = (name, config, cb) => registerTimed(name, config, async (args, extra) => {
-  if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !((name === 'render' || name === 'start_render') && args.draft)) {
-    const p = load(args.project_id);
-    const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
-    if (why) throw new Error(why);
-  }
-  return cb(args, extra);
+server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name) ? {...config, inputSchema: z.object(config.inputSchema ?? {}).strict()} : config, async (args, extra) => {
+  const call = () => {
+    if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !((name === 'render' || name === 'start_render') && args.draft)) {
+      const p = load(args.project_id);
+      const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
+      if (why) throw new Error(why);
+    }
+    return cb(args, extra);
+  };
+  return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
 });
 
 server.registerTool('list_projects', {description: 'List reel-agent projects (id, name, clip count, last update).', inputSchema: {}}, async () => {
@@ -573,9 +581,13 @@ server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan k
   await save(project_id, p); return text(`${clip_id}: ${keyframes.length} keyframes`);
 });
 
-server.registerTool('edit_caption', {description: 'Edit one caption page: new text (words are re-timed evenly across the page), which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default), behind = draw the page BEHIND the presenter (big words over the head/shoulders; needs prepare_mattes afterwards). Position, size and behind follow the words when the style changes.', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional(), behind: z.boolean().optional()}}, async ({project_id, caption_id, text: t, accent_words, top_pct, scale, behind}) => {
-  const p = load(project_id); const i = p.captions.findIndex((c) => c.id === caption_id); if (i < 0) throw new Error(`no caption ${caption_id}`);
+server.registerTool('edit_caption', {description: 'Edit one caption page: new text (same word count: each word keeps its id and timing — a spelling fix; otherwise the words are re-timed evenly across the page), starts_at_wid = move the page break before this page (the page now starts at that word: its head goes to the page before, or it takes that page\'s tail; every word keeps its id and the time it is said), shift_ms = show the page earlier (−) or later (+) than its words are said, which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default), behind = draw the page BEHIND the presenter (big words over the head/shoulders; needs prepare_mattes afterwards). Position, size and behind follow the words when the style changes. Several at once apply in that order, as one edit.', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), starts_at_wid: z.string().optional().describe('word id ("<source>:<i>") the page starts at from now on: a word of the page before it, or of this page'), shift_ms: z.number().int().min(-3000).max(3000).optional().describe('show the page this many ms earlier (−) or later (+); the words keep the time they are said'), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional(), behind: z.boolean().optional()}}, async ({project_id, caption_id, text: t, starts_at_wid, shift_ms, accent_words, top_pct, scale, behind}) => {
+  const p = load(project_id); if (!p.captions.some((c) => c.id === caption_id)) throw new Error(`no caption ${caption_id} — get_project lists the pages (re-paging with set_caption_style or run_ai_step captions gives the generated pages new ids)`);
+  const before = p.captions;
+  if (starts_at_wid) p.captions = setPageStart(p.captions, caption_id, starts_at_wid, p.clips, FPS);
+  const i = p.captions.findIndex((c) => c.id === caption_id);
   let cap = p.captions[i];
+  if (shift_ms) cap = shiftPage(cap, shift_ms);
   if (t != null) cap = retext(cap, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
   if (top_pct != null) { cap.topPct = top_pct; cap.pin = true; } if (scale != null) cap.scale = scale;
@@ -583,16 +595,17 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   p.captions[i] = cap; await save(project_id, p);
   const floats = PRESETS[p.captionStyle]?.position === 'float';
   const needMatte = cap.behind && spansWithoutMatte([cap], p.mattes, p.clips).length;
-  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
+  const other = p.captions.find((c, k) => k !== i && !before.includes(c)); // the page on the other side of a moved break
+  return text(`${other ? `${other.id}: "${capText(other)}"\n` : ''}${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
 });
 
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   const startMs = Math.round(sourceSec * 1000); const endMs = Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000);
-  let cap = retext({id: 'x', src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
+  let cap = retext({id: nextId(p.captions, 'c'), src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? 1 : 0})); }
-  p.captions = renumber([...p.captions, cap], 'c'); await save(project_id, p);
-  return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${p.captions.at(-1).id})`);
+  p.captions = [...p.captions, cap]; await save(project_id, p);
+  return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${cap.id})`);
 });
 
 server.registerTool('set_captions', {description: 'Switch the captions of the reel off (or back on) without deleting them: off = the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on. Use it when the brief asks for a reel without subtitles (instead of duplicating the project or deleting pages). Music still ducks under the speech.', inputSchema: {project_id: pid, off: z.boolean()}}, async ({project_id, off}) => {
@@ -627,8 +640,8 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
   else s = brollSrc(path.isAbsolute(src) ? hostFile(src) : src);
   if (/^https?:/.test(s)) source = 'pexels';
   if (!kind) kind = brollKind(s);
-  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
-  p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
+  const b = {id: nextId(p.brolls, 'b'), clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
+  p.brolls = [...p.brolls, b]; await save(project_id, p);
   const abs = toAbs(p, clip.id, b.startMs) ?? 0;
   return text(`Added B-roll ${p.brolls.at(-1).id} on ${clip.id} @${f1(abs)}–${f1(abs + (b.endMs - b.startMs) / 1000 / (clip.speed ?? 1))}s (${mode} ${kind}${asset_id ? `, library ${asset_id}` : ''})`);
 });
@@ -837,7 +850,6 @@ server.registerTool('set_language', {description: 'Set the transcription languag
 
 // ---------- motion graphics ----------
 const TEMPLATE_HELP = Object.entries(TEMPLATES).map(([id, t]) => `${id} = ${t.desc}; props ${describeSchema(t.schema)}`).join('\n');
-const nextId = (items, prefix) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
 // where a graphic goes: a word id (start of that word) or a timeline second
 async function anchorFor(p, {at_wid, at_sec}) {
   if (at_wid) { const {clip, word} = await wordAt(p, at_wid); return {src: clip.src, startMs: word.startMs}; }

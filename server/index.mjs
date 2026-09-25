@@ -285,7 +285,13 @@ const mcpHttp = () => mcpHttpP ??= (async () => {
   return createMcpHttp({createServer: createReelServer, onSessionClosed: releaseSession, idleMs: +(process.env.REEL_MCP_IDLE_MIN || 60) * 60e3});
 })();
 
-const server = createServer(async (req, res) => {
+// a route that throws answers 500 with the reason: the request never hangs (the MCP tool waiting on it would)
+const server = createServer((req, res) => handle(req, res).catch((e) => {
+  console.error(`${req.method} ${req.url}:`, e);
+  if (!res.headersSent) json(res, 500, {error: String(e?.message ?? e).slice(0, 300)});
+  else res.end();
+}));
+async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
@@ -398,7 +404,9 @@ const server = createServer(async (req, res) => {
       // merge: a writer that does not know a field (an older editor, a new
       // project setting) must not wipe it; clearing is done with null / []
       const saved = {...prev, ...incoming, createdAt: prev.createdAt || now, updatedAt: now};
-      fs.writeFileSync(file, JSON.stringify(saved, null, 2));
+      // write + rename: the MCP server and the editor read this file while it is saved — never half of it
+      fs.writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(saved, null, 2));
+      fs.renameSync(`${file}.${process.pid}.tmp`, file);
       return json(res, 200, {ok: true, updatedAt: now});
     }
     if (req.method === 'DELETE') {
@@ -843,7 +851,7 @@ const server = createServer(async (req, res) => {
   }
 
   json(res, 404, {error: 'not found'});
-});
+}
 
 // a single bad request/job must not kill the whole backend
 process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e));

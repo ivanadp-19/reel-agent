@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {clipDurationSec, placeClips} from '../src/timeline';
-import {projectCaptions} from '../src/captions';
+import {pageBefore, projectCaptions} from '../src/captions';
 import {projectBrolls, type BrollAsset, type BrollItem} from '../src/brollModel';
 import type {PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
@@ -39,7 +39,7 @@ export const Inspector: React.FC<{
 }> = ({playerRef, onGenerate, generating, progressLabel, onStyleChange, notify}) => {
   const {
     meta, captions, clips, brolls, brollAssets, accentColor, captionStyle, selectedId, selectedClipId, currentFrame,
-    select, selectClip, setText, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
+    select, selectClip, setText, movePageStart, shiftCaption, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
     setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setTransitionPattern, applySpeedRamp,
     captionsOff, setCaptionsOff,
@@ -62,6 +62,8 @@ export const Inspector: React.FC<{
   const projBrolls = projectBrolls(brolls, clips, meta.fps);
   const selClip = clips.find((c) => c.id === selectedClipId);
   const placedSel = selClip && placeClips(clips, meta.fps).find((p) => p.clip.id === selClip.id);
+  // a move the data no longer allows (a page changed under the buttons) is reported, never thrown out of the click
+  const movePage = (id: string, wid: string) => { try { movePageStart(id, wid); } catch (e) { notify(String((e as Error)?.message ?? e), 'error'); } };
   const seekMs = (ms: number) => playerRef.current?.seekTo(Math.round((ms / 1000) * meta.fps));
   const packKind = PACKS[captionStyle]?.transition ?? 'whip';
   const assets: BrollAsset[] = [...brollAssets, ...library.filter((a) => !brollAssets.some((b) => b.id === a.id)).map((a) => ({id: a.id, src: a.src, kind: a.kind, label: a.label}))];
@@ -215,6 +217,11 @@ export const Inspector: React.FC<{
                 {projCaps.map((c) => {
                   const sel = c.id === selectedId;
                   const text = c.words.map((w) => w.text).join(' ');
+                  // the stored page and its neighbor: the page break moves between them (edit_caption starts_at_wid)
+                  const page = captions.find((x) => x.id === c.id);
+                  const prev = sel && page ? pageBefore(captions, page, clips, meta.fps) : undefined; // only the selected page shows the buttons
+                  const take = prev && prev.words.length > 1 ? prev.words[prev.words.length - 1].wid : undefined;
+                  const give = prev && page && page.words.length > 1 ? page.words[1].wid : undefined;
                   return (
                     <div
                       key={`${c.id}@${c.startMs}`}
@@ -229,13 +236,22 @@ export const Inspector: React.FC<{
 
                       {sel ? (
                         <div onClick={(e) => e.stopPropagation()}>
+                          {/* applied on blur: typed live, the words re-split on every key and a space could never be typed */}
                           <textarea
-                            value={text}
+                            key={text}
+                            defaultValue={text}
                             onFocus={pushHistory}
-                            onChange={(e) => setText(c.id, e.target.value)}
+                            onBlur={(e) => e.target.value !== text && setText(c.id, e.target.value)}
                             rows={2}
                             className="w-full mt-1 mb-3 bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-body-md resize-y"
                           />
+                          <Label>Page start · timing</Label>
+                          <div className="flex gap-1.5 mt-1 mb-3">
+                            <Btn disabled={!take} title={prev ? `Take "${prev.words[prev.words.length - 1].text}" from the page before` : 'First page'} onClick={() => take && movePage(c.id, take)}>◂ word</Btn>
+                            <Btn disabled={!give} title={give ? `Give "${page?.words[0].text}" to the page before` : 'No page before, or a retyped page'} onClick={() => give && movePage(c.id, give)}>word ▸</Btn>
+                            <Btn title="The page 0.1 s earlier" onClick={() => shiftCaption(c.id, -100)}>−0.1 s</Btn>
+                            <Btn title="The page 0.1 s later" onClick={() => shiftCaption(c.id, 100)}>+0.1 s</Btn>
+                          </div>
                           <Label>Vertical position: {c.topPct}%</Label>
                           <input type="range" min={5} max={88} value={c.topPct} onPointerDown={pushHistory} onChange={(e) => setTopPct(c.id, Number(e.target.value))} className="w-full mt-1 mb-3 accent-primary" />
                           <div className="flex items-center justify-between mb-3" title="Big words over the head and shoulders; needs a person matte (Settings → Prepare mattes)">
