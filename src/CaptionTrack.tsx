@@ -42,7 +42,8 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
         : preset.colors.text;
   // not spoken yet: hidden (space reserved) or dimmed (karaoke) — plain text either way
   const dimmed = build && !spoken && preset.upcoming === 'dim';
-  const hidden = build && !spoken && preset.upcoming === 'hidden';
+  const hidden = build && !spoken && (preset.upcoming === 'hidden' || preset.upcoming === 'collapse');
+  const collapsed = build && !spoken && preset.upcoming === 'collapse'; // no space: the spoken group recenters live
   const opacity = hidden ? 0 : dimmed ? 1 : m.opacity;
   const styled = !dimmed && !hidden;
   // César 9:27: classifier highlights (keywords / questions / CTAs) get a more dynamic entry —
@@ -79,7 +80,7 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
       <span
         data-w={index}
         style={{
-          display: 'inline-block',
+          display: collapsed ? 'none' : 'inline-block',
           position: 'relative',
           zIndex: 1,
           fontWeight: t.weight ?? preset.font.weight,
@@ -206,7 +207,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         padding: '0 70px',
         opacity: a * ex.opacity,
         transform: [transform, ex.dy ? `translateY(${ex.dy.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
-        filter: [preset.pageIn.type === 'blur' && a < 1 ? `blur(${((1 - a) * 10).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
+        filter: [(preset.pageIn.type === 'blur' || preset.pageIn.type === 'slideUp') && a < 1 ? `blur(${((1 - a) * (preset.pageIn.type === 'blur' ? 10 : 6)).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
       }}
     >
       <div
@@ -231,21 +232,53 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         }}
       >
         {box ? <div style={box} /> : null}
-        {caption.words.map((w, i) => (
-          <React.Fragment key={i}>
-          {w.br ? <div style={{flexBasis: '100%', height: 0}} /> : null}
-          <Word
-            w={w}
-            index={i}
-            preset={preset}
-            accent={accent}
-            active={absMs >= w.startMs && absMs <= w.endMs}
-            underBox={!!box && i === spokenIdx && !boxOff}
-            onsetFrame={onset(i)}
-            captionKeyIn={caption.keyIn}
-          />
-          </React.Fragment>
-        ))}
+  {(() => {
+        // César 10:35: a development name like 'Montealbán 326' must never split across lines.
+        // When layout.unbreakable, bonded pairs (Capitalized + Capitalized/digit) render inside a
+        // nowrap group so flex-wrap can never separate them, whatever the measured widths say.
+        const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
+        const canBond = !!(preset.layout && preset.layout.unbreakable);
+        const pairBond = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[A-ZÁÉÍÓÚÑÜ0-9]/.test(b);
+        const els: React.ReactNode[] = [];
+        const wordEl = (i: number) => {
+          const w = caption.words[i];
+          return (
+            <Word
+              key={i}
+              w={w}
+              index={i}
+              preset={preset}
+              accent={accent}
+              active={absMs >= w.startMs && absMs <= w.endMs}
+              underBox={!!box && i === spokenIdx && !boxOff}
+              onsetFrame={onset(i)}
+              captionKeyIn={caption.keyIn}
+            />
+          );
+        };
+        for (let i = 0; i < caption.words.length; i++) {
+          const w = caption.words[i];
+          if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
+          const nxt = caption.words[i + 1];
+          if (canBond && nxt && !nxt.br && pairBond(w.text, nxt.text)) {
+            const run = [i];
+            let j = i;
+            while (j + 1 < caption.words.length && !caption.words[j + 1].br && pairBond(caption.words[j].text, caption.words[j + 1].text)) {
+              run.push(j + 1);
+              j++;
+            }
+            els.push(
+              <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
+                {run.map((k) => wordEl(k))}
+              </span>
+            );
+            i = j;
+          } else {
+            els.push(wordEl(i));
+          }
+        }
+        return els;
+      })()}
       </div>
     </div>
   );

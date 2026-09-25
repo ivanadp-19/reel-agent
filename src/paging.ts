@@ -42,7 +42,15 @@ export const DEFAULT_TOP = 58;
 
 // topBySrc: vertical position per source file (face-aware placement), % from top
 export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Record<string, number> = {}): Caption[] {
-  const {maxWords, maxCharsLine} = preset.layout;
+  const {maxWords, maxCharsLine, unbreakable} = preset.layout;
+  // César 10:35: a highlight span or a proper name + number ('Montealbán 326') is ONE unit —
+  // never let a page boundary fall inside it (3 lines or a smaller size instead)
+  const bonded = (a: {text: string; tier?: number}, b?: TimelineWord) => {
+    if (!unbreakable || !b) return false;
+    if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) return true;
+    const bn = b.word.replace(/^[.,;:¿¡]+/, '');
+    return /^[A-ZÁÉÍÓÚÑ]/.test(a.text) && (/^[A-ZÁÉÍÓÚÑ]/.test(bn) || /^\d/.test(bn));
+  };
   const pages: {src: string; words: CaptionWord[]; start: number; end: number}[] = [];
   let cur: CaptionWord[] = [];
   let curSrc = '';
@@ -70,9 +78,9 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     const sameClipNext = !!next && next.clipId === w.clipId;
     const gapAfter = sameClipNext && next.startMs - w.endMs > GAP_MS;
     const full = cur.length >= maxWords || chars() >= maxCharsLine;
-    if (SENT_END.test(w.word)) flush();
+    if (SENT_END.test(w.word) && !bonded(cur[cur.length - 1], next)) flush();
     else if (next && !sameClipNext) flush(); // clip boundary
-    else if (!isGlue(display) && (full || gapAfter || CLAUSE_END.test(w.word))) flush();
+    else if (!isGlue(display) && !bonded(cur[cur.length - 1], next) && (full || gapAfter || CLAUSE_END.test(w.word))) flush();
     else if (full && isGlue(display)) {
       // full on a function word: break BEFORE the trailing function words so
       // they open the next page ("They all lied to us / about this one thing")

@@ -47,7 +47,7 @@ export type Preset = {
   shadow: string; // CSS text-shadow ('' = none)
   container: 'none' | 'pill' | 'bar' | 'glass' | 'comic'; // comic = white pill, black border, hard offset shadow (Pop)
   reveal: 'page' | 'build'; // build = words appear at their onset and stay
-  upcoming: 'hidden' | 'dim'; // build only: words not yet spoken
+  upcoming: 'hidden' | 'dim' | 'collapse'; // build only. hidden: space reserved; dim: karaoke; collapse: no space — the block recenters as words join
   active: 'none' | 'color' | 'box-slide' | 'box-jump'; // the spoken word: color, or a karaoke box that slides to it (Focus, 80 ms) or jumps by fade (Lift, Stack)
   position: 'anchored' | 'float'; // anchored = face-aware topPct; float = alternate corners
   pageIn: {type: AnimIn; ms: number};
@@ -62,7 +62,7 @@ export type Preset = {
   heroPunch: number; // extra scale on the footage while a tier-2 word is up, 3–4 f in (Impact II: 0.12; 0 = off)
   glitchPulse: boolean; // a 250 ms blur + chromatic pulse on the footage at each tier-1 word (Impact II)
   tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
-  layout: {maxWords: number; maxCharsLine: number};
+  layout: {maxWords: number; maxCharsLine: number; unbreakable?: boolean}; // unbreakable: never split tier spans / name+number pairs across pages (César 10:35, 'Montealbán 326' is one name)
 };
 
 const SOFT = '0 2px 14px rgba(0,0,0,0.55), 0 0 30px rgba(0,0,0,0.35)';
@@ -154,14 +154,15 @@ export const PRESETS: Record<string, Preset> = {
     // -> centered soft halo: tight 8px core at 0.75 + wide 40px diffusion; NO offset (he rejected the hard look)
     shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
     reveal: 'build',
-    upcoming: 'hidden',
+    upcoming: 'collapse', // César 10:35 (frame sequences from his 9 reels): words DO build in, but the block
+    // RECENTERS live as it grows ('TODO A' -> 'TODO A LA MANO', always centered) — unspoken words take no space
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
     wordIn: 'ccSlideUp',
     keyIn: 'highlightRise', // classifier highlights (keywords/questions/CTAs): per-char rise + white->yellow sweep (César 9:27)
     holdMs: 250, // César 9:47: NO captions during silence — page ends ~250ms after its last word; never hold through pauses
     tiers: {1: {weight: 700, color: 'accent', scale: 1.15}, 2: {weight: 700, color: 'accent', scale: 1.15}}, // highlights: solid #FFE500, slightly bigger, dynamic entry
-    layout: {maxWords: 8, maxCharsLine: 18}, // whole phrase per page (up to 2 lines, br-flagged); proper-name/number pairs never split
+    layout: {maxWords: 6, maxCharsLine: 24, unbreakable: true}, // his reels: phrases of 2-5 words, one line when it fits, 2 balanced lines when not; 3 lines / smaller size beat splitting a name (César 10:35)
     titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
   },
   // ---- Captions.ai-like packs ----
