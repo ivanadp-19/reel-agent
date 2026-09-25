@@ -12,6 +12,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
@@ -59,7 +60,7 @@ fs.mkdirSync(PROJECTS_DIR, {recursive: true});
 // Per-run secret for calls that touch the local filesystem by path (the MCP
 // server reads it from .backend-token). Other local pages/processes cannot
 // make the backend ingest arbitrary files without it.
-const TOKEN = crypto.randomBytes(16).toString('hex');
+const TOKEN = process.env.REEL_BACKEND_TOKEN || crypto.randomBytes(16).toString('hex');
 fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 // our pid, so `npm run stop` can stop us by pid — never by a pkill pattern (see AGENTS.md)
 fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
@@ -283,11 +284,51 @@ const renderQueue = createQueue(PLAN.workers, renderJob);
 //   non-browser clients (the MCP server, curl) send none and pass
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+// Railway / public mode (REEL_PUBLIC=1): the backend faces the internet, so the
+// loopback gate is replaced by HTTP basic auth. The bcrypt hashes come from
+// REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same hashes Caddy uses on
+// the VM, so existing passwords keep working and no secret crosses a chat.
+const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
+const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').filter(Boolean).map((pair) => { const i = pair.indexOf(':'); return [pair.slice(0, i), pair.slice(i + 1)]; }));
+const MIME = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.cube': 'text/plain', '.vtt': 'text/vtt', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon'};
+const DIST = path.join(ROOT, 'editor', 'dist');
+function serveFile(req, res, file) {
+  const st = fs.statSync(file);
+  const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const range = req.headers.range && req.headers.range.match(/bytes=(\d*)-(\d*)/);
+  if (range && (range[1] || range[2])) {
+    const start = range[1] ? +range[1] : Math.max(0, st.size - (+range[2]));
+    const end = range[1] ? (range[2] ? Math.min(+range[2], st.size - 1) : st.size - 1) : st.size - 1;
+    res.writeHead(206, {'Content-Type': type, 'Content-Length': end - start + 1, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Accept-Ranges': 'bytes'});
+    return fs.createReadStream(file, {start, end}).pipe(res);
+  }
+  res.writeHead(200, {'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes'});
+  fs.createReadStream(file).pipe(res);
+}
+function serveStatic(req, res, pathname) {
+  const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
+  for (const base of [PUBLIC, DIST]) {
+    const file = path.join(base, clean);
+    if (file.startsWith(base) && fs.existsSync(file) && fs.statSync(file).isFile()) return serveFile(req, res, file);
+  }
+  const index = path.join(DIST, 'index.html');
+  if (fs.existsSync(index)) return serveFile(req, res, index);
+  return json(res, 404, {error: 'not found'});
+}
 const server = createServer(async (req, res) => {
-  const host = (req.headers.host || '').replace(/:\d+$/, '');
-  if (!LOCAL_HOSTS.has(host)) return json(res, 403, {error: 'local access only'});
-  if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return json(res, 403, {error: 'bad origin'});
   const url = new URL(req.url, 'http://localhost');
+  if (PUBLIC_MODE) {
+    const h = req.headers.authorization || '';
+    const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
+    const i = b.indexOf(':');
+    const ok = i > 0 && AUTH[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), AUTH[b.slice(0, i)]);
+    if (!ok) { res.writeHead(401, {'WWW-Authenticate': 'Basic realm="reel-agent"'}); return res.end('auth required'); }
+    if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
+  } else {
+    const host = (req.headers.host || '').replace(/:\d+$/, '');
+    if (!LOCAL_HOSTS.has(host)) return json(res, 403, {error: 'local access only'});
+    if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return json(res, 403, {error: 'bad origin'});
+  }
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
 
@@ -753,4 +794,6 @@ process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 try { ensureSfx(); } catch (e) { console.error('sfx:', e.message); }
 const PORT = +(process.env.REEL_PORT || 3333); // another port for a second backend on the same box (the MCP then needs REEL_API)
-server.listen(PORT, '127.0.0.1', () => console.log(`editor backend → http://127.0.0.1:${PORT}`));
+const HOST = process.env.REEL_HOST || '127.0.0.1';
+const BIND_PORT = +(process.env.PORT || PORT);
+server.listen(BIND_PORT, HOST, () => console.log(`editor backend → http://${HOST}:${BIND_PORT}`));
