@@ -12,8 +12,7 @@ RUN npm ci
 COPY . .
 RUN python3 -m venv .venv \
   && .venv/bin/pip install -q --upgrade pip \
-  && .venv/bin/pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
-  && .venv/bin/pip install -q whisperx opencv-python-headless mediapipe
+  && .venv/bin/pip install -q opencv-python-headless mediapipe
 RUN mkdir -p .models \
   && curl -sSfL -o .models/yunet.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx \
   && curl -sSfL -o .models/selfie_segmenter.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite
