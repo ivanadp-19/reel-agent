@@ -16,7 +16,11 @@ export function renderPlan({cpus = os.cpus().length, memBytes = os.totalmem(), e
   // leave a core per render for the encoder once there are cores to spare
   const perWorker = Math.floor(cpus / workers);
   const concurrency = Math.max(1, Math.min(16, +env.REEL_RENDER_CONCURRENCY || (perWorker > 4 ? perWorker - 2 : perWorker)));
-  const cacheBytes = Math.min(4e9, Math.max(5e8, Math.floor(memBytes / 4 / workers)));
+  // the compositor's decoded-frame cache (--offthreadvideo-cache-size-in-bytes) is most of a render's
+  // memory: measured, the `remotion` compositor process grows to the cap (3.98 GB RSS with the old 4 GB
+  // ceiling on a 32 GB box) — so it is bounded by REEL_RENDER_CACHE_MB (default 1024), not by the RAM
+  const cacheCap = Math.max(256, +env.REEL_RENDER_CACHE_MB || 1024) * 2 ** 20;
+  const cacheBytes = Math.min(cacheCap, Math.max(5e8, Math.floor(memBytes / 4 / workers)));
   return {workers, concurrency, cacheBytes};
 }
 

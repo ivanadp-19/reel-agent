@@ -25,6 +25,14 @@
 //
 // Queue: serial by default (one render at a time on the whole machine, counted over
 // every backend sharing public/); REEL_RENDER_WORKERS = N allows N at once. FIFO by seq.
+// The limit is a lock, not only a count: a job starts only after it takes one of the
+// `workers` slot files (.slot-<n>.lock, exclusive create, naming the backend pid and the
+// job) and gives it back when it settles — so two backends ticking at once never run two
+// renders whose memory adds up. A slot whose backend is dead, or whose job has ended, is stale.
+//
+// Memory (scripts/render-memory.mjs): a queued job starts only while the memory available
+// is at least REEL_RENDER_START_MIN_MEM_MB; below it the job stays queued with memoryWait
+// {since, availMb, needMb, checks} and a label that says so, and is checked again on every tick.
 //
 // Liveness: while a job runs, its owner rewrites heartbeatAt every few seconds after
 // checking that the render process (pid) is alive. A job is failed when
@@ -47,6 +55,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {availableMemMb, startMinMemMb} from './render-memory.mjs';
 
 export const STATES = ['queued', 'running', 'done', 'failed', 'cancelled'];
 export const ACTIVE = new Set(['queued', 'running']);
@@ -149,7 +158,7 @@ export function prune(dir, {days = +(process.env.REEL_RENDER_JOBS_DAYS || 14), n
 export function legacyView(job, ahead = 0) {
   if (!job) return {status: 'unknown'};
   const base = {jobId: job.id, state: job.status, stage: job.stage, progress: job.progress ?? 0, label: job.label, frames: job.frames, etaSec: job.etaSec};
-  if (job.status === 'queued') return {...base, status: 'running', queued: true, ahead, label: `Queued — ${ahead} render${ahead === 1 ? '' : 's'} ahead`};
+  if (job.status === 'queued') return {...base, status: 'running', queued: true, ahead, label: job.memoryWait ? job.label : `Queued — ${ahead} render${ahead === 1 ? '' : 's'} ahead`};
   if (job.status === 'running') return {...base, status: 'running'};
   if (job.status === 'done') return {...base, status: 'done', progress: 100, ...job.result};
   return {...base, status: 'error', error: job.status === 'cancelled' ? `cancelled${job.error ? `: ${job.error}` : ''}` : job.error || 'render failed', ...(job.result?.qc ? {qc: job.result.qc} : {})};
@@ -185,7 +194,7 @@ export function describeJob(job, {ahead = 0, now = Date.now()} = {}) {
   const kind = job.draft ? 'draft' : 'final';
   const who = job.projectId ? ` ${job.projectId}` : '';
   const head = `${job.id}  ${kind}${who}  ${job.status.toUpperCase()}`;
-  if (job.status === 'queued') return `${head} — ${ahead ? `${ahead} render${ahead === 1 ? '' : 's'} ahead` : 'next'}, submitted ${fmtDuration((now - Date.parse(job.createdAt)) / 1000)} ago`;
+  if (job.status === 'queued') return `${head} — ${ahead ? `${ahead} render${ahead === 1 ? '' : 's'} ahead` : job.memoryWait ? `next, waiting for memory (${job.memoryWait.availMb} MB available, needs ${job.memoryWait.needMb} MB)` : 'next'}, submitted ${fmtDuration((now - Date.parse(job.createdAt)) / 1000)} ago`;
   if (job.status === 'running') {
     const fr = job.frames?.total && !/frame/i.test(job.label ?? '') ? ` · frame ${job.frames.done}/${job.frames.total}` : '';
     const eta = Number.isFinite(job.etaSec) ? ` · ~${fmtDuration(job.etaSec)} left` : '';
@@ -218,6 +227,8 @@ export function createRenderJobs({
   kill = killTree,
   owner = process.pid,
   log = (m) => console.log(m),
+  memory = availableMemMb, // () → MB a render may use now, or null (not measured: no floor)
+  minStartMemMb = startMinMemMb(),
 } = {}) {
   fs.mkdirSync(dir, {recursive: true});
   const active = new Map(); // id → {ac, pid, settled}
@@ -240,6 +251,54 @@ export function createRenderJobs({
   };
   const cancelRequested = (id) => fs.existsSync(fileOf(dir, id, '.cancel'));
 
+  // ---- the global render lock: `workers` slot files shared by every backend on this dir ----
+  const slotFile = (n) => path.join(dir, `.slot-${n}.lock`);
+  const readSlot = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+  // a slot nobody can be using: its backend is gone, or this backend / the job says the job is over
+  const staleSlot = (s) => {
+    if (!s || !isAlive(s.owner)) return true;
+    if (s.owner === owner) return !active.has(s.job) && !starting.has(s.job);
+    // another live backend: its job must be running, or queued under its claim (being started)
+    const j = s.job && ID_RE.test(s.job) ? readJob(dir, s.job) : null;
+    return !j || !(j.status === 'running' || (j.status === 'queued' && claimOwner(j.id) === s.owner));
+  };
+  const starting = new Set(); // jobs between taking their slot and entering `active`
+  function takeSlot(jobId) {
+    for (let n = 0; n < workers; n++) {
+      const f = slotFile(n);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { fs.writeFileSync(f, JSON.stringify({owner, job: jobId, at: iso()}), {flag: 'wx'}); return f; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+        const cur = readSlot(f);
+        // only an unreadable slot older than a few seconds is stale (it may be mid-write)
+        if (!cur) { try { if (now() - fs.statSync(f).mtimeMs < 5000) break; } catch {} }
+        if (!staleSlot(cur)) break;
+        fs.rmSync(f, {force: true});
+      }
+    }
+    return null;
+  }
+  const releaseSlot = (f, jobId) => { if (f && readSlot(f)?.job === jobId) fs.rmSync(f, {force: true}); };
+  const slotsHeld = () => { let n = 0; for (let i = 0; i < workers; i++) { const s = readSlot(slotFile(i)); if (s && !staleSlot(s)) n++; } return n; };
+
+  // ---- the memory floor before a start (called on a job this backend has claimed) ----
+  // → the job to start (its wait, if it had one, recorded as memoryWaited), or null: left
+  // queued, its record saying why (memoryWait)
+  function memoryRoom(j) {
+    if (!(minStartMemMb > 0)) return j;
+    let avail = null;
+    try { avail = memory(); } catch {}
+    if (avail == null || avail >= minStartMemMb) {
+      if (!j.memoryWait) return j;
+      const waited = Math.round((now() - Date.parse(j.memoryWait.since)) / 1000);
+      log(`render ${j.id}: memory back (${avail ?? '?'} MB available) after waiting ${fmtDuration(waited)}`);
+      return {...j, memoryWait: undefined, memoryWaited: {since: j.memoryWait.since, sec: waited, checks: j.memoryWait.checks, availMb: avail}};
+    }
+    const w = j.memoryWait ?? {since: iso(), checks: 0};
+    if (!j.memoryWait) log(`render ${j.id}: deferred — ${avail} MB of memory available, a render needs ${minStartMemMb} MB (REEL_RENDER_START_MIN_MEM_MB); re-checking every ${Math.round(tickMs / 1000)}s`);
+    save({...j, memoryWait: {...w, availMb: avail, needMb: minStartMemMb, checks: w.checks + 1, lastAt: iso()}, label: `Queued — waiting for memory (${avail} MB available, needs ${minStartMemMb} MB)`});
+    return null;
+  }
+
   function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null} = {}) {
     if (typeof props !== 'string') props = JSON.stringify(props ?? {});
     const t = now();
@@ -253,10 +312,11 @@ export function createRenderJobs({
     return {job: readJob(dir, id) ?? job, ahead: aheadOf(jobs, id)};
   }
 
-  function start(job) {
+  function start(job, lockFile) {
     const ac = new AbortController();
-    const slot = {ac, pid: null, settled: false};
+    const slot = {ac, pid: null, settled: false, lockFile};
     active.set(job.id, slot);
+    starting.delete(job.id);
     const t = iso();
     save({...job, status: 'running', stage: 'starting', label: 'Starting', progress: 0, startedAt: t, heartbeatAt: t, progressAt: t, owner, pid: null, attempts: (job.attempts ?? 0) + 1, error: undefined});
     let props = '{}';
@@ -265,18 +325,21 @@ export function createRenderJobs({
     const ctx = {
       signal: ac.signal,
       props,
+      // called from a child's stdout handler: a failed write (a full disk) must not throw out of it
       update(u) {
         if (slot.settled) return;
-        const cur = readJob(dir, job.id);
-        if (!cur || cur.status !== 'running') return;
-        // a new label counts too: "Downloading B-roll 2/5 · 34 MB" moves inside one percent
-        const moved = (u.progress != null && u.progress !== lastPct) || (u.stage && u.stage !== cur.stage) || (u.frames && u.frames.done !== cur.frames?.done) || (u.label != null && u.label !== cur.label);
-        if (u.progress != null) lastPct = u.progress;
-        const t2 = iso();
-        save({...cur, ...u, heartbeatAt: t2, ...(moved ? {progressAt: t2} : {})});
+        try {
+          const cur = readJob(dir, job.id);
+          if (!cur || cur.status !== 'running') return;
+          // a new label counts too: "Downloading B-roll 2/5 · 34 MB" moves inside one percent
+          const moved = (u.progress != null && u.progress !== lastPct) || (u.stage && u.stage !== cur.stage) || (u.frames && u.frames.done !== cur.frames?.done) || (u.label != null && u.label !== cur.label);
+          if (u.progress != null) lastPct = u.progress;
+          const t2 = iso();
+          save({...cur, ...u, heartbeatAt: t2, ...(moved ? {progressAt: t2} : {})});
+        } catch (e) { log(`render ${job.id}: progress not saved: ${e.message}`); }
       },
       // the process the heartbeat watches (null between processes: preparing, copying, the review proxy)
-      setPid(pid) { slot.pid = pid ?? null; slot.deadSince = null; if (!slot.settled) patch(job.id, {pid: pid ?? null}); },
+      setPid(pid) { slot.pid = pid ?? null; slot.deadSince = null; if (!slot.settled) try { patch(job.id, {pid: pid ?? null}); } catch {} },
     };
     log(`render ${job.id} started (${job.draft ? 'draft' : 'final'}${job.projectId ? ` of ${job.projectId}` : ''}, attempt ${(job.attempts ?? 0) + 1})`);
     Promise.resolve()
@@ -295,11 +358,16 @@ export function createRenderJobs({
         const cancelled = why?.code === 'CANCELLED';
         const cur = readJob(dir, job.id);
         if (cur && ACTIVE.has(cur.status)) {
-          finish(job.id, {status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', label: cancelled ? 'Cancelled' : 'Failed', error: String(cancelled ? why.detail ?? '' : e?.message ?? e).slice(0, 400) || undefined, ...(e?.result ? {result: e.result} : {})});
+          const oom = !cancelled && e?.code === 'OOM';
+          finish(job.id, {status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', label: cancelled ? 'Cancelled' : oom ? 'Failed — out of memory' : 'Failed', error: String(cancelled ? why.detail ?? '' : e?.message ?? e).slice(0, 400) || undefined, ...(oom ? {errorCode: 'OOM'} : {}), ...(e?.result ? {result: e.result} : {})});
         }
         log(`render ${job.id} ${cancelled ? 'cancelled' : `failed: ${String(why?.message ?? why).slice(0, 200)}`}`);
       })
-      .finally(() => { slot.settled = true; active.delete(job.id); if (!stopping) pump(); });
+      .catch((e) => log(`render ${job.id}: could not record its end: ${e?.message ?? e}`)) // a full disk: the backend stays up
+      .finally(() => {
+        slot.settled = true; active.delete(job.id);
+        if (!stopping) { try { releaseSlot(slot.lockFile, job.id); } catch {} pump(); }
+      });
   }
 
   const abort = (id, code, detail) => {
@@ -340,27 +408,38 @@ export function createRenderJobs({
     }
   }
 
-  // Start queued jobs while there are free slots (counted over every backend on this dir).
+  // Start queued jobs while there are free slots (counted over every backend on this dir,
+  // and held as slot locks), the memory allowing.
   function pump() {
+    if (stopping) return;
     const jobs = listJobs(dir);
     // a claimed job that has not written 'running' yet takes its slot too (another backend is starting it)
-    let running = jobs.filter((j) => j.status === 'running' || (j.status === 'queued' && isAlive(claimOwner(j.id)))).length;
+    let running = Math.max(jobs.filter((j) => j.status === 'running' || (j.status === 'queued' && isAlive(claimOwner(j.id)))).length, active.size, slotsHeld());
     const queued = jobs.filter((j) => j.status === 'queued').sort((a, b) => a.seq - b.seq);
     for (const j of queued) {
       if (running >= workers) break;
       if (cancelRequested(j.id)) { finish(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
       if (!fs.existsSync(fileOf(dir, j.id, '.props.json'))) { finish(j.id, {status: 'failed', stage: 'failed', label: 'Failed', error: 'its props file is gone'}); continue; }
       if (!claim(j.id)) continue; // another backend took it
+      const unclaim = () => fs.rmSync(fileOf(dir, j.id, '.claim'), {force: true});
       const fresh = readJob(dir, j.id);
-      if (fresh?.status !== 'queued') { fs.rmSync(fileOf(dir, j.id, '.claim'), {force: true}); continue; }
+      if (fresh?.status !== 'queued') { unclaim(); continue; }
+      const ready = memoryRoom(fresh);
+      if (!ready) { unclaim(); break; } // FIFO: the jobs behind it wait for memory too
+      starting.add(j.id);
+      const lockFile = takeSlot(j.id);
+      if (!lockFile) { starting.delete(j.id); unclaim(); break; } // every slot held (another backend's render)
       running++;
-      start(fresh);
+      start(ready, lockFile);
     }
   }
 
   // The heartbeat: every tickMs, for each job this backend runs — cancel requests,
   // a render process that died, a render that stopped making progress.
   function tick() {
+    try { beat(); } catch (e) { log(`render queue tick: ${e?.message ?? e}`); } // an interval callback must never throw into the backend
+  }
+  function beat() {
     const t = now();
     for (const [id, slot] of active) {
       if (slot.settled) continue;
