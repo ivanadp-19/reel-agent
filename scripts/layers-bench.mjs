@@ -148,7 +148,7 @@ async function render(props, mode) {
 // SSIM + PSNR of b against a, per frame → {frames, ssimMin, ssimMean, psnrMin, worst: [frame, ssim]}
 function compare(a, b) {
   const log = path.join(ROOT, '.captions-tmp', `ssim-${process.pid}.log`);
-  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', a, '-i', b, '-lavfi', `[0:v]setpts=N[x];[1:v]setpts=N[y];[x][y]ssim=stats_file=${log}`, '-f', 'null', '-'], {encoding: 'utf8'});
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', a, '-i', b, '-lavfi', `[0:v]setpts=N/(${FPS}*TB)[x];[1:v]setpts=N/(${FPS}*TB)[y];[x][y]ssim=shortest=1:stats_file=${log}`, '-f', 'null', '-'], {encoding: 'utf8'});
   if (r.status !== 0) throw new Error(r.stderr);
   const rows = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => ({n: +l.match(/n:(\d+)/)[1], ssim: +l.match(/All:([\d.]+)/)[1]}));
   fs.rmSync(log, {force: true});
@@ -180,8 +180,8 @@ console.log('layered vs one-pass, per frame:', JSON.stringify(out.quality));
 function syncCheck(full, layered, master, threshold = 56) {
   const log = path.join(ROOT, '.captions-tmp', `sync-${process.pid}.log`);
   const mask = (a) => `[${a}][m${a}]blend=all_mode=difference,format=gray,lut=y='if(gt(val,${threshold}),255,0)'[k${a}]`;
-  const fc = [`[2:v]setpts=N,format=yuv420p,split[m0][m1]`, `[0:v]setpts=N,format=yuv420p[0]`, `[1:v]setpts=N,format=yuv420p[1]`, mask(0), mask(1),
-    `[k0][k1]blend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=${log}`].join(';');
+  const fc = [`[2:v]setpts=N/(${FPS}*TB),format=yuv420p,split[m0][m1]`, `[0:v]setpts=N/(${FPS}*TB),format=yuv420p[0]`, `[1:v]setpts=N/(${FPS}*TB),format=yuv420p[1]`, mask(0), mask(1),
+    `[k0][k1]blend=all_mode=difference:shortest=1,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=${log}`].join(';');
   const r = spawnSync('ffmpeg', ['-v', 'error', '-i', full, '-i', layered, '-i', master, '-filter_complex', fc, '-f', 'null', '-'], {encoding: 'utf8'});
   if (r.status !== 0) throw new Error(r.stderr.slice(-600));
   const ys = [...fs.readFileSync(log, 'utf8').matchAll(/YAVG=([\d.]+)/g)].map((m) => +m[1] / 255);
@@ -195,7 +195,7 @@ if (fs.existsSync(master)) {
   out.sync = syncCheck(fullB.path, layB.path, master);
   // the same measure against a deliberately shifted layer: what a one-frame error would look like
   const shifted = path.join(ROOT, '.captions-tmp', 'bench-shifted.mp4');
-  ff(['-i', layB.path, '-vf', 'setpts=N/(30*TB),trim=start_frame=1,setpts=N/(30*TB)', '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12', shifted]);
+  ff(['-i', layB.path, '-vf', `select='gte(n\\,1)',setpts=N/(${FPS}*TB)`, '-r', String(FPS), '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12', shifted]);
   out.syncShiftedByOne = syncCheck(fullB.path, shifted, master);
   fs.rmSync(shifted, {force: true});
   console.log('caption sync (mask disagreement, % of frame):', JSON.stringify({aligned: out.sync, shiftedByOneFrame: out.syncShiftedByOne}));
