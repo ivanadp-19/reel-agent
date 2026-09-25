@@ -27,6 +27,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
+import {acquireLock, releaseLock} from './project-lock.mjs';
 
 export const CATALOG_VERSION = 1;
 export const DEFAULT_DIRS = ['inputs', 'clips', 'broll', 'broll-assets', 'music'];
@@ -171,9 +172,13 @@ export function describe(e) {
 
 const THREADS = () => String(process.env.REEL_CATALOG_THREADS || 1);
 
+// what a stop (SIGTERM from catalog_assets on cancel / timeout, Ctrl-C) must clean up
+const CHILDREN = new Set(); // ffmpeg processes running now
+const TMP_SHEETS = new Set(); // contact sheets being written
 function runAsync(cmd, args) {
   return new Promise((resolve) => {
     const p = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'pipe']});
+    CHILDREN.add(p); p.on('close', () => CHILDREN.delete(p));
     const out = [], err = [];
     p.stdout.on('data', (d) => out.push(d)); p.stderr.on('data', (d) => err.push(d));
     p.on('error', (e) => resolve({status: -1, stdout: Buffer.alloc(0), stderr: String(e)}));
@@ -220,23 +225,33 @@ function sheetFilter(e) {
 async function analyzeStreams(file, e, {hasAudio, sheetOut}) {
   const args = ['-hide_banner', '-nostats', '-v', 'info', '-threads', THREADS(), '-i', file];
   let sheet = null;
+  // written under a per-process name and renamed into place: a reader never sees half a JPEG, a failed run keeps the old one
+  const sheetTmp = sheetOut && `${sheetOut}.${process.pid}.tmp.jpg`;
   const raw = ['-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'];
   const tiny = `scale=${GRID}:${GRID}:flags=area,format=rgb24`;
   if (e.kind === 'image') {
     args.push('-map', '0:v:0', '-vf', tiny, '-frames:v', '1', ...raw);
-    if (sheetOut) { args.push('-map', '0:v:0', '-vf', `scale=${cellWidth(e) * 2}:-2`, '-frames:v', '1', '-y', sheetOut); sheet = {times: [], cols: 1, rows: 1}; }
+    if (sheetOut) { args.push('-map', '0:v:0', '-vf', `scale=${cellWidth(e) * 2}:-2`, '-frames:v', '1', '-y', sheetTmp); sheet = {times: [], cols: 1, rows: 1}; }
   } else if (e.kind === 'video') {
     if (sheetOut) {
       sheet = sheetFilter(e);
-      args.push('-filter_complex', `[0:v:0]split=2[a][b];[a]fps=${SAMPLE_FPS},${tiny}[raw];[b]${sheet.vf}[sheet]`, '-map', '[raw]', ...raw, '-map', '[sheet]', '-frames:v', '1', '-q:v', '4', '-y', sheetOut);
+      args.push('-filter_complex', `[0:v:0]split=2[a][b];[a]fps=${SAMPLE_FPS},${tiny}[raw];[b]${sheet.vf}[sheet]`, '-map', '[raw]', ...raw, '-map', '[sheet]', '-frames:v', '1', '-q:v', '4', '-y', sheetTmp);
       delete sheet.vf;
     } else args.push('-map', '0:v:0', '-vf', `fps=${SAMPLE_FPS},${tiny}`, ...raw);
   }
   if (hasAudio) args.push('-map', '0:a:0', '-af', `silencedetect=n=${SILENCE_DB}dB:d=0.5,volumedetect`, '-f', 'null', '-');
-  if (sheetOut) { fs.mkdirSync(path.dirname(sheetOut), {recursive: true}); fs.rmSync(sheetOut, {force: true}); }
-  const r = await runAsync('ffmpeg', args);
-  if (r.status !== 0) throw new Error(`ffmpeg failed: ${r.stderr.trim().split('\n').pop()}`);
-  if (sheetOut && !fs.existsSync(sheetOut)) throw new Error('contact sheet was not written');
+  if (sheetOut) { fs.mkdirSync(path.dirname(sheetOut), {recursive: true}); TMP_SHEETS.add(sheetTmp); }
+  let r;
+  try {
+    r = await runAsync('ffmpeg', args);
+    if (r.status !== 0) throw new Error(`ffmpeg failed: ${r.stderr.trim().split('\n').pop()}`);
+    if (sheetOut) {
+      if (!fs.existsSync(sheetTmp)) throw new Error('contact sheet was not written');
+      fs.renameSync(sheetTmp, sheetOut);
+    }
+  } finally {
+    if (sheetOut) { fs.rmSync(sheetTmp, {force: true}); TMP_SHEETS.delete(sheetTmp); }
+  }
   const size = GRID * GRID * 3;
   const frames = [];
   for (let o = 0; o + size <= r.stdout.length; o += size) frames.push(frameStats(r.stdout.subarray(o, o + size)));
@@ -334,8 +349,9 @@ export function loadCatalog(publicDir, dir) {
 function saveCatalog(publicDir, dir, cat) {
   const f = catalogFile(publicDir, dir);
   fs.mkdirSync(path.dirname(f), {recursive: true});
-  fs.writeFileSync(`${f}.tmp`, JSON.stringify(cat, null, 2));
-  fs.renameSync(`${f}.tmp`, f);
+  const tmp = `${f}.${process.pid}.tmp`; // per process: two writers never share a temp file
+  fs.writeFileSync(tmp, JSON.stringify(cat, null, 2));
+  fs.renameSync(tmp, f);
 }
 
 function listMedia(abs) {
@@ -352,15 +368,39 @@ export function staleFiles(publicDir, dir) {
   return files.filter((f) => !unchanged(cat?.files?.[f.name], f)).map((f) => f.name);
 }
 
+// One run per folder at a time, across processes: public/catalog/<dir>.lock (scripts/project-lock.mjs —
+// atomic wx create, frees itself when the holder dies). A second run over the same folder skips it
+// (summary.busy) instead of decoding every file again and racing on the JSON and the sheets.
+const lockDir = (publicDir) => path.join(publicDir, 'catalog');
+const HELD = new Map(); // abs folder → {publicDir, id} this process is cataloging (the file lock is per pid)
+const beat = () => { for (const {publicDir, id} of HELD.values()) try { acquireLock(lockDir(publicDir), id, {owner: `catalog pid ${process.pid}`}); } catch {} };
+let beating = null;
+export function releaseAll() { for (const {publicDir, id} of HELD.values()) releaseLock(lockDir(publicDir), id); HELD.clear(); }
+const emptySummary = (dir) => ({dir, files: 0, analyzed: [], reused: 0, removed: [], errors: [], pending: 0});
+
 // analyze what is new or changed in public/<dir>, drop what is gone; returns a summary
-export async function catalogDir(publicDir, dir, {force = false, limit = Infinity, log = () => {}} = {}) {
+export async function catalogDir(publicDir, dir, opts = {}) {
   dir = safeDir(publicDir, dir);
   const abs = path.join(publicDir, dir);
+  const id = catalogName(dir);
+  if (HELD.has(abs)) return {...emptySummary(dir), busy: `this process (pid ${process.pid})`};
+  const got = acquireLock(lockDir(publicDir), id, {owner: `catalog pid ${process.pid}`});
+  if (!got.ok) return {...emptySummary(dir), busy: `${got.holder.owner}, pid ${got.holder.pid}`};
+  HELD.set(abs, {publicDir, id});
+  // one decode can outlast the lock's TTL (a long file on a busy VM): keep it fresh while we hold it
+  beating ??= setInterval(beat, 60_000).unref();
+  try { return await catalogLocked(publicDir, dir, abs, opts); } finally {
+    HELD.delete(abs);
+    releaseLock(lockDir(publicDir), id);
+    if (!HELD.size) { clearInterval(beating); beating = null; }
+  }
+}
+
+async function catalogLocked(publicDir, dir, abs, {force = false, limit = Infinity, log = () => {}}) {
   const prev = loadCatalog(publicDir, dir)?.files ?? {};
   let library = [];
   try { const l = JSON.parse(fs.readFileSync(path.join(abs, 'library.json'), 'utf8')); if (Array.isArray(l)) library = l; } catch {}
   const files = listMedia(abs);
-  const sheetsDir = path.join(publicDir, 'catalog', 'sheets', catalogName(dir));
   const out = {};
   const summary = {dir, files: files.length, analyzed: [], reused: 0, removed: [], errors: [], pending: 0};
   const cat = () => ({version: CATALOG_VERSION, dir, generatedAt: new Date().toISOString(), legend: LEGEND, files: out});
@@ -396,7 +436,7 @@ export async function buildCatalog(publicDir, dirs = DEFAULT_DIRS, opts = {}) {
   const out = [];
   let left = opts.limit ?? Infinity;
   for (const d of dirs) {
-    if (!fs.existsSync(path.join(publicDir, d))) { out.push({dir: d, files: 0, analyzed: [], reused: 0, removed: [], errors: [], pending: 0, missing: true}); continue; }
+    if (!fs.existsSync(path.join(publicDir, d))) { out.push({...emptySummary(d), missing: true}); continue; }
     const s = await catalogDir(publicDir, d, {...opts, limit: left});
     left -= s.analyzed.length;
     out.push(s);
@@ -447,6 +487,38 @@ export function searchCatalog(entries, q = {}) {
 
 export const entryLine = (e) => `${e.src} — ${e.desc}${e.tags?.length ? `\n  tags: ${e.tags.join(', ')}` : ''}${e.sheet ? `\n  sheet: ${e.sheet.file}${e.sheet.times?.length ? ` (${e.sheet.cols}×${e.sheet.rows}, frames at ${e.sheet.times.map(fmt).join(', ')} s)` : ''}` : ''}${e.descSource ? `\n  description from: ${e.descSource}` : ''}`;
 
+// ---------- run as a child (MCP catalog_assets) ----------
+
+export const CATALOG_TIMEOUT_MS = Number(process.env.REEL_CATALOG_TIMEOUT_MS) || 10 * 60 * 1000;
+const RUNS = new Set(); // children of this process: killed when it exits
+let exitHook = false;
+// The CLI in its own niced process; signal (the MCP request's: cancelled / expired) and timeoutMs
+// stop it — SIGTERM, which the child turns into killing its ffmpeg, dropping temp sheets and
+// releasing its folder locks. What it analyzed before the stop is already saved.
+export function runCatalogChild(publicDir, dirs, {force = false, limit = 25, signal, timeoutMs = CATALOG_TIMEOUT_MS} = {}) {
+  const args = [import.meta.filename, '--json', '--with-parent', '--public', publicDir, '--limit', String(limit), ...(force ? ['--force'] : []), ...dirs];
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('catalog cancelled before it started'));
+    const ch = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    RUNS.add(ch);
+    if (!exitHook) { exitHook = true; process.once('exit', killRuns); }
+    let out = '', err = '', why = null;
+    const stop = (reason) => { if (!why) { why = reason; ch.kill('SIGTERM'); } };
+    const onAbort = () => stop('cancelled');
+    signal?.addEventListener('abort', onAbort, {once: true});
+    const timer = setTimeout(() => stop(`timed out after ${Math.round(timeoutMs / 1000)} s`), timeoutMs);
+    ch.stdout.on('data', (d) => { out += d; }); ch.stderr.on('data', (d) => { err += d; });
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); RUNS.delete(ch); };
+    ch.on('error', (e) => { done(); reject(new Error(`catalog failed: ${e.message}`)); });
+    ch.on('close', (code) => {
+      done();
+      if (why) return reject(new Error(`catalog ${why} — the files analyzed so far are saved; call again for the rest`));
+      try { if (code !== 0) throw new Error(err.trim().split('\n').pop() || `exit ${code}`); resolve(JSON.parse(out)); } catch (e) { reject(new Error(`catalog failed: ${e.message}`)); }
+    });
+  });
+}
+function killRuns() { for (const ch of RUNS) try { ch.kill('SIGTERM'); } catch {} }
+
 // ---------- helpers ----------
 
 function median(xs) { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
@@ -462,6 +534,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename) {
   const limit = opt('--limit');
   const force = argv.includes('--force');
   const asJson = argv.includes('--json');
+  // a stop (SIGTERM from runCatalogChild, Ctrl-C): no orphan ffmpeg, no temp sheet, no lock left behind
+  const quit = (code) => {
+    for (const p of CHILDREN) try { p.kill('SIGKILL'); } catch {}
+    for (const f of TMP_SHEETS) fs.rmSync(f, {force: true});
+    releaseAll();
+    process.exit(code);
+  };
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.once(sig, () => quit(130));
+  // spawned by the MCP server: if it dies (no SIGTERM reaches us), we are reparented — stop too
+  if (argv.includes('--with-parent')) { const ppid = process.ppid; setInterval(() => { if (process.ppid !== ppid) quit(1); }, 2000).unref(); }
   const dirs = argv.filter((a) => !a.startsWith('--'));
   const nice = Number(process.env.REEL_CATALOG_NICE ?? 15);
   try { if (nice > 0) os.setPriority(0, Math.min(19, nice)); } catch {} // children (ffmpeg) inherit it
@@ -469,7 +551,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename) {
   try {
     const res = await buildCatalog(publicDir, dirs.length ? dirs : DEFAULT_DIRS, {force, limit: limit ? Math.max(1, +limit) : Infinity, log});
     if (asJson) process.stdout.write(JSON.stringify(res));
-    else for (const s of res) console.log(s.missing ? `${s.dir}: (no folder)` : `${s.dir}: ${s.files} file(s), ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} left for the next run` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''} → ${path.relative(ROOT, catalogFile(publicDir, s.dir))}`);
+    else for (const s of res) console.log(s.missing ? `${s.dir}: (no folder)` : s.busy ? `${s.dir}: skipped — another catalog run is on it (${s.busy})` : `${s.dir}: ${s.files} file(s), ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} left for the next run` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''} → ${path.relative(ROOT, catalogFile(publicDir, s.dir))}`);
   } catch (e) {
     console.error(String(e.message ?? e));
     process.exit(1);

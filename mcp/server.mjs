@@ -13,7 +13,7 @@
 //   brolls[]   same anchoring
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawn, spawnSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
@@ -37,7 +37,7 @@ import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
-import {DEFAULT_DIRS, entryLine, loadEntries, searchCatalog, staleFiles} from '../scripts/catalog.mjs';
+import {DEFAULT_DIRS, entryLine, loadEntries, runCatalogChild, searchCatalog, staleFiles} from '../scripts/catalog.mjs';
 import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
 
@@ -570,20 +570,10 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
 // at another public/ (tests).
 const CAT_PUBLIC = process.env.REEL_CATALOG_PUBLIC ? path.resolve(process.env.REEL_CATALOG_PUBLIC) : PUBLIC;
 const dirName = z.string().regex(/^[\w-]+(\/[\w-]+)*$/).describe('a folder under public/, e.g. inputs, clips, broll, broll-assets, music');
-function runCatalog(dirs, {force, limit}) {
-  const args = [path.join(ROOT, 'scripts', 'catalog.mjs'), '--json', '--public', CAT_PUBLIC, '--limit', String(limit), ...(force ? ['--force'] : []), ...dirs];
-  return new Promise((resolve, reject) => {
-    const ch = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']}); // renices itself (REEL_CATALOG_NICE)
-    let out = '', err = '';
-    ch.stdout.on('data', (d) => { out += d; }); ch.stderr.on('data', (d) => { err += d; });
-    ch.on('error', reject);
-    ch.on('close', (code) => { try { if (code !== 0) throw new Error(err.trim().split('\n').pop() || `exit ${code}`); resolve(JSON.parse(out)); } catch (e) { reject(new Error(`catalog failed: ${e.message}`)); } });
-  });
-}
-
-server.registerTool('catalog_assets', {description: `Build or refresh the ASSET CATALOG — what is actually in each media file, so you choose footage by content and never by its name (names lie: "skybar" can be a lounge by day; a hook can be 33 s of black). Per file: duration, resolution/fps, black stretches with timestamps, silence, day/night and static/moving (heuristics, labelled so), a contact sheet, and a description from the transcript cache or library metadata when there is one. Incremental: only new or changed files are decoded (niced, one thread); a folder already cataloged costs a stat per file. Defaults to ${DEFAULT_DIRS.join(', ')}. limit caps the files decoded in this call — call again for the rest. Then query it with search_catalog.`, inputSchema: {dirs: z.array(dirName).max(10).optional(), force: z.boolean().default(false).describe('decode everything again'), limit: z.number().int().min(1).max(200).default(25)}}, async ({dirs, force, limit}) => {
-  const res = await runCatalog(dirs?.length ? dirs : DEFAULT_DIRS, {force, limit});
-  const lines = res.map((s) => s.missing ? `${s.dir}: no such folder` : `${s.dir}: ${s.files} file(s) — ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} NOT YET (call again)` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''}`);
+server.registerTool('catalog_assets', {description: `Build or refresh the ASSET CATALOG — what is actually in each media file, so you choose footage by content and never by its name (names lie: "skybar" can be a lounge by day; a hook can be 33 s of black). Per file: duration, resolution/fps, black stretches with timestamps, silence, day/night and static/moving (heuristics, labelled so), a contact sheet, and a description from the transcript cache or library metadata when there is one. Incremental: only new or changed files are decoded (niced, one thread); a folder already cataloged costs a stat per file. Defaults to ${DEFAULT_DIRS.join(', ')}. limit caps the files decoded in this call — call again for the rest. Then query it with search_catalog.`, inputSchema: {dirs: z.array(dirName).max(10).optional(), force: z.boolean().default(false).describe('decode everything again'), limit: z.number().int().min(1).max(200).default(25)}}, async ({dirs, force, limit}, extra) => {
+  // the request's signal: a cancelled or expired call stops the child (and its ffmpeg) instead of orphaning it
+  const res = await runCatalogChild(CAT_PUBLIC, dirs?.length ? dirs : DEFAULT_DIRS, {force, limit, signal: extra?.signal});
+  const lines = res.map((s) => s.missing ? `${s.dir}: no such folder` : s.busy ? `${s.dir}: skipped — another catalog run is on it (${s.busy}); call again when it finishes` : `${s.dir}: ${s.files} file(s) — ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} NOT YET (call again)` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''}`);
   return text(`${lines.join('\n')}\n\nQuery with search_catalog (filters on content; sheets=true shows the contact sheets).`);
 });
 

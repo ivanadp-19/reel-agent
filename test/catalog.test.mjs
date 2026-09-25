@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {blackRanges, buildCatalog, catalogDir, daylight, frameStats, loadCatalog, loadEntries, motion, searchCatalog, silenceRanges, staleFiles, tagsFor} from '../scripts/catalog.mjs';
+import {acquireLock} from '../scripts/project-lock.mjs';
+import {blackRanges, buildCatalog, catalogDir, runCatalogChild, daylight, frameStats, loadCatalog, loadEntries, motion, searchCatalog, silenceRanges, staleFiles, tagsFor} from '../scripts/catalog.mjs';
 
 // ---------- pure analysis ----------
 
@@ -189,6 +190,80 @@ test('catalog refuses folders outside public/', async () => {
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
+// ---------- concurrency: one run per folder, stoppable ----------
+
+const leftovers = (pub) => fs.readdirSync(pub, {recursive: true}).map(String).filter((f) => /\.tmp(\.jpg)?$|\.lock$/.test(f));
+const sleeper = () => spawn('sleep', ['30'], {stdio: 'ignore'});
+
+test('two runs over one folder in one process: the second is skipped, nothing is decoded twice', async () => {
+  const pub = fixtures();
+  try {
+    const [a, b] = await Promise.all([catalogDir(pub, 'inputs'), catalogDir(pub, 'inputs')]);
+    const ran = [a, b].find((s) => !s.busy), skipped = [a, b].find((s) => s.busy);
+    assert.ok(ran && skipped, JSON.stringify([a, b]));
+    assert.equal(ran.analyzed.length, 5); assert.deepEqual(skipped.analyzed, []);
+    assert.equal(Object.keys(loadCatalog(pub, 'inputs').files).length, 5);
+    assert.deepEqual(leftovers(pub), []); // lock released, no temp files
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('two CLI processes over one folder: every file decoded once, the JSON keeps all entries', async () => {
+  const pub = fixtures();
+  const cli = () => new Promise((resolve) => {
+    const ch = spawn(process.execPath, ['scripts/catalog.mjs', '--json', '--public', pub, 'inputs'], {stdio: ['ignore', 'pipe', 'inherit']});
+    let out = ''; ch.stdout.on('data', (d) => { out += d; }); ch.on('close', () => resolve(JSON.parse(out)[0]));
+  });
+  try {
+    const runs = await Promise.all([cli(), cli()]);
+    // the second either found the folder locked, or started after the first finished and found nothing new
+    assert.equal(runs.reduce((n, s) => n + s.analyzed.length, 0), 5, JSON.stringify(runs));
+    assert.equal(Object.keys(loadCatalog(pub, 'inputs').files).length, 5);
+    assert.deepEqual(leftovers(pub), []);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('a folder locked by another live process is skipped; its lock frees itself when that process dies', async () => {
+  const pub = fixtures();
+  const other = sleeper();
+  try {
+    assert.ok(acquireLock(path.join(pub, 'catalog'), 'inputs', {pid: other.pid, owner: 'catalog pid ' + other.pid}).ok);
+    const s = await catalogDir(pub, 'inputs');
+    assert.match(s.busy, new RegExp(`pid ${other.pid}`)); assert.deepEqual(s.analyzed, []);
+    assert.equal(loadCatalog(pub, 'inputs'), null); // nothing written while it held it
+    other.kill('SIGKILL'); await new Promise((r) => other.once('close', r));
+    const after = await catalogDir(pub, 'inputs');
+    assert.equal(after.busy, undefined); assert.equal(after.analyzed.length, 5);
+  } finally { other.kill('SIGKILL'); fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('runCatalogChild: a cancelled or timed-out request stops the child and its ffmpeg, frees the lock', async () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-catalog-'));
+  const d = path.join(pub, 'inputs'); fs.mkdirSync(d);
+  // long enough that the decode is still running when we cancel
+  ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=640x1136:r=30:d=40', ...X264, '-g', '30', path.join(d, 'long.mp4'));
+  const lock = path.join(pub, 'catalog', 'inputs.lock');
+  const ffmpegs = () => spawnSync('pgrep', ['-f', `ffmpeg.*${pub}`], {encoding: 'utf8'}).stdout.trim();
+  try {
+    const ac = new AbortController();
+    const run = runCatalogChild(pub, ['inputs'], {signal: ac.signal});
+    for (let i = 0; i < 200 && !(fs.existsSync(lock) && ffmpegs()); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(ffmpegs(), 'the child should be decoding');
+    ac.abort();
+    await assert.rejects(run, /catalog cancelled — the files analyzed so far are saved/);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(ffmpegs(), '', 'no orphan ffmpeg');
+    assert.deepEqual(leftovers(pub), []);
+
+    await assert.rejects(runCatalogChild(pub, ['inputs'], {timeoutMs: 300}), /catalog timed out after 0 s/);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(ffmpegs(), ''); assert.deepEqual(leftovers(pub), []);
+
+    await assert.rejects(runCatalogChild(pub, ['inputs'], {signal: AbortSignal.abort()}), /cancelled before it started/);
+    const [s] = await runCatalogChild(pub, ['inputs']);
+    assert.deepEqual(s.analyzed, ['long.mp4']);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
 // ---------- MCP ----------
 
 test('MCP: catalog_assets builds the catalog on request, search_catalog queries it by content', async () => {
@@ -226,5 +301,25 @@ test('MCP: catalog_assets builds the catalog on request, search_catalog queries 
 
     const bad = await client.callTool({name: 'catalog_assets', arguments: {dirs: ['../etc']}});
     assert.ok(bad.isError);
+  } finally { await client.close(); fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('MCP: cancelling catalog_assets from the client kills the child and its ffmpeg', async () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-catalog-'));
+  const d = path.join(pub, 'inputs'); fs.mkdirSync(d);
+  ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=640x1136:r=30:d=40', ...X264, '-g', '30', path.join(d, 'long.mp4'));
+  const ffmpegs = () => spawnSync('pgrep', ['-f', `ffmpeg.*${pub}`], {encoding: 'utf8'}).stdout.trim();
+  const client = new Client({name: 'test', version: '0'});
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_CATALOG_PUBLIC: pub, REEL_API: 'http://127.0.0.1:9'}}));
+  try {
+    const ac = new AbortController();
+    const call = client.callTool({name: 'catalog_assets', arguments: {dirs: ['inputs']}}, undefined, {signal: ac.signal});
+    for (let i = 0; i < 200 && !ffmpegs(); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(ffmpegs(), 'the child should be decoding');
+    ac.abort();
+    await assert.rejects(call);
+    for (let i = 0; i < 40 && ffmpegs(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(ffmpegs(), '', 'no orphan ffmpeg after the cancel');
+    assert.ok(!fs.existsSync(path.join(pub, 'catalog', 'inputs.lock')));
   } finally { await client.close(); fs.rmSync(pub, {recursive: true, force: true}); }
 });

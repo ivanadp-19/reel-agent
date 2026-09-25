@@ -95,7 +95,7 @@ The production box is a small Linux VM (2 vCPU) shared by several agent sessions
   lines contain those words) and kill it mid-edit — it happened twice in one day.
   Stop the app with `npm run stop` (by pid file); anything else: `pgrep -af <pattern>`
   first, read the list, then `kill <pid>` of exactly the process you mean.
-- **The asset catalog runs niced.** `scripts/catalog.mjs` renices itself to 15 (`REEL_CATALOG_NICE`; ffmpeg inherits it) and decodes with one thread (`REEL_CATALOG_THREADS`), so a render or another session keeps the CPU. Run it by hand as `nice -n 15 ionice -c3 node scripts/catalog.mjs` on the VM, and only when there are new files — it is incremental, a second run over the same folder decodes nothing. Never put it on server start or a tight cron.
+- **The asset catalog runs niced.** `scripts/catalog.mjs` renices itself to 15 (`REEL_CATALOG_NICE`; ffmpeg inherits it) and decodes with one thread (`REEL_CATALOG_THREADS`), so a render or another session keeps the CPU. Run it by hand as `nice -n 15 ionice -c3 node scripts/catalog.mjs` on the VM, and only when there are new files — it is incremental, a second run over the same folder decodes nothing. Never put it on server start or a tight cron. One run per folder: `public/catalog/<dir>.lock` (`scripts/project-lock.mjs`); a second run over a locked folder skips it instead of decoding it again. `catalog_assets` stops its child (and the ffmpeg under it) when the MCP request is cancelled or after `REEL_CATALOG_TIMEOUT_MS` (10 min); what was analyzed stays saved.
 - **One agent per project.** The MCP server takes `public/projects/<id>.lock` on
   its first write to a project and refreshes it on every write
   (`scripts/project-lock.mjs`); a second agent that tries to write gets an error
