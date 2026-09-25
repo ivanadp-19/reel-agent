@@ -18,7 +18,10 @@ describes every command, flag, output and exit code.
 
 ```bash
 reel projects create "Promo café" --json            # → {id: "promo-cafe", created}
+reel projects set promo-cafe --lang es --caption-style caja --json
 reel clips add promo-cafe ~/shoot/ --json            # a folder or files, appended to the timeline
+reel autocut promo-cafe --dry-run --json             # what the silence cut would keep; nothing saved
+reel autocut promo-cafe --json                       # clips → their speech segments
 reel captions generate promo-cafe --json             # transcribe + page the speech
 reel captions get promo-cafe --json > caps.json      # edit the pages (text, tiers, timing)
 reel captions diff promo-cafe caps.json --json       # what would change
@@ -48,6 +51,28 @@ a review link needs a final that passed QC.
   `render wait --timeout`. A timeout leaves the render running.
 - Project writes go through the backend's compare-and-swap: when the editor or
   another agent saved in between, `reel` reads again and redoes its change.
+
+## Project settings and autocut
+
+`projects set` and `autocut` take the project by id or by the name it was created
+with (two projects with that name: exit 5, pass the id).
+
+- `reel projects set <project> [--lang auto|es|en] [--caption-style <pack>] [--name "<name>"]`
+  — the MCP's `set_language`, `set_caption_style` and `rename_project`. `--lang` is
+  a language code (`es`, not `Spanish`: exit 2); `--caption-style` is one of the
+  packs `reel help projects set --json` lists. A new pack re-pages the generated
+  captions for it (tiers and hand-made pages stay), like the MCP. Setting what is
+  already set changes nothing (`changed: false`).
+- `reel autocut <project> [--dry-run] [--timeout <s>]` — the editor's / MCP's
+  autocut step: the backend's `/api/trim-silence` job analyzes the speech of every
+  clip, then each clip is replaced by its speech segments (silence at the ends and
+  long pauses inside dropped; B-roll re-anchored to the pieces), written with the
+  same compare-and-swap as every other change. `--dry-run` prints the plan (clips
+  and duration before / after, the segments kept per clip) and saves nothing. When
+  the timeline changes while the analysis runs, autocut stops with exit 5 instead
+  of applying a stale plan — run it again. It needs a backend whose autocut job
+  hands the plan back in its status (`result`); an older one fails with
+  `job_failed`.
 
 ## Renders and the layer cache
 
