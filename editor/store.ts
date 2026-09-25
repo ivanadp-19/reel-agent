@@ -1,12 +1,12 @@
 import {create} from 'zustand';
-import type {Caption} from '../src/captions';
+import {retext, setPageStart, shiftPage, type Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
 import type {PresetId} from '../src/captionPresets';
 import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, locateSec, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -65,6 +65,8 @@ type EditorState = {
   setCaptionScale: (id: string, scale: number) => void;
   setBrollScale: (id: string, scale: number) => void;
   setText: (id: string, text: string) => void;
+  movePageStart: (id: string, wid: string) => void; // edit_caption starts_at_wid
+  shiftCaption: (id: string, ms: number) => void; // edit_caption shift_ms
   toggleAccent: (id: string, wordIndex: number) => void;
   setEmoji: (id: string, wordIndex: number, emoji: string) => void;
   setCaptionBehind: (id: string, behind: boolean) => void;
@@ -145,14 +147,6 @@ const mapCap = (caps: Caption[], id: string, fn: (c: Caption) => Caption) =>
   caps.map((c) => (c.id === id ? fn(c) : c));
 // the clip under the playhead and the source time there (null with no clips)
 const atFrame = (s: {clips: Clip[]; meta: Meta | null}, frame: number) => (s.meta ? locateSec(s.clips, s.meta.fps, frame / s.meta.fps) : null);
-// first free id with a prefix (c0, b0, g0… like the MCP tools)
-const nextId = (items: {id: string}[], prefix: string) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
-// evenly timed words for hand-typed text (tier 0), like the MCP's retext
-const wordsOf = (text: string, startMs: number, endMs: number) => {
-  const toks = text.trim().split(/\s+/).filter(Boolean);
-  const per = (endMs - startMs) / Math.max(1, toks.length);
-  return toks.map((t, i) => ({text: t, startMs: Math.round(startMs + i * per), endMs: Math.round(startMs + (i + 1) * per), tier: 0}));
-};
 
 export const useEditor = create<EditorState>((set) => ({
   meta: null,
@@ -218,24 +212,10 @@ export const useEditor = create<EditorState>((set) => ({
   setCaptionScale: (id, scale) => set((s) => ({captions: mapCap(s.captions, id, (c) => ({...c, scale}))})),
   setBrollScale: (id, scale) => set((s) => ({brolls: s.brolls.map((b) => (b.id === id ? {...b, scale} : b))})),
 
-  // правка текста: ре-токенизация, равномерное распределение тайминга,
-  // сохранение акцентов по совпадению слова
-  setText: (id, text) =>
-    set((s) => ({
-      captions: mapCap(s.captions, id, (c) => {
-        const tokens = text.trim().split(/\s+/).filter(Boolean);
-        if (!tokens.length) return c;
-        const tiers = new Map(c.words.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
-        const per = (c.endMs - c.startMs) / tokens.length;
-        const words = tokens.map((t, i) => ({
-          text: t,
-          startMs: Math.round(c.startMs + i * per),
-          endMs: Math.round(c.startMs + (i + 1) * per),
-          tier: tiers.get(t.toLowerCase()) ?? 0,
-        }));
-        return {...c, words};
-      }),
-    })),
+  // the page's text, the way edit_caption does it (src/captions.ts retext)
+  setText: (id, text) => set((s) => ({captions: mapCap(s.captions, id, (c) => (text.trim() ? retext(c, text) : c))})),
+  movePageStart: (id, wid) => set((s) => ({...withHistory(s), captions: setPageStart(s.captions, id, wid)})),
+  shiftCaption: (id, ms) => set((s) => ({...withHistory(s), captions: mapCap(s.captions, id, (c) => shiftPage(c, ms))})),
 
   setEmoji: (id, wi, emoji) =>
     set((s) => ({
@@ -251,7 +231,7 @@ export const useEditor = create<EditorState>((set) => ({
       const startMs = Math.round(at.sourceSec * 1000);
       const endMs = Math.round(Math.min(at.clip.outSec, at.sourceSec + durationSec * (at.clip.speed ?? 1)) * 1000);
       const topPct = s.captions.find((c) => c.src === at.clip.src)?.topPct ?? DEFAULT_TOP;
-      const cap: Caption = {id: nextId(s.captions, 'c'), src: at.clip.src, startMs, endMs, topPct, words: wordsOf(text, startMs, endMs)};
+      const cap = retext({id: nextId(s.captions, 'c'), src: at.clip.src, startMs, endMs, topPct, words: []}, text);
       return {...withHistory(s), captions: [...s.captions, cap], selectedId: cap.id, selectedClipId: null};
     }),
   deleteCaption: (id) =>

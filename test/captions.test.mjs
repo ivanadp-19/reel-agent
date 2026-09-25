@@ -67,6 +67,12 @@ test('re-page (replace): deleted words stay gone, a retexted page survives witho
   assert.equal(r.added, 0);
 });
 
+test('re-page (replace): a re-paged page never inherits the id of a page that was there', () => {
+  const old = [gen('c0', [wd('a:0', 'uno', 0)]), gen('c1', [wd('a:1', 'dos', 400)]), gen('c2', [wd('a:2', 'tres', 1000)])];
+  const fresh = [gen('c0', [wd('a:0', 'uno', 0), wd('a:1', 'dos', 400)]), gen('c1', [wd('a:2', 'tres', 1000)])];
+  assert.deepEqual(mergeCaptions(old, fresh, [clip], {replace: true}).captions.map((c) => c.id), ['c3', 'c4'], 'a stale "c1" is an error, not another page');
+});
+
 test('generate (no replace): existing pages stay, only new words get pages', () => {
   const existing = [gen('c0', [wd('a:0', 'uno', 0), wd('a:1', 'dos', 400)])];
   const fresh = [gen('c0', [wd('a:0', 'uno', 0), wd('a:1', 'dos', 400), wd('a:2', 'tres', 800)])];
