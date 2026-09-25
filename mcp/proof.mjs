@@ -2,11 +2,11 @@
 // (bundle once per process, then one renderStill per time) and tile them.
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
 import {bundle} from '@remotion/bundler';
 import {renderStill, selectComposition} from '@remotion/renderer';
 import {linkPublic, sweepDead} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
+import {runCmd} from '../scripts/remote-broll.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const TMP = path.join(ROOT, '.captions-tmp');
@@ -44,7 +44,7 @@ export async function renderProof(props, times, outDir, scale = 0.35) {
   const cols = Math.min(4, stills.length);
   const rows = Math.ceil(stills.length / cols);
   const sheet = path.join(outDir, 'proof-sheet.jpg');
-  tile(stills.map((s) => s.file), cols, sheet, stills.map((s) => `STILL ${s.t.toFixed(1)} s - proof, not the render`), Math.round(46 * scale));
+  await tile(stills.map((s) => s.file), cols, sheet, stills.map((s) => `STILL ${s.t.toFixed(1)} s - proof, not the render`), Math.round(46 * scale));
   return {sheet, stills, rows, cols};
 }
 
@@ -62,7 +62,7 @@ export async function renderStrip(props, atSec, outDir, {frames = 24, cols = 8, 
     stills.push(out);
   }
   const sheet = path.join(outDir, 'strip.jpg');
-  tile(stills, cols, sheet, stills.map((_, i) => `STILL f${first + i}`), Math.max(11, Math.round(64 * scale)));
+  await tile(stills, cols, sheet, stills.map((_, i) => `STILL f${first + i}`), Math.max(11, Math.round(64 * scale)));
   return {sheet, first, fps: composition.fps};
 }
 
@@ -80,12 +80,13 @@ export function tileFilter(n, cols, labels = null, font = 16) {
 }
 
 // tile images into one JPEG; without drawtext (an ffmpeg built without freetype)
-// the tiles go out unlabeled rather than not at all
-function tile(files, cols, out, labels, font) {
+// the tiles go out unlabeled rather than not at all. Async: proofs run inside the
+// backend too (the MCP over /mcp), whose event loop must keep serving meanwhile.
+async function tile(files, cols, out, labels, font) {
   const inputs = files.flatMap((f) => ['-i', f]);
   for (const l of [labels, null]) {
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...inputs, '-filter_complex', tileFilter(files.length, cols, l, font), '-q:v', '4', out]);
-    if (r.status === 0) return;
+    const r = await runCmd('ffmpeg', ['-v', 'error', '-y', ...inputs, '-filter_complex', tileFilter(files.length, cols, l, font), '-q:v', '4', out]);
+    if (r.code === 0) return;
     if (!l) throw new Error(`ffmpeg tiling failed: ${String(r.stderr).slice(-200)}`);
   }
 }

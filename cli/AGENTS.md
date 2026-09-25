@@ -89,8 +89,8 @@ backend may read that user's own files by path.
 Install once on the server (Node 24 on every user's PATH; the checkout readable
 by them): `sudo ln -sf "$PWD/cli/reel.mjs" /usr/local/bin/reel`. Backend
 settings: `REEL_REQUIRE_TOKEN=1` makes loopback API calls carry a token (a box
-shared over SSH; without it a caller with no token is still let in, as the local
-editor and the MCP are — they send no token yet, so they stop working with it on),
+shared over SSH; without it a caller with no token is still let in; the MCP sends
+the backend token, the editor served by `npm start` sends none and stops working),
 `REEL_RENDER_MIN_FREE_DISK_MB` (3072) and `REEL_RENDER_MIN_FREE_MEM_MB` (1024,
 Linux) are the render floors (0 turns one off), `REEL_UPLOAD_MAX_MB` (2048),
 `REEL_TOKENS_FILE` (`.reel-tokens.json`).
