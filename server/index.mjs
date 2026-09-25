@@ -5,14 +5,15 @@
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
 //   captions   — words → caption pages + face-aware placement (job)
 //   trim-silence — autocut plan (job)
-//   render     — export the MultiClip composition to mp4 (job)
+//   render     — export the MultiClip composition to mp4 (job); a final that passes QC
+//                becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
+//   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
 //   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys)
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import bcrypt from 'bcryptjs';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
@@ -21,6 +22,9 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
+import {createLink, loadReviews, playableVersions, publicLink, recordFinal, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {gate, serveFile} from './http.mjs';
+import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -54,6 +58,7 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const EXPORTS = path.join(PUBLIC, 'exports');
 const PROJECTS_DIR = path.join(PUBLIC, 'projects');
+const REVIEWS = reviewsDir(PUBLIC); // review versions + links, outside the project JSON (scripts/reviews.mjs)
 fs.mkdirSync(EXPORTS, {recursive: true});
 fs.mkdirSync(PROJECTS_DIR, {recursive: true});
 
@@ -219,7 +224,7 @@ function renderJob(job, id) {
   renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
   return bakeMissing(job.raw, id).then((raw) => renderProps({...job, raw}, id), (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
 }
-function renderProps({raw, draft, expectSec, clean}, id) {
+function renderProps({raw, draft, expectSec, clean, projectId}, id) {
   return new Promise((settle) => {
     const propsFile = path.join(ROOT, `.props-${id}.json`);
     // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
@@ -258,6 +263,16 @@ function renderProps({raw, draft, expectSec, clean}, id) {
         fin.on('close', () => {
           let r;
           try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+          if (r.ok && projectId) {
+            // a final that passed QC becomes a review version of its project: 720p proxy + poster
+            // (inside this queue slot), numbered and recorded; the render is done either way
+            renders[id] = {status: 'running', progress: 100, label: 'Review proxy'};
+            recordFinal({draft, qcOk: r.ok, projectId, outFile, dir: REVIEWS, publicDir: PUBLIC, jobId: id}).then(
+              (v) => { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, projectId, version: v.v}; },
+              (e) => { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, projectId, versionError: String(e?.message ?? e).slice(0, 200)}; },
+            ).finally(settle);
+            return;
+          }
           if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs};
           else {
             const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
@@ -278,34 +293,15 @@ function renderProps({raw, draft, expectSec, clean}, id) {
 }
 const renderQueue = createQueue(PLAN.workers, renderJob);
 
-// The backend has no auth, so only local callers may reach it:
-// - Host must be loopback (DNS-rebinding pages send a foreign Host header)
-// - a browser Origin, when present, must be a localhost page (the editor);
-//   cross-origin pages always send Origin, so this blocks CSRF POSTs, while
-//   non-browser clients (the MCP server, curl) send none and pass
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
-const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-// Railway / public mode (REEL_PUBLIC=1): the backend faces the internet, so the
-// loopback gate is replaced by HTTP basic auth. The bcrypt hashes come from
-// REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same hashes Caddy uses on
-// the VM, so existing passwords keep working and no secret crosses a chat.
+// Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
+// locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
+// refused); in Railway / public mode (REEL_PUBLIC=1) HTTP basic auth instead, with
+// the bcrypt hashes from REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same
+// hashes Caddy uses on the VM, so existing passwords keep working and no secret
+// crosses a chat. The review pages /r/<token> are the one public exception.
 const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
 const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').filter(Boolean).map((pair) => { const i = pair.indexOf(':'); return [pair.slice(0, i), pair.slice(i + 1)]; }));
-const MIME = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.cube': 'text/plain', '.vtt': 'text/vtt', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon'};
 const DIST = path.join(ROOT, 'editor', 'dist');
-function serveFile(req, res, file) {
-  const st = fs.statSync(file);
-  const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
-  const range = req.headers.range && req.headers.range.match(/bytes=(\d*)-(\d*)/);
-  if (range && (range[1] || range[2])) {
-    const start = range[1] ? +range[1] : Math.max(0, st.size - (+range[2]));
-    const end = range[1] ? (range[2] ? Math.min(+range[2], st.size - 1) : st.size - 1) : st.size - 1;
-    res.writeHead(206, {'Content-Type': type, 'Content-Length': end - start + 1, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Accept-Ranges': 'bytes'});
-    return fs.createReadStream(file, {start, end}).pipe(res);
-  }
-  res.writeHead(200, {'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes'});
-  fs.createReadStream(file).pipe(res);
-}
 function serveStatic(req, res, pathname) {
   const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
   for (const base of [PUBLIC, DIST]) {
@@ -316,22 +312,22 @@ function serveStatic(req, res, pathname) {
   if (fs.existsSync(index)) return serveFile(req, res, index);
   return json(res, 404, {error: 'not found'});
 }
+// Where a review link points: REEL_PUBLIC_URL (https://reels.example.com) when set,
+// else the address this request came through (the proxy's forwarded host first).
+function publicBase(req) {
+  if (process.env.REEL_PUBLIC_URL) return process.env.REEL_PUBLIC_URL.replace(/\/+$/, '');
+  const first = (h) => String(h || '').split(',')[0].trim();
+  const host = first(req.headers['x-forwarded-host']) || req.headers.host || `127.0.0.1:${PORT}`;
+  const proto = first(req.headers['x-forwarded-proto']) || 'http';
+  return `${/^https?$/.test(proto) ? proto : 'http'}://${host}`;
+}
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (PUBLIC_MODE && url.pathname === '/api/ping') return json(res, 200, {ok: true}); // Railway healthcheck: no auth, no info
-  if (PUBLIC_MODE) {
-    const h = req.headers.authorization || '';
-    const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
-    const i = b.indexOf(':');
-    const tokOK = TOKENS.includes(req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
-    const ok = tokOK || i > 0 && AUTH[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), AUTH[b.slice(0, i)]);
-    if (!ok) { res.writeHead(401, {'WWW-Authenticate': 'Basic realm="reel-agent"'}); return res.end('auth required'); }
-    if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
-  } else {
-    const host = (req.headers.host || '').replace(/:\d+$/, '');
-    if (!LOCAL_HOSTS.has(host)) return json(res, 403, {error: 'local access only'});
-    if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return json(res, 403, {error: 'bad origin'});
-  }
+  const g = gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS});
+  if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
+  if (g.kind === 'ping') return json(res, 200, {ok: true});
+  if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
+  if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
 
@@ -756,14 +752,48 @@ const server = createServer(async (req, res) => {
     return json(res, 200, statusJob.store[id] ?? {status: 'unknown'});
   }
 
+  // ---- review links (scripts/reviews.mjs): the editor's Share button and the MCP share_version / list_versions / revoke_review_link ----
+  //   GET    /api/reviews/<projectId>                → {versions, links}
+  //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt} (the token is shown once)
+  //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
+  const rv = url.pathname.match(/^\/api\/reviews\/([\w-]+)(?:\/links(?:\/([0-9a-f]{8}))?)?$/);
+  if (rv) {
+    const [, projectId, linkId] = rv;
+    const withLinks = url.pathname.includes('/links');
+    if (req.method === 'GET' && !withLinks) {
+      const r = loadReviews(REVIEWS, projectId);
+      const playable = new Set(playableVersions(r, PUBLIC).map((x) => x.v));
+      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v)})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
+    }
+    if (req.method === 'POST' && withLinks && !linkId) {
+      let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
+      if (!playableVersions(loadReviews(REVIEWS, projectId), PUBLIC).length) return json(res, 400, {error: 'no final render to share yet — export a final (not a draft) first'});
+      try {
+        const l = createLink(REVIEWS, projectId, {days: b?.days});
+        return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`});
+      } catch (e) { return json(res, 400, {error: String(e?.message ?? e).slice(0, 200)}); }
+    }
+    if (req.method === 'DELETE' && linkId) {
+      const l = revokeLink(REVIEWS, projectId, linkId);
+      return l ? json(res, 200, l) : json(res, 404, {error: `no link ${linkId}`});
+    }
+    return json(res, 405, {error: 'method not allowed'});
+  }
+
   // ---- E9: запустить рендер ----
   if (req.method === 'POST' && url.pathname === '/api/render') {
-    let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?}
+    let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?}
     let draft = false;
-    let expectSec, clean = 'off';
+    let expectSec, clean = 'off', projectId = null;
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
+      // project_id (editor, MCP render): a final that passes QC is recorded as a review version of that project
+      if (props.project_id != null) {
+        if (!/^[\w-]+$/.test(String(props.project_id))) throw new Error('bad project_id');
+        if (fs.existsSync(path.join(PROJECTS_DIR, `${props.project_id}.json`))) projectId = String(props.project_id);
+      }
+      delete props.project_id;
       clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
       // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
@@ -777,7 +807,7 @@ const server = createServer(async (req, res) => {
     const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
     // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
     renders[id] = {status: 'running', progress: 0, queued: true};
-    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean});
+    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, projectId: draft ? null : projectId});
     if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
   }
