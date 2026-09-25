@@ -2,6 +2,7 @@ import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
+import {textWidthEm} from './textFit';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily, type FontFamily} from './fonts';
 import {ensureProjectFont} from './projectFont';
@@ -42,7 +43,8 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
         : preset.colors.text;
   // not spoken yet: hidden (space reserved) or dimmed (karaoke) — plain text either way
   const dimmed = build && !spoken && preset.upcoming === 'dim';
-  const hidden = build && !spoken && preset.upcoming === 'hidden';
+  const hidden = build && !spoken && (preset.upcoming === 'hidden' || preset.upcoming === 'collapse');
+  const collapsed = build && !spoken && preset.upcoming === 'collapse'; // no space: the spoken group recenters live
   const opacity = hidden ? 0 : dimmed ? 1 : m.opacity;
   const styled = !dimmed && !hidden;
   // César 9:27: classifier highlights (keywords / questions / CTAs) get a more dynamic entry —
@@ -79,7 +81,7 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
       <span
         data-w={index}
         style={{
-          display: 'inline-block',
+          display: collapsed ? 'none' : 'inline-block',
           position: 'relative',
           zIndex: 1,
           fontWeight: t.weight ?? preset.font.weight,
@@ -129,7 +131,34 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const absMs = caption.startMs + (frame / fps) * 1000;
-  const fontSize = Math.round(preset.font.sizePx * (caption.scale ?? 1) * pageScale(preset, caption.words.length));
+  const baseSize = Math.round(preset.font.sizePx * (caption.scale ?? 1) * pageScale(preset, caption.words.length));
+  // Bonded pairs (layout.unbreakable): Capitalized+Capitalized/digit words render inside a
+  // nowrap span so flex-wrap can never split a name ('MONTEALBÁN 326'). Two passes:
+  // name+number bonds first (stronger than Cap+Cap), then Cap+Cap on the words left free.
+  // Pairs NEVER chain (a chained run made the whole page one unbreakable overflowing line).
+  const canBond = !!(preset.layout && preset.layout.unbreakable);
+  const pairBondStrong = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[0-9]/.test(b); // name + number
+  const pairBondWeak = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[A-ZÁÉÍÓÚÑÜ]/.test(b); // name + name
+  const paired = new Set<number>();
+  for (const bond of [pairBondStrong, pairBondWeak]) {
+    if (!canBond) break;
+    for (let i = 0; i < caption.words.length - 1; i++) {
+      const nxt = caption.words[i + 1];
+      if (!paired.has(i) && !paired.has(i + 1) && !nxt.br && bond(caption.words[i].text, nxt.text)) paired.add(i);
+    }
+  }
+  // César 10:35: "3 lines or a smaller size beat splitting a name" — shrink the page so the
+  // widest unbreakable unit (bonded pair or single word) fits the frame (70px side padding).
+  const {width: compWidth} = useVideoConfig();
+  const availPx = compWidth - 140;
+  const familyName = preset.font.custom ? preset.font.custom.family : preset.font.family;
+  const unitEms: number[] = [];
+  for (let i = 0; i < caption.words.length; i++) {
+    if (paired.has(i)) { unitEms.push(textWidthEm(caption.words[i].text + ' ' + caption.words[i + 1].text, familyName)); i++; }
+    else unitEms.push(textWidthEm(caption.words[i].text, familyName));
+  }
+  const widestPx = Math.max(...unitEms) * baseSize;
+  const fontSize = widestPx > availPx ? Math.max(40, Math.floor((baseSize * availPx) / widestPx)) : baseSize;
 
   // entrance + exit. Guarded for very short pages (1–2 frames after autocut /
   // clip clamping): interpolate() needs strictly increasing ranges.
@@ -206,7 +235,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         padding: '0 70px',
         opacity: a * ex.opacity,
         transform: [transform, ex.dy ? `translateY(${ex.dy.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
-        filter: [preset.pageIn.type === 'blur' && a < 1 ? `blur(${((1 - a) * 10).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
+        filter: [(preset.pageIn.type === 'blur' || preset.pageIn.type === 'slideUp') && a < 1 ? `blur(${((1 - a) * (preset.pageIn.type === 'blur' ? 10 : 6)).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
       }}
     >
       <div
@@ -231,21 +260,44 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         }}
       >
         {box ? <div style={box} /> : null}
-        {caption.words.map((w, i) => (
-          <React.Fragment key={i}>
-          {w.br ? <div style={{flexBasis: '100%', height: 0}} /> : null}
-          <Word
-            w={w}
-            index={i}
-            preset={preset}
-            accent={accent}
-            active={absMs >= w.startMs && absMs <= w.endMs}
-            underBox={!!box && i === spokenIdx && !boxOff}
-            onsetFrame={onset(i)}
-            captionKeyIn={caption.keyIn}
-          />
-          </React.Fragment>
-        ))}
+  {(() => {
+        // César 10:35: a development name like 'Montealbán 326' must never split across lines.
+        // When layout.unbreakable, bonded pairs (Capitalized + Capitalized/digit) render inside a
+        // nowrap group so flex-wrap can never separate them, whatever the measured widths say.
+        const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
+        const els: React.ReactNode[] = [];
+        const wordEl = (i: number) => {
+          const w = caption.words[i];
+          return (
+            <Word
+              key={i}
+              w={w}
+              index={i}
+              preset={preset}
+              accent={accent}
+              active={absMs >= w.startMs && absMs <= w.endMs}
+              underBox={!!box && i === spokenIdx && !boxOff}
+              onsetFrame={onset(i)}
+              captionKeyIn={caption.keyIn}
+            />
+          );
+        };
+        for (let i = 0; i < caption.words.length; i++) {
+          const w = caption.words[i];
+          if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
+          if (paired.has(i)) {
+            els.push(
+              <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
+                {wordEl(i)}{wordEl(i + 1)}
+              </span>
+            );
+            i++;
+          } else {
+            els.push(wordEl(i));
+          }
+        }
+        return els;
+      })()}
       </div>
     </div>
   );
