@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
 
 const GB = 1e9;
-test('render plan: the 2-vCPU VM renders one at a time with both cores; big boxes run several', () => {
+test('render plan: serial by default (one render with all the cores); REEL_RENDER_WORKERS = N runs N', () => {
   assert.deepEqual({...renderPlan({cpus: 2, memBytes: 8 * GB, env: {}}), cacheBytes: 0}, {workers: 1, concurrency: 2, cacheBytes: 0});
   const m = renderPlan({cpus: 16, memBytes: 64 * GB, env: {}});
-  assert.equal(m.workers, 2); assert.equal(m.concurrency, 6);
-  assert.equal(renderPlan({cpus: 32, memBytes: 4 * GB, env: {}}).workers, 1, 'RAM caps the workers');
+  assert.equal(m.workers, 1, 'big boxes stay serial unless asked'); assert.equal(m.concurrency, 14);
+  const n = renderPlan({cpus: 16, memBytes: 64 * GB, env: {REEL_RENDER_WORKERS: '2'}});
+  assert.equal(n.workers, 2); assert.equal(n.concurrency, 6);
+  assert.equal(renderPlan({cpus: 32, memBytes: 4 * GB, env: {REEL_RENDER_WORKERS: '4'}}).workers, 1, 'RAM caps the workers');
   const o = renderPlan({cpus: 2, memBytes: 8 * GB, env: {REEL_RENDER_WORKERS: '2', REEL_RENDER_CONCURRENCY: '1'}});
   assert.equal(o.workers, 2); assert.equal(o.concurrency, 1);
 });

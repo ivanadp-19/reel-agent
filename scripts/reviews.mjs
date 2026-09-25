@@ -6,7 +6,8 @@
 // Store: public/reviews/<projectId>.json — outside the project JSON on purpose
 // (the editor's compare-and-swap on updatedAt and the project list never see it):
 //   {projectId, managedBy: 'review-link', versions: [...], links: [...]}
-//   version: {v, createdAt, durationSec, sizeBytes, file, proxy, poster, proxyBytes, generated: [...]}
+//   version: {v, createdAt, durationSec, sizeBytes, file, proxy, poster, proxyBytes, job?, generated: [...]}
+//     job       the render job that made it (public/render-jobs/<job>.json while its state is kept)
 //     file      the full final render (exports/edited-<job>.mp4), download only
 //     proxy     720p H.264 CRF 26 +faststart (reviews/<projectId>/v<n>.mp4), what the page streams
 //     poster    one frame (reviews/<projectId>/v<n>.jpg)
@@ -62,7 +63,7 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // temporary names next to where they go; here they get the version number (read +
 // numbered + written synchronously, so two renders of one project finishing
 // together cannot take the same number).
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, now = Date.now()}) {
+export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now()}) {
   const r = loadReviews(dir, projectId);
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
   const sub = path.join(dir, projectId);
@@ -74,6 +75,7 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
   const version = {
     v, createdAt: new Date(now).toISOString(), durationSec: Math.round(durationSec * 100) / 100, sizeBytes,
     file: rel(file), proxy: rel(proxyAbs), poster: fs.existsSync(posterAbs) ? rel(posterAbs) : null, proxyBytes: fs.statSync(proxyAbs).size,
+    ...(jobId ? {job: String(jobId)} : {}), // the render job it came from (public/render-jobs/<job>.json, scripts/render-jobs.mjs)
   };
   version.generated = [version.proxy, version.poster].filter(Boolean);
   r.versions.push(version);
@@ -148,7 +150,7 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
   fs.mkdirSync(path.dirname(tmp), {recursive: true});
   try {
     const {durationSec} = await makeProxy(outFile, `${tmp}.mp4`, `${tmp}.jpg`);
-    return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes: fs.statSync(outFile).size, publicDir});
+    return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes: fs.statSync(outFile).size, publicDir, jobId});
   } finally {
     fs.rmSync(`${tmp}.mp4`, {force: true}); fs.rmSync(`${tmp}.jpg`, {force: true});
   }

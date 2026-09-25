@@ -30,7 +30,7 @@ function fixture(n = 2) {
     const proxy = path.join(pub, `.proxy-${i}`), poster = path.join(pub, `.poster-${i}`);
     fs.writeFileSync(proxy, Buffer.from(Array.from({length: 1000}, (_, k) => k % 256)));
     fs.writeFileSync(poster, 'jpeg');
-    recordVersion(dir, 'p-1', {file: full, proxyTmp: proxy, posterTmp: poster, durationSec: 12.345, sizeBytes: 5000, publicDir: pub, now: T0 + i});
+    recordVersion(dir, 'p-1', {file: full, proxyTmp: proxy, posterTmp: poster, durationSec: 12.345, sizeBytes: 5000, publicDir: pub, jobId: `job-${i}`, now: T0 + i});
   }
   return {pub, dir};
 }
@@ -45,6 +45,7 @@ test('versions: numbered, full + generated proxy/poster recorded, outside the pr
   assert.equal(v2.poster, 'reviews/p-1/v2.jpg');
   assert.deepEqual(v2.generated, ['reviews/p-1/v2.mp4', 'reviews/p-1/v2.jpg'], 'the files this feature made are marked');
   assert.equal(v2.durationSec, 12.35);
+  assert.equal(v2.job, 'job-2', 'the render job it came from (public/render-jobs/)');
   assert.equal(r.managedBy, 'review-link');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pub, 'projects', 'p-1.json'), 'utf8')), {name: 'Café <promo>'}, 'the project JSON is untouched');
   assert.throws(() => loadReviews(dir, '../x'), /bad project id/);

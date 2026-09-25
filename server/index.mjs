@@ -5,8 +5,9 @@
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
 //   captions   — words → caption pages + face-aware placement (job)
 //   trim-silence — autocut plan (job)
-//   render     — export the MultiClip composition to mp4 (job); a final that passes QC
-//                becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
+//   render     — export the MultiClip composition to mp4: a job persisted on disk, queued,
+//                cancellable (/api/render, /api/render-jobs; scripts/render-jobs.mjs); a final that
+//                passes QC becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
 //   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
 //   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys)
 import {createServer} from 'node:http';
@@ -14,15 +15,17 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {pathToFileURL} from 'node:url';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FILE, clientFont} from '../src/fonts.ts';
-import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
-import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
-import {createLink, loadReviews, playableVersions, publicLink, recordFinal, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {renderPlan} from '../scripts/render-queue.mjs';
+import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
+import {createRenderRunner} from '../scripts/render-runner.mjs';
+import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from './http.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -72,7 +75,6 @@ fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
 process.once('exit', () => { try { if (fs.readFileSync(path.join(ROOT, '.backend.pid'), 'utf8') === String(process.pid)) fs.rmSync(path.join(ROOT, '.backend.pid')); } catch {} });
 
-const renders = {}; // jobId -> {status, progress, file, error}
 const captionJobs = {}; // jobId -> {status, progress, label, error}
 const transcribeJobs = {}; // jobId -> {status, progress, label, error}
 const trimJobs = {}; // jobId -> {status, progress, label, error}
@@ -199,10 +201,13 @@ async function localizeRemoteBrolls(props) {
   }
 }
 
-// ---- render queue (scripts/render-queue.mjs): `workers` exports at once, the rest wait ----
+// ---- render jobs (scripts/render-jobs.mjs + scripts/render-runner.mjs) ----
+// A render is a job on disk (public/render-jobs/): POST /api/render answers with its
+// id at once, the queue runs one at a time (REEL_RENDER_WORKERS = N for more), the
+// status survives a restart, a job whose process dies is failed. The editor, the MCP
+// (render, start_render, render_status, list_render_jobs, cancel_render) and the CLI
+// (scripts/render-cli.mjs) all go through the routes below.
 const PLAN = renderPlan();
-console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concurrency}`);
-// one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
 // LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
 // baked here, before the render, so no clip silently plays ungraded
 async function bakeMissing(raw, id) {
@@ -220,78 +225,25 @@ async function bakeMissing(raw, id) {
   fs.rmSync(outFile, {force: true});
   return JSON.stringify(props);
 }
-function renderJob(job, id) {
-  renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
-  return bakeMissing(job.raw, id).then((raw) => renderProps({...job, raw}, id), (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
+// before the render (inside its queue slot, so the submit answers at once): remote
+// B-roll downloaded to disk, then the LUT bakes the grade still needs
+async function prepareRender(raw, id) {
+  const props = JSON.parse(raw);
+  await localizeRemoteBrolls(props);
+  return bakeMissing(JSON.stringify(props), id);
 }
-function renderProps({raw, draft, expectSec, clean, projectId}, id) {
-  return new Promise((settle) => {
-    const propsFile = path.join(ROOT, `.props-${id}.json`);
-    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
-    const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
-    const outFile = path.join(EXPORTS, outName);
-    fs.writeFileSync(propsFile, raw);
-    renders[id] = {status: 'running', progress: 0};
-    const t0 = Date.now();
-    // Draft: half resolution + ultrafast — for quick checks
-    const child = spawn('npx', renderArgs({outFile, propsFile, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes}), {cwd: ROOT});
-    let errTail = ''; // keep the tail of output so failures show a real message
-    const onProgress = (d) => {
-      const s = String(d);
-      const m = s.match(/Rendered\s+(\d+)\/(\d+)/);
-      if (m) renders[id].progress = Math.round((+m[1] / +m[2]) * 100);
-      errTail = (errTail + s).slice(-2000);
-    };
-    child.stdout.on('data', onProgress);
-    child.stderr.on('data', onProgress);
-    child.on('close', (code) => {
-      fs.rmSync(propsFile, {force: true});
-      fs.rmSync(links, {recursive: true, force: true});
-      const secs = Math.round((Date.now() - t0) / 1000);
-      if (code === 0) console.log(`render ${id} ${draft ? 'draft ' : ''}took ${secs}s for ${expectSec?.toFixed(1)}s of video`);
-      if (code === 0 && draft) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, renderSec: secs}; settle(); }
-      else if (code === 0) {
-        // final: two-pass loudness to −14 LUFS, then the QC gate, in a child
-        // process (a few seconds of ffmpeg must not block this event loop). A render
-        // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
-        renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
-        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
-        let out = '';
-        fin.stdout.on('data', (d) => (out += d));
-        fin.stderr.on('data', (d) => process.stderr.write(d));
-        fin.on('close', () => {
-          let r;
-          try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
-          if (r.ok && projectId) {
-            // a final that passed QC becomes a review version of its project: 720p proxy + poster
-            // (inside this queue slot), numbered and recorded; the render is done either way
-            renders[id] = {status: 'running', progress: 100, label: 'Review proxy'};
-            recordFinal({draft, qcOk: r.ok, projectId, outFile, dir: REVIEWS, publicDir: PUBLIC, jobId: id}).then(
-              (v) => { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, projectId, version: v.v}; },
-              (e) => { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, projectId, versionError: String(e?.message ?? e).slice(0, 200)}; },
-            ).finally(settle);
-            return;
-          }
-          if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs};
-          else {
-            const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-            try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
-            renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text};
-          }
-          settle();
-        });
-      } else {
-        const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
-        console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);
-        renders[id] = {status: 'error', error: line || `render exited ${code}`};
-        settle();
-      }
-    });
-    child.on('error', (e) => { renders[id] = {status: 'error', error: `render could not start: ${e.message}`}; settle(); });
-  });
-}
-const renderQueue = createQueue(PLAN.workers, renderJob);
+// the layered pipeline's master cache (another branch), when it is there — contract in scripts/render-runner.mjs
+const MASTER_HOOK = path.join(ROOT, 'scripts', 'master-cache.mjs');
+const masterCache = fs.existsSync(MASTER_HOOK) ? await import(pathToFileURL(MASTER_HOOK).href).catch((e) => { console.error(`master cache hook: ${e.message}`); return null; }) : null;
+const RENDER_JOBS = jobsDir(PUBLIC);
+const renderJobs = createRenderJobs({
+  dir: RENDER_JOBS,
+  workers: PLAN.workers,
+  run: createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, master: masterCache}),
+}).start();
+// stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
+for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
+console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}${masterCache ? ', master cache on' : ''} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
 
 // Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
 // locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
@@ -780,7 +732,13 @@ const server = createServer(async (req, res) => {
     return json(res, 405, {error: 'method not allowed'});
   }
 
-  // ---- E9: запустить рендер ----
+  // ---- render jobs ----
+  //   POST   /api/render {…props, draft?, project_id?} → {jobId, status: 'queued', ahead} at once
+  //   GET    /api/render/<id>                → the job in the shape pollers read (running / done / error)
+  //   GET    /api/render-jobs?project=&status=&limit= → {jobs (newest first, each with ahead), workers}
+  //   GET    /api/render-jobs/<id>           → the job as stored + ahead
+  //   POST   /api/render-jobs/<id>/cancel    → cancelled (queued: at once; running: its process is killed)
+  //   POST   /api/render-jobs/prune {days?}  → {removed}: state of finished jobs older than days (never the mp4s)
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?}
     let draft = false;
@@ -794,28 +752,49 @@ const server = createServer(async (req, res) => {
         if (fs.existsSync(path.join(PROJECTS_DIR, `${props.project_id}.json`))) projectId = String(props.project_id);
       }
       delete props.project_id;
+      if (!Array.isArray(props.clips) || !props.clips.length) throw new Error('no clips on the timeline');
       clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
-      // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
-      // that fetch was failing mid-way on big files. Download every remote asset
-      // once into public/broll/ and render from disk instead.
-      await localizeRemoteBrolls(props);
       raw = JSON.stringify(props);
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
-    const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
-    // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
-    renders[id] = {status: 'running', progress: 0, queued: true};
-    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, projectId: draft ? null : projectId});
-    if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
-    return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
+    // drafts keep their project for the job list; only finals become review versions (the runner checks draft)
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId});
+    if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
+    return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {})});
   }
   if (req.method === 'GET' && url.pathname.startsWith('/api/render/')) {
     const id = url.pathname.split('/').pop();
-    const r = renders[id];
-    if (r?.queued) { const n = renderQueue.ahead(id); return json(res, 200, {...r, ahead: n, label: `Queued — ${n} render${n === 1 ? '' : 's'} ahead`}); }
-    return json(res, 200, r ?? {status: 'unknown'});
+    if (!/^[\w-]{6,64}$/.test(id)) return json(res, 200, {status: 'unknown'});
+    return json(res, 200, renderJobs.view(id));
+  }
+  if (url.pathname === '/api/render-jobs/prune' && req.method === 'POST') {
+    let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
+    const days = b.days == null ? undefined : Math.max(0, +b.days);
+    if (days != null && !Number.isFinite(days)) return json(res, 400, {error: 'days must be a number'});
+    return json(res, 200, {removed: renderJobs.prune(days != null ? {days} : {})});
+  }
+  const rj = url.pathname.match(/^\/api\/render-jobs(?:\/([\w-]{6,64}))?(\/cancel)?$/);
+  if (rj) {
+    const [, id, cancel] = rj;
+    const all = renderJobs.list();
+    const withAhead = (j) => ({...j, ahead: j.status === 'queued' ? aheadOf(all, j.id) : 0});
+    if (req.method === 'GET' && !id) {
+      const status = url.searchParams.get('status')?.split(',').filter(Boolean);
+      const project = url.searchParams.get('project') || undefined;
+      const limit = Math.min(200, +url.searchParams.get('limit') || 50);
+      return json(res, 200, {workers: renderJobs.workers, jobs: renderJobs.list({projectId: project, status, limit}).map(withAhead)});
+    }
+    if (req.method === 'GET' && id && !cancel) {
+      const j = renderJobs.get(id);
+      return j ? json(res, 200, withAhead(j)) : json(res, 404, {error: `no render job ${id}`});
+    }
+    if ((req.method === 'POST' && cancel) || (req.method === 'DELETE' && id && !cancel)) {
+      const r = renderJobs.cancel(id);
+      return r.ok ? json(res, 200, {...r.job, pending: !!r.pending}) : json(res, r.job ? 409 : 404, {error: r.error});
+    }
+    return json(res, 405, {error: 'method not allowed'});
   }
 
   json(res, 404, {error: 'not found'});
