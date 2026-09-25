@@ -51,6 +51,7 @@ export type Music = {
   fadeOutSec: number; // fade at the end of the video (0 = none)
   duck?: boolean; // auto-lower the music while someone is speaking
   duckLevel?: number; // ducked gain as a fraction of volume (default 0.25)
+  credit?: string; // license credit line to ship with the reel (Openverse CC BY tracks, set_music)
 } | null;
 
 export type Project = {
@@ -95,6 +96,17 @@ export const placeClips = (clips: Clip[], fps: number): PlacedClip[] => {
     };
   });
 };
+
+// absolute timeline second → the clip under it and the source time inside it
+// (the last clip when past the end). Shared by the MCP tools and the editor.
+export function locateSec(clips: Clip[], fps: number, atSec: number): {clip: Clip; sourceSec: number; pc: PlacedClip} | null {
+  const placed = placeClips(clips, fps);
+  const ms = atSec * 1000;
+  const pc = placed.find((x) => ms >= x.startMs && ms < x.endMs) ?? placed.at(-1);
+  if (!pc) return null;
+  const sourceSec = pc.clip.inSec + ((ms - pc.startMs) / 1000) * (pc.clip.speed ?? 1);
+  return {clip: pc.clip, sourceSec: Math.min(pc.clip.outSec, Math.max(pc.clip.inSec, sourceSec)), pc};
+}
 
 export const totalDurationFrames = (clips: Clip[], fps: number): number =>
   Math.max(1, clips.reduce((sum, c) => sum + Math.max(1, Math.round(clipDurationSec(c) * fps)), 0));

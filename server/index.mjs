@@ -17,6 +17,11 @@ import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
+// sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
+import {searchStock} from '../mcp/stock.mjs';
+import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
+import {findOrGenerate, librarySearch, listLibrary, searchAssets} from '../mcp/assets.mjs';
+import {blackSpans, loadLibrary as loadBrollLibrary, searchLibrary as searchBrollLibrary, sheetFor, upsertAsset} from '../mcp/broll.mjs';
 
 // HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
 // through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
@@ -71,6 +76,7 @@ const json = (res, code, obj) => {
   res.end(JSON.stringify(obj));
 };
 
+const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
   '/api/captions': {route: '/api/captions', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
   '/api/trim-silence': {route: '/api/trim-silence', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
@@ -254,6 +260,98 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // ---- sourcing for the editor (the same modules the MCP tools use) ----
+  const env = () => ({...readEnvFile(), ...process.env});
+  const fail = (e) => json(res, 500, {error: String(e?.message ?? e).slice(0, 300)});
+  if (req.method === 'GET' && url.pathname === '/api/stock') {
+    const q = url.searchParams.get('q') || '';
+    if (!q.trim()) return json(res, 400, {error: 'q required'});
+    try { return json(res, 200, await searchStock(q, url.searchParams.get('kind') === 'image' ? 'image' : 'video', Math.min(10, +(url.searchParams.get('count') || 6)), env().PEXELS_API_KEY)); } catch (e) { return fail(e); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/music/search') {
+    const q = url.searchParams.get('q') || '';
+    if (q.trim().length < 2) return json(res, 400, {error: 'q required'});
+    try {
+      const rows = await searchMusic(q, {limit: Math.min(10, +(url.searchParams.get('limit') || 6)), minSec: +(url.searchParams.get('min_sec') || 20)});
+      for (const r of rows) musicRows.set(r.id, r); // what pick may download: only what Openverse returned
+      if (musicRows.size > 200) for (const k of [...musicRows.keys()].slice(0, musicRows.size - 200)) musicRows.delete(k);
+      return json(res, 200, rows);
+    } catch (e) { return fail(e); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/music/library') return json(res, 200, loadMusicLibrary());
+  if (req.method === 'POST' && url.pathname === '/api/music/pick') {
+    // the client names a track by id; the URL comes from the server's own search results or the library, never from the request
+    let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+    const row = musicRows.get(String(b?.id ?? '')) ?? loadMusicLibrary().find((r) => r.id === b?.id);
+    if (!row) return json(res, 404, {error: 'unknown track — search first'});
+    try { const e = await downloadMusic(row); return json(res, 200, {src: e.src, credit: e.credit ?? creditOf(e)}); } catch (e) { return fail(e); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/assets') {
+    const q = url.searchParams.get('q'), kind = url.searchParams.get('kind') || undefined;
+    return json(res, 200, q ? librarySearch(q, {kind, limit: 30}) : listLibrary().filter((e) => !kind || e.kind === kind).slice(-30).reverse());
+  }
+  if (req.method === 'GET' && url.pathname === '/api/assets/search') {
+    const q = url.searchParams.get('q') || '';
+    if (!q.trim()) return json(res, 400, {error: 'q required'});
+    try { return json(res, 200, await searchAssets({query: q, kind: url.searchParams.get('kind') || 'sticker', style: url.searchParams.get('style') || undefined, limit: Math.min(12, +(url.searchParams.get('limit') || 8))})); } catch (e) { return fail(e); }
+  }
+  if (req.method === 'POST' && url.pathname === '/api/assets/generate') {
+    let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+    if (!b?.prompt || String(b.prompt).length < 3) return json(res, 400, {error: 'prompt required'});
+    const e = env();
+    try { return json(res, 200, await findOrGenerate({prompt: String(b.prompt).slice(0, 400), kind: b.kind, size: b.size, quality: b.quality, force: !!b.force, apiKey: e.OPENAI_API_KEY, model: e.REEL_IMAGE_MODEL || 'gpt-image-1.5'})); } catch (e) { return fail(e); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/broll-library') {
+    const rows = searchBrollLibrary(url.searchParams.get('q') || '');
+    return json(res, 200, rows.map((a) => { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, sheetFor(a)).split(path.sep).join('/'); } catch {} return {...a, sheet}; }));
+  }
+  if (req.method === 'POST' && url.pathname.startsWith('/api/broll-library/')) {
+    const id = decodeURIComponent(url.pathname.split('/').pop());
+    if (!loadBrollLibrary().some((a) => a.id === id)) return json(res, 404, {error: `no library asset ${id}`});
+    let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+    const tags = Array.isArray(b.tags) ? b.tags.map((t) => String(t).trim()).filter((t) => t.length >= 2 && t.length <= 30).slice(0, 12) : undefined;
+    return json(res, 200, upsertAsset({id, ...(tags ? {tags} : {}), ...(typeof b.desc === 'string' ? {desc: b.desc.trim().slice(0, 200)} : {})}));
+  }
+  if (req.method === 'GET' && url.pathname === '/api/black') {
+    const src = url.searchParams.get('src') || '';
+    if (!/^clips\/[\w.\-]+\.(mp4|mov|m4v|webm)$/i.test(src) || !fs.existsSync(path.join(PUBLIC, src))) return json(res, 400, {error: 'src must be a clip under public/clips'});
+    try { return json(res, 200, blackSpans(src)); } catch (e) { return fail(e); }
+  }
+
+  // ---- brand kits: public/brands/<slug>.json (set_brand from / save_as, the Styles tab) ----
+  const BRANDS = path.join(PUBLIC, 'brands');
+  const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  if (req.method === 'GET' && url.pathname === '/api/brands') {
+    let files = []; try { files = fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')); } catch {}
+    return json(res, 200, files.map((f) => { try { return {slug: f.slice(0, -5), name: JSON.parse(fs.readFileSync(path.join(BRANDS, f), 'utf8')).name || f.slice(0, -5)}; } catch { return null; } }).filter(Boolean));
+  }
+  if (url.pathname.startsWith('/api/brands/')) {
+    const id = slug(decodeURIComponent(url.pathname.split('/').pop()));
+    if (!id) return json(res, 400, {error: 'bad kit name'});
+    const file = path.join(BRANDS, `${id}.json`);
+    if (req.method === 'GET') return fs.existsSync(file) ? json(res, 200, JSON.parse(fs.readFileSync(file, 'utf8'))) : json(res, 404, {error: 'not found'});
+    if (req.method === 'POST') {
+      let kit; try { kit = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+      if (!/^#[0-9a-fA-F]{6}$/.test(kit?.colors?.accent ?? '')) return json(res, 400, {error: 'a kit needs colors.accent (#rrggbb)'});
+      fs.mkdirSync(BRANDS, {recursive: true});
+      fs.writeFileSync(file, JSON.stringify({...kit, name: kit.name || id}, null, 2));
+      return json(res, 200, {slug: id});
+    }
+  }
+
+  // ---- upload an image (brand logo) → public/brand/ ----
+  if (req.method === 'POST' && url.pathname === '/api/upload-image') {
+    const safe = (url.searchParams.get('name') || 'logo.png').replace(/[^\w.\-]/g, '_');
+    if (!/\.(png|jpe?g|webp|svg)$/i.test(safe)) return json(res, 400, {error: 'png, jpg, webp or svg'});
+    const dir = path.join(PUBLIC, 'brand');
+    fs.mkdirSync(dir, {recursive: true});
+    const ws = fs.createWriteStream(path.join(dir, safe));
+    req.pipe(ws);
+    ws.on('finish', () => json(res, 200, {src: `brand/${safe}`}));
+    ws.on('error', () => json(res, 500, {error: 'write failed'}));
+    return;
+  }
+
   // ---- upload a music track → public/music/ ----
   if (req.method === 'POST' && url.pathname === '/api/music') {
     const safe = (url.searchParams.get('name') || 'track.mp3').replace(/[^\w.\-]/g, '_');
@@ -350,7 +448,9 @@ const server = createServer(async (req, res) => {
           await run('ffmpeg', ['-y', '-ss', '0.3', '-i', out, '-frames:v', '1', '-vf', 'scale=160:-1', thumb]);
         }
         cleanup();
-        return json(res, 200, {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`, ...(durationSec ? {durationSec: +durationSec.toFixed(2)} : {})});
+        const asset = {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`, ...(durationSec ? {durationSec: +durationSec.toFixed(2)} : {})};
+        try { upsertAsset({id, src: asset.src, kind, label: asset.label, durationSec: asset.durationSec ?? null}); } catch {}
+        return json(res, 200, asset);
       } catch (e) {
         cleanup();
         return json(res, 500, {error: String(e).slice(0, 200)});

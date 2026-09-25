@@ -10,13 +10,9 @@ import {spawnSync} from 'node:child_process';
 
 export const TARGET = {I: -14, tolerance: 1, TP: -1, tpAim: -1.5, LRA: 11};
 
-// optional voice cleanup before loudness (final render only): ffmpeg's own
-// denoiser + a low cut, no external models
-export const CLEAN = {
-  off: {desc: 'nothing', af: ''},
-  light: {desc: 'low cut at 80 Hz + gentle spectral denoise (room hiss, hum)', af: 'highpass=f=80,afftdn=nf=-25:nr=10:nt=w'},
-  strong: {desc: 'low cut at 100 Hz + heavier denoise + de-esser', af: 'highpass=f=100,afftdn=nf=-30:nr=18:nt=w,deesser=i=0.35'},
-};
+// optional voice cleanup before loudness (final render only): src/audio.ts
+import {CLEAN} from '../src/audio.ts';
+export {CLEAN};
 
 const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 26});
 

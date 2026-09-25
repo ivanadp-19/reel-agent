@@ -61,6 +61,16 @@ export const Start: React.FC<{
     await fetch('/api/projects/' + id, {method: 'DELETE'}).catch(() => {});
     onRefresh();
   };
+  // duplicate_project: a copy under a new id, a sandbox for experiments
+  const dup = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      const p = await fetch('/api/projects/' + id).then((r) => r.json());
+      const {createdAt: _c, updatedAt: _u, ...rest} = p;
+      await fetch(`/api/projects/p-${Date.now()}`, {method: 'POST', body: JSON.stringify({...rest, name: `${p.name || 'Untitled project'} (copy)`})});
+    } catch { /* ignore */ }
+    onRefresh();
+  };
 
   return (
     <div className="h-screen bg-background text-on-surface flex flex-col items-center overflow-y-auto py-12 px-8">
@@ -149,6 +159,13 @@ export const Start: React.FC<{
                       className="absolute top-1 right-1 w-6 h-6 rounded bg-surface-container-lowest/80 text-on-surface-variant hover:text-error opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
                     >
                       <span className="material-symbols-outlined text-[16px]">delete</span>
+                    </button>
+                    <button
+                      onClick={(e) => dup(e, p.id)}
+                      title="Duplicate project"
+                      className="absolute top-1 right-8 w-6 h-6 rounded bg-surface-container-lowest/80 text-on-surface-variant hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">content_copy</span>
                     </button>
                   </div>
                   <div className="p-2">

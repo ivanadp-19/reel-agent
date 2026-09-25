@@ -166,3 +166,26 @@ test('a person-outline graphic and a cutout layout need a matte for their span, 
   assert.deepEqual(ms5([g('layout', {cutout: false})]), []);
   assert.deepEqual(ms5([g('stat', {value: '1'})]), []);
 });
+
+test('fieldsOf turns a template schema into form fields (kind, options, defaults, nested rows)', async () => {
+  const {fieldsOf, TEMPLATES} = await import('../src/graphicTemplates.ts');
+  const stat = fieldsOf(TEMPLATES.stat.schema);
+  assert.deepEqual(stat.map((f) => [f.key, f.kind, f.required]), [['value', 'string', true], ['label', 'string', false], ['countUp', 'boolean', false]]);
+  assert.equal(stat[0].max, 14);
+  assert.equal(stat[2].default, true);
+  const hook = fieldsOf(TEMPLATES['hook-stack'].schema);
+  const lines = hook.find((f) => f.key === 'lines');
+  assert.equal(lines.kind, 'array');
+  assert.deepEqual([lines.min, lines.max], [1, 4]);
+  assert.deepEqual(lines.item.map((f) => [f.key, f.kind]), [['text', 'string'], ['size', 'enum'], ['accent', 'boolean']]);
+  assert.deepEqual(lines.item[1].options, ['sm', 'md', 'lg', 'xl']);
+  assert.equal(lines.item[1].default, 'lg');
+  const neon = fieldsOf(TEMPLATES['neon-frame'].schema).find((f) => f.key === 'xPct');
+  assert.deepEqual([neon.kind, neon.min, neon.max, neon.default, neon.desc], ['number', 0, 100, 50, 'center x, % of frame width']);
+  // every template (including the preprocess-wrapped ones) yields known field kinds
+  for (const [id, t] of Object.entries(TEMPLATES)) {
+    const fs = fieldsOf(t.schema);
+    assert.ok(fs.length, id);
+    for (const f of fs) assert.ok(['string', 'number', 'boolean', 'enum', 'array'].includes(f.kind), `${id}.${f.key} is ${f.kind}`);
+  }
+});

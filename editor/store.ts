@@ -6,11 +6,17 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, locateSec, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
+import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
+import type {BrollIn, BrollOut} from '../src/motion';
+import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
+import {DEFAULT_TOP} from '../src/paging';
+import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cuts';
+import type {AudioOptions} from '../src/audio';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: {clean?: string; sfx?: boolean} | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -18,7 +24,7 @@ export type OffMic = 'mark' | 'cut' | 'off';
 const HISTORY_LIMIT = 100;
 
 // one undo step = the full editable state
-type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]};
+type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
 
 type EditorState = {
   meta: Meta | null;
@@ -39,9 +45,10 @@ type EditorState = {
   lang: Lang; // transcription language for this project
   offMic: OffMic;
   hiddenWids: string[]; // transcript words whose caption pages were deleted — never re-paged
-  brand: Brand | null; // client kit (set by the agent with set_brand); read-only in the editor for now
-  grade: ProjectGrade | null; // color (set_grade); read-only in the editor for now
-  audio: {clean?: string; sfx?: boolean} | null; // voice cleanup + sfx (set_audio); read-only in the editor for now
+  brand: Brand | null; // client kit (set_brand / Styles tab)
+  grade: ProjectGrade | null; // color (set_grade / Styles tab)
+  audio: AudioOptions; // voice cleanup + sfx (set_audio / Settings tab)
+  plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -59,6 +66,9 @@ type EditorState = {
   setText: (id: string, text: string) => void;
   toggleAccent: (id: string, wordIndex: number) => void;
   setEmoji: (id: string, wordIndex: number, emoji: string) => void;
+  setCaptionBehind: (id: string, behind: boolean) => void;
+  addCaption: (frame: number, text: string, durationSec?: number) => void;
+  deleteCaption: (id: string) => void;
 
   // clips track (multi-clip timeline)
   addClip: (clip: Clip) => void;
@@ -78,6 +88,11 @@ type EditorState = {
   setClipVolume: (id: string, volume: number) => void;
   toggleClipMute: (id: string) => void;
   setClipSpeed: (id: string, speed: number) => void;
+  setClipEnter: (id: string, enter: Enter | undefined) => void;
+  setClipAudioCut: (id: string, cut: {jSec?: number; lSec?: number}) => void;
+  setTransitionPattern: (pattern: 'punch-alternate' | 'none') => void;
+  applySpeedRamp: (id: string, from: number, to: number, steps: number) => void;
+  cutWords: (tr: TClip[], ranges: CutRange[]) => void; // cut_words: approved word ranges, snapped into the pauses
   setMusic: (music: Music) => void;
   setAccentColor: (color: string) => void;
   setCaptionStyle: (style: PresetId) => void;
@@ -90,6 +105,21 @@ type EditorState = {
   removeBroll: (id: string) => void;
   setBrollMode: (id: string, mode: BrollItem['mode']) => void;
   swapBroll: (id: string) => void;
+  setBrollMotion: (id: string, m: {arrive?: BrollIn; leave?: BrollOut}) => void;
+  setBrollTiming: (id: string, t: {startSec?: number; endSec?: number}) => void;
+  addBroll: (frame: number, b: {src: string; kind: BrollItem['kind']; mode: BrollItem['mode']; durationSec: number; source?: BrollItem['source']; query?: string; assetId?: string}) => void;
+
+  // graphics (source-anchored, like captions)
+  addGraphic: (frame: number, g: {template: TemplateId; props: Record<string, unknown>; durationSec?: number; yPct?: number; behind?: boolean; reveal?: Reveal; out?: Out; life?: Life; camera?: Graphic['camera']}) => void;
+  editGraphic: (id: string, patch: Partial<Pick<Graphic, 'props' | 'yPct' | 'behind' | 'reveal' | 'out' | 'life' | 'camera'>> & {startSec?: number; durationSec?: number}) => void;
+  removeGraphic: (id: string) => void;
+
+  // project-wide settings (no undo, like accent and style)
+  setBrand: (brand: Brand | null) => void;
+  setGrade: (grade: ProjectGrade | null) => void;
+  setAudio: (audio: AudioOptions) => void;
+  setPlan: (plan: string) => void;
+  addMattes: (mattes: Matte[]) => void;
 
   pushHistory: () => void;
   undo: () => void;
@@ -101,8 +131,8 @@ const withMeta = (meta: Meta | null, clips: Clip[]): Meta | null =>
   meta ? {...meta, durationInFrames: totalDurationFrames(clips, meta.fps)} : meta;
 
 // capture the undoable slice of state
-type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]};
-const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls});
+type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
+const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls, graphics: s.graphics});
 // returns the {past, future} patch to prepend to a mutation that should be undoable
 const withHistory = (s: Snappable & {past: Snapshot[]}) => ({
   past: [...s.past, snap(s)].slice(-HISTORY_LIMIT),
@@ -111,6 +141,16 @@ const withHistory = (s: Snappable & {past: Snapshot[]}) => ({
 
 const mapCap = (caps: Caption[], id: string, fn: (c: Caption) => Caption) =>
   caps.map((c) => (c.id === id ? fn(c) : c));
+// the clip under the playhead and the source time there (null with no clips)
+const atFrame = (s: {clips: Clip[]; meta: Meta | null}, frame: number) => (s.meta ? locateSec(s.clips, s.meta.fps, frame / s.meta.fps) : null);
+// first free id with a prefix (c0, b0, g0… like the MCP tools)
+const nextId = (items: {id: string}[], prefix: string) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
+// evenly timed words for hand-typed text (tier 0), like the MCP's retext
+const wordsOf = (text: string, startMs: number, endMs: number) => {
+  const toks = text.trim().split(/\s+/).filter(Boolean);
+  const per = (endMs - startMs) / Math.max(1, toks.length);
+  return toks.map((t, i) => ({text: t, startMs: Math.round(startMs + i * per), endMs: Math.round(startMs + (i + 1) * per), tier: 0}));
+};
 
 export const useEditor = create<EditorState>((set) => ({
   meta: null,
@@ -134,6 +174,7 @@ export const useEditor = create<EditorState>((set) => ({
   brand: null,
   grade: null,
   audio: null,
+  plan: '',
   past: [],
   future: [],
 
@@ -159,6 +200,7 @@ export const useEditor = create<EditorState>((set) => ({
         brand: p.brand ?? null,
         grade: p.grade ?? null,
         audio: p.audio ?? null,
+        plan: p.plan ?? '',
         past: [],
         future: [],
       };
@@ -195,6 +237,26 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => ({
       captions: mapCap(s.captions, id, (c) => ({...c, words: c.words.map((w, i) => (i !== wi ? w : emoji ? {...w, emoji} : (({emoji: _, ...rest}) => rest)(w)))})),
     })),
+  setCaptionBehind: (id, behind) =>
+    set((s) => ({...withHistory(s), captions: mapCap(s.captions, id, (c) => (behind ? {...c, behind: true} : (({behind: _, ...rest}) => rest)(c)))})),
+  // a hand-typed page on the clip under the playhead (delete_captions / add_caption semantics)
+  addCaption: (frame, text, durationSec = 2) =>
+    set((s) => {
+      const at = atFrame(s, frame);
+      if (!at || !text.trim()) return s;
+      const startMs = Math.round(at.sourceSec * 1000);
+      const endMs = Math.round(Math.min(at.clip.outSec, at.sourceSec + durationSec * (at.clip.speed ?? 1)) * 1000);
+      const topPct = s.captions.find((c) => c.src === at.clip.src)?.topPct ?? DEFAULT_TOP;
+      const cap: Caption = {id: nextId(s.captions, 'c'), src: at.clip.src, startMs, endMs, topPct, words: wordsOf(text, startMs, endMs)};
+      return {...withHistory(s), captions: [...s.captions, cap], selectedId: cap.id, selectedClipId: null};
+    }),
+  deleteCaption: (id) =>
+    set((s) => {
+      const cap = s.captions.find((c) => c.id === id);
+      if (!cap) return s;
+      const wids = cap.words.map((w) => w.wid).filter((w): w is string => !!w);
+      return {...withHistory(s), captions: s.captions.filter((c) => c.id !== id), hiddenWids: [...new Set([...s.hiddenWids, ...wids])], selectedId: s.selectedId === id ? null : s.selectedId};
+    }),
   toggleAccent: (id, wi) =>
     set((s) => ({
       captions: mapCap(s.captions, id, (c) => ({
@@ -324,13 +386,57 @@ export const useEditor = create<EditorState>((set) => ({
       return {clips, meta: withMeta(s.meta, clips)};
     }),
 
+  // how the clip starts (set_transitions items); undefined = plain cut
+  setClipEnter: (id, enter) =>
+    set((s) => ({...withHistory(s), clips: s.clips.map((c) => (c.id !== id ? c : enter ? {...c, enter} : (({enter: _, ...rest}) => rest)(c)))})),
+  // J/L-cut seconds (set_audio_cut); 0 clears. placeClips clamps them at render time
+  setClipAudioCut: (id, cut) =>
+    set((s) => ({
+      ...withHistory(s),
+      clips: s.clips.map((c) => {
+        if (c.id !== id) return c;
+        const n = {...c};
+        if (cut.jSec != null) { if (cut.jSec > 0) n.jSec = cut.jSec; else delete n.jSec; }
+        if (cut.lSec != null) { if (cut.lSec > 0) n.lSec = cut.lSec; else delete n.lSec; }
+        return n;
+      }),
+    })),
+  setTransitionPattern: (pattern) =>
+    set((s) => ({...withHistory(s), clips: pattern === 'none' ? s.clips.map(({enter: _, ...c}) => c) : punchAlternate(s.clips)})),
+  // set_speed_ramp: the clip becomes `steps` pieces whose speed eases from → to
+  applySpeedRamp: (id, from, to, steps) =>
+    set((s) => {
+      const c = s.clips.find((x) => x.id === id);
+      if (!c) return s;
+      const speeds = speedRamp(from, to, steps);
+      const span = c.outSec - c.inSec;
+      if (span / speeds.length < 0.3) return s; // the UI checks this first
+      let clips = s.clips, brolls = s.brolls, cur = id;
+      const ids = [id];
+      for (let k = 1; k < speeds.length; k++) {
+        const r = splitClip(clips, cur, c.inSec + (span * k) / speeds.length);
+        if (!r) return s;
+        clips = r.clips; brolls = reanchor(brolls, r.remap); cur = r.newId; ids.push(cur);
+      }
+      clips = clips.map((x) => (ids.includes(x.id) ? {...x, speed: speeds[ids.indexOf(x.id)]} : x));
+      return {...withHistory(s), clips, brolls, meta: withMeta(s.meta, clips)};
+    }),
+
+  cutWords: (tr, ranges) =>
+    set((s) => {
+      const {spans} = planWordCuts(tr, s.clips, ranges);
+      if (!spans.length) return s;
+      const r = applyWordCuts(s.clips, s.brolls, spans, tr);
+      return {...withHistory(s), clips: r.clips, brolls: r.brolls, meta: withMeta(s.meta, r.clips), selectedClipId: null};
+    }),
+
   // push history only on add/remove (not on every volume/fade slider tick)
   setMusic: (music) =>
     set((s) => {
       const structural = (s.music === null) !== (music === null);
       return {...(structural ? withHistory(s) : {}), music};
     }),
-  setAccentColor: (accentColor) => set({accentColor}),
+  setAccentColor: (accentColor) => set((s) => ({accentColor, brand: s.brand ? {...s.brand, colors: {...s.brand.colors, accent: accentColor}} : s.brand})),
   setCaptionStyle: (captionStyle) => set({captionStyle}),
   setCaptions: (captions) => set({captions, selectedId: null}),
   setProjectInfo: (projectId, projectName) => set({projectId, projectName}),
@@ -351,6 +457,73 @@ export const useEditor = create<EditorState>((set) => ({
         return {...b, src: next};
       }),
     })),
+
+  setBrollMotion: (id, m) => set((s) => ({...withHistory(s), brolls: s.brolls.map((b) => (b.id === id ? {...b, ...m} : b))})),
+  // move / resize a cue in timeline seconds (edit_broll): it stays on one clip
+  setBrollTiming: (id, t) =>
+    set((s) => {
+      const b = s.brolls.find((x) => x.id === id);
+      if (!b || !s.meta) return s;
+      const n = {...b};
+      if (t.startSec != null) {
+        const at = locateSec(s.clips, s.meta.fps, t.startSec);
+        if (!at) return s;
+        const len = n.endMs - n.startMs;
+        n.clipId = at.clip.id; n.startMs = Math.round(at.sourceSec * 1000); n.endMs = Math.min(Math.round(at.clip.outSec * 1000), n.startMs + len);
+      }
+      if (t.endSec != null) {
+        const at = locateSec(s.clips, s.meta.fps, t.endSec);
+        if (!at || at.clip.id !== n.clipId) return s;
+        n.endMs = Math.max(n.startMs + 300, Math.round(at.sourceSec * 1000));
+      }
+      return {...withHistory(s), brolls: s.brolls.map((x) => (x.id === id ? n : x))};
+    }),
+  addBroll: (frame, b) =>
+    set((s) => {
+      const at = atFrame(s, frame);
+      if (!at) return s;
+      const startMs = Math.round(at.sourceSec * 1000);
+      const endMs = Math.round(Math.min(at.clip.outSec, at.sourceSec + b.durationSec * (at.clip.speed ?? 1)) * 1000);
+      const cue: BrollItem = {id: nextId(s.brolls, 'b'), clipId: at.clip.id, startMs, endMs, kind: b.kind, mode: b.mode, src: b.src, source: b.source ?? 'own', query: b.query, alternatives: [], ...(b.assetId ? {assetId: b.assetId} : {})} as BrollItem;
+      return {...withHistory(s), brolls: [...s.brolls, cue], selectedId: cue.id, selectedClipId: null};
+    }),
+
+  // ---- graphics ----
+  addGraphic: (frame, g) =>
+    set((s) => {
+      const at = atFrame(s, frame);
+      if (!at) return s;
+      const startMs = Math.round(at.sourceSec * 1000);
+      const gfx: Graphic = {id: nextId(s.graphics, 'g'), src: at.clip.src, startMs, endMs: startMs + Math.round(g.durationSec ? g.durationSec * 1000 : TEMPLATES[g.template].defaultMs), template: g.template, props: g.props};
+      if (g.yPct != null) gfx.yPct = g.yPct;
+      if (g.behind) gfx.behind = true;
+      if (g.reveal) gfx.reveal = g.reveal; if (g.out) gfx.out = g.out; if (g.life) gfx.life = g.life; if (g.camera) gfx.camera = g.camera;
+      return {...withHistory(s), graphics: [...s.graphics, gfx], selectedId: gfx.id, selectedClipId: null};
+    }),
+  editGraphic: (id, patch) =>
+    set((s) => {
+      const g = s.graphics.find((x) => x.id === id);
+      if (!g) return s;
+      const {startSec, durationSec, ...rest} = patch;
+      const n: Graphic = {...g, ...rest};
+      if (startSec != null && s.meta) {
+        const at = locateSec(s.clips, s.meta.fps, startSec);
+        if (!at) return s;
+        const len = n.endMs - n.startMs;
+        n.src = at.clip.src; n.startMs = Math.round(at.sourceSec * 1000); n.endMs = n.startMs + len;
+      }
+      if (durationSec != null) n.endMs = n.startMs + Math.round(durationSec * 1000);
+      if (n.behind === false) delete n.behind;
+      return {...withHistory(s), graphics: s.graphics.map((x) => (x.id === id ? n : x))};
+    }),
+  removeGraphic: (id) => set((s) => ({...withHistory(s), graphics: s.graphics.filter((g) => g.id !== id), selectedId: s.selectedId === id ? null : s.selectedId})),
+
+  // ---- project-wide settings ----
+  setBrand: (brand) => set((s) => ({brand, accentColor: brand?.colors.accent ?? s.accentColor})),
+  setGrade: (grade) => set({grade}),
+  setAudio: (audio) => set({audio}),
+  setPlan: (plan) => set({plan}),
+  addMattes: (mattes) => set((s) => ({mattes: [...s.mattes, ...mattes]})),
 
   // snapshot the full editable state before a logical edit
   pushHistory: () => set((s) => ({past: [...s.past, snap(s)].slice(-HISTORY_LIMIT), future: []})),

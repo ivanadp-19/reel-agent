@@ -17,16 +17,17 @@ import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {applyAutocut, cutRange, locateSec, placeClips, reanchor, splitClip} from '../src/timeline.ts';
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
-import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
+import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
+import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
-import {validateProject} from '../src/validate.ts';
-import {findCutCandidates} from '../src/cuts.ts';
+import {transcriptIssues, validateProject} from '../src/validate.ts';
+import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
@@ -34,7 +35,7 @@ import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './b
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
-import {CLEAN} from '../scripts/qc.mjs';
+import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -89,14 +90,11 @@ const needBackend = async () => {
 // ---------- timeline math (shared with the editor: src/timeline.ts) ----------
 const place = (clips) => placeClips(clips, FPS);
 const totalSec = (clips) => place(clips).at(-1)?.endMs / 1000 || 0;
-// absolute timeline second → {clip, sourceSec}
+// absolute timeline second → {clip, sourceSec} (src/timeline.ts)
 function locate(p, atSec) {
-  const ms = atSec * 1000;
-  const pc = place(p.clips).find((x) => ms >= x.startMs && ms < x.endMs) ?? place(p.clips).at(-1);
-  if (!pc) throw new Error('project has no clips');
-  const speed = pc.clip.speed ?? 1;
-  const sourceSec = pc.clip.inSec + ((ms - pc.startMs) / 1000) * speed;
-  return {clip: pc.clip, sourceSec: Math.min(pc.clip.outSec, Math.max(pc.clip.inSec, sourceSec)), pc};
+  const r = locateSec(p.clips, FPS, atSec);
+  if (!r) throw new Error('project has no clips');
+  return r;
 }
 // source-relative ms on a clip → absolute seconds (null if trimmed away)
 function toAbs(p, clipId, srcMs, clamp = false) {
@@ -180,24 +178,8 @@ function retext(cap, text) {
 }
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
-// ---------- Pexels ----------
-async function pexels(query, kind, count) {
-  const key = ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY;
-  if (!key) throw new Error('PEXELS_API_KEY missing in .env');
-  const url = kind === 'video'
-    ? `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`
-    : `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`;
-  const d = await fetch(url, {headers: {Authorization: key}}).then((r) => r.json());
-  if (kind === 'video') {
-    return (d.videos ?? []).map((v) => {
-      const files = (v.video_files ?? []).filter((f) => f.file_type === 'video/mp4' && f.height);
-      const tall = files.filter((f) => f.height >= 1920).sort((a, b) => a.height - b.height);
-      const pick = tall[0] ?? files.sort((a, b) => b.height - a.height)[0];
-      return pick ? {src: pick.link, duration: v.duration, size: `${pick.width}x${pick.height}`, page: v.url} : null;
-    }).filter(Boolean);
-  }
-  return (d.photos ?? []).map((ph) => ({src: ph.src?.large2x || ph.src?.large, alt: ph.alt, page: ph.url})).filter((x) => x.src);
-}
+// ---------- Pexels (mcp/stock.mjs, shared with /api/stock) ----------
+const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY);
 
 // ---------- server ----------
 const server = new McpServer({name: 'reel', version: '0.1.0'});
@@ -344,48 +326,18 @@ server.registerTool('split_clip', {description: 'Split a clip in two: at a timel
   await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });
 
-const SNAP_MS = 150; // how far into the neighbouring pause a word cut reaches
 server.registerTool('cut_words', {description: 'Remove speech by word id: from_wid … to_wid (inclusive, same clip), or many stretches in ONE call with ranges (e.g. the ones find_cut_candidates suggested and you approved). Cut points snap into the pauses around the words so no syllable is clipped. Word ids stay valid after cuts; clip ids change (re-read get_transcript before using clip ids).', inputSchema: {project_id: pid, from_wid: z.string().optional().describe('first word to remove, "<source>:<i>"'), to_wid: z.string().optional().describe('last word to remove; defaults to from_wid'), ranges: z.array(z.object({from_wid: z.string(), to_wid: z.string().optional()})).max(80).optional().describe('several stretches at once')}}, async ({project_id, from_wid, to_wid, ranges}) => {
   const p = load(project_id);
   const list = ranges?.length ? ranges : from_wid ? [{from_wid, to_wid}] : null;
   if (!list) throw new Error('give from_wid (and to_wid), or ranges');
   const tr = await transcript(p);
-  // plan every stretch against the timeline as it is now, in source ms
-  const plans = [];
-  for (const r of list) {
-    const a = await wordAt(p, r.from_wid, tr); const b = r.to_wid ? await wordAt(p, r.to_wid, tr) : a;
-    if (a.entry.clipId !== b.entry.clipId) throw new Error(`${r.from_wid} and ${r.to_wid} sit on different clips (${a.entry.clipId}, ${b.entry.clipId}) — give them as two ranges`);
-    if (b.k < a.k) throw new Error(`${r.to_wid} comes before ${r.from_wid}`);
-    const inMs = a.clip.inSec * 1000, outMs = a.clip.outSec * 1000;
-    const startMs = a.prev ? Math.min(a.word.startMs, Math.max(a.prev.endMs + 40, a.word.startMs - SNAP_MS)) : inMs;
-    const endMs = b.next ? Math.max(b.word.endMs, Math.min(b.next.startMs - 40, b.word.endMs + SNAP_MS)) : outMs;
-    plans.push({src: a.clip.src, startMs, endMs, text: a.entry.words.slice(a.k, b.k + 1).map((w) => w.word).join(' ')});
-  }
-  // overlapping stretches become one; each remaining span sits inside one clip
-  // (earlier cuts only removed other spans), found again by source time
-  plans.sort((x, y) => (x.src === y.src ? x.startMs - y.startMs : x.src < y.src ? -1 : 1));
-  const merged = [];
-  for (const c of plans) { const last = merged.at(-1); if (last && last.src === c.src && c.startMs <= last.endMs) { last.endMs = Math.max(last.endMs, c.endMs); last.text += ` ${c.text}`; } else merged.push({...c}); }
-  const lines = [];
-  const pieces = new Set(); // clips this call cut into
-  for (const c of merged) {
-    const clip = p.clips.find((k) => k.src === c.src && k.inSec * 1000 <= c.startMs + 1 && k.outSec * 1000 >= c.endMs - 1);
-    const r = clip && cutRange(p.clips, clip.id, c.startMs / 1000, c.endMs / 1000);
-    if (!r) { lines.push(`skipped "${c.text}" (not on the timeline any more)`); continue; }
-    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap);
-    for (const s of r.remap) pieces.add(s.segId);
-    lines.push(`cut "${c.text}" — ${f1((c.endMs - c.startMs) / 1000)}s of ${path.basename(c.src)} (${f1(c.startMs / 1000)}–${f1(c.endMs / 1000)})`);
-  }
-  // a piece left between two cuts that holds no word at all is dead air: drop it
-  const words = new Map(tr.map((t) => [t.source, []]));
-  for (const t of tr) words.get(t.source).push(...t.words);
-  const silent = p.clips.filter((k) => pieces.has(k.id) && k.outSec - k.inSec < 4 && !(words.get(path.basename(k.src).replace(/\.[^.]+$/, '')) ?? []).some((w) => w.endMs > k.inSec * 1000 && w.startMs < k.outSec * 1000));
-  if (silent.length) {
-    p.clips = p.clips.filter((k) => !silent.includes(k));
-    lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
-  }
+  // the same planner and cutter the editor's Transcript panel uses (src/cuts.ts)
+  const {spans, errors} = planWordCuts(tr, p.clips, list);
+  if (errors.length) throw new Error(errors.join('; '));
+  const r = applyWordCuts(p.clips, p.brolls, spans, tr);
+  p.clips = r.clips; p.brolls = r.brolls;
   await save(project_id, p);
-  return text(`${lines.join('\n')}\n\n${summary(project_id, p)}`);
+  return text(`${r.lines.join('\n')}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, by word id (nothing is cut): retakes — a line the speaker said more than once, including the quiet read-through she does before performing it; the kept take is the LAST complete one (rehearsal first, take last), attempts are whole sentences even when said with a pause inside —, off-mic lines, meta talk ("sorry", "say it again", "otra vez", "corta") and fillers (um, uh, eh, mmm, "you know", "o sea"; "este"/"like" only between pauses). Review the list against the transcript, drop what should stay, then pass the rest to cut_words ranges in one call.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -610,38 +562,10 @@ async function wordAt(p, wid, tr) {
   const k = t.words.findIndex((w) => String(w.i) === i);
   return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
 }
-// a clip edge inside a word (from the last transcript run): the syllable gets clipped
-function cutWordIssues(p) {
+// off-mic words left in the cut + clip edges inside a word (src/validate.ts), from the last transcript run
+function transcriptIssuesOf(p) {
   let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const words = [...(bySource.get(path.basename(c.src).replace(/\.[^.]+$/, ''))?.values() ?? [])];
-    for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]]) {
-      const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
-      if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
-    }
-  }
-  return out;
-}
-// off-mic words still inside the cut (from the last transcript run), per clip
-function offMicIssues(p) {
-  if (p.offMic === 'off') return [];
-  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const source = path.basename(c.src).replace(/\.[^.]+$/, '');
-    const off = [...(bySource.get(source)?.values() ?? [])].filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).sort((a, b) => a.i - b.i);
-    if (!off.length) continue;
-    // contiguous runs of word indices → one cut_words call each
-    const runs = [];
-    for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) r.to = w.i; else runs.push({from: w.i, to: w.i, text: []}); runs[runs.length - 1].text.push(w.word); }
-    out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
-  }
-  return out;
+  return transcriptIssues(p, tr);
 }
 
 server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -724,15 +648,10 @@ server.registerTool('list_assets', {description: 'Browse the local asset library
 });
 
 server.registerTool('generate_asset', {description: 'LAST RESORT: generate an image asset with the OpenAI Images API (transparent PNG; the user pays per image). Searching is free, so this tool first looks in the local library and the search sources for the same idea and returns those instead of generating; pass force=true only when none of them fits. kind wraps the prompt: sticker (die-cut flat vector), doodle (hand-drawn marker), texture (seamless, opaque), ui (flat mockup). Describe the object only — style comes from kind. Then place it with add_graphic template=sticker.', inputSchema: {prompt: z.string().min(3).max(400), kind: z.enum(['sticker', 'doodle', 'texture', 'ui']).default('sticker'), size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'), quality: z.enum(['low', 'medium', 'high']).default('medium'), force: z.boolean().default(false).describe('generate even if existing assets match')}}, async ({prompt, kind, size, quality, force}) => {
-  if (!force) {
-    // free options first: the library, then the search sources
-    const searchKind = kind === 'texture' ? 'illustration' : 'sticker';
-    const found = [...librarySearch(prompt, {kind: undefined, limit: 4}), ...(await searchAssets({query: prompt, kind: searchKind, limit: 4}).catch(() => []))]
-      .filter((r, i, arr) => arr.findIndex((x) => x.src === r.src) === i).slice(0, 5);
-    if (found.length) return text(`Not generated — ${found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + found.map((r) => `${r.id}${r.fromLibrary ? '  [library]' : ''}\n  src: ${r.src}  (${r.format}, ${r.license}${r.source ? ', ' + r.source : ''})${r.credit ? `\n  credit: ${r.credit}` : ''}${r.prompt ? `\n  prompt: ${r.prompt}` : ''}`).join('\n'));
-  }
-  const r = await generateAsset({prompt, kind, size, quality, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
-  return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
+  const r = await findOrGenerate({prompt, kind, size, quality, force, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
+  if (r.found) return text(`Not generated — ${r.found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + r.found.map((x) => `${x.id}${x.fromLibrary ? '  [library]' : ''}\n  src: ${x.src}  (${x.format}, ${x.license}${x.source ? ', ' + x.source : ''})${x.credit ? `\n  credit: ${x.credit}` : ''}${x.prompt ? `\n  prompt: ${x.prompt}` : ''}`).join('\n'));
+  const g = r.generated;
+  return text(`${g.cached ? `Reused ${g.src} (already generated${g.reusedPrompt ? ` for "${g.reusedPrompt}"` : ''})` : `Generated ${g.src} (${g.model}${g.usage?.output_tokens ? `, ${g.usage.output_tokens} output tokens` : ''})`}`);
 });
 
 server.registerTool('set_grade', {description: `Color for the whole reel: a bounded automatic correction per source (measured on its lit frames: stretches flat footage, nudges exposure and color cast, lifts dull saturation — never restyles) plus one look. Looks: ${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}. intensity 0–1 (0.8 default). Look at the result with caption_proof (frame_at shows the raw source). Needs the backend the first time a source is analyzed.`, inputSchema: {project_id: pid, look: z.enum(Object.keys(LOOKS)).default(DEFAULT_LOOK), intensity: z.number().min(0).max(1).default(0.8), auto: z.boolean().default(true).describe('the per-source correction; false = look only')}}, async ({project_id, look, intensity, auto}) => {
@@ -830,7 +749,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
-const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p), ...cutWordIssues(p)];
+const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
 const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
