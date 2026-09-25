@@ -280,12 +280,15 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
   const out = [];
   const byWid = new Map(words.map((w) => [`${w.clipId}|${w.wid}`, w]));
   const covered = new Set();
+  const seen = new Set(); // a word the guion split ("acomodan" → "acomoda" "a") shares its id: only its first piece starts with it
   for (const c of pages) {
     const hand = c.words.filter((w) => !w.wid);
     let worst = null;
     for (const w of c.words) {
       if (!w.wid) continue;
       covered.add(w.wid);
+      if (seen.has(`${c.clipId}|${w.wid}`)) continue;
+      seen.add(`${c.clipId}|${w.wid}`);
       const s = byWid.get(`${c.clipId}|${w.wid}`);
       if (!s) continue;
       const d = w.startMs - s.t0 * 1000;
@@ -796,8 +799,11 @@ export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x 
 // The label never says "aprobado": only the client approves.
 // Advisory checks go to the client for a decision and NEVER count toward the verdict — not when the
 // judge confirms them, not as a pattern of minors. source-cut: César's rule, a whip / blur inside a
-// source clip never auto-fails. Matched by check name, so a finding written by hand is covered too.
-export const ADVISORY = new Set(['source-cut']);
+// source clip never auto-fails. validate-guion-conflict: the audio and the client's script say different
+// things (70 vs 60 invitados) — the audio stays on screen (César: the audio wins on content) and the
+// client confirms; the judge never fails a reel for it. Matched by check name, so a finding written by
+// hand is covered too.
+export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict']);
 export const isAdvisory = (f) => !!f.advisory || ADVISORY.has(f.check);
 export const counts = (f) => !f.dismissed && !isAdvisory(f) && (f.kind !== 'candidate' || f.confirmed);
 export function verdictOf(findings, {reduced = false} = {}) {
@@ -1161,12 +1167,12 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (role !== 'master' && firstText * 1000 > T.firstTextMs && total > 5) findings.push(F('hook-text', 'major', 'rule', 0, Number.isFinite(firstText) ? firstText : null, `nada escrito en pantalla hasta ${Number.isFinite(firstText) ? `${firstText.toFixed(1)} s` : 'el final'} — el hook no se lee sin audio`, {}, [{tool: 'add_graphic', note: 'hook-stack / big-word at the first word (reel-edit step 5)', args: {template: 'hook-stack', at_wid: words[0]?.wid}}]));
 
   // --- validate (src/validate.ts) — estimated geometry: heuristic ---
-  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor'};
+  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor'};
   const whenOf = (ref) => { const c = pages.find((x) => x.id === ref); if (c) return [c.startMs / 1000, c.endMs / 1000]; const g = gfx.find((x) => x.id === ref); return g ? [g.startMs / 1000, g.endMs / 1000] : [null, null]; };
   for (const i of validateProject(p, FPS)) {
     if (i.code === 'hook' && (role === 'master' || findings.some((f) => f.check === 'hook-text'))) continue;
     const [s0, e] = whenOf(i.ref);
-    findings.push(F(`validate-${i.code}`, sevOf[i.code] ?? (i.level === 'error' ? 'major' : 'minor'), ['matte', 'timing', 'overlap-captions', 'glue', 'short', 'long'].includes(i.code) ? 'rule' : 'heuristic', s0, e, i.msg, {page: i.ref, lookAt: s0 != null ? r2((s0 + e) / 2) : undefined}, []));
+    findings.push(F(`validate-${i.code}`, sevOf[i.code] ?? (i.level === 'error' ? 'major' : 'minor'), ['matte', 'timing', 'overlap-captions', 'glue', 'short', 'long', 'guion-timing', 'guion-conflict'].includes(i.code) ? 'rule' : i.code === 'guion-missing' ? 'candidate' : 'heuristic', s0, e, i.msg, {page: i.ref, lookAt: s0 != null ? r2((s0 + e) / 2) : undefined}, []));
   }
 
   // --- cuts ---

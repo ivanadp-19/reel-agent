@@ -174,6 +174,7 @@ function summary(id, p) {
   out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
   if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
   if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, planMode(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
+  if (p.guion) out.push('', `GUION (set_guion): ${p.guion.trim().split(/\s+/).length} words — captions take its wording where it aligns with the audio; validate reports guion-conflict / guion-missing / guion-altered`);
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -277,7 +278,7 @@ const sec = (d) => z.number().describe(d);
 // a brief asks for before planning (clips, language, brand kit and its style)
 // and draft renders (render and start_render check draft themselves).
 const OPEN_BEFORE_APPROVAL = new Set([
-  'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
+  'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_guion', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
   'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs',
 ]);
@@ -611,6 +612,13 @@ server.registerTool('add_caption', {description: 'Add a caption page at a timeli
 server.registerTool('set_captions', {description: 'Switch the captions of the reel off (or back on) without deleting them: off = the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on. Use it when the brief asks for a reel without subtitles (instead of duplicating the project or deleting pages). Music still ducks under the speech.', inputSchema: {project_id: pid, off: z.boolean()}}, async ({project_id, off}) => {
   const p = load(project_id); p.captionsOff = off; await save(project_id, p);
   return text(`Captions ${off ? `OFF (${p.captions.length} pages kept, none rendered)` : `ON (${p.captions.length} pages)`}`);
+});
+
+server.registerTool('set_guion', {description: 'Attach the client\'s script (guion) to the project, as they wrote it. The captions job then aligns the ASR words to it: a word the guion spells otherwise takes its spelling (ASR timing kept), one ASR word that swallowed two ("acomodan" for "acomoda a") is split in its span, and what cannot be aligned with confidence is left as heard. Where audio and guion say different things (70 vs 60, another name) the AUDIO stays on screen and validate reports guion-conflict for a human; guion-missing / guion-altered / guion-extra say where the captions and the script part. Re-run run_ai_step captions (or set_caption_style) after setting it. Empty text removes it. Stage directions ([…], (…), lines like "INSERTO: …") are not treated as speech.', inputSchema: {project_id: pid, text: z.string().max(40000)}}, async ({project_id, text: guion}) => {
+  const p = load(project_id); p.guion = guion.trim(); await save(project_id, p);
+  if (!p.guion) return text('Guion removed');
+  const conflicts = allIssues(p).filter((i) => i.code.startsWith('guion-'));
+  return text(`Guion set (${p.guion.split(/\s+/).length} words). ${p.captions.length ? 'Regenerate captions to reconcile them with it (run_ai_step captions).' : 'Captions generated from now on are reconciled with it.'}${conflicts.length ? '\n' + issuesText(conflicts) : ''}`);
 });
 
 server.registerTool('delete_captions', {description: 'Delete caption pages by id. Their words stay uncaptioned even after set_caption_style or regenerating (to change wording use edit_caption instead).', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
@@ -1011,7 +1019,7 @@ server.registerTool('delete_graphics', {description: 'Delete graphics by id.', i
 server.registerTool('set_caption_style', {description: `The STYLE PACK of the reel — one of the 20 Captions.ai looks, or the three real-estate references. A pack sets the caption look, the palette and faces (unless a brand kit or a project accent is set), the family of transitions, how B-roll cues arrive and leave, and the frame the style lives in. Packs: ${Object.values(PACKS).map((x) => `${x.id} = ${x.desc} [cuts: ${x.transition}${x.brollMode ? `, B-roll: ${x.brollMode}` : ''}${x.layout ? `, frame: ${x.layout.shape} on ${x.layout.canvas}` : ''}]`).join('; ')}. References: ${['palabra', 'caja', 'tracked'].map((id) => `${id} = ${PRESETS[id].desc}`).join('; ')}. Re-pages the generated captions for the new pack, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); p.captionStyle = style;
   if (p.clips.length && p.captions.length) {
-    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions)}); // the pager sees the project's emphasis (a highlighted name stays one unit)
+    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion}); // the pager sees the project's emphasis (a highlighted name stays one unit)
     const fresh = readPublic('captions.multi.json');
     // generated pages are re-paged; hand-made ones, deleted words and tiers survive
     // (a project from before word ids has no way to tell: everything is re-paged)
@@ -1052,7 +1060,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions)}); const fresh = readPublic('captions.multi.json');
+  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion}); const fresh = readPublic('captions.multi.json');
   const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
@@ -1067,7 +1075,7 @@ server.registerTool('timing_report', {description: 'Where the time of this proje
   return text(timingText(summarize(readTiming(PROJECTS, project_id))));
 });
 
-server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook, and with a guion (set_guion) its coverage: guion-conflict (audio and script disagree — the audio stays; ask the human), guion-missing, guion-altered, guion-extra, guion-timing. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
   return text(issuesText(allIssues(p)));
 });

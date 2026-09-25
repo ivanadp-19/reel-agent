@@ -42,7 +42,7 @@ export const Inspector: React.FC<{
     select, selectClip, setText, movePageStart, shiftCaption, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
     setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setTransitionPattern, applySpeedRamp,
-    captionsOff, setCaptionsOff,
+    captionsOff, setCaptionsOff, guion, setGuion,
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
@@ -206,6 +206,16 @@ export const Inspector: React.FC<{
             <div className="flex items-center justify-between mb-5" title="set_captions: the pages are kept, none is rendered (a reel without subtitles)">
               <Label>{captionsOff ? 'Captions off — not rendered' : 'Show captions'}</Label>
               <Toggle on={!captionsOff} onChange={(on) => setCaptionsOff(!on)} />
+            </div>
+            <div className="mb-5" title="set_guion: generated captions take the script's wording where it aligns with the audio (ASR timing kept); where they disagree the audio stays and Validate reports it">
+              <Label>Guion (client script)</Label>
+              <textarea
+                value={guion}
+                onChange={(e) => setGuion(e.target.value)}
+                rows={guion ? Math.min(10, guion.split('\n').length + 1) : 2}
+                placeholder="Paste the script. Regenerate captions to reconcile them with it."
+                className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[12px] resize-y"
+              />
             </div>
 
             {!captions.length ? (

@@ -15,6 +15,7 @@ export type CaptionWord = {
   br?: boolean; // hard line break before this word (two-line phrase pages)
   emoji?: string; // one emoji that pops in right after the word
   speaker?: string; // spk1, spk2… who says it (diarization); presets may color or place pages per speaker later
+  asr?: string; // what the ASR heard, when the guion's wording replaced it (src/guion.ts); split pieces share it and the id
 };
 export type Caption = {
   id: string;
