@@ -182,7 +182,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
-      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, mode: renderMode})}).then((x) => x.json());
+      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, mode: renderMode, project_id: projectId})}).then((x) => x.json());
       pollJob(
         '/api/render', r.jobId,
         (s) => setExp({status: 'running', progress: s.progress ?? 0, label: s.label}), // "Queued — n renders ahead" while it waits its turn
@@ -205,7 +205,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId})}).then((x) => x.json());
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
@@ -233,7 +233,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setTrimming(true);
     setTrimLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang, offMic})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang, offMic, project_id: projectId})}).then((x) => x.json());
       pollJob(
         '/api/trim-silence', jobId,
         (s) => setTrimLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),

@@ -36,6 +36,8 @@ import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {createToolClock, logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
@@ -164,6 +166,12 @@ function summary(id, p) {
 
 // ---------- backend jobs ----------
 async function runJob(route, body, maxSec = 1800) {
+  const ctx = callCtx.getStore();
+  const t0Job = Date.now();
+  try { return await runJobUntimed(route, ctx?.project ? {...body, project_id: ctx.project} : body, maxSec); }
+  finally { if (ctx) ctx.jobMs += Date.now() - t0Job; } // the backend logs this time as its own stages
+}
+async function runJobUntimed(route, body, maxSec) {
   await needBackend();
   const {jobId, error} = await fetch(`${API}${route}`, {method: 'POST', body: JSON.stringify(body)}).then((r) => r.json());
   if (!jobId) throw new Error(error || `${route} did not start`);
@@ -204,6 +212,27 @@ const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXEL
 
 // ---------- server ----------
 const server = new McpServer({name: 'reel', version: '0.1.0'});
+// Timing (scripts/timing.mjs): every tool call is logged to its project's
+// public/projects/<id>.timing.jsonl with its duration, the part spent waiting on
+// backend jobs, and the gap since the previous call = the agent's own turn. A tool
+// without project_id counts for the last project this session touched.
+const SESSION = `${process.env.REEL_AGENT || 'mcp'}-${process.pid}-${Date.now().toString(36)}`;
+const clock = createToolClock();
+const callCtx = new AsyncLocalStorage(); // {project, jobMs} of the call in flight
+let lastProject = null;
+const registerTool = server.registerTool.bind(server);
+server.registerTool = (name, def, handler) => registerTool(name, def, async (args, extra) => {
+  const started = clock.start();
+  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject, jobMs: 0};
+  if (ctx.project) lastProject = ctx.project;
+  let ok = true;
+  try { return await callCtx.run(ctx, () => handler(args, extra)); }
+  catch (e) { ok = false; throw e; }
+  finally {
+    const ms = clock.end(started);
+    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
+  }
+});
 const text = (s) => ({content: [{type: 'text', text: s}]});
 const pid = z.string().describe('project id from list_projects (e.g. "p-1789542691547")');
 const sec = (d) => z.number().describe(d);
@@ -891,6 +920,11 @@ const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level ===
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
 const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio, captionsOff: p.captionsOff});
+
+server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  load(project_id);
+  return text(timingText(summarize(readTiming(PROJECTS, project_id))));
+});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);

@@ -192,7 +192,15 @@ export async function deepgramAll(wavs, lang, dir = TRANSCRIPTS) {
 // Transcribe every not-yet-cached source among `clips` (Deepgram when a key is
 // set, else one WhisperX batch; Deepgram failures fall back to WhisperX).
 // onBatch(label) is called once before the run (for progress UI).
+// the transcription time of a job, for the project's timing log: the backend reads this
+// stderr line (server/index.mjs → scripts/timing.mjs) and logs it as its own stage
 export async function transcribeClips(clips, onBatch, lang = 'auto') {
+  const todo = new Set(clips.filter((c) => !fs.existsSync(cacheFile(c, lang))).map((c) => sourceKey(c))).size;
+  const t0 = Date.now();
+  try { return await transcribeUncached(clips, onBatch, lang); }
+  finally { if (todo) console.error(`TIMING:transcribe:${Date.now() - t0}:${todo}`); }
+}
+async function transcribeUncached(clips, onBatch, lang) {
   fs.mkdirSync(TRANSCRIPTS, {recursive: true});
   fs.mkdirSync(TMP, {recursive: true});
   const pending = new Map(); // key -> clip

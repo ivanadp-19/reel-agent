@@ -23,6 +23,7 @@ import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
 import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey} from '../scripts/layers.mjs';
 import {chooseRenderMode} from '../src/layers.ts';
+import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -70,6 +71,8 @@ fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
 process.once('exit', () => { try { if (fs.readFileSync(path.join(ROOT, '.backend.pid'), 'utf8') === String(process.pid)) fs.rmSync(path.join(ROOT, '.backend.pid')); } catch {} });
 
 const renders = {}; // jobId -> {status, progress, file, error}
+// backend work into the project's timing log (scripts/timing.mjs), when the request names the project
+const logStage = (project, stage, ms, extra = {}) => project && logTiming(PROJECTS_DIR, project, {kind: 'stage', stage, ms, ...extra});
 const captionJobs = {}; // jobId -> {status, progress, label, error}
 const transcribeJobs = {}; // jobId -> {status, progress, label, error}
 const trimJobs = {}; // jobId -> {status, progress, label, error}
@@ -88,17 +91,17 @@ const json = (res, code, obj) => {
 
 const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
-  '/api/captions': {route: '/api/captions', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
-  '/api/trim-silence': {route: '/api/trim-silence', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
-  '/api/transcribe': {route: '/api/transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
-  '/api/matte': {route: '/api/matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
-  '/api/grade': {route: '/api/grade', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
-  '/api/lut': {route: '/api/lut', name: 'LUT', prefix: 'lut', script: 'scripts/lut.mjs', store: {}},
+  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
+  '/api/trim-silence': {route: '/api/trim-silence', stage: 'autocut', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
+  '/api/transcribe': {route: '/api/transcribe', stage: 'transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
+  '/api/matte': {route: '/api/matte', stage: 'matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
+  '/api/grade': {route: '/api/grade', stage: 'grade-analysis', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
+  '/api/lut': {route: '/api/lut', stage: 'lut', name: 'LUT', prefix: 'lut', script: 'scripts/lut.mjs', store: {}},
 };
 
 // Turn a stderr tail into one line a user can act on.
 function explainFailure(tail, fallback) {
-  const lines = tail.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !/^PROGRESS:/.test(l));
+  const lines = tail.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !/^(PROGRESS|TIMING):/.test(l));
   const known = [
     [/WhisperX is not installed|whisperx could not start|spawnSync \.venv\/bin\/whisperx/i, 'WhisperX is not installed — run `npm run setup` (creates .venv and installs whisperx)'],
     [/whisperx failed \(exit/i, null], // keep the script's own message (has the real whisperx error)
@@ -225,7 +228,9 @@ async function bakeMissing(raw, id) {
 }
 function renderJob(job, id) {
   renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
-  return bakeMissing(job.raw, id).then((raw) => renderProps({...job, raw}, id), (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
+  const t = Date.now();
+  if (t - job.queuedAt > 1000) logStage(job.project, 'queue', t - job.queuedAt, {job: id});
+  return bakeMissing(job.raw, id).then((raw) => { if (Date.now() - t > 1000) logStage(job.project, 'prepare', Date.now() - t, {job: id}); return renderProps({...job, raw}, id); }, (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
 }
 // one `remotion render`: progress into renders[id] (scaled into [from, to] %), resolves {code, errTail}
 function remotion(args, id, {from = 0, to = 100} = {}) {
@@ -267,7 +272,7 @@ function finalize(outFile, expectSec, clean) {
 //   layers — the master without captions (cached by its inputs, scripts/layers.mjs),
 //            a transparent caption layer, an ffmpeg composite
 // then, final renders only, loudness + QC on the file that ships.
-async function renderProps({raw, draft, expectSec, clean, mode: requested}, id) {
+async function renderProps({raw, draft, expectSec, clean, mode: requested, project}, id) {
   const props = JSON.parse(raw);
   const choice = chooseRenderMode(requested, props, FPS);
   const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
@@ -280,7 +285,14 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested}, id) 
   const info = {mode: choice.mode, ...(choice.reasons.length ? {fallback: choice.reasons} : {})};
   const stages = {};
   const t0 = Date.now();
-  const stage = async (name, fn) => { const t = Date.now(); const r = await fn(); stages[name] = +((Date.now() - t) / 1000).toFixed(1); return r; };
+  const stage = async (name, fn) => {
+    const t = Date.now();
+    const r = await fn();
+    const ms = Date.now() - t;
+    stages[name] = +(ms / 1000).toFixed(1);
+    logStage(project, name, ms, {job: id, mode: choice.mode, draft, ...(name === 'render' || name === 'master' ? {videoSec: expectSec} : {}), ...(r?.code || r?.ok === false ? {ok: false} : {})});
+    return r;
+  };
   if (choice.reasons.length) console.log(`render ${id}: layers → full (${choice.reasons.join('; ')})`);
   try {
     if (choice.mode === 'full') {
@@ -789,11 +801,20 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && job) {
     const id = String(Date.now());
     const inFile = path.join(ROOT, `.${job.prefix}-${id}.json`);
-    fs.writeFileSync(inFile, await body(req));
+    const raw = await body(req);
+    fs.writeFileSync(inFile, raw);
+    let project = null;
+    try { const p = JSON.parse(raw).project_id; if (typeof p === 'string') project = p; } catch {}
+    const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
     const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
     let errTail = '';
+    let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
+      for (const m of String(d).matchAll(/TIMING:transcribe:(\d+):(\d+)/g)) {
+        innerMs += +m[1];
+        if (job.stage !== 'transcribe') logStage(project, 'transcribe', +m[1], {job: id, sources: +m[2], in: job.stage});
+      }
       for (const m of String(d).matchAll(/PROGRESS:(\d+):([^\n]+)/g)) {
         job.store[id] = {status: 'running', progress: +m[1], label: m[2].trim()};
       }
@@ -806,6 +827,9 @@ const server = createServer(async (req, res) => {
     });
     child.on('close', (code) => {
       fs.rmSync(inFile, {force: true});
+      // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
+      const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
+      logStage(project, job.stage, ms, {job: id, ...(code === 0 ? {} : {ok: false})});
       job.store[id] = code === 0
         ? {status: 'done', progress: 100, label: 'Ready'}
         : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
@@ -819,14 +843,20 @@ const server = createServer(async (req, res) => {
   }
 
   // ---- E9: запустить рендер ----
+  // where a project's time went (scripts/timing.mjs) — the MCP's timing_report reads the same log
+  if (req.method === 'GET' && url.pathname.startsWith('/api/timing/')) {
+    const s = summarize(readTiming(PROJECTS_DIR, decodeURIComponent(url.pathname.split('/').pop())));
+    return json(res, 200, {...s, text: timingText(s)});
+  }
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?}
     let draft = false;
-    let expectSec, clean = 'off', mode = DEFAULT_MODE;
+    let expectSec, clean = 'off', mode = DEFAULT_MODE, project = null;
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
       if (props.mode === 'full' || props.mode === 'layers') mode = props.mode;
+      if (typeof props.project_id === 'string') project = props.project_id;
       clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
       // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
@@ -840,7 +870,7 @@ const server = createServer(async (req, res) => {
     const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
     // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
     renders[id] = {status: 'running', progress: 0, queued: true};
-    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, mode});
+    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, mode, project, queuedAt: Date.now()});
     if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
   }

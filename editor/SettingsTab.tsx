@@ -16,13 +16,20 @@ type MusicRow = {id: string; title: string; creator: string; license: string; du
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 
 export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => void}> = ({notify}) => {
-  const {meta, clips, music, captions, graphics, mattes, captionStyle, captionsOff, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
+  const {meta, projectId, clips, music, captions, graphics, mattes, captionStyle, captionsOff, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mq, setMq] = useState('');
   const [mrows, setMrows] = useState<MusicRow[] | null>(null);
   const [mbusy, setMbusy] = useState<string | null>(null);
+  const [timing, setTiming] = useState<string | null>(null);
   if (!meta) return null;
+  // where this project's time went (scripts/timing.mjs; the MCP's timing_report reads the same log)
+  const loadTiming = async () => {
+    if (!projectId) return;
+    try { setTiming((await fetch(`/api/timing/${encodeURIComponent(projectId)}`).then((r) => r.json())).text); }
+    catch { notify('Could not read the timing log', 'error'); }
+  };
   // search_music / set_music music_id: clean licenses (Openverse CC0 / CC BY), credit kept with the project
   const searchMusic = async () => {
     if (mq.trim().length < 2) return;
@@ -151,6 +158,11 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
             ))}
           </div>
         )}
+      </Section>
+
+      <Section title="Timing" hint="Where this project's time went: the agent's decisions (gaps between its tool calls), inspection, transcription, render by stage, loudness + QC. Every tool call and backend job is logged.">
+        <Btn onClick={loadTiming} disabled={!projectId}>Show timing</Btn>
+        {timing && <pre className="text-[11px] leading-snug text-on-surface-variant whitespace-pre-wrap">{timing}</pre>}
       </Section>
 
       <div className="pt-4 border-t border-outline-variant/30">
