@@ -43,7 +43,7 @@ const result = codex
 let offKept = 0;
 for (const c of p.clips) {
   let words = [];
-  try { words = transcribeClip(c, p.lang ?? 'auto', 'mark'); } catch {}
+  try { words = await transcribeClip(c, p.lang ?? 'auto', 'mark'); } catch {}
   offKept += words.filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).length;
 }
 const faces = Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));

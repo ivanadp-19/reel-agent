@@ -124,9 +124,38 @@ function parseWhisperxJson(file) {
     .filter((w) => w.word.length > 0);
 }
 
-// Transcribe every not-yet-cached source among `clips` in ONE whisperx run.
+// ---- Deepgram Nova-3 (optional, pre-recorded API) ----
+// DEEPGRAM_API_KEY in .env switches transcription to Deepgram: seconds per clip
+// instead of minutes on CPU WhisperX. Words land in the SAME cache format
+// ({word, startMs, endMs}), so every downstream step is untouched. Any failure
+// (no network, bad key, quota) falls back to local WhisperX for those clips.
+// REEL_STT=whisperx forces the local engine even with a key set.
+export const useDeepgram = () => Boolean(process.env.DEEPGRAM_API_KEY) && (process.env.REEL_STT || 'auto') !== 'whisperx';
+
+export function parseDeepgramJson(data) {
+  const words = data?.results?.channels?.[0]?.alternatives?.[0]?.words ?? [];
+  return words
+    .map((w) => ({word: String(w.punctuated_word ?? w.word).trim(), startMs: Math.round(w.start * 1000), endMs: Math.round(w.end * 1000)}))
+    .filter((w) => w.word.length > 0);
+}
+
+async function deepgramTranscribe(wavPath, lang) {
+  const params = new URLSearchParams({model: 'nova-3', smart_format: 'false', filler_words: 'true'});
+  if (lang === 'auto') params.set('detect_language', 'true');
+  else params.set('language', lang);
+  const res = await fetch(`https://api.deepgram.com/v1/listen?${params}`, {
+    method: 'POST',
+    headers: {Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'audio/wav'},
+    body: fs.readFileSync(wavPath),
+  });
+  if (!res.ok) throw new Error(`deepgram ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  return parseDeepgramJson(await res.json());
+}
+
+// Transcribe every not-yet-cached source among `clips` (Deepgram when a key is
+// set, else one WhisperX batch; Deepgram failures fall back to WhisperX).
 // onBatch(label) is called once before the run (for progress UI).
-export function transcribeClips(clips, onBatch, lang = 'auto') {
+export async function transcribeClips(clips, onBatch, lang = 'auto') {
   fs.mkdirSync(TRANSCRIPTS, {recursive: true});
   fs.mkdirSync(TMP, {recursive: true});
   const pending = new Map(); // key -> clip
@@ -141,6 +170,28 @@ export function transcribeClips(clips, onBatch, lang = 'auto') {
     else wavs.push(wav);
   }
   if (!wavs.length) return;
+
+  if (useDeepgram()) {
+    onBatch?.(`Transcribing ${wavs.length} clip${wavs.length === 1 ? '' : 's'} (Deepgram)`);
+    for (const wav of wavs) {
+      const key = path.basename(wav, '.16k.wav');
+      try {
+        const words = await deepgramTranscribe(wav, lang);
+        if (isDegenerate(words)) throw new Error('degenerate transcript');
+        fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
+        pending.delete(key);
+      } catch (e) {
+        console.error(`deepgram failed for ${key} (${String(e).slice(0, 140)}); WhisperX takes it`);
+      }
+    }
+    if (!pending.size) return;
+    wavs.length = 0;
+    for (const key of pending.keys()) {
+      const wav = path.join(TMP, `${key}.16k.wav`);
+      if (fs.existsSync(wav)) wavs.push(wav);
+    }
+    if (!wavs.length) return;
+  }
 
   if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
     throw new Error('WhisperX is not installed (.venv/bin/whisperx missing) — run `npm run setup`');
@@ -196,9 +247,9 @@ export function isDegenerate(words) {
 // Words for one clip (source-relative times). Uses the cache; transcribes on miss.
 // offMic: 'mark' | 'cut' | 'off' — unless off, words of a quieter second voice
 // come back with {off: true} (callers decide whether to skip them; indices stay).
-export function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
+export async function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
   const cache = cacheFile(clip, lang);
-  if (!fs.existsSync(cache)) transcribeClips([clip], undefined, lang);
+  if (!fs.existsSync(cache)) await transcribeClips([clip], undefined, lang);
   if (!fs.existsSync(cache)) throw new Error(`transcription failed for ${clip.id}`);
   let words = JSON.parse(fs.readFileSync(cache, 'utf8'));
   const turns = speakersFor(clip);
@@ -210,21 +261,21 @@ export function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
 
 // Assemble all clips' words onto the timeline, honoring trim (in/out) and order.
 // onProgress(idx, total, clip) is called before each clip is transcribed.
-export function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark') {
-  // one whisperx run for everything not cached yet
-  transcribeClips(clips, (label) => onProgress?.(0, clips.length, {id: label, label, batch: true}), lang);
+export async function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark') {
+  // one transcription run for everything not cached yet
+  await transcribeClips(clips, (label) => onProgress?.(0, clips.length, {id: label, label, batch: true}), lang);
   const out = [];
   let offsetMs = 0;
-  clips.forEach((clip, idx) => {
+  for (const [idx, clip] of clips.entries()) {
     onProgress?.(idx, clips.length, clip);
     let words;
     try {
-      words = transcribeClip(clip, lang, offMic);
+      words = await transcribeClip(clip, lang, offMic);
     } catch (e) {
       // one bad clip shouldn't kill the whole job — skip it, keep its slot
       console.error(`SKIP clip ${clip.id}: ${String(e).slice(0, 160)}`);
       offsetMs += (clip.outSec - clip.inSec) * 1000;
-      return;
+      continue;
     }
     const inMs = clip.inSec * 1000;
     const outMs = clip.outSec * 1000;
@@ -247,7 +298,7 @@ export function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark')
       });
     });
     offsetMs += (clip.outSec - clip.inSec) * 1000;
-  });
+  }
   // persist for reuse (e.g. B-roll detection without re-running)
   fs.writeFileSync(path.join(PUBLIC, 'words.multi.json'), JSON.stringify(out, null, 2));
   return out;
