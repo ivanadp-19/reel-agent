@@ -39,7 +39,7 @@ import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
-import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, withPlan} from '../src/plan.ts';
+import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -73,7 +73,7 @@ function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
   const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.planApproved ??= false; p.planReviews ??= []; p.planMode ??= null; p.captionsOff ??= false;
+  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.planApproved ??= false; p.planReviews ??= []; p.planMode ??= null; p.planModeLog ??= []; p.captionsOff ??= false;
   return p;
 }
 // one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit
@@ -135,7 +135,7 @@ function summary(id, p) {
   const out = [];
   out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
   if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
-  if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, modeOf(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
+  if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, planMode(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
@@ -218,7 +218,6 @@ const sec = (d) => z.number().describe(d);
 // Open before approval: reading, looking, searching, the plan itself, the setup
 // a brief asks for before planning (clips, language, brand kit and its style)
 // and draft renders (render checks draft itself).
-const modeOf = planMode;
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
@@ -228,7 +227,7 @@ const registerTool = server.registerTool.bind(server);
 server.registerTool = (name, config, cb) => registerTool(name, config, async (args, extra) => {
   if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !(name === 'render' && args.draft)) {
     const p = load(args.project_id);
-    const why = planGate(p, name === 'render' ? 'The final render' : name, modeOf(p));
+    const why = planGate(p, name === 'render' ? 'The final render' : name, planMode(p));
     if (why) throw new Error(why);
   }
   return cb(args, extra);
@@ -258,7 +257,7 @@ server.registerTool('set_plan', {description: 'Write the editorial plan BEFORE t
   const {found} = planWords(p.plan, lastTranscript(p), p.clips, FPS);
   const out = [`Plan saved (${p.plan.split('\n').length} lines, ${wids.length} word ids${unknown.length ? `; NOT in the transcript, fix them: ${unknown.join(', ')}` : ''}).`];
   if (found.length) out.push('', 'The words it names (quote them when you present it; the user does not read ids):', ...found.map((w) => `  ${w.wid} "${w.text}" @${f1(w.atMs / 1000)}s`));
-  const mode = modeOf(p);
+  const mode = planMode(p);
   if (mode === 'auto') out.push('', 'Plan mode auto: show the whole plan to the user in your message now — in their language, words quoted instead of ids — then go on with the edit without waiting (nobody may be watching). Follow it; the final message says where you departed from it. (If the user asks to review plans before editing: set_plan_mode review.)');
   else out.push('', p.planApproved ? 'Same plan as before — still APPROVED.' : 'Plan mode review — NOT APPROVED yet. Present the whole plan to the user in the chat — in their language, words quoted instead of ids — end by asking for "ok" or changes, and STOP: no more editing tools this turn. Their "ok" → approve_plan with their words; changes → request_plan_changes, then set_plan with the revision, present it again and stop again.');
   return text(out.join('\n'));
@@ -281,10 +280,13 @@ server.registerTool('request_plan_changes', {description: 'Record that the USER 
   const r = reviewPlan(p, {decision: 'changes', said: user_said, notes});
   if (r.error) throw new Error(r.error);
   p.planApproved = r.planApproved; p.planReviews = r.planReviews; await save(project_id, p);
-  return text(`Changes noted. Revise the plan with set_plan and present the new version in the chat${modeOf(p) === 'review' ? ' — it is NOT approved: stop until the user answers' : ''}.\n${planStatus(p, modeOf(p))}`);
+  return text(`Changes noted. Revise the plan with set_plan and present the new version in the chat${planMode(p) === 'review' ? ' — it is NOT approved: stop until the user answers' : ''}.\n${planStatus(p, planMode(p))}`);
 });
-server.registerTool('set_plan_mode', {description: 'How the plan step works on this project, when the USER asks for it (quote them). auto (the default, for unattended runs): write the plan, show it in the chat and keep editing. review: present the plan and STOP until the user approves it in the chat (approve_plan); until then the tools that edit the project and the final render refuse to run. Never switch it on your own — least of all to get past the review gate.', inputSchema: {project_id: pid, mode: z.enum(PLAN_MODES), user_said: userSaid}}, async ({project_id, mode}) => {
-  const p = load(project_id); p.planMode = mode; await save(project_id, p);
+server.registerTool('set_plan_mode', {description: 'How the plan step works on this project, when the USER asks for it (quote them). auto (the default, for unattended runs): write the plan, show it in the chat and keep editing. review: present the plan and STOP until the user approves it in the chat (approve_plan); until then the tools that edit the project and the final render refuse to run. Never switch it on your own — least of all to get past the review gate.', inputSchema: {project_id: pid, mode: z.enum(PLAN_MODES), user_said: userSaid}}, async ({project_id, mode, user_said}) => {
+  const p = load(project_id);
+  const r = setPlanMode(p, mode, user_said);
+  if (r.error) throw new Error(r.error);
+  p.planMode = r.planMode; p.planModeLog = r.planModeLog; await save(project_id, p);
   return text(`Plan mode ${mode} on this project.${mode === 'review' ? (p.plan && !p.planApproved ? ' The current plan is not approved: present it in the chat and stop until the user answers.' : ' After set_plan, present the plan and stop until the user approves it.') : ' After set_plan, show the plan in the chat and keep going.'}\n${p.plan ? planStatus(p, mode) : ''}`.trim());
 });
 // a word id present in the last transcript run (get_transcript); nothing to check against before one
@@ -983,7 +985,7 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
-server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. A final render also needs the user\'s approval of the plan (approve_plan); drafts do not. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
+server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. In plan mode review, a final render also needs the user\'s approval of the plan (approve_plan); drafts never do. In auto mode (the default) the plan is shown in the chat but nothing blocks. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const r = await runJob('/api/render', {...projectProps(p), draft});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));

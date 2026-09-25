@@ -66,8 +66,9 @@ need) the agent then keeps editing without waiting. Waiting for approval is
 opt-in, only when the user asks for it: `set_plan_mode review` → the agent
 presents the plan and stops, the user's "ok" is recorded with `approve_plan`
 (changes: `request_plan_changes`, then a new `set_plan`). The project JSON keeps
-`planMode`, `planApproved` (a changed plan resets it) and the user's answers
-(`planReviews`). Only in review mode, while the plan is unapproved, the MCP tools
+`planMode` (+ `planModeLog`: who switched it, quoted), `planApproved` (a changed
+plan resets it) and the user's answers (`planReviews`). Only in review mode, while
+the plan is unapproved or not written yet, the MCP tools
 that edit the project and the final render refuse to run (`src/plan.ts`
 `planGate`, default-deny list in `mcp/server.mjs`); reads, proofs, searches and
 draft renders stay open. No plan screen in the editor for now.

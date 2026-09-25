@@ -14,7 +14,9 @@ import type {TClip} from './cuts.ts';
 // one answer of the user to the plan, in their words
 export type PlanReview = {decision: 'approved' | 'changes'; said: string; notes?: string; at: string};
 // what approval needs from a project
-export type Plannable = {plan?: string; planApproved?: boolean; planReviews?: PlanReview[]; planMode?: PlanMode | null};
+export type Plannable = {plan?: string; planApproved?: boolean; planReviews?: PlanReview[]; planMode?: PlanMode | null; planModeLog?: PlanModeChange[]};
+// who switched the plan mode, in their words
+export type PlanModeChange = {mode: PlanMode; said: string; at: string};
 
 export type PlanMode = 'auto' | 'review';
 export const PLAN_MODES: PlanMode[] = ['auto', 'review'];
@@ -23,6 +25,15 @@ const isMode = (m: unknown): m is PlanMode => PLAN_MODES.includes(m as PlanMode)
 export const planMode = (p: Plannable): PlanMode => (isMode(p.planMode) ? p.planMode : 'auto');
 
 const KEEP_REVIEWS = 12;
+
+// switch the plan mode on the user's request; the log keeps who asked, quoted
+export function setPlanMode(p: Plannable, mode: PlanMode, said: string, at = new Date().toISOString()): {planMode: PlanMode; planModeLog: PlanModeChange[]; error?: string} {
+  const log = p.planModeLog ?? [];
+  const quoted = said.trim();
+  if (!isMode(mode)) return {planMode: planMode(p), planModeLog: log, error: `plan mode is ${PLAN_MODES.join(' or ')}`};
+  if (!quoted) return {planMode: planMode(p), planModeLog: log, error: 'quote what the user said (user_said)'};
+  return {planMode: mode, planModeLog: [...log, {mode, said: quoted, at}].slice(-KEEP_REVIEWS)};
+}
 
 // a new or edited plan needs a new yes; the same text keeps the answer it had
 export function withPlan(p: Plannable, plan: string): {plan: string; planApproved: boolean; changed: boolean} {
@@ -64,9 +75,11 @@ export function planStatus(p: Plannable, mode: PlanMode = planMode(p)): string {
   return `NOT APPROVED (plan mode review) — present it in the chat and wait for the user's answer${changes}`;
 }
 
-// null = go ahead; otherwise why not. Auto mode, no plan, or an approved plan = go ahead.
+// null = go ahead; otherwise why not. Auto mode or an approved plan = go ahead;
+// in review mode, no plan yet blocks too (the user asked to see it first).
 export function planGate(p: Plannable, action: string, mode: PlanMode = planMode(p)): string | null {
-  if (mode !== 'review' || !p.plan?.trim() || p.planApproved) return null;
+  if (mode !== 'review' || p.planApproved) return null;
+  if (!p.plan?.trim()) return `${action} waits for the plan (plan mode review): write it with set_plan, present it in the chat and STOP until the user answers. Reading, looking (frame_at, caption_proof), searching and draft renders still work.`;
   const asked = pendingChanges(p);
   return `${action} waits for the user to approve the plan (plan mode review). Present the plan in the chat (get_project shows it) and STOP until they answer: "ok" → approve_plan with their words; changes → set_plan with the revised plan, present it again and stop.${asked.length ? ` Changes asked so far: ${asked.map(quote).join('; ')}.` : ''} Reading, looking (frame_at, caption_proof), searching and draft renders still work.`;
 }

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {pendingChanges, planGate, planMode, planStatus, planWords, reviewPlan, withPlan} from '../src/plan.ts';
+import {pendingChanges, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
 
 const PLAN = `STYLE: none
 IDEA: the flat sells itself
@@ -55,11 +55,21 @@ test('plan mode: auto unless the project was switched to review', () => {
   assert.equal(planMode({planMode: 'review'}), 'review');
 });
 
+test('switching the plan mode keeps who asked for it, quoted', () => {
+  const r = setPlanMode({}, 'review', '  muéstrame el plan antes  ', 't1');
+  assert.deepEqual(r, {planMode: 'review', planModeLog: [{mode: 'review', said: 'muéstrame el plan antes', at: 't1'}]});
+  const back = setPlanMode({planMode: 'review', planModeLog: r.planModeLog}, 'auto', 'ya no esperes mi ok', 't2');
+  assert.deepEqual(back.planModeLog.map((x) => [x.mode, x.said]), [['review', 'muéstrame el plan antes'], ['auto', 'ya no esperes mi ok']]);
+  assert.match(setPlanMode({}, 'review', ' ').error, /user_said/);
+  assert.match(setPlanMode({}, 'nope', 'x').error, /auto or review/);
+});
+
 test('the gate: only in review mode, with an unapproved plan; it names the action and the asked changes', () => {
   const pending = {plan: PLAN, planApproved: false, planReviews: [{decision: 'changes', said: 'otra alberca', at: 't'}]};
   assert.equal(planGate(pending, 'cut_words'), null); // auto (default): the plan is shown, the edit goes on
   assert.equal(planGate({...pending, planMode: 'auto'}, 'cut_words', 'auto'), null);
-  assert.equal(planGate({plan: ''}, 'cut_words', 'review'), null);
+  assert.equal(planGate({plan: ''}, 'cut_words'), null); // auto, no plan: nothing to wait for
+  assert.match(planGate({plan: ''}, 'cut_words', 'review'), /^cut_words waits for the plan \(plan mode review\): write it with set_plan/); // review: no plan blocks too
   assert.equal(planGate({plan: PLAN, planApproved: true}, 'cut_words', 'review'), null);
   const why = planGate(pending, 'cut_words', 'review');
   assert.match(why, /^cut_words waits for the user to approve the plan \(plan mode review\)/);
@@ -109,10 +119,14 @@ test('MCP, plan mode auto (the default): the plan is shown and the edit goes on 
 
 test('MCP, plan mode review: an unapproved plan blocks editing tools and the final render, not reads or drafts', async () => {
   await withServer({}, async (call, saved) => {
-    // no plan yet: nothing is gated
+    // auto, no plan yet: nothing is gated
     assert.equal(gated(await call('set_accent_color', {color: '#FF0000'})), false);
     assert.match((await call('set_plan_mode', {mode: 'review', user_said: 'muéstrame el plan antes de editar'})).text, /Plan mode review/);
     assert.equal(saved().planMode, 'review');
+    assert.deepEqual(saved().planModeLog.map((x) => [x.mode, x.said]), [['review', 'muéstrame el plan antes de editar']]);
+    // review, no plan yet: editing waits for the plan too
+    const early = await call('set_accent_color', {color: '#123456'});
+    assert.ok(early.err && /waits for the plan \(plan mode review\)/.test(early.text), early.text);
     const r = await call('set_plan', {plan: PLAN});
     assert.match(r.text, /Plan mode review — NOT APPROVED yet.*STOP/s);
     assert.equal(saved().planApproved, false);
@@ -144,6 +158,7 @@ test('MCP: back to auto when the user says so, and the gate is gone', async () =
     assert.ok(gated(await call('cut_words', {from_wid: 'a:0'})));
     await call('set_plan_mode', {mode: 'auto', user_said: 'ya no esperes mi ok'});
     assert.equal(saved().planMode, 'auto');
+    assert.deepEqual(saved().planModeLog.map((x) => x.said), ['quiero revisar el plan', 'ya no esperes mi ok']);
     assert.equal(gated(await call('cut_words', {from_wid: 'a:0'})), false);
   });
 });
