@@ -1,10 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {flagOffMic, loudnessFromPcm, runsOf} from '../src/speech.ts';
+import {paint, track} from './loud.mjs';
 
-// loudness track at 50 windows/s; paint(a, b, db) sets a span in seconds
-const track = (sec) => ({fps: 50, db: new Array(Math.round(sec * 50)).fill(-60)});
-const paint = (t, a, b, db) => { for (let i = Math.round(a * 50); i < Math.round(b * 50); i++) t.db[i] = db; };
 const W = (word, a, b) => ({word, startMs: a * 1000, endMs: b * 1000});
 
 test('a quieter take before the loud repeat is flagged off-mic', () => {
@@ -65,7 +63,7 @@ test('one speaker, or two at the same level: nothing is off-mic by speaker; a so
 });
 
 
-import {voiceInGap, voiceSpans} from '../src/speech.ts';
+import {longestSilenceMs, voiceSpans} from '../src/speech.ts';
 
 test('voiceSpans: speech above the noise floor, silence skipped, short dips bridged', () => {
   const t = track(12); // 50 windows/s at -60
@@ -74,8 +72,17 @@ test('voiceSpans: speech above the noise floor, silence skipped, short dips brid
   paint(t, 7, 7.5, -24); paint(t, 7.6, 8.2, -23); // two words with a 100 ms dip: one span
   const spans = voiceSpans(t);
   assert.deepEqual(spans, [[1, 3], [7, 8.2]]);
-  assert.ok(voiceInGap(spans, 7000, 7400));
-  assert.ok(!voiceInGap(spans, 3000, 6900));
+  assert.equal(longestSilenceMs(spans, 7000, 7400), 0); // inside a phrase
+  assert.equal(longestSilenceMs(spans, 3000, 6900), 3900); // nothing in it
+  assert.equal(longestSilenceMs(spans, 2000, 7200), 4000); // 3 → 7
+});
+
+test('voiceSpans: a voice still talking when the track ends is a span too', () => {
+  const t = track(4);
+  paint(t, 1, 4, -25);
+  assert.deepEqual(voiceSpans(t), [[1, 4]]);
+  paint(t, 3.9, 4, -60); // ends 100 ms before the track does: inside the dip
+  assert.deepEqual(voiceSpans(t), [[1, 3.9]]);
 });
 
 test('voiceSpans: a flat track has no voice (nothing stands out from the floor)', () => {

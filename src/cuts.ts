@@ -11,7 +11,7 @@
 // (up to JOIN_MS), so a take said with a pause in it competes whole against a rehearsal read in
 // one breath. Pure: no fs. Words carry source-relative ms and their index in the source transcript.
 
-import {voiceInGap, voiceSpans, type Loudness} from './speech.ts';
+import {longestSilenceMs, voiceSpans, type Loudness} from './speech.ts';
 
 export type TWord = {i: number; word: string; startMs: number; endMs: number; off?: boolean};
 export type TClip = {clipId: string; source: string; words: TWord[]};
@@ -161,7 +161,8 @@ export function findCutCandidates(clips: TClip[], opts: {gapMs?: number; windowM
 // Words come from WhisperX, and WhisperX drops words it cannot align (a quiet
 // presenter, fillers, overlap): a transcript gap is not always silence. With
 // `loud` (the per-source loudness track, see speech.ts) a pause of up to
-// bridgeMaxMs that still has a voice in it is NOT a cut point, and each run
+// bridgeMaxMs whose silences are all shorter than gapMs (a voice fills the
+// hole) is NOT a cut point, and each run
 // grows to the edges of the voice span it lives in, so a swallowed "eh…" or a
 // clipped last word stays in the take. Gaps without energy keep the old
 // behavior: they are cut. With `dropOff`, off-mic words (a second voice away
@@ -180,29 +181,30 @@ export function speechSegments(
   if (!ws.length) return [];
   const spans = o.loud ? voiceSpans(o.loud) : [];
   const bridgeMax = o.bridgeMaxMs;
-  // a pause worth keeping: short enough, with a voice in it, and not explained
-  // by an off-mic word we were asked to drop
-  const bridgeable = (aMs: number, bMs: number) =>
-    bMs - aMs <= bridgeMax && !off.some((w) => w.startMs < bMs && w.endMs > aMs) && voiceInGap(spans, aMs, bMs);
+  const offIn = (aMs: number, bMs: number) => off.some((w) => w.startMs < bMs && w.endMs > aMs);
+  // a pause worth keeping: short enough, no silence longer than gapMs inside it
+  // (the voice fills the hole), and not explained by an off-mic word we drop
+  const bridgeable = (aMs: number, bMs: number) => bMs - aMs <= bridgeMax && !offIn(aMs, bMs) && longestSilenceMs(spans, aMs, bMs) <= o.gapMs;
   const runs: [number, number][] = [];
   let start = ws[0].startMs;
   ws.forEach((w, k) => {
     const next = ws[k + 1];
-    if (!next || (next.startMs - w.endMs > o.gapMs && !bridgeable(w.endMs, next.startMs))) {
+    // a dropped off-mic word splits the take however short the gaps around it are
+    if (!next || offIn(w.endMs, next.startMs) || (next.startMs - w.endMs > o.gapMs && !bridgeable(w.endMs, next.startMs))) {
       runs.push([start, w.endMs]);
       if (next) start = next.startMs;
     }
   });
   // grow each run to the edges of the voice span it lives in (never more than
-  // bridgeMax past its words, never across an off-mic word we are dropping)
+  // bridgeMax past its words, never into an off-mic word we are dropping)
   const grown = runs.map(([a, b]): [number, number] => {
     const head = spans.find(([s, e]) => s * 1000 <= a && e * 1000 >= a);
     const tail = spans.find(([s, e]) => s * 1000 <= b && e * 1000 >= b);
     let lo = head && a - head[0] * 1000 <= bridgeMax ? head[0] * 1000 : a;
     let hi = tail && tail[1] * 1000 - b <= bridgeMax ? tail[1] * 1000 : b;
     for (const w of off) {
-      if (w.endMs <= a && a - w.endMs <= bridgeMax) lo = Math.max(lo, w.endMs);
-      if (w.startMs >= b && w.startMs - b <= bridgeMax) hi = Math.min(hi, w.startMs);
+      if (w.startMs < a && w.endMs > lo) lo = Math.min(a, Math.max(lo, w.endMs));
+      if (w.endMs > b && w.startMs < hi) hi = Math.max(b, Math.min(hi, w.startMs));
     }
     return [lo, hi];
   });

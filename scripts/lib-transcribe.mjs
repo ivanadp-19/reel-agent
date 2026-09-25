@@ -63,8 +63,14 @@ const cacheFile = (clip, lang) => path.join(TRANSCRIPTS, `${sourceKey(clip)}.${l
 
 // Loudness sidecar per source (20 ms windows): tells the presenter's takes from
 // a quieter voice off camera (a director feeding lines). See src/speech.ts.
+const LOUD = new Map(); // per process: autocut asks for the same source once per clip
 export function loudnessFor(clip) {
-  const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.loud.json`);
+  const key = sourceKey(clip);
+  if (!LOUD.has(key)) LOUD.set(key, readLoudness(clip, key));
+  return LOUD.get(key);
+}
+function readLoudness(clip, key) {
+  const f = path.join(TRANSCRIPTS, `${key}.loud.json`);
   if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
   const ff = spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(PUBLIC, clip.src), '-vn', '-f', 'f32le', '-ac', '1', '-ar', '16000', '-'], {cwd: ROOT, maxBuffer: 1 << 29});
   if (ff.status !== 0 || !ff.stdout?.length) return null;

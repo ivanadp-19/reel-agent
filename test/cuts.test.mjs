@@ -91,9 +91,7 @@ test('a take split by a short pause is one attempt: "Y" + "si necesitas…" beat
 });
 
 
-// loudness track at 50 windows/s for autocut voice-activity tests
-const loud = (sec) => ({fps: 50, db: new Array(Math.round(sec * 50)).fill(-60)});
-const paint = (t, a, b, db) => { for (let i = Math.round(a * 50); i < Math.round(b * 50); i++) t.db[i] = db; };
+import {paint, track} from './loud.mjs';
 const W2 = (a, b, off) => ({startMs: a * 1000, endMs: b * 1000, ...(off ? {off: true} : {})});
 const CLIP = {inSec: 0, outSec: 20};
 
@@ -104,7 +102,7 @@ test('autocut without loudness keeps the old behavior: words only', () => {
 });
 
 test('a pause with a voice still in it is not a cut point (WhisperX dropped the words)', () => {
-  const t = loud(20);
+  const t = track(20);
   paint(t, 0.8, 3.1, -25); // the presenter talks straight through; the transcript has a hole
   const words = [W2(1, 1.5), W2(2.4, 2.9)]; // 900 ms transcript gap
   const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
@@ -113,7 +111,7 @@ test('a pause with a voice still in it is not a cut point (WhisperX dropped the 
 });
 
 test('a silent pause is still cut, even with a loudness track', () => {
-  const t = loud(20);
+  const t = track(20);
   paint(t, 0.9, 1.6, -25); paint(t, 2.3, 3.0, -25); // two phrases, real silence between
   const words = [W2(1, 1.5), W2(2.4, 2.9)];
   const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
@@ -121,7 +119,7 @@ test('a silent pause is still cut, even with a loudness track', () => {
 });
 
 test('a pause longer than bridgeMaxMs is cut even if something rustles in it', () => {
-  const t = loud(20);
+  const t = track(20);
   paint(t, 0.9, 1.6, -25); paint(t, 2.0, 2.5, -30); paint(t, 4.4, 5.1, -25); // 2.9 s gap with noise
   const words = [W2(1, 1.5), W2(4.5, 5)];
   const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
@@ -129,16 +127,44 @@ test('a pause longer than bridgeMaxMs is cut even if something rustles in it', (
 });
 
 test('dropOff: the off-mic voice explains its energy — its gap is never bridged back', () => {
-  const t = loud(20);
-  paint(t, 0.9, 3.1, -25); // presenter, then the director inside the same loud stretch
-  const words = [W2(1, 1.5), W2(1.7, 2.6, true), W2(2.8, 3.1)]; // off-mic line in the middle
+  const t = track(20);
+  paint(t, 0.9, 2.9, -25); // presenter, then the director inside the same loud stretch
+  const words = [W2(1, 1.5), W2(1.7, 2.6, true), W2(2.7, 2.9)]; // off-mic line in the middle
   const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t, dropOff: true});
   assert.equal(segs.length, 2, JSON.stringify(segs)); // cut around the off-mic line
-  assert.ok(segs[0].outSec <= 1.7 && segs[1].inSec >= 2.6, JSON.stringify(segs));
+  // the take grows to the voice edge but stops at the dropped line (+ inner pad)
+  assert.ok(segs[0].outSec <= 1.7 + AUTOCUT.innerPad && segs[1].inSec >= 2.6 - AUTOCUT.innerPad, JSON.stringify(segs));
+});
+
+test('dropOff: an off-mic word over the take edge still stops the growth (no overlapping segments)', () => {
+  const t = track(20);
+  paint(t, 0.9, 2.9, -25);
+  const words = [W2(1, 1.5), W2(1.4, 2.6, true), W2(2.7, 2.9)]; // the director starts over her last word
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t, dropOff: true});
+  assert.equal(segs.length, 2, JSON.stringify(segs));
+  assert.ok(segs[0].outSec <= 1.5 + AUTOCUT.innerPad, JSON.stringify(segs));
+  assert.ok(segs[1].inSec >= segs[0].outSec, JSON.stringify(segs));
+});
+
+test('dropOff: a short off-mic word between two close words still splits the take', () => {
+  const t = track(20);
+  paint(t, 0.9, 2.4, -25);
+  const words = [W2(1, 1.5), W2(1.55, 1.9, true), W2(1.95, 2.3)]; // gaps under gapMs on both sides
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t, dropOff: true});
+  assert.equal(segs.length, 2, JSON.stringify(segs));
+  assert.ok(segs[0].outSec <= 1.55 + AUTOCUT.innerPad && segs[1].inSec >= 1.9 - AUTOCUT.innerPad, JSON.stringify(segs));
+});
+
+test('a blip in a long pause does not bridge it: every silence inside the gap must be under gapMs', () => {
+  const t = track(20);
+  paint(t, 0.9, 1.6, -25); paint(t, 2.14, 2.26, -30); paint(t, 2.9, 3.6, -25); // a 120 ms click in a 1.4 s pause
+  const words = [W2(1, 1.5), W2(3, 3.5)];
+  const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});
+  assert.equal(segs.length, 2, JSON.stringify(segs));
 });
 
 test('a swallowed word at the take edge: the segment grows to the voice span', () => {
-  const t = loud(20);
+  const t = track(20);
   paint(t, 0.6, 2.4, -25); // "…eh, esta casa" — WhisperX only aligned from 1.0
   const words = [W2(1, 1.5), W2(1.55, 1.9)];
   const segs = speechSegments(words, CLIP, {...AUTOCUT, loud: t});

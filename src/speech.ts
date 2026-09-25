@@ -176,12 +176,20 @@ export function voiceSpans(loud: Loudness, opts: {voiceDb?: number; dipMs?: numb
   for (let i = 0; i <= db.length; i++) {
     const on = i < db.length && db[i] >= thresh;
     if (on) { if (open < 0) open = i; lastOn = i; }
-    else if (open >= 0 && i - lastOn > dip) { spans.push([open / fps, (lastOn + 1) / fps]); open = -1; }
+    else if (open >= 0 && (i === db.length || i - lastOn > dip)) { spans.push([open / fps, (lastOn + 1) / fps]); open = -1; }
   }
   return spans.filter(([a, b]) => (b - a) * 1000 >= blipMs);
 }
 
-// does any voice span cover a real stretch of the (aMs, bMs) gap?
-export function voiceInGap(spans: [number, number][], aMs: number, bMs: number, minMs = 120): boolean {
-  return spans.some(([s, e]) => Math.min(e * 1000, bMs) - Math.max(s * 1000, aMs) >= minMs);
+// the longest stretch without voice inside the (aMs, bMs) gap: 0 when a span
+// covers it all, bMs - aMs when nothing in it is voice
+export function longestSilenceMs(spans: [number, number][], aMs: number, bMs: number): number {
+  let cur = aMs, worst = 0;
+  for (const [s, e] of spans) {
+    const s1 = s * 1000, e1 = e * 1000;
+    if (e1 <= aMs || s1 >= bMs) continue;
+    worst = Math.max(worst, s1 - cur);
+    cur = Math.max(cur, e1);
+  }
+  return Math.max(worst, bMs - cur);
 }
