@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {clipDurationSec} from '../src/timeline';
+import {fmtMB, isVideoFile, pct, uploadFile, type UploadItem} from './upload';
 
 export type ProjectMeta = {id: string; name: string; clips: number; updatedAt: string | null; thumb: string | null};
 type HealthCheck = {id: string; ok: boolean; label: string; hint: string; optional?: boolean};
@@ -25,27 +26,52 @@ export const Start: React.FC<{
 }> = ({projects, onNew, onOpen, onRefresh}) => {
   const {clips, addClip} = useEditor();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
   const checkHealth = () => fetch('/api/health').then((r) => r.json()).then(setHealth).catch(() => setHealth(null));
   useEffect(() => { checkHealth(); }, []);
   const problems = health?.checks.filter((c) => !c.ok) ?? [];
 
-  const importFiles = async (files: File[]) => {
-    const vids = files.filter((f) => f.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name));
-    if (!vids.length) return;
-    for (let i = 0; i < vids.length; i++) {
-      setBusy(`Uploading ${vids[i].name} (${i + 1}/${vids.length})…`);
-      try {
-        const clip = await fetch('/api/add-clip?name=' + encodeURIComponent(vids[i].name), {method: 'POST', body: vids[i]}).then((r) => r.json());
-        if (clip?.id) addClip(clip);
-      } catch {
-        /* skip */
-      }
+  // one upload at a time (the backend transcodes each one), every file with its own row:
+  // queued → uploading (%, MB) → processing on the server → done | error (the server's message)
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [skipped, setSkipped] = useState<string[]>([]);
+  const busy = uploads.some((u) => u.phase === 'queued' || u.phase === 'uploading' || u.phase === 'processing');
+  const patch = (key: string, p: Partial<UploadItem>) => setUploads((l) => l.map((u) => (u.key === key ? {...u, ...p} : u)));
+
+  const upload = async (file: File, key: string) => {
+    patch(key, {phase: 'uploading'});
+    try {
+      const clip = await uploadFile<{id?: string; error?: string}>('/api/add-clip?name=' + encodeURIComponent(file.name), file, {
+        progress: (loaded) => patch(key, {loaded}),
+        uploaded: () => patch(key, {phase: 'processing', loaded: file.size}),
+      });
+      if (!clip?.id) throw new Error(clip?.error || 'the server did not return a clip');
+      addClip(clip as Parameters<typeof addClip>[0]);
+      patch(key, {phase: 'done'});
+    } catch (e) {
+      patch(key, {phase: 'error', error: e instanceof Error ? e.message : String(e)});
     }
-    setBusy(null);
   };
+  // files picked or dropped while others are still going wait behind them
+  const queue = useRef(Promise.resolve());
+  const importFiles = (files: File[]) => {
+    const vids = files.filter(isVideoFile);
+    setSkipped(files.filter((f) => !isVideoFile(f)).map((f) => f.name));
+    if (!vids.length) return;
+    const items: UploadItem[] = vids.map((f, i) => ({key: `${Date.now()}-${i}-${f.name}`, name: f.name, size: f.size, loaded: 0, phase: 'queued'}));
+    // rows that finished fine go; running, queued and failed ones stay
+    setUploads((l) => [...l.filter((u) => u.phase !== 'done'), ...items]);
+    for (let i = 0; i < vids.length; i++) queue.current = queue.current.then(() => upload(vids[i], items[i].key));
+  };
+  const failed = uploads.filter((u) => u.phase === 'error');
+  // closing the tab mid-upload loses the file: ask first
+  useEffect(() => {
+    if (!busy) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [busy]);
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = '';
@@ -77,7 +103,7 @@ export const Start: React.FC<{
       <div className="w-full max-w-3xl">
         <div className="mb-8 text-center">
           <h1 className="text-headline-lg font-headline-lg font-bold">reel-agent</h1>
-          <p className="text-body-md text-on-surface-variant mt-1">Open a project or drop clips to start a new one</p>
+          <p className="text-body-md text-on-surface-variant mt-1">Open a recent project, or start a new one: upload clips, then create the project</p>
         </div>
 
         {/* Setup problems (from /api/health): shown until everything the AI steps need is in place */}
@@ -99,35 +125,111 @@ export const Start: React.FC<{
           </div>
         )}
 
-        {/* New project */}
-        <input ref={inputRef} type="file" accept="video/*" multiple onChange={onPick} className="hidden" />
+        {/* New project. The file input is visually hidden but stays in the page and the
+            accessibility tree (not display:none), so browser automation can find and fill it;
+            the "Choose files" button is its <label>. */}
+        <input
+          id="start-file-input"
+          ref={inputRef}
+          type="file"
+          accept="video/*"
+          multiple
+          onChange={onPick}
+          aria-label="Choose video files"
+          data-testid="clip-file-input"
+          className="sr-only"
+        />
         <div
-          onClick={() => !clips.length && inputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={onDrop}
-          className={`w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-3 py-12 transition-all ${
+          data-testid="clip-dropzone"
+          className={`w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-3 py-10 px-6 transition-all ${
             dragOver ? 'border-primary bg-primary-container/10' : 'border-outline-variant bg-surface-container-low'
-          } ${clips.length ? '' : 'cursor-pointer hover:border-primary/60'}`}
+          }`}
         >
-          <span className="material-symbols-outlined text-[48px] text-primary">{busy ? 'progress_activity' : 'video_library'}</span>
-          {busy ? (
-            <p className="text-body-md text-primary">{busy}</p>
-          ) : clips.length ? (
-            <div className="flex flex-col items-center gap-3">
-              <p className="text-body-md text-on-surface">{clips.length} clip{clips.length > 1 ? 's' : ''} ready</p>
-              <div className="flex gap-2">
-                <button onClick={() => inputRef.current?.click()} className="px-4 py-2 rounded-lg border border-outline-variant text-on-surface-variant hover:bg-surface-variant text-body-md font-bold">Add more</button>
-                <button onClick={onNew} className="bg-primary-container text-on-primary-container px-5 py-2 rounded-lg font-bold text-body-md hover:brightness-110 active:scale-95 transition-all flex items-center gap-1">
-                  Open editor <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <button className="bg-primary-container text-on-primary-container px-6 py-2.5 rounded-lg font-bold text-body-md hover:brightness-110 active:scale-95 transition-all">New project — add files</button>
-              <p className="text-body-sm text-on-surface-variant">or drag &amp; drop videos here</p>
-            </>
+          <span className={`material-symbols-outlined text-[48px] text-primary ${busy ? 'animate-spin' : ''}`}>{busy ? 'progress_activity' : 'video_library'}</span>
+          <p className="text-body-md text-on-surface font-bold">
+            {clips.length ? 'Step 2 — create the project' : 'Step 1 — add your clips'}
+          </p>
+          <p className="text-body-sm text-on-surface-variant text-center max-w-md">
+            {busy
+              ? 'Uploading… each clip is also converted on the server before it is ready. Keep this tab open.'
+              : clips.length
+                ? `${clips.length} clip${clips.length > 1 ? 's' : ''} uploaded, but no project exists yet. Click “Create project” to save them as a new project and open the editor — or add more clips first.`
+                : 'Upload the videos for a new reel. Then you create the project from them in step 2.'}
+          </p>
+          <div className="flex gap-2 flex-wrap justify-center">
+            <label
+              htmlFor="start-file-input"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click(); } }}
+              className={clips.length
+                ? 'cursor-pointer px-4 py-2 rounded-lg border border-outline-variant text-on-surface-variant hover:bg-surface-variant text-body-md font-bold'
+                : 'cursor-pointer bg-primary-container text-on-primary-container px-6 py-2.5 rounded-lg font-bold text-body-md hover:brightness-110 active:scale-95 transition-all'}
+            >
+              {clips.length ? 'Add more clips' : 'Choose files'}
+            </label>
+            {clips.length > 0 && (
+              <button
+                onClick={onNew}
+                disabled={busy}
+                title={busy ? 'Wait for the uploads to finish' : 'Save the uploaded clips as a new project and open the editor'}
+                className="bg-primary-container text-on-primary-container px-5 py-2 rounded-lg font-bold text-body-md hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Create project <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
+              </button>
+            )}
+          </div>
+          <p className="text-[11px] text-on-surface-variant">or drag &amp; drop videos here (mp4, mov, m4v, webm, mkv)</p>
+
+          {uploads.length > 0 && (
+            <ul className="w-full max-w-lg mt-2 space-y-2" aria-live="polite" data-testid="upload-list">
+              {uploads.map((u) => (
+                <li key={u.key} data-phase={u.phase} className="rounded-lg bg-surface-container px-3 py-2 text-body-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate font-medium" title={u.name}>{u.name}</span>
+                    <span className={`shrink-0 text-[11px] ${u.phase === 'error' ? 'text-error' : u.phase === 'done' ? 'text-primary' : 'text-on-surface-variant'}`}>
+                      {u.phase === 'queued' && `Waiting · ${fmtMB(u.size)}`}
+                      {u.phase === 'uploading' && `${pct(u.loaded, u.size)}% · ${fmtMB(u.loaded)} / ${fmtMB(u.size)}`}
+                      {u.phase === 'processing' && 'Uploaded — processing on the server…'}
+                      {u.phase === 'done' && 'Ready'}
+                      {u.phase === 'error' && 'Failed'}
+                    </span>
+                  </div>
+                  {(u.phase === 'uploading' || u.phase === 'processing') && (
+                    <div
+                      className="mt-1.5 h-1.5 rounded bg-surface-variant overflow-hidden"
+                      role="progressbar"
+                      aria-label={`Upload of ${u.name}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={u.phase === 'processing' ? 100 : pct(u.loaded, u.size)}
+                    >
+                      <div
+                        className={`h-full bg-primary transition-[width] ${u.phase === 'processing' ? 'animate-pulse' : ''}`}
+                        style={{width: `${u.phase === 'processing' ? 100 : pct(u.loaded, u.size)}%`}}
+                      />
+                    </div>
+                  )}
+                  {u.phase === 'processing' && (
+                    <p className="mt-1 text-[11px] text-on-surface-variant">Converting the video and making a thumbnail. Large or 4K/HDR clips can take a few minutes.</p>
+                  )}
+                  {u.phase === 'error' && <p role="alert" className="mt-1 text-[11px] text-error break-words">{u.error}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {failed.length > 0 && !busy && (
+            <button onClick={() => setUploads((l) => l.filter((u) => u.phase !== 'error'))} className="text-[11px] uppercase tracking-wide text-primary hover:underline">
+              Dismiss errors
+            </button>
+          )}
+          {skipped.length > 0 && (
+            <p role="alert" className="text-[11px] text-error text-center">
+              Skipped (not a video): {skipped.join(', ')}
+            </p>
           )}
         </div>
 
