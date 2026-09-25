@@ -23,6 +23,7 @@ import {brandSchema} from '../src/brand.ts';
 import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {renderPlan} from '../scripts/render-queue.mjs';
+import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
@@ -150,56 +151,9 @@ async function health() {
   return {ok: checks.every((c) => c.ok || c.optional), checks};
 }
 
-// The only remote host we ever download from. Anything else in a B-roll src
-// (an agent talked into it by a transcript, a stray URL) is refused, and
-// redirects are re-checked hop by hop so a 302 cannot point at the LAN.
-const ALLOWED_REMOTE = /(^|\.)pexels\.com$/i;
-async function fetchAllowed(url, hops = 0) {
-  const u = new URL(url);
-  if (u.protocol !== 'https:' || !ALLOWED_REMOTE.test(u.hostname)) throw new Error(`refusing to download from ${u.hostname}: only Pexels URLs are fetched`);
-  const r = await fetch(u, {redirect: 'manual'});
-  if ([301, 302, 303, 307, 308].includes(r.status)) {
-    if (hops >= 3) throw new Error('too many redirects');
-    return fetchAllowed(new URL(r.headers.get('location') ?? '', u).href, hops + 1);
-  }
-  return r;
-}
-
-// download remote B-roll srcs into public/broll/ and rewrite props in place
+// remote (Pexels) B-roll is downloaded into public/broll/ before a render (scripts/remote-broll.mjs:
+// Pexels only, redirects re-checked, a deadline per download, abortable by the render job)
 const BROLL_DIR = path.join(PUBLIC, 'broll');
-async function localizeRemoteBrolls(props) {
-  const items = Array.isArray(props?.brolls) ? props.brolls : [];
-  fs.mkdirSync(BROLL_DIR, {recursive: true});
-  for (const b of items) {
-    if (!/^https?:\/\//.test(b.src ?? '')) continue;
-    const ext = b.kind === 'video' ? 'mp4' : (b.src.match(/\.(jpe?g|png|webp)(\?|$)/i)?.[1] ?? 'jpg');
-    // named by a hash of the whole URL: Pexels files of one size share their last
-    // characters ("…_1080_1920_30fps.mp4"), and a name from those made two cues share one file
-    const name = `px-${crypto.createHash('sha1').update(b.src).digest('hex').slice(0, 16)}.${ext}`;
-    const file = path.join(BROLL_DIR, name);
-    if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
-      const r = await fetchAllowed(b.src);
-      if (!r.ok) throw new Error(`B-roll download ${r.status}: ${b.src}`);
-      const tmp = file + '.part';
-      fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
-      if (ext === 'mp4') {
-        // Remotion's compositor fails on 4K sources ("Could not extract frame ...
-        // Request closed"); the output is 1080x1920 anyway, so cap the height.
-        const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=height', '-of', 'csv=p=0', tmp]);
-        const h = parseInt(probe.stdout, 10) || 0;
-        if (h > 1920) {
-          const small = file + '.small.mp4';
-          const enc = await run('ffmpeg', ['-y', '-i', tmp, '-vf', 'scale=-2:1920', '-c:v', 'libx264', '-preset', 'veryfast',
-            '-crf', '20', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', small]);
-          if (enc.code !== 0) throw new Error(`B-roll downscale failed: ${enc.stderr.slice(-200)}`);
-          fs.rmSync(tmp, {force: true});
-          fs.renameSync(small, file);
-        } else fs.renameSync(tmp, file);
-      } else fs.renameSync(tmp, file);
-    }
-    b.src = `broll/${name}`;
-  }
-}
 
 // ---- render jobs (scripts/render-jobs.mjs + scripts/render-runner.mjs) ----
 // A render is a job on disk (public/render-jobs/): POST /api/render answers with its
@@ -210,7 +164,7 @@ async function localizeRemoteBrolls(props) {
 const PLAN = renderPlan();
 // LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
 // baked here, before the render, so no clip silently plays ungraded
-async function bakeMissing(raw, id) {
+async function bakeMissing(raw, id, {signal, setPid, progress} = {}) {
   const props = JSON.parse(raw);
   const g = props.grade;
   const missing = lutBakes(g, props.clips ?? [], props.mattes ?? []).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
@@ -218,8 +172,10 @@ async function bakeMissing(raw, id) {
   const inFile = path.join(ROOT, `.lut-${id}.json`), outFile = path.join(ROOT, '.captions-tmp', `lut-${id}.json`);
   fs.mkdirSync(path.dirname(outFile), {recursive: true});
   fs.writeFileSync(inFile, JSON.stringify({bake: missing}));
-  const r = await run('node', ['scripts/lut.mjs', inFile, outFile]);
-  fs.rmSync(inFile, {force: true});
+  progress?.(0.9, `Baking the LUT into ${missing.length} source${missing.length === 1 ? '' : 's'}`);
+  let r;
+  try { r = await runCmd('node', ['scripts/lut.mjs', inFile, outFile], {cwd: ROOT, signal, onPid: setPid}); }
+  finally { fs.rmSync(inFile, {force: true}); }
   if (r.code !== 0) throw new Error(explainFailure(r.stderr, 'LUT bake failed'));
   g.baked = {...g.baked, ...JSON.parse(fs.readFileSync(outFile, 'utf8')).baked};
   fs.rmSync(outFile, {force: true});
@@ -227,10 +183,11 @@ async function bakeMissing(raw, id) {
 }
 // before the render (inside its queue slot, so the submit answers at once): remote
 // B-roll downloaded to disk, then the LUT bakes the grade still needs
-async function prepareRender(raw, id) {
+// — both abortable: a cancel or the preparing stall limit stops them (the job's signal)
+async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
   const props = JSON.parse(raw);
-  await localizeRemoteBrolls(props);
-  return bakeMissing(JSON.stringify(props), id);
+  await localizeRemoteBrolls(props, {dir: BROLL_DIR, signal, onPid: setPid, progress: (f, label) => progress?.(f * 0.8, label)});
+  return bakeMissing(JSON.stringify(props), id, {signal, setPid, progress});
 }
 // the layered pipeline's master cache (another branch), when it is there — contract in scripts/render-runner.mjs
 const MASTER_HOOK = path.join(ROOT, 'scripts', 'master-cache.mjs');

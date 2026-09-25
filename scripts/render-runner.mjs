@@ -23,12 +23,19 @@
 // goes through loudness + QC + review version); the job result says master {hit, key}.
 // A miss renders and then offers the fresh master to storeMaster. A hook that throws is
 // logged and treated as a miss: the cache can never fail a render.
+//
+// CANCEL (or the stall control) aborts ctx.signal. Every stage follows it: prepare gets
+// the signal (and is raced against it, so a step that ignores it still frees the queue
+// slot), the child processes are killed, and on the way out the job's files are removed
+// (every exports/edited-<id>*: the render, finalize's .loudnorm.mp4) — and a review
+// version recorded while the cancel came in is taken back (unrecord): a cancelled job
+// leaves no file and no version.
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {renderArgs} from './render-queue.mjs';
 import {linkPublic} from './public-links.mjs';
-import {recordFinal} from './reviews.mjs';
+import {recordFinal, removeVersion} from './reviews.mjs';
 import {killTree} from './render-jobs.mjs';
 
 // [from, to] of the overall percentage per stage; a draft has no finalizing / review
@@ -115,10 +122,11 @@ export function createRenderRunner({
   reviewsDir = path.join(publicDir, 'reviews'),
   tmpDir = path.join(root, '.captions-tmp'),
   plan = {concurrency: 1, cacheBytes: 5e8},
-  prepare = async (raw) => raw, // (raw props, jobId) → raw props: localize remote B-roll, bake LUTs
+  prepare = async (raw) => raw, // (raw props, jobId, {signal, setPid, progress(frac, label)}) → raw props: localize remote B-roll, bake LUTs
   master = null, // {lookupMaster, storeMaster} — see MASTER CACHE HOOK above
   commands = defaultCommands,
   record = recordFinal,
+  unrecord = ({projectId, v}) => removeVersion(reviewsDir, projectId, v, publicDir), // a version recorded by a job cancelled meanwhile
   log = (m) => console.log(m),
   now = Date.now,
 } = {}) {
@@ -130,102 +138,127 @@ export function createRenderRunner({
     const t0 = now();
     const set = (stage, frac = 0, extra = {}) => ctx.update({stage, label: extra.label ?? STAGE_LABEL[stage], progress: overall(stage, frac, draft), ...extra});
     const stop = () => { if (signal.aborted) throw signal.reason; };
-
-    set('preparing', 0);
-    let raw = await prepare(ctx.props, id);
-    stop();
-    const props = JSON.parse(raw);
+    // a step that does not follow the signal cannot hold the job (and the queue) past a cancel
+    const abortable = (p) => new Promise((resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason);
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, {once: true});
+      Promise.resolve(p).then(
+        (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+        (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+      );
+    });
 
     const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
     const outFile = path.join(exportsDir, outName);
     const result = {file: `/exports/${outName}`, path: outFile};
-
-    // ---- the master: from the cache, or rendered now ----
-    let hit = null;
-    if (master?.lookupMaster) {
-      try { hit = await master.lookupMaster({props, raw, draft}); } catch (e) { log(`render ${id}: master cache lookup failed (${e.message}) — rendering`); }
-      if (hit && !fs.existsSync(hit.file ?? '')) hit = null;
+    let recorded = null; // {projectId, v} once a review version exists for this job
+    // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
+    const cleanUp = () => {
+      let names = [];
+      try { names = fs.readdirSync(exportsDir); } catch {}
+      for (const f of names) if (f.startsWith(`edited-${id}`) && /\.mp4$/.test(f)) fs.rmSync(path.join(exportsDir, f), {force: true});
+      if (recorded) { try { unrecord(recorded); } catch (e) { log(`render ${id}: could not take back review version v${recorded.v}: ${e.message}`); } }
+    };
+    try {
+      return await work();
+    } catch (e) {
+      if (signal.aborted) cleanUp();
+      throw e;
     }
-    if (hit) {
-      set('master', 0);
-      await fs.promises.copyFile(hit.file, outFile);
-      result.master = {hit: true, key: hit.key ?? null};
-      set('master', 1);
-    } else {
-      const propsFile = path.join(root, `.props-${id}.json`);
-      // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-      const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
-      fs.writeFileSync(propsFile, raw);
-      set('bundling', 0);
-      let firstFrameAt = null, lastErr = '';
-      try {
-        const [cmd, args] = commands.render({outFile, propsFile, publicDir: links, draft, plan, id});
-        const r = await runChild(cmd, args, {
-          cwd: root, signal, onPid: ctx.setPid,
-          onLine: (l) => {
-            if (/error/i.test(l)) lastErr = l.trim();
-            const p = parseRemotion(l);
-            if (!p) return;
-            const extra = {};
-            if (p.frames) {
-              extra.frames = p.frames;
-              if (p.stage === 'rendering' && p.frames.done > 0) {
-                firstFrameAt ??= now();
-                extra.etaSec = etaFor({done: p.frames.done, total: p.frames.total, sinceFirstFrameSec: (now() - firstFrameAt) / 1000, draft, expectSec});
+
+    async function work() {
+      set('preparing', 0);
+      const raw = await abortable(prepare(ctx.props, id, {signal, setPid: ctx.setPid, progress: (frac, label) => set('preparing', frac, {label})}));
+      stop();
+      const props = JSON.parse(raw);
+
+      // ---- the master: from the cache, or rendered now ----
+      let hit = null;
+      if (master?.lookupMaster) {
+        try { hit = await abortable(master.lookupMaster({props, raw, draft})); } catch (e) { stop(); log(`render ${id}: master cache lookup failed (${e.message}) — rendering`); }
+        if (hit && !fs.existsSync(hit.file ?? '')) hit = null;
+      }
+      if (hit) {
+        set('master', 0);
+        await abortable(fs.promises.copyFile(hit.file, outFile));
+        result.master = {hit: true, key: hit.key ?? null};
+        set('master', 1);
+      } else {
+        const propsFile = path.join(root, `.props-${id}.json`);
+        // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+        const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
+        fs.writeFileSync(propsFile, raw);
+        set('bundling', 0);
+        let firstFrameAt = null, lastErr = '';
+        try {
+          const [cmd, args] = commands.render({outFile, propsFile, publicDir: links, draft, plan, id});
+          const r = await runChild(cmd, args, {
+            cwd: root, signal, onPid: ctx.setPid,
+            onLine: (l) => {
+              if (/error/i.test(l)) lastErr = l.trim();
+              const p = parseRemotion(l);
+              if (!p) return;
+              const extra = {};
+              if (p.frames) {
+                extra.frames = p.frames;
+                if (p.stage === 'rendering' && p.frames.done > 0) {
+                  firstFrameAt ??= now();
+                  extra.etaSec = etaFor({done: p.frames.done, total: p.frames.total, sinceFirstFrameSec: (now() - firstFrameAt) / 1000, draft, expectSec});
+                }
+                if (p.stage === 'rendering') extra.label = `Rendering frame ${p.frames.done}/${p.frames.total}`;
               }
-              if (p.stage === 'rendering') extra.label = `Rendering frame ${p.frames.done}/${p.frames.total}`;
-            }
-            set(p.stage, p.frac, extra);
-          },
-        });
-        if (r.code !== 0 || !fs.existsSync(outFile)) {
-          fs.rmSync(outFile, {force: true});
-          log(`render ${id} failed:\n${r.tail.slice(-1200)}`);
-          throw new RenderError(lastErr.slice(0, 300) || (r.signal ? `the render process was killed (${r.signal})` : `render exited ${r.code}`));
+              set(p.stage, p.frac, extra);
+            },
+          });
+          if (r.code !== 0 || !fs.existsSync(outFile)) {
+            fs.rmSync(outFile, {force: true});
+            log(`render ${id} failed:\n${r.tail.slice(-1200)}`);
+            throw new RenderError(lastErr.slice(0, 300) || (r.signal ? `the render process was killed (${r.signal})` : `render exited ${r.code}`));
+          }
+        } finally {
+          fs.rmSync(propsFile, {force: true});
+          fs.rmSync(links, {recursive: true, force: true});
         }
-      } catch (e) {
-        if (signal.aborted) fs.rmSync(outFile, {force: true}); // a cancelled render leaves no half file
-        throw e;
-      } finally {
-        fs.rmSync(propsFile, {force: true});
-        fs.rmSync(links, {recursive: true, force: true});
+        if (master?.storeMaster) {
+          try { await abortable(master.storeMaster({props, raw, draft, file: outFile})); } catch (e) { stop(); log(`render ${id}: master cache store failed (${e.message})`); }
+        }
+        result.master = master ? {hit: false} : undefined;
       }
-      if (master?.storeMaster) {
-        try { await master.storeMaster({props, raw, draft, file: outFile}); } catch (e) { log(`render ${id}: master cache store failed (${e.message})`); }
-      }
-      result.master = master ? {hit: false} : undefined;
-    }
-    result.renderSec = Math.round((now() - t0) / 1000);
-    stop();
-    if (draft) { log(`render ${id} draft took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`); return result; }
+      result.renderSec = Math.round((now() - t0) / 1000);
+      stop();
+      if (draft) { log(`render ${id} draft took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`); return result; }
 
-    // ---- final: loudness + QC, in a child process (a few seconds of ffmpeg must not block the backend) ----
-    set('finalizing', 0, {frames: undefined, etaSec: Math.round(8 + expectSec * 0.35)});
-    const [fcmd, fargs] = commands.finalize({outFile, expectSec, clean: job.clean ?? 'off'});
-    const fin = await runChild(fcmd, fargs, {cwd: root, signal, onPid: ctx.setPid});
-    let qc;
-    try { qc = JSON.parse(fin.out.trim().split('\n').pop()); } catch { qc = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
-    result.qc = qc.text;
-    result.renderSec = Math.round((now() - t0) / 1000);
-    if (!qc.ok) {
-      // kept as *-qcfail.mp4 for inspection, reported as a failure
-      const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-      try { fs.renameSync(outFile, path.join(exportsDir, failed)); } catch {}
-      const why = [qc.error, ...(qc.checks ?? []).filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ');
-      throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed)});
-    }
-    stop();
-    // ---- a final that passed QC for a project becomes its next review version ----
-    if (job.projectId) {
-      set('review', 0, {etaSec: 10});
-      try {
-        const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id});
-        if (v) { result.version = v.v; result.projectId = job.projectId; }
-      } catch (e) {
-        result.versionError = String(e?.message ?? e).slice(0, 200);
+      // ---- final: loudness + QC, in a child process (a few seconds of ffmpeg must not block the backend) ----
+      set('finalizing', 0, {frames: undefined, etaSec: Math.round(8 + expectSec * 0.35)});
+      const [fcmd, fargs] = commands.finalize({outFile, expectSec, clean: job.clean ?? 'off'});
+      const fin = await runChild(fcmd, fargs, {cwd: root, signal, onPid: ctx.setPid});
+      let qc;
+      try { qc = JSON.parse(fin.out.trim().split('\n').pop()); } catch { qc = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+      result.qc = qc.text;
+      result.renderSec = Math.round((now() - t0) / 1000);
+      if (!qc.ok) {
+        // kept as *-qcfail.mp4 for inspection, reported as a failure
+        const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
+        try { fs.renameSync(outFile, path.join(exportsDir, failed)); } catch {}
+        const why = [qc.error, ...(qc.checks ?? []).filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ');
+        throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed)});
       }
+      stop();
+      // ---- a final that passed QC for a project becomes its next review version ----
+      if (job.projectId) {
+        set('review', 0, {etaSec: 10});
+        try {
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal});
+          if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; }
+        } catch (e) {
+          stop(); // cancelled while the proxy was made: not a version error, a cancel
+          result.versionError = String(e?.message ?? e).slice(0, 200);
+        }
+        stop(); // the cancel came in while it was being recorded: cleanUp takes the version back
+      }
+      log(`render ${id} took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`);
+      return result;
     }
-    log(`render ${id} took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video`);
-    return result;
   };
 }

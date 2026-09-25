@@ -30,6 +30,10 @@
 //   - its render process dies without reporting (pid gone, no close from the runner),
 //   - it makes no progress for REEL_RENDER_STALL_SEC (default 900 s) while Remotion
 //     bundles / renders / encodes (it prints progress all the time: silence = a hung Chrome),
+//   - it makes no progress for REEL_RENDER_PREPARE_STALL_SEC (default 300 s) while it
+//     prepares (B-roll downloads report every MB, each step reports itself: silence = a
+//     hung download or LUT bake) or copies a cached master — the runner is aborted, so
+//     the download / ffmpeg stops and the queue moves on,
 //   - its backend died or was stopped (SIGTERM/SIGINT kill its renders — shutdown()):
 //     on the next tick of any backend (restart included) the job
 //     is re-queued once (attempts ≤ 2) and then failed; a render process it left
@@ -47,6 +51,7 @@ export const STATES = ['queued', 'running', 'done', 'failed', 'cancelled'];
 export const ACTIVE = new Set(['queued', 'running']);
 export const MAX_ATTEMPTS = 2; // a job interrupted by a backend restart is re-queued once
 const STALL_STAGES = new Set(['starting', 'bundling', 'rendering', 'encoding']); // the stages that report progress continuously
+const PREPARE_STAGES = new Set(['preparing', 'master']); // downloads, LUT bakes, the cached master: a limit of their own
 const ID_RE = /^[\w-]{6,64}$/;
 const DAY = 86400e3;
 
@@ -186,6 +191,7 @@ export function createRenderJobs({
   workers = Math.max(1, +(process.env.REEL_RENDER_WORKERS || 1)),
   tickMs = 5000,
   stallMs = +(process.env.REEL_RENDER_STALL_SEC || 900) * 1000,
+  prepareStallMs = +(process.env.REEL_RENDER_PREPARE_STALL_SEC || 300) * 1000,
   now = Date.now,
   isAlive = pidAlive,
   cmdline = pidCmdline,
@@ -243,7 +249,8 @@ export function createRenderJobs({
         if (slot.settled) return;
         const cur = readJob(dir, job.id);
         if (!cur || cur.status !== 'running') return;
-        const moved = (u.progress != null && u.progress !== lastPct) || (u.stage && u.stage !== cur.stage) || (u.frames && u.frames.done !== cur.frames?.done);
+        // a new label counts too: "Downloading B-roll 2/5 · 34 MB" moves inside one percent
+        const moved = (u.progress != null && u.progress !== lastPct) || (u.stage && u.stage !== cur.stage) || (u.frames && u.frames.done !== cur.frames?.done) || (u.label != null && u.label !== cur.label);
         if (u.progress != null) lastPct = u.progress;
         const t2 = iso();
         save({...cur, ...u, heartbeatAt: t2, ...(moved ? {progressAt: t2} : {})});
@@ -346,8 +353,10 @@ export function createRenderJobs({
         abort(id, 'DIED', `the render process (pid ${slot.pid}) died without reporting`);
         continue;
       }
-      // stalled: Remotion prints progress all the time, so silence while it bundles or renders means a hung Chrome
-      if (stallMs > 0 && STALL_STAGES.has(j.stage) && j.progressAt && t - Date.parse(j.progressAt) > stallMs) {
+      // stalled: Remotion prints progress all the time, so silence while it bundles or renders means a
+      // hung Chrome; preparing reports every step and every downloaded MB, so silence there is a hung download
+      const limit = STALL_STAGES.has(j.stage) ? stallMs : PREPARE_STAGES.has(j.stage) ? prepareStallMs : 0;
+      if (limit > 0 && j.progressAt && t - Date.parse(j.progressAt) > limit) {
         abort(id, 'STALLED', `no progress for ${fmtDuration((t - Date.parse(j.progressAt)) / 1000)} (stage ${j.stage}) — killed`);
         continue;
       }
