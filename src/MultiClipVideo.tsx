@@ -2,12 +2,11 @@ import React from 'react';
 import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVideoConfig, useCurrentFrame, interpolate, getRemotionEnvironment} from 'remotion';
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
-import {focusSpans, hideUnder, projectCaptions, tierSpans, type Caption} from './captions';
-import {presetOf} from './captionPresets';
+import {type Caption} from './captions';
 import {packOf} from './stylePacks';
-import {avoidGraphics} from './validate';
 import {GraphicsLayer, LayoutStage} from './Graphics';
-import {projectGraphics, type Graphic} from './graphicTemplates';
+import {type Graphic} from './graphicTemplates';
+import {captionLayout} from './layers';
 import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
@@ -124,8 +123,10 @@ export const MultiClipVideo: React.FC<{
   grade?: ProjectGrade | null;
   audio?: {clean?: string; sfx?: boolean} | null;
   captionsOff?: boolean; // the project's captions switch (set_captions): pages are kept, none is drawn
-}> = ({clips = [], music = null, captions: allCaptions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false}) => {
-  const captions = captionsOff ? [] : allCaptions; // the music still ducks under their words (speech spans below)
+  // the layered render (scripts/layers.mjs): 'captions' draws only the caption pages on a
+  // transparent frame, to be laid over a master rendered with captionsOff
+  layer?: 'all' | 'captions';
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false, layer = 'all'}) => {
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
@@ -133,18 +134,12 @@ export const MultiClipVideo: React.FC<{
   const accentColor = kit.accent;
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);
-  // captions + b-roll are anchored to clips (source-relative) → project to absolute
-  const projectedCaptions = projectCaptions(captions, clips, fps);
+  // captions + b-roll are anchored to clips (source-relative) → project to absolute;
+  // the pages shown and what they do to the footage come from src/layers.ts (the layered render checks the same)
+  const {preset, projectedGraphics, shownCaptions, focus, punch, pulses, speech} = captionLayout({clips, captions, graphics, captionStyle, captionsOff}, fps);
   const projectedBrolls = projectBrolls(brolls, clips, fps);
-  const projectedGraphics = projectGraphics(graphics, clips, fps);
-  // captions step around text graphics, and none over a closing card (the voice goes on; the card carries the message)
-  const shownCaptions = hideUnder(avoidGraphics(projectedCaptions, projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
-  const preset = presetOf(captionStyle);
-  const focus = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
   // a B-roll card sits over blurred footage whatever the pack
   const cards = projectedBrolls.filter((b) => b.mode === 'card').map((b) => ({startMs: b.startMs, endMs: b.endMs}));
-  const punch = preset.heroPunch ? {spans: tierSpans(shownCaptions, 2, preset.holdMs), scale: preset.heroPunch} : undefined;
-  const pulses = preset.glitchPulse ? tierSpans(shownCaptions, 1, preset.holdMs, 250) : [];
   const zooms: Zoom[] = projectedGraphics.filter((g) => g.camera === 'punch').map((g) => ({startMs: g.startMs - 100, endMs: g.endMs, scale: 0.4, inMs: 333, outMs: 230}));
   // cover transitions on clips and on B-roll cues
   const cuts = [
@@ -156,6 +151,17 @@ export const MultiClipVideo: React.FC<{
   // in the live Player). Use native <Video> in preview for smooth playback,
   // OffthreadVideo only when actually rendering the mp4.
   const Clip = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
+
+  // the caption layer of a layered render: the same top caption track on a transparent frame, no footage, no audio
+  if (layer === 'captions') {
+    return (
+      <BrandContext.Provider value={kit}>
+        <AbsoluteFill>
+          <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} />
+        </AbsoluteFill>
+      </BrandContext.Provider>
+    );
+  }
 
   return (
     <BrandContext.Provider value={kit}>
@@ -247,7 +253,7 @@ export const MultiClipVideo: React.FC<{
       <GraphicsLayer items={projectedGraphics} accentColor={accentColor} titles={preset.titles} />
 
       {/* music */}
-      {music && <MusicTrack music={music} totalFrames={totalFrames} speech={projectCaptions(allCaptions, clips, fps).map((c) => [c.startMs, c.endMs])} />}
+      {music && <MusicTrack music={music} totalFrames={totalFrames} speech={speech} />}
 
       {/* sound effects (synthesized, public/sfx): a whoosh on whip / zoom / card / split cuts, a pop on stickers */}
       {audio?.sfx ? [
