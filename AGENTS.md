@@ -125,8 +125,9 @@ project. `scripts/run-report.mjs` measures a run from its JSONL log.
 
 The production box is a small Linux VM (2 vCPU) shared by several agent sessions.
 
-- **Node 24 through nvm.** `npm run setup` loads `~/.nvm/nvm.sh` and runs
-  `nvm install 24 && nvm use 24` when the node on PATH is older (`.nvmrc` says 24);
+- **Node 24 (24.2+) through nvm.** `npm run setup` loads `~/.nvm/nvm.sh` and runs
+  `nvm install 24 && nvm use 24` when the node on PATH is older (`.nvmrc` says 24; the
+  scripts tell they were run directly with `import.meta.main`, new in 24.2);
   a login shell must get it too: `nvm alias default 24`. Non-interactive shells
   (cron, `nohup`, the headless runners) do not read `.bashrc` — source nvm or call
   `~/.nvm/versions/node/v24.*/bin/node` explicitly.

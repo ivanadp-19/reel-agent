@@ -47,6 +47,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 
 export const STATES = ['queued', 'running', 'done', 'failed', 'cancelled'];
 export const ACTIVE = new Set(['queued', 'running']);
@@ -64,23 +65,27 @@ export function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
-// the command line of a pid (Linux /proc); null elsewhere or when it is gone
+// macOS has no /proc: the same answers from `ps` (null when it fails)
+const ps = (args) => { const r = spawnSync('ps', args, {encoding: 'utf8', timeout: 10e3}); return r.status === 0 ? r.stdout : null; };
+// the command line of a pid (Linux /proc, `ps` elsewhere); null when it is gone
 export function pidCmdline(pid) {
-  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return null; }
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch {}
+  return Number.isInteger(pid) && pid > 0 ? ps(['-p', String(pid), '-o', 'command='])?.trim() || null : null;
 }
-// every process below pid (Linux /proc; [] elsewhere)
+// every process below pid (Linux /proc, `ps` elsewhere)
 export function descendants(pid) {
   const kids = new Map();
-  let names = [];
-  try { names = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch { return []; }
-  for (const n of names) {
-    try {
-      const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
-      const ppid = +st.slice(st.lastIndexOf(')') + 2).split(' ')[1]; // "pid (comm) state ppid …"
-      if (!kids.has(ppid)) kids.set(ppid, []);
-      kids.get(ppid).push(+n);
-    } catch {}
-  }
+  const add = (child, ppid) => { if (!kids.has(ppid)) kids.set(ppid, []); kids.get(ppid).push(child); };
+  let names = null;
+  try { names = fs.readdirSync('/proc').filter((n) => /^\d+$/.test(n)); } catch {}
+  if (names) {
+    for (const n of names) {
+      try {
+        const st = fs.readFileSync(`/proc/${n}/stat`, 'utf8');
+        add(+n, +st.slice(st.lastIndexOf(')') + 2).split(' ')[1]); // "pid (comm) state ppid …"
+      } catch {}
+    }
+  } else for (const l of (ps(['-A', '-o', 'pid=,ppid=']) ?? '').split('\n')) { const [child, ppid] = l.trim().split(/\s+/).map(Number); if (child) add(child, ppid); }
   const out = [];
   for (const q = [pid]; q.length;) for (const c of kids.get(q.shift()) ?? []) { out.push(c); q.push(c); }
   return out;

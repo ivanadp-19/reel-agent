@@ -44,7 +44,7 @@ const fileOf = (dir, projectId) => {
 export function loadReviews(dir, projectId) {
   const f = fileOf(dir, projectId);
   let r = {};
-  try { r = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+  try { r = JSON.parse(fs.readFileSync(f, 'utf8')) ?? {}; } catch {} // a file holding null reads as empty: resolveToken reads every project's
   return {projectId, managedBy: MANAGED_BY, versions: Array.isArray(r.versions) ? r.versions : [], links: Array.isArray(r.links) ? r.links : []};
 }
 function saveReviews(dir, r) {

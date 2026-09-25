@@ -99,7 +99,7 @@ export const qcText = (r) => r.checks.map((c) => `${c.ok ? '✓' : c.blocking ? 
 //   node scripts/qc.mjs <file.mp4> [expectSec]              → report, exit 1 on failure
 //   node scripts/qc.mjs --finalize <file.mp4> <expectSec>   → normalize, then QC; JSON on stdout
 //     (the backend runs this as a child process so its event loop never blocks)
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args[0] === '--finalize') {
     const [, file, expect, clean] = args;

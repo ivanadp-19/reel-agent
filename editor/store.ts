@@ -1,5 +1,5 @@
 import {create} from 'zustand';
-import {retext, setPageStart, shiftPage, type Caption} from '../src/captions';
+import {playedSpans, retext, setPageStart, shiftPage, type Caption} from '../src/captions';
 import type {BrollItem, BrollAsset} from '../src/Broll';
 import type {PresetId} from '../src/captionPresets';
 import type {Graphic} from '../src/graphicTemplates';
@@ -213,7 +213,7 @@ export const useEditor = create<EditorState>((set) => ({
   setBrollScale: (id, scale) => set((s) => ({brolls: s.brolls.map((b) => (b.id === id ? {...b, scale} : b))})),
 
   // the page's text, the way edit_caption does it (src/captions.ts retext)
-  setText: (id, text) => set((s) => ({captions: mapCap(s.captions, id, (c) => (text.trim() ? retext(c, text) : c))})),
+  setText: (id, text) => set((s) => ({captions: mapCap(s.captions, id, (c) => (text.trim() ? retext(c, text, playedSpans(c, s.clips)) : c))})), // the text box shows the words that play
   movePageStart: (id, wid) => set((s) => ({...withHistory(s), captions: setPageStart(s.captions, id, wid)})),
   shiftCaption: (id, ms) => set((s) => ({...withHistory(s), captions: mapCap(s.captions, id, (c) => shiftPage(c, ms))})),
 

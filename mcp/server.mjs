@@ -18,7 +18,7 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
 import {applyAutocut, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, normalizeCaption, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
+import {mergeCaptions, normalizeCaption, playedSpans, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
@@ -53,10 +53,15 @@ const API = process.env.REEL_API || 'http://127.0.0.1:3333';
 // Railway public mode (REEL_API pointing at the hosted backend): the server
 // accepts the shared backend token instead of basic auth - send it on every call.
 const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+// …and a deadline (REEL_BACKEND_TIMEOUT_SEC; an ingest that transcodes passes a longer one): a backend
+// that stopped answering fails the tool with that reason instead of hanging it
+const BACKEND_SEC = +(process.env.REEL_BACKEND_TIMEOUT_SEC || 60);
+const INGEST = () => AbortSignal.timeout(30 * 60e3);
 const _fetch = globalThis.fetch;
-globalThis.fetch = (u, o = {}) => {
-  if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
-  return _fetch(u, o);
+globalThis.fetch = async (u, o = {}) => {
+  if (!String(u).startsWith(API)) return _fetch(u, o);
+  try { return await _fetch(u, {signal: AbortSignal.timeout(BACKEND_SEC * 1000), ...o, headers: {...(TOK ? {'x-reel-token': TOK} : {}), ...(o.headers || {})}}); }
+  catch (e) { throw e?.name === 'TimeoutError' ? new Error(`the backend (${API}) did not answer ${new URL(u).pathname} in ${BACKEND_SEC} s — it looks stuck: restart it (npm start)`) : e; }
 };
 const FPS = 30;
 
@@ -218,19 +223,6 @@ const SESSION = `${process.env.REEL_AGENT || 'mcp'}-${process.pid}-${Date.now().
 const clock = createToolClock();
 const callCtx = new AsyncLocalStorage(); // {project, jobMs} of the call in flight
 let lastProject = null;
-const registerTool = server.registerTool.bind(server);
-server.registerTool = (name, def, handler) => registerTool(name, def, async (args, extra) => {
-  const started = clock.start();
-  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject, jobMs: 0};
-  if (ctx.project) lastProject = ctx.project;
-  let ok = true;
-  try { return await callCtx.run(ctx, () => handler(args, extra)); }
-  catch (e) { ok = false; throw e; }
-  finally {
-    const ms = clock.end(started);
-    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
-  }
-});
 const text = (s) => ({content: [{type: 'text', text: s}]});
 const pid = z.string().describe('project id from list_projects (e.g. "p-1789542691547")');
 const sec = (d) => z.number().describe(d);
@@ -258,10 +250,14 @@ const READ_ONLY = new Set([
 ]);
 const queues = new Map(); // project id → its last queued call
 const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
-// on top of the timing wrapper above: a call the gate refuses is still logged (as failed). Arguments
-// a tool does not take are an error, never dropped (edit_caption start_sec used to answer ok and do nothing)
-const registerTimed = server.registerTool.bind(server);
-server.registerTool = (name, config, cb) => registerTimed(name, {...config, inputSchema: z.object(config.inputSchema ?? {}).strict()}, async (args, extra) => {
+// Every tool: timed (a call the gate refuses is logged too, as failed), queued behind the writes to its
+// project, gated by the plan. Arguments a tool does not take are an error, never dropped (edit_caption
+// start_sec used to answer ok and do nothing).
+const registerTool = server.registerTool.bind(server);
+server.registerTool = (name, config, cb) => registerTool(name, {...config, inputSchema: z.object(config.inputSchema ?? {}).strict()}, async (args, extra) => {
+  const started = clock.start();
+  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject, jobMs: 0};
+  if (ctx.project) lastProject = ctx.project;
   const call = () => {
     if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !((name === 'render' || name === 'start_render') && args.draft)) {
       const p = load(args.project_id);
@@ -270,7 +266,13 @@ server.registerTool = (name, config, cb) => registerTimed(name, {...config, inpu
     }
     return cb(args, extra);
   };
-  return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
+  let ok = true;
+  try { return await callCtx.run(ctx, () => (args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call())); }
+  catch (e) { ok = false; throw e; }
+  finally {
+    const ms = clock.end(started);
+    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
+  }
 });
 
 server.registerTool('list_projects', {description: 'List reel-agent projects (id, name, clip count, last update).', inputSchema: {}}, async () => {
@@ -439,7 +441,7 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
     // same machine: hand the backend the path instead of streaming the file through memory
     const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}, signal: INGEST()}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...clip} = r;
     p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
@@ -551,7 +553,7 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   const i = p.captions.findIndex((c) => c.id === caption_id);
   let cap = p.captions[i];
   if (shift_ms) cap = shiftPage(cap, shift_ms);
-  if (t != null) cap = retext(cap, t);
+  if (t != null) cap = retext(cap, t, playedSpans(cap, p.clips)); // the text get_project shows: the words that play
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
   if (top_pct != null) { cap.topPct = top_pct; cap.pin = true; } if (scale != null) cap.scale = scale;
   if (behind != null) { if (behind) cap.behind = true; else delete cap.behind; }
@@ -620,7 +622,7 @@ server.registerTool('add_broll_assets', {description: "Bring the client's own fo
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
     const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
-    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}, signal: INGEST()}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
     const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
     content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));

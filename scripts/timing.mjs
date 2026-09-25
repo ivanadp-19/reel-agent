@@ -115,7 +115,7 @@ export function timingText(s) {
   return [`${s.totalSec} s of work over ${s.sessions} agent session(s), ${s.renders} render(s); biggest: ${s.biggest ? LABEL[s.biggest] : '—'}`, ...lines, top ? `tools by time: ${top}` : ''].filter(Boolean).join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const id = process.argv[2];
   if (!id) { console.error('usage: node scripts/timing.mjs <project_id> [--json]'); process.exit(2); }
   const s = summarize(readTiming(path.resolve(import.meta.dirname, '..', 'public', 'projects'), id));

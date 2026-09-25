@@ -30,7 +30,7 @@ export function measure(file) {
   return Object.fromEntries(Object.values(KEYS).map((k) => [k, +(lit.reduce((n, f) => n + f[k], 0) / lit.length).toFixed(2)]));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const {clips = []} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   fs.mkdirSync(CACHE, {recursive: true});
   const srcs = [...new Set(clips.map((c) => c.src))];

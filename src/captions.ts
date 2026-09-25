@@ -120,15 +120,30 @@ function handPage(c: Caption, words: CaptionWord[], elsewhere: CaptionWord[] = [
   return {...c, words, startMs: words[0].startMs, endMs: words[words.length - 1].endMs, covers: [...new Set(covers)]};
 }
 
-// New text. Same word count → each word keeps its id, time and tier (a spelling fix stays
-// anchored); otherwise the words are re-timed evenly over the page, a word that was there keeps its tier.
-export function retext(cap: Caption, text: string): Caption {
+// The time of a page that plays: its span cut to the clips of its source (a trim or a cut word hides
+// the rest; a source placed twice counts once), source ms, in order
+export function playedSpans(cap: Caption, clips: Clip[]): [number, number][] {
+  const spans = clips.filter((c) => c.src === cap.src).map((c): [number, number] => [Math.max(cap.startMs, c.inSec * 1000), Math.min(cap.endMs, c.outSec * 1000)]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+  return spans.reduce<[number, number][]>((out, [a, b]) => { const last = out[out.length - 1]; if (last && a <= last[1]) last[1] = Math.max(last[1], b); else out.push([a, b]); return out; }, []);
+}
+
+// New text for the words the reader sees (`spans` = playedSpans; the whole page by default), what
+// get_project and the editor show. Same word count → each word keeps its id, time and tier (a spelling
+// fix stays anchored); otherwise the new words are spread evenly over the time that plays — never into a
+// gap a cut left — and a word that was there keeps its tier. Words a cut hides stay as they are.
+export function retext(cap: Caption, text: string, spans: [number, number][] = []): Caption {
   const words = text.split(/\s+/).filter(Boolean);
   if (!words.length) throw new Error('empty caption text');
-  if (words.length === cap.words.length) return handPage(cap, cap.words.map((w, i) => ({...w, text: words[i]})));
-  const tiers = new Map(cap.words.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
-  const step = (cap.endMs - cap.startMs) / words.length;
-  return handPage(cap, words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: tiers.get(t.toLowerCase()) ?? 0})));
+  const play = spans.length ? spans : [[cap.startMs, cap.endMs]];
+  const plays = (w: CaptionWord) => play.some(([a, b]) => w.endMs > a && w.startMs < b);
+  const shown = cap.words.filter(plays);
+  if (words.length === shown.length) return handPage(cap, cap.words.map((w) => (plays(w) ? {...w, text: words[shown.indexOf(w)]} : w)));
+  const tiers = new Map(shown.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
+  const step = play.reduce((n, [a, b]) => n + b - a, 0) / words.length;
+  // a point of the played time → [source ms, end of its span]
+  const at = (pos: number) => { for (const [a, b] of play) { if (pos < b - a) return [a + pos, b]; pos -= b - a; } const end = play[play.length - 1][1]; return [end, end]; };
+  const typed = words.map((t, j) => { const [s, end] = at(j * step); return {text: t, startMs: Math.round(s), endMs: Math.round(Math.min(end, s + step)), tier: tiers.get(t.toLowerCase()) ?? 0}; });
+  return handPage(cap, [...cap.words.filter((w) => !plays(w)), ...typed].sort((a, b) => a.startMs - b.startMs));
 }
 
 // the page before `cap` on its source: the one whose break with `cap` setPageStart moves

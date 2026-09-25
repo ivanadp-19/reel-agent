@@ -24,4 +24,4 @@ export function ensureSfx() {
   }
   return DIR;
 }
-if (import.meta.url === `file://${process.argv[1]}`) console.log(ensureSfx());
+if (import.meta.main) console.log(ensureSfx());

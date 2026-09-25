@@ -34,7 +34,7 @@ export function parseStats(text) {
 }
 
 export function frameStats(file, n = 2) {
-  const r = spawnSync('ffmpeg', statsArgs(file, n), {encoding: 'utf8', maxBuffer: 1 << 24});
+  const r = spawnSync('ffmpeg', statsArgs(file, n), {encoding: 'utf8', maxBuffer: 1 << 24, timeout: 60e3}); // 3 frames; an input that never ends must not hang QC
   return r.status === 0 ? parseStats(r.stdout) : [];
 }
 

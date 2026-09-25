@@ -15,7 +15,7 @@
     "video-editing"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=24.2"
   },
   "scripts": {
     "start": "node scripts/dev.mjs",

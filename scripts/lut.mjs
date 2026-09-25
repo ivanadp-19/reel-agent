@@ -77,7 +77,7 @@ export function bake({key, src, lut, mix}) {
   return rel;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const job = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const result = {};
   if (job.make) result.lut = makeLut(job.make);

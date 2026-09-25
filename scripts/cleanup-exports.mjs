@@ -226,7 +226,7 @@ export function formatPlan(plan, {apply = false} = {}) {
 }
 
 // ---------- CLI ----------
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const root = path.resolve(import.meta.dirname, '..');
   let o, plan;
   try {

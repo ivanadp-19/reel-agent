@@ -106,7 +106,7 @@ const clean = (s) => String(s).replace(/^[¿¡"'(]+|[.,;:!?"')]+$/g, '');
 const CAP = /^[A-ZÁÉÍÓÚÑÜ]/;
 const SENT_END = /[.!?…]["')\]]*$/;
 const sourceOf = (s) => path.basename(s).replace(/\.[^.]+$/, '');
-const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 28});
+const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 28, timeout: TIMEOUT()});
 
 // ---------- evidence: timeline speech ----------
 // transcript words of every placed clip at the time the viewer HEARS them (seconds), in order.
@@ -836,7 +836,7 @@ function F(check, severity, kind, at, end, msg, evidence = {}, fix = []) {
 
 // ---------- evidence from the mp4 ----------
 function probe(file) {
-  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels,duration:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
+  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels,duration:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8', timeout: TIMEOUT()});
   return r.status === 0 ? JSON.parse(r.stdout) : null;
 }
 // One decode per file, not one per measurement (the VM has 2 vCPU): every video number comes
@@ -997,7 +997,7 @@ function sheetsOf(file, groups, fps = FPS, width = 270) {
   for (const label of [true, false]) {
     const graph = [`[0:v]split=${groups.length}${groups.map((_, i) => `[s${i}]`).join('')}`, ...groups.map((g, i) => `[s${i}]${chain(g, label)}[o${i}]`)].join(';');
     const outs = groups.flatMap((g, i) => ['-map', `[o${i}]`, '-fps_mode', 'vfr', '-frames:v', '1', '-q:v', '4', g.out]);
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-an', '-filter_complex', graph, ...outs]);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-an', '-filter_complex', graph, ...outs], {timeout: TIMEOUT()});
     if (r.status === 0 && groups.every((g) => fs.existsSync(g.out))) return groups.map((g) => g.out);
   }
   return groups.map((g) => sheet(file, g.times, g.cols, g.out, width)); // the slow path: one seek per frame
@@ -1013,10 +1013,10 @@ function sheet(file, times, cols, out, width = 270) {
       const base = ['-v', 'error', '-y', ...(MEDIA.test(f0) && !/\.(jpe?g|png|webp|tiff?)$/i.test(f0) ? ['-ss', String(t)] : []), '-i', f0, '-frames:v', '1'];
       const pad = `scale=${width}:${Math.round(width * 16 / 9)}:force_original_aspect_ratio=decrease,pad=${width}:${Math.round(width * 16 / 9)}:(ow-iw)/2:(oh-ih)/2`;
       const lab = `${pad},pad=iw:ih+26:0:0:color=0xFFE500,drawtext=text='${String(label).replace(/[\\':,;[\]=]/g, (c) => `\\${c}`).slice(0, 40)}':fontcolor=black:fontsize=18:x=6:y=h-22`;
-      if (spawnSync('ffmpeg', [...base, '-vf', lab, '-q:v', '4', f]).status !== 0) spawnSync('ffmpeg', [...base, '-vf', pad, '-q:v', '4', f]);
+      if (spawnSync('ffmpeg', [...base, '-vf', lab, '-q:v', '4', f], {timeout: TIMEOUT()}).status !== 0) spawnSync('ffmpeg', [...base, '-vf', pad, '-q:v', '4', f], {timeout: TIMEOUT()});
     });
     const rows = Math.ceil(items.length / cols);
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-framerate', '1', '-i', path.join(dir, '%02d.jpg'), '-vf', `tile=${cols}x${rows}:padding=4:color=0x303030`, '-frames:v', '1', '-q:v', '4', out]);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-framerate', '1', '-i', path.join(dir, '%02d.jpg'), '-vf', `tile=${cols}x${rows}:padding=4:color=0x303030`, '-frames:v', '1', '-q:v', '4', out], {timeout: TIMEOUT()});
     return r.status === 0 ? out : null;
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
@@ -1369,7 +1369,8 @@ export function reportText(r) {
 }
 
 // ---------- CLI ----------
-if (import.meta.url === `file://${process.argv[1]}`) {
+// import.meta.main: run directly, also through .claude/skills (a symlink) or a path with spaces
+if (import.meta.main) {
   const args = process.argv.slice(2);
   const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
   const bool = (n) => { const i = args.indexOf(n); if (i >= 0) args.splice(i, 1); return i >= 0; };
@@ -1399,6 +1400,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     fs.writeFileSync(latest, json);
     if (role) fs.writeFileSync(path.join(base, `${role}.json`), json);
   } catch (e) { console.error(`(report not saved: ${e.message}; read-only sandbox?)`); }
-  console.log(asJson ? json : `${txt}\n\nreport: ${path.join(outDir, 'report.json')}`);
-  process.exit(0);
+  // exit once stdout is flushed: into a pipe, an exit right after console.log cut the report at 64 KiB
+  process.stdout.write(`${asJson ? json : `${txt}\n\nreport: ${path.join(outDir, 'report.json')}`}\n`, () => process.exit(0));
 }

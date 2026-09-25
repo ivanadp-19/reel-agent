@@ -30,12 +30,12 @@ function reel() {
 const textOf = (c) => c.words.map((w) => w.text).join(' ');
 
 // the project in public/projects/ (where the MCP server reads it), the server on stdio, no backend (or `api`)
-async function withProject(fn, api = 'http://127.0.0.1:9', project = reel(), id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`) {
+async function withProject(fn, {api = 'http://127.0.0.1:9', project = reel(), id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, env = {}} = {}) {
   const file = path.join('public', 'projects', `${id}.json`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, JSON.stringify(project));
   const client = new Client({name: 'test', version: '0'});
-  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: api, REEL_AGENT: 'caption-test'}}));
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: api, REEL_AGENT: 'caption-test', ...env}}));
   const call = async (name, args) => { const r = await client.callTool({name, arguments: {project_id: id, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   try { await fn(call, read, id); } finally {
@@ -165,13 +165,13 @@ test('re-paging takes the pages its own job made (never a file every job writes)
       assert.ok(!r.err, r.text);
       assert.deepEqual(read().captions.map(textOf), caja.map(textOf));
       assert.ok(read().captions.every((c) => +c.id.slice(1) >= 5), 'the re-paged pages get new ids');
-    }, B.url);
+    }, {api: B.url});
     await withProject(async (call, read) => {
       const before = read();
       const r = await call('set_caption_style', {style: 'caja'});
       assert.ok(r.err && /without its result — restart the backend/.test(r.text), r.text);
       assert.deepEqual(read(), before, 'no page lost to an empty re-page');
-    }, old.url);
+    }, {api: old.url});
   } finally { B.close(); old.close(); }
 });
 
@@ -213,7 +213,7 @@ test('get_transcript shows the words its own job made (never the file every job 
       const r = await call('get_transcript', {});
       assert.ok(!r.err, r.text);
       assert.match(r.text, /0:Solo 1:mío 2:Zacatecas/);
-    }, B.url);
+    }, {api: B.url});
   } finally { B.close(); }
 });
 
@@ -240,10 +240,35 @@ test('two projects transcribed one after the other: each reads its own last run 
       const r = await call('set_plan', {plan});
       assert.match(r.text, new RegExp(`NOT in the transcript, fix them: ${b}:9\\)`), r.text);
       assert.match(r.text, new RegExp(`${a}:2 "Ana,"`), 'the words of its own transcript are quoted');
-    }, undefined, project(a), ids[0]);
+    }, {project: project(a), id: ids[0]});
   } finally {
     for (const n of [a, b]) fs.rmSync(path.join(transcripts, `${n}.es.json`), {force: true});
     for (const id of ids) fs.rmSync(path.join('public', 'projects', 'transcripts', `${id}.json`), {force: true});
     fs.rmSync(tmp, {recursive: true, force: true});
   }
+});
+
+test('a backend that stops answering fails the tool with the reason, never hangs it', {timeout: 30000}, async () => {
+  const srv = http.createServer((req, res) => { if (req.url === '/api/projects') { res.writeHead(200); res.end('[]'); } }); // anything else: never answered
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    await withProject(async (call) => {
+      const r = await call('set_caption_style', {style: 'caja'});
+      assert.ok(r.err && /did not answer \/api\/captions in 1 s/.test(r.text), r.text);
+    }, {api: `http://127.0.0.1:${srv.address().port}`, env: {REEL_BACKEND_TIMEOUT_SEC: '1'}});
+  } finally { srv.closeAllConnections(); srv.close(); }
+});
+
+test('a page a cut hides in part: the text replaces the words that play, the hidden ones stay, no typed word falls into the cut', async () => {
+  // c1 "hoy te enseño la casa": the cut 1.12–1.83 s hides "te enseño la"; the reader sees "hoy casa"
+  const cut = {...reel(), clips: [{id: 'k0', src: SRC, inSec: 0, outSec: 1.12, sourceDurationSec: 6}, {id: 'k1', src: SRC, inSec: 1.83, outSec: 6, sourceDurationSec: 6}]};
+  const onScreen = (p) => projectCaptions(p.captions, p.clips, 30).filter((c) => c.id === 'c1').flatMap((c) => c.words.map((w) => w.text));
+  await withProject(async (call, read) => {
+    assert.deepEqual(onScreen(read()), ['hoy', 'casa']);
+    assert.ok(!(await call('edit_caption', {caption_id: 'c1', text: 'HOY CASA'})).err); // a spelling fix of what plays
+    assert.deepEqual(read().captions[1].words.map((w) => `${w.wid}:${w.text}`), ['t:3:HOY', 't:4:te', 't:5:enseño', 't:6:la', 't:7:CASA'], 'ids kept, hidden words untouched');
+    assert.ok(!(await call('edit_caption', {caption_id: 'c1', text: 'hoy la CASA'})).err); // one word more
+    assert.deepEqual(onScreen(read()), ['hoy', 'la', 'CASA'], 'every typed word plays');
+    assert.deepEqual(read().captions[1].words.filter((w) => w.wid).map((w) => w.text), ['te', 'enseño', 'la'], 'the words under the cut are still there if it is undone');
+  }, {project: cut});
 });
