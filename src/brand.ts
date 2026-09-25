@@ -6,6 +6,7 @@
 import {createContext, useContext} from 'react';
 import {z} from 'zod';
 import {FONT_FILE, isCatalog, type ClientFont} from './fonts.ts';
+import {LOOKS, type GradeParams} from './grade.ts';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'hex color like #FFB020');
 const fontFile = z.object({
@@ -14,6 +15,48 @@ const fontFile = z.object({
   weight: z.number().int().min(100).max(900),
   italic: z.boolean().optional(),
 });
+
+// How a client edits, written from their words ("sin subtítulos", "Helvetica
+// Bold blanca, acento amarillo", "cortes secos, nada de zooms", "color natural,
+// piel sin naranja"): a flexible spec, not a profile extracted from videos. Known
+// keys are applied when the kit is loaded (captions, grade, audio) or read by the
+// plan (pack, pace, transitions, music, broll); any other named preference is kept
+// as is and read by the reel-plan skill. Reusable from public/brands/<slug>.json.
+const adjust = z.object({exposure: z.number().min(-2).max(2), contrast: z.number().min(0.5).max(1.5), saturation: z.number().min(0).max(2), temperature: z.number().min(-1).max(1), tint: z.number().min(-1).max(1)}).partial();
+export const styleSchema = z.object({
+  notes: z.string().max(3000).optional().describe('how this client edits, in their words: what they like, what to avoid'),
+  captions: z.enum(['on', 'off']).optional().describe('off = their reels go without subtitles by default'),
+  pack: z.string().max(40).optional().describe('caption style pack by default'),
+  grade: z.object({look: z.enum(Object.keys(LOOKS) as [string, ...string[]]), intensity: z.number().min(0).max(1), auto: z.boolean(), adjust, highlights: z.number().min(0).max(1), skin: z.number().min(0).max(1), lut: z.string().nullable(), lutMix: z.number().min(0).max(1)}).partial().optional().describe('color defaults (set_grade knobs)'),
+  pace: z.string().max(200).optional(),
+  transitions: z.string().max(200).optional(),
+  music: z.string().max(200).optional(),
+  broll: z.string().max(300).optional(),
+  audio: z.object({clean: z.string().optional(), sfx: z.boolean().optional()}).optional(),
+}).catchall(z.union([z.string().max(500), z.number(), z.boolean()]));
+export type Style = z.infer<typeof styleSchema>;
+
+// what loading a kit's style does to a project, without jobs (the pack needs a
+// re-paging job: the caller runs it). Shared by set_brand and the Styles tab.
+export function styleEffects(st: Style | undefined): {captionsOff?: boolean; grade?: GradeParams; audio?: {clean?: string; sfx?: boolean}; pack?: string} {
+  if (!st) return {};
+  return {
+    ...(st.captions ? {captionsOff: st.captions === 'off'} : {}),
+    ...(st.grade && Object.keys(st.grade).length ? {grade: st.grade as GradeParams} : {}),
+    ...(st.audio ? {audio: st.audio} : {}),
+    ...(st.pack ? {pack: st.pack} : {}),
+  };
+}
+// a partial style on top of a kit's: null removes a key, adjust / grade merge key by key
+export function mergeStyle(prev: Style | undefined, patch: Record<string, unknown>): Style {
+  const out: Record<string, unknown> = {...(prev ?? {})};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete out[k];
+    else if (k === 'grade' && v && typeof v === 'object') out.grade = {...(out.grade as object), ...(v as object), ...((v as {adjust?: object}).adjust ? {adjust: {...((out.grade as {adjust?: object})?.adjust), ...(v as {adjust: object}).adjust}} : {})};
+    else out[k] = v;
+  }
+  return styleSchema.parse(out);
+}
 
 export const brandSchema = z.object({
   name: z.string().trim().max(40).optional(),
@@ -33,9 +76,10 @@ export const brandSchema = z.object({
     }
   }),
   logo: z.string().optional().describe('image under public/, e.g. brands/acme.png'),
+  style: styleSchema.optional(),
 });
 // display / body: a catalog family (src/fonts.ts) or the family of one of `files`
-export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: string; body?: string; files?: ClientFont[]}; logo?: string};
+export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: string; body?: string; files?: ClientFont[]}; logo?: string; style?: Style};
 
 // what the renderer uses: every value resolved, `branded` = a kit is active
 export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: string; body?: string; script?: string; logo?: string; fontFiles: ClientFont[]};

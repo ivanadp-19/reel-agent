@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
+import {brandSchema} from '../src/brand.ts';
 import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
@@ -422,9 +423,11 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET') return fs.existsSync(file) ? json(res, 200, JSON.parse(fs.readFileSync(file, 'utf8'))) : json(res, 404, {error: 'not found'});
     if (req.method === 'POST') {
       let kit; try { kit = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
-      if (!/^#[0-9a-fA-F]{6}$/.test(kit?.colors?.accent ?? '')) return json(res, 400, {error: 'a kit needs colors.accent (#rrggbb)'});
+      // the same rule as set_brand (src/brand.ts): colors, fonts, font files, style
+      const r = brandSchema.safeParse({...kit, name: kit?.name || id});
+      if (!r.success) return json(res, 400, {error: r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ').slice(0, 300)});
       fs.mkdirSync(BRANDS, {recursive: true});
-      fs.writeFileSync(file, JSON.stringify({...kit, name: kit.name || id}, null, 2));
+      fs.writeFileSync(file, JSON.stringify(r.data, null, 2));
       return json(res, 200, {slug: id});
     }
   }

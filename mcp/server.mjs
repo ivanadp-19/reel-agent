@@ -37,7 +37,7 @@ import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
-import {brandSchema} from '../src/brand.ts';
+import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -125,6 +125,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 function summary(id, p) {
   const out = [];
   out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
+  if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
   if (p.plan) out.push('', 'PLAN (set_plan):', ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
@@ -237,7 +238,7 @@ const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
 const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
-server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, name, from, save_as, clear}) => {
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio to this project (apply_style false = only store it) and tells you the pack to set; reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, apply_style, name, from, save_as, clear}) => {
   const p = load(project_id);
   if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
   let b;
@@ -284,13 +285,41 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
       b.logo = path.relative(PUBLIC, abs);
     }
   }
+  if (style) {
+    try { b.style = mergeStyle(b.style, style); } catch (e) { throw new Error(`style: ${e.issues?.map((i) => `${i.path.join('.')} ${i.message}`).join('; ') ?? e.message}`); }
+  }
   const r = brandSchema.safeParse(b);
   if (!r.success) throw new Error(`brand: ${r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}`);
   p.brand = r.data; p.accentColor = r.data.colors.accent;
+  // the kit's style on this project: captions, color and audio now; the pack is a job — say it
+  const applied = [];
+  if (apply_style && (from || style) && r.data.style) {
+    const fx = styleEffects(r.data.style);
+    if (fx.captionsOff != null) { p.captionsOff = fx.captionsOff; applied.push(`captions ${fx.captionsOff ? 'off' : 'on'}`); }
+    if (fx.audio) { p.audio = {...p.audio, ...fx.audio}; applied.push('audio'); }
+    if (fx.grade) {
+      const {lut, ...rest} = fx.grade;
+      p.grade = {...(p.grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), ...rest, ...(rest.adjust ? {adjust: {...p.grade?.adjust, ...rest.adjust}} : {})};
+      if (lut !== undefined) p.grade.lut = lut ? lutPath(lut) : null;
+      if (p.clips.length) await settleGrade(p);
+      applied.push('color');
+    }
+    if (fx.pack && fx.pack !== p.captionStyle) applied.push(`pack ${fx.pack} → call set_caption_style ${fx.pack}`);
+  }
   let saved = '';
   if (save_as) { fs.mkdirSync(BRANDS, {recursive: true}); fs.writeFileSync(path.join(BRANDS, `${slug(save_as)}.json`), JSON.stringify({...r.data, name: r.data.name ?? save_as}, null, 2)); saved = ` — saved as "${slug(save_as)}"`; }
   await save(project_id, p);
-  return text(`Brand kit: ${JSON.stringify(p.brand)}${saved}`);
+  return text(`Brand kit: ${JSON.stringify(p.brand)}${saved}${applied.length ? `\nStyle applied: ${applied.join(', ')}` : ''}`);
+});
+
+server.registerTool('style_kits', {description: 'The saved brand / style kits (public/brands/): without name, each kit with its style notes in one line; with name, the whole kit JSON (colors, fonts, logo, style). Read it when planning a reel for a client (reel-plan) and load it with set_brand from.', inputSchema: {name: z.string().optional()}}, async ({name}) => {
+  if (name) {
+    const f = path.join(BRANDS, `${slug(name)}.json`);
+    if (!fs.existsSync(f)) throw new Error(`no saved kit "${name}"${savedBrands().length ? ` — saved: ${savedBrands().join(', ')}` : ''}`);
+    return text(JSON.stringify(JSON.parse(fs.readFileSync(f, 'utf8')), null, 2));
+  }
+  const rows = savedBrands().map((k) => { try { const b = JSON.parse(fs.readFileSync(path.join(BRANDS, `${k}.json`), 'utf8')); return `${k}  "${b.name ?? k}"  accent ${b.colors?.accent}${b.fonts?.body ? `, captions ${b.fonts.body}` : ''}${b.style ? `  — style: ${[b.style.captions ? `captions ${b.style.captions}` : '', b.style.pack ? `pack ${b.style.pack}` : '', b.style.notes ? b.style.notes.replace(/\s+/g, ' ').slice(0, 140) : ''].filter(Boolean).join('; ')}` : ''}`; } catch { return null; } }).filter(Boolean);
+  return text(rows.length ? rows.join('\n') : 'No saved kits yet — write one from the client\'s words with set_brand style + save_as.');
 });
 
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {

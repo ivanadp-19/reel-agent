@@ -3,7 +3,7 @@ import {useEditor} from './store';
 import {PRESETS, type PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
 import {FONT_FAMILIES, type ClientFont} from '../src/fonts';
-import type {Brand} from '../src/brand';
+import {styleEffects, styleSchema, type Brand, type Style} from '../src/brand';
 import {ColorSection} from './ColorSection';
 import {Btn, IconBtn, Label, Section, Select, TextInput} from './ui';
 
@@ -26,7 +26,7 @@ const ColorField: React.FC<{label: string; value?: string; fallback: string; onC
 );
 
 export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: (msg: string, kind: 'error' | 'ok') => void}> = ({onStyleChange, notify}) => {
-  const {accentColor, captionStyle, brand, setAccentColor, setBrand} = useEditor();
+  const {accentColor, captionStyle, brand, grade, audio, setAccentColor, setBrand, setGrade, setAudio, setCaptionsOff} = useEditor();
   const [kits, setKits] = useState<Kit[]>([]);
   const logoInput = useRef<HTMLInputElement>(null);
   const fontInput = useRef<HTMLInputElement>(null);
@@ -37,7 +37,28 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
   const loadKit = async (slug: string) => {
     if (!slug) return;
     const k = await fetch(`/api/brands/${slug}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    if (k?.colors?.accent) { setBrand(k); notify(`Brand kit "${k.name ?? slug}" loaded`, 'ok'); } else notify('Could not load that kit', 'error');
+    if (!k?.colors?.accent) return notify('Could not load that kit', 'error');
+    setBrand(k);
+    // its style on this project, as set_brand from does (src/brand.ts styleEffects); a LUT is baked by the render if not yet
+    const fx = styleEffects(k.style);
+    if (fx.captionsOff != null) setCaptionsOff(fx.captionsOff);
+    if (fx.audio) setAudio({...(audio ?? {}), ...fx.audio});
+    if (fx.grade) setGrade({...(grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), ...fx.grade, ...(fx.grade.adjust ? {adjust: {...grade?.adjust, ...fx.grade.adjust}} : {})});
+    if (fx.pack && fx.pack in PRESETS && fx.pack !== captionStyle) onStyleChange(fx.pack as PresetId);
+    notify(`Brand kit "${k.name ?? slug}" loaded${k.style ? ' with its style' : ''}`, 'ok');
+  };
+  // the kit's style: notes in words + the other preferences as JSON (validated by styleSchema)
+  const {notes = '', ...prefs} = brand?.style ?? {};
+  const [prefsText, setPrefsText] = useState('');
+  const [prefsErr, setPrefsErr] = useState<string | null>(null);
+  useEffect(() => { setPrefsText(Object.keys(prefs).length ? JSON.stringify(prefs, null, 1) : ''); setPrefsErr(null); }, [brand?.name, JSON.stringify(prefs)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const setStyle = (st: Style) => patchBrand((b) => { const clean = Object.fromEntries(Object.entries(st).filter(([, v]) => v !== '' && v != null)); return Object.keys(clean).length ? {...b, style: clean as Style} : (({style: _, ...rest}) => rest)(b); });
+  const commitPrefs = () => {
+    let obj: unknown = {};
+    try { obj = prefsText.trim() ? JSON.parse(prefsText) : {}; } catch { return setPrefsErr('not valid JSON'); }
+    const r = styleSchema.safeParse({...(obj as object), ...(notes ? {notes} : {})});
+    if (!r.success) return setPrefsErr(r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; '));
+    setPrefsErr(null); setStyle(r.data);
   };
   const saveKit = async () => {
     if (!brand) return;
@@ -128,6 +149,10 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
                 {brand.logo && <IconBtn icon="close" title="Remove logo" onClick={() => patchBrand(({logo: _, ...b}) => b)} />}
               </div>
             </div>
+            <Label>Style — how this client edits (read by the plan)</Label>
+            <textarea value={notes} onChange={(e) => setStyle({...prefs, notes: e.target.value} as Style)} rows={3} placeholder="In their words: sin subtítulos, cortes secos, color natural, piel sin naranja…" className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[12px] resize-y" />
+            <textarea value={prefsText} onChange={(e) => setPrefsText(e.target.value)} onBlur={commitPrefs} rows={prefsText ? Math.min(10, prefsText.split('\n').length + 1) : 2} placeholder='Preferences as JSON: {"captions": "off", "pack": "palabra", "grade": {"look": "natural", "skin": 0.8}, "pace": "rápido"}' className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[11px] font-mono resize-y" />
+            {prefsErr && <p className="text-[11px] text-error">{prefsErr}</p>}
             <div className="flex gap-2">
               <Btn onClick={saveKit} className="flex-1">Save as kit…</Btn>
               <Btn onClick={() => { setBrand(null); notify('Brand kit removed', 'ok'); }} className="flex-1">Remove kit</Btn>
