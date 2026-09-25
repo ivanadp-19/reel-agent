@@ -23,6 +23,7 @@ import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, recordFinal, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, serveFile} from './http.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -442,6 +443,17 @@ const server = createServer(async (req, res) => {
     let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
     const tags = Array.isArray(b.tags) ? b.tags.map((t) => String(t).trim()).filter((t) => t.length >= 2 && t.length <= 30).slice(0, 12) : undefined;
     return json(res, 200, upsertAsset({id, ...(tags ? {tags} : {}), ...(typeof b.desc === 'string' ? {desc: b.desc.trim().slice(0, 200)} : {})}));
+  }
+  // asset catalog (scripts/catalog.mjs): read-only here — building it is `node scripts/catalog.mjs` or MCP catalog_assets, never the backend
+  if (req.method === 'GET' && url.pathname === '/api/catalog') {
+    const q = url.searchParams;
+    const bool = (k) => (q.has(k) ? q.get(k) === 'true' : undefined);
+    const num = (k) => (q.has(k) && q.get(k) !== '' && Number.isFinite(+q.get(k)) ? +q.get(k) : undefined);
+    const dir = q.get('dir') || undefined;
+    if (dir && !/^[\w-]+(\/[\w-]+)*$/.test(dir)) return json(res, 400, {error: 'bad dir'});
+    const list = (k) => (q.get(k) ? q.get(k).split(',').map((t) => t.trim()).filter(Boolean) : undefined);
+    const rows = searchCatalog(loadEntries(PUBLIC, dir ? [dir] : undefined), {dir, kind: q.get('kind') || undefined, minSec: num('min_sec'), maxSec: num('max_sec'), daylight: q.get('daylight') || undefined, orientation: q.get('orientation') || undefined, hasBlack: bool('has_black'), maxBlackRatio: num('max_black_ratio'), hasSpeech: bool('has_speech'), tags: list('tags'), excludeTags: list('exclude_tags'), text: q.get('text') || undefined, limit: Math.min(500, num('limit') ?? 200)});
+    return json(res, 200, rows);
   }
   if (req.method === 'GET' && url.pathname === '/api/black') {
     const src = url.searchParams.get('src') || '';
