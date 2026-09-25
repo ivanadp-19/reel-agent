@@ -2,6 +2,7 @@ import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
+import {textWidthEm} from './textFit';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily, type FontFamily} from './fonts';
 import {ensureProjectFont} from './projectFont';
@@ -130,7 +131,34 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const absMs = caption.startMs + (frame / fps) * 1000;
-  const fontSize = Math.round(preset.font.sizePx * (caption.scale ?? 1) * pageScale(preset, caption.words.length));
+  const baseSize = Math.round(preset.font.sizePx * (caption.scale ?? 1) * pageScale(preset, caption.words.length));
+  // Bonded pairs (layout.unbreakable): Capitalized+Capitalized/digit words render inside a
+  // nowrap span so flex-wrap can never split a name ('MONTEALBÁN 326'). Two passes:
+  // name+number bonds first (stronger than Cap+Cap), then Cap+Cap on the words left free.
+  // Pairs NEVER chain (a chained run made the whole page one unbreakable overflowing line).
+  const canBond = !!(preset.layout && preset.layout.unbreakable);
+  const pairBondStrong = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[0-9]/.test(b); // name + number
+  const pairBondWeak = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[A-ZÁÉÍÓÚÑÜ]/.test(b); // name + name
+  const paired = new Set<number>();
+  for (const bond of [pairBondStrong, pairBondWeak]) {
+    if (!canBond) break;
+    for (let i = 0; i < caption.words.length - 1; i++) {
+      const nxt = caption.words[i + 1];
+      if (!paired.has(i) && !paired.has(i + 1) && !nxt.br && bond(caption.words[i].text, nxt.text)) paired.add(i);
+    }
+  }
+  // César 10:35: "3 lines or a smaller size beat splitting a name" — shrink the page so the
+  // widest unbreakable unit (bonded pair or single word) fits the frame (70px side padding).
+  const {width: compWidth} = useVideoConfig();
+  const availPx = compWidth - 140;
+  const familyName = preset.font.custom ? preset.font.custom.family : preset.font.family;
+  const unitEms: number[] = [];
+  for (let i = 0; i < caption.words.length; i++) {
+    if (paired.has(i)) { unitEms.push(textWidthEm(caption.words[i].text + ' ' + caption.words[i + 1].text, familyName)); i++; }
+    else unitEms.push(textWidthEm(caption.words[i].text, familyName));
+  }
+  const widestPx = Math.max(...unitEms) * baseSize;
+  const fontSize = widestPx > availPx ? Math.max(40, Math.floor((baseSize * availPx) / widestPx)) : baseSize;
 
   // entrance + exit. Guarded for very short pages (1–2 frames after autocut /
   // clip clamping): interpolate() needs strictly increasing ranges.
@@ -237,8 +265,6 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         // When layout.unbreakable, bonded pairs (Capitalized + Capitalized/digit) render inside a
         // nowrap group so flex-wrap can never separate them, whatever the measured widths say.
         const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
-        const canBond = !!(preset.layout && preset.layout.unbreakable);
-        const pairBond = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[A-ZÁÉÍÓÚÑÜ0-9]/.test(b);
         const els: React.ReactNode[] = [];
         const wordEl = (i: number) => {
           const w = caption.words[i];
@@ -259,20 +285,13 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         for (let i = 0; i < caption.words.length; i++) {
           const w = caption.words[i];
           if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
-          const nxt = caption.words[i + 1];
-          if (canBond && nxt && !nxt.br && pairBond(w.text, nxt.text)) {
-            const run = [i];
-            let j = i;
-            while (j + 1 < caption.words.length && !caption.words[j + 1].br && pairBond(caption.words[j].text, caption.words[j + 1].text)) {
-              run.push(j + 1);
-              j++;
-            }
+          if (paired.has(i)) {
             els.push(
               <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
-                {run.map((k) => wordEl(k))}
+                {wordEl(i)}{wordEl(i + 1)}
               </span>
             );
-            i = j;
+            i++;
           } else {
             els.push(wordEl(i));
           }
