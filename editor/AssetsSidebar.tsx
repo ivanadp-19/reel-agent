@@ -1,6 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
+import {pct, uploadClip} from './upload';
 import {placeClips, clipDurationSec} from '../src/timeline';
 
 type LibRow = {id: string; tags?: string[]};
@@ -13,6 +14,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   const clipInput = useRef<HTMLInputElement>(null);
   const brollInput = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState<string | null>(null);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [tags, setTags] = useState<Record<string, string[]>>({}); // library tags per asset id (suggest_broll matches on them)
@@ -34,13 +36,19 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   // upload videos → backend remuxes/encodes + thumbnails → append to timeline
   const importFiles = async (files: File[]) => {
     const vids = files.filter((f) => f.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name));
+    setImportErrors([]);
     for (let i = 0; i < vids.length; i++) {
-      setImporting(`Importing ${vids[i].name} (${i + 1}/${vids.length})…`);
+      const what = `${vids[i].name} (${i + 1}/${vids.length})`;
+      setImporting(`Uploading ${what}…`);
       try {
-        const clip = await fetch('/api/add-clip?name=' + encodeURIComponent(vids[i].name), {method: 'POST', body: vids[i]}).then((r) => r.json());
-        if (clip?.id) addClip(clip);
-      } catch {
-        /* skip a failed file, keep going */
+        const clip = await uploadClip<Parameters<typeof addClip>[0]>(vids[i], {
+          progress: (loaded, total) => setImporting(`Uploading ${what} · ${pct(loaded, total)}%`),
+          processing: (progress, label) => setImporting(`${label} ${what} · ${progress}%`),
+        });
+        addClip(clip);
+      } catch (e) {
+        // show why, keep going with the next file
+        setImportErrors((l) => [...l, `${vids[i].name}: ${e instanceof Error ? e.message : String(e)}`]);
       }
     }
     setImporting(null);
@@ -104,6 +112,12 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
         <div className="px-4 py-2 text-[11px] text-primary border-b border-outline-variant/30 flex items-center gap-2">
           <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
           <span className="truncate">{importing}</span>
+        </div>
+      )}
+      {importErrors.length > 0 && !importing && (
+        <div role="alert" className="px-4 py-2 text-[11px] text-error border-b border-outline-variant/30 flex items-start gap-2">
+          <span className="flex-1 break-words">{importErrors.join(' · ')}</span>
+          <button onClick={() => setImportErrors([])} title="Dismiss" className="material-symbols-outlined text-[14px] hover:brightness-125">close</button>
         </div>
       )}
       {dragOver && (

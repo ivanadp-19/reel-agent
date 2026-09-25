@@ -1,6 +1,6 @@
 // Editor backend (port 3333):
 //   projects   — multi-project library (list/get/save/delete)
-//   add-clip   — upload video → remux/encode + thumbnail → return clip
+//   add-clip   — upload video → remux/encode + thumbnail → a clip (browser uploads as a job, server/ingest.mjs)
 //   music      — upload an audio track
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
 //   captions   — words → caption pages + face-aware placement (job)
@@ -42,6 +42,7 @@ import {createTokenStore, openForUser} from './tokens.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {projectIssues, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
+import {createClipIngest} from './ingest.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -251,6 +252,8 @@ const TRUST_HOPS = trustedHops();
 const USERS = createTokenStore(process.env.REEL_TOKENS_FILE || path.join(ROOT, '.reel-tokens.json'));
 const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
 const UPLOADS = path.join(ROOT, '.uploads');
+// clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
+const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure});
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
 const DIST = path.join(ROOT, 'editor', 'dist');
 function serveStatic(req, res, pathname) {
@@ -655,108 +658,10 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ---- add a clip to the timeline: upload → remux/encode → thumbnail ----
-  if (req.method === 'POST' && url.pathname === '/api/add-clip') {
-    const rawName = url.searchParams.get('name') || 'clip.mp4';
-    const base = rawName.replace(/\.[^.]+$/, '').replace(/[^\w\-]/g, '_').slice(0, 40) || 'clip';
-    const clipsDir = path.join(PUBLIC, 'clips');
-    const thumbsDir = path.join(clipsDir, 'thumbs');
-    fs.mkdirSync(thumbsDir, {recursive: true});
-
-    // unique id (avoid clobbering existing clips)
-    let id = base;
-    let n = 2;
-    while (fs.existsSync(path.join(clipsDir, `${id}.mp4`))) id = `${base}-${n++}`;
-
-    // a local file path (same machine, from the MCP server) skips the upload —
-    // only with the run token, and only video files. A user token (the reel CLI) may
-    // name a path too, but only one of its own files or one anyone can read
-    // (server/tokens.mjs openForUser): the backend never reads other users' files for it.
-    // ?upload=<id>: a part the CLI uploaded in chunks (server/uploads.mjs), taken whole.
-    const local = url.searchParams.get('path');
-    const upload = url.searchParams.get('upload');
-    let opened = null, uploaded = null;
-    if (local) {
-      if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local)) return json(res, 400, {error: 'path must be a video file', code: 'bad_path'});
-      if (g.via === 'user-token') {
-        opened = openForUser(local, g.uid);
-        if (!opened) return json(res, 403, {error: 'the backend may not read this file for you: it is not yours and not readable by everyone', code: 'path_not_allowed', hint: 'upload it instead (reel clips add does when this happens)'});
-      } else {
-        if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
-        if (!fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
-      }
-    } else if (upload) {
-      if (!UPLOAD_ID.test(upload)) return json(res, 400, {error: 'bad upload id', code: 'bad_request'});
-      uploaded = partFile(UPLOADS, g.user, upload);
-      const have = partSize(uploaded), want = +(url.searchParams.get('size') ?? have);
-      if (!have) return json(res, 404, {error: `no upload ${upload}`, code: 'not_found'});
-      if (have !== want) return json(res, 409, {error: `upload ${upload} has ${have} of ${want} bytes`, code: 'upload_incomplete', size: have});
-    }
-    const tmp = opened?.path ?? local ?? uploaded ?? path.join(ROOT, `.upload-${id}.bin`);
-    const cleanup = () => { opened?.close(); if (!local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
-    const ingest = async () => {
-      try {
-        const out = path.join(clipsDir, `${id}.mp4`);
-        // probe codec / pixel format / size / rotation / duration
-        const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-          '-show_entries', 'stream=codec_name,pix_fmt,width,height,color_transfer:stream_side_data=rotation:format=duration', '-of', 'json', tmp]);
-        let codec = '', pix = '', duration = 0, w = 0, h = 0, rotated = false, trc = '';
-        try {
-          const p = JSON.parse(probe.stdout);
-          const s = p.streams?.[0] ?? {};
-          codec = s.codec_name ?? ''; pix = s.pix_fmt ?? ''; w = s.width ?? 0; h = s.height ?? 0; trc = s.color_transfer ?? '';
-          rotated = (s.side_data_list ?? []).some((d) => d.rotation && d.rotation % 180 !== 0);
-          duration = parseFloat(p.format?.duration ?? '0');
-        } catch {}
-
-        // Already 1080p-class h264/yuv420 and not rotated → fast remux. Anything
-        // else (4K phones, HEVC, rotation metadata, 10-bit) is re-encoded: rotation
-        // baked in, fitted inside 1080×1920 (portrait) or 1920×1080 (landscape).
-        // Remotion's compositor cannot read 2160-tall sources.
-        const hdr = trc in HDR_TRC;
-        const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920 && !hdr;
-        const fit = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':force_original_aspect_ratio=decrease:force_divisible_by=2";
-        // HDR: fit first (cheaper), then BT.2020 YUV → RGB → LUT → BT.709 YUV
-        const vf = hdr
-          ? `${fit},scale=in_color_matrix=bt2020:in_range=tv:out_range=pc,format=gbrp16le,lut3d=file=${hdrLut(trc)},scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv`
-          : fit;
-        const enc = compatible
-          ? await run('ffmpeg', ['-y', '-i', tmp, '-c', 'copy', '-movflags', '+faststart', out])
-          : await run('ffmpeg', ['-y', '-i', tmp, '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
-              ...(hdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
-              '-c:a', 'aac', '-ar', '48000', '-movflags', '+faststart', out]);
-        if (enc.code !== 0) {
-          cleanup();
-          return json(res, 500, {error: 'transcode failed', detail: enc.stderr.slice(-300)});
-        }
-
-        // re-probe duration from the output (authoritative)
-        const dp = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of',
-          'default=noprint_wrappers=1:nokey=1', out]);
-        const dur = parseFloat(dp.stdout) || duration || 0;
-
-        // thumbnail
-        await run('ffmpeg', ['-y', '-ss', String(Math.min(0.5, dur / 2)), '-i', out, '-frames:v', '1',
-          '-vf', 'scale=160:-1', path.join(thumbsDir, `${id}.jpg`)]);
-
-        cleanup();
-        return json(res, 200, {
-          id, src: `clips/${id}.mp4`, label: rawName.replace(/\.[^.]+$/, ''),
-          inSec: 0, outSec: dur, sourceDurationSec: dur,
-          ...(hdr ? {ingest: `${trc === 'smpte2084' ? 'PQ' : 'HLG'} HDR tone-mapped to SDR`} : {}),
-        });
-      } catch (e) {
-        cleanup();
-        return json(res, 500, {error: String(e).slice(0, 200)});
-      }
-    };
-    if (local || uploaded) { ingest(); return; }
-    const ws = fs.createWriteStream(tmp);
-    req.pipe(ws);
-    req.on('error', () => { cleanup(); json(res, 500, {error: 'upload failed'}); });
-    ws.on('finish', ingest);
-    return;
-  }
+  // ---- add a clip to the timeline: upload → remux/encode → thumbnail (server/ingest.mjs) ----
+  //   ?path= (the MCP, the reel CLI) and ?upload= (the CLI's chunked part) answer with the clip; a browser upload
+  //   answers 202 {jobId}, polled at /api/add-clip/<jobId>
+  if (clipIngest.handle(req, res, url, g)) return;
 
   // ---- pipeline jobs: transcribe / captions / autocut ----
   // Each spawns one pipeline script with the request body as its input file and
