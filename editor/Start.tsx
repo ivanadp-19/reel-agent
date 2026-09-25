@@ -1,11 +1,14 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {clipDurationSec} from '../src/timeline';
-import {fmtMB, isVideoFile, pct, uploadFile, type UploadItem} from './upload';
+import {fmtMB, isVideoFile, pct, pendingIngests, uploadClip, waitIngest, type UploadItem} from './upload';
 
 export type ProjectMeta = {id: string; name: string; clips: number; updatedAt: string | null; thumb: string | null};
 type HealthCheck = {id: string; ok: boolean; label: string; hint: string; optional?: boolean};
 type Health = {ok: boolean; checks: HealthCheck[]};
+
+// ingest jobs this page is polling (one poll per job, however often Start mounts)
+const watching = new Set<string>();
 
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 const ago = (iso: string | null) => {
@@ -39,20 +42,40 @@ export const Start: React.FC<{
   const busy = uploads.some((u) => u.phase === 'queued' || u.phase === 'uploading' || u.phase === 'processing');
   const patch = (key: string, p: Partial<UploadItem>) => setUploads((l) => l.map((u) => (u.key === key ? {...u, ...p} : u)));
 
+  type NewClip = Parameters<typeof addClip>[0];
+  const pending = pendingIngests();
   const upload = async (file: File, key: string) => {
     patch(key, {phase: 'uploading'});
+    let jobId = '';
     try {
-      const clip = await uploadFile<{id?: string; error?: string}>('/api/add-clip?name=' + encodeURIComponent(file.name), file, {
+      const clip = await uploadClip<NewClip>(file, {
         progress: (loaded) => patch(key, {loaded}),
-        uploaded: () => patch(key, {phase: 'processing', loaded: file.size}),
+        uploaded: () => patch(key, {phase: 'processing', loaded: file.size, progress: 0, label: 'Processing on the server'}),
+        // the server works on its own from here: remembered, so a reload picks the clip up
+        job: (id) => { jobId = id; watching.add(id); pending.add({jobId: id, name: file.name, size: file.size}); },
+        processing: (progress, label) => patch(key, {progress, label}),
       });
-      if (!clip?.id) throw new Error(clip?.error || 'the server did not return a clip');
-      addClip(clip as Parameters<typeof addClip>[0]);
+      addClip(clip);
       patch(key, {phase: 'done'});
     } catch (e) {
       patch(key, {phase: 'error', error: e instanceof Error ? e.message : String(e)});
+    } finally {
+      if (jobId) { watching.delete(jobId); pending.remove(jobId); }
     }
   };
+  // clips whose upload finished in an earlier page load: wait for them here
+  useEffect(() => {
+    const resume = pending.list().filter((p) => !watching.has(p.jobId));
+    if (!resume.length) return;
+    setUploads((l) => [...l, ...resume.map((p): UploadItem => ({key: p.jobId, name: p.name, size: p.size, loaded: p.size, phase: 'processing', progress: 0, label: 'Processing on the server'}))]);
+    for (const p of resume) {
+      watching.add(p.jobId);
+      waitIngest<NewClip>(p.jobId, {progress: (progress, label) => patch(p.jobId, {progress, label})})
+        .then((clip) => { addClip(clip); patch(p.jobId, {phase: 'done'}); })
+        .catch((e) => patch(p.jobId, {phase: 'error', error: e instanceof Error ? e.message : String(e)}))
+        .finally(() => { watching.delete(p.jobId); pending.remove(p.jobId); });
+    }
+  }, []);
   // files picked or dropped while others are still going wait behind them
   const queue = useRef(Promise.resolve());
   const importFiles = (files: File[]) => {
@@ -193,7 +216,7 @@ export const Start: React.FC<{
                     <span className={`shrink-0 text-[11px] ${u.phase === 'error' ? 'text-error' : u.phase === 'done' ? 'text-primary' : 'text-on-surface-variant'}`}>
                       {u.phase === 'queued' && `Waiting · ${fmtMB(u.size)}`}
                       {u.phase === 'uploading' && `${pct(u.loaded, u.size)}% · ${fmtMB(u.loaded)} / ${fmtMB(u.size)}`}
-                      {u.phase === 'processing' && 'Uploaded — processing on the server…'}
+                      {u.phase === 'processing' && `${u.label ?? 'Processing'} · ${u.progress ?? 0}%`}
                       {u.phase === 'done' && 'Ready'}
                       {u.phase === 'error' && 'Failed'}
                     </span>
@@ -205,16 +228,16 @@ export const Start: React.FC<{
                       aria-label={`Upload of ${u.name}`}
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      aria-valuenow={u.phase === 'processing' ? 100 : pct(u.loaded, u.size)}
+                      aria-valuenow={u.phase === 'processing' ? u.progress ?? 0 : pct(u.loaded, u.size)}
                     >
                       <div
                         className={`h-full bg-primary transition-[width] ${u.phase === 'processing' ? 'animate-pulse' : ''}`}
-                        style={{width: `${u.phase === 'processing' ? 100 : pct(u.loaded, u.size)}%`}}
+                        style={{width: `${u.phase === 'processing' ? u.progress ?? 0 : pct(u.loaded, u.size)}%`}}
                       />
                     </div>
                   )}
                   {u.phase === 'processing' && (
-                    <p className="mt-1 text-[11px] text-on-surface-variant">Converting the video and making a thumbnail. Large or 4K/HDR clips can take a few minutes.</p>
+                    <p className="mt-1 text-[11px] text-on-surface-variant">Uploaded — converting the video and making a thumbnail. Large or 4K/HDR clips can take a few minutes; the server finishes it even if this tab closes.</p>
                   )}
                   {u.phase === 'error' && <p role="alert" className="mt-1 text-[11px] text-error break-words">{u.error}</p>}
                 </li>
