@@ -122,7 +122,8 @@ export const MultiClipVideo: React.FC<{
   brand?: Brand | null;
   grade?: ProjectGrade | null;
   audio?: {clean?: string; sfx?: boolean} | null;
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null}) => {
+  captionsOnly?: boolean; // render ONLY the caption layer over transparency (alpha overlay for a clean master)
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOnly = false}) => {
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
@@ -135,6 +136,16 @@ export const MultiClipVideo: React.FC<{
   const projectedGraphics = projectGraphics(graphics, clips, fps);
   // captions step around text graphics, and none over a closing card (the voice goes on; the card carries the message)
   const shownCaptions = hideUnder(avoidGraphics(projectedCaptions, projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
+
+  // alpha overlay mode: same caption projection/timing as the full render, transparent everywhere else.
+  // Export PNG frames and pack with prores_ks profile 4444 yuva444p10le.
+  if (captionsOnly) {
+    return (
+      <AbsoluteFill style={{backgroundColor: 'transparent'}}>
+        <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} />
+      </AbsoluteFill>
+    );
+  }
   const preset = presetOf(captionStyle);
   const focus = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
   // a B-roll card sits over blurred footage whatever the pack

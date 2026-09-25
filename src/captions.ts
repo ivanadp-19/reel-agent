@@ -16,6 +16,8 @@ export type CaptionWord = {
   emoji?: string; // one emoji that pops in right after the word
   speaker?: string; // spk1, spk2… who says it (diarization); presets may color or place pages per speaker later
   popMs?: number; // visual pop time in a fastBuild cascade (page start + idx*45) — SFX pairs clicks/typing here, not startMs
+  sentenceStart?: boolean; // a guion sentence begins on this word — never orphan-merge it back
+
 };
 export type Caption = {
   id: string;

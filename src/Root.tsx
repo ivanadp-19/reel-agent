@@ -8,6 +8,7 @@ import {totalDurationFrames} from './timeline';
 // in Studio they fall back to the files on disk.
 export const RemotionRoot: React.FC = () => {
   return (
+    <>
     <Composition
       id="MultiClip"
       component={MultiClipVideo}
@@ -37,5 +38,34 @@ export const RemotionRoot: React.FC = () => {
         };
       }}
     />
+    {/* Caption layer alone, transparent background — overlay for a clean (captionless) master.
+        Render PNG frames, then pack with prores_ks profile 4444 yuva444p10le. */}
+    <Composition
+      id="CaptionOnly"
+      component={MultiClipVideo}
+      durationInFrames={300}
+      fps={30}
+      width={1080}
+      height={1920}
+      defaultProps={{clips: [], music: null, captions: [], brolls: [], graphics: [], mattes: [], accentColor: '#FFB020', captionStyle: 'palabra', brand: null, grade: null, audio: null, captionsOnly: true}}
+      calculateMetadata={async ({props}) => {
+        const fps = 30;
+        const p = props as {clips?: unknown; captions?: unknown};
+        const fromDisk = async (file: string, fallback: unknown) => {
+          const j = await fetch(staticFile(file)).then((r2) => r2.json()).catch(() => fallback);
+          return Array.isArray(j) || (j && typeof j === 'object') ? j : fallback;
+        };
+        const tl = Array.isArray(p.clips) ? {clips: p.clips} : await fromDisk('timeline.json', {clips: []});
+        const captions = Array.isArray(p.captions) ? p.captions : await fromDisk('captions.multi.json', []);
+        return {
+          fps,
+          width: 1080,
+          height: 1920,
+          durationInFrames: totalDurationFrames(tl.clips, fps),
+          props: {...props, clips: tl.clips, captions, captionsOnly: true},
+        };
+      }}
+    />
+    </>
   );
 };
