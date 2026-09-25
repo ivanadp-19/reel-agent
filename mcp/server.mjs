@@ -38,7 +38,7 @@ import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mj
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
-import {FONT_FAMILIES, FONT_FILE, clientFont} from '../src/fonts.ts';
+import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -269,7 +269,8 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
     const entry = clientFont(rel.split(path.sep).join('/'), ff.family, ff.weight, ff.italic);
     b.fonts.files = [...(b.fonts.files ?? []).filter((x) => x.file !== entry.file), entry];
   }
-  if (display_font) b.fonts.display = display_font; if (caption_font) b.fonts.body = caption_font;
+  // the name as typed or as the file named it ("DejaVu Sans" = "Deja Vu Sans" = "dejavusans")
+  if (display_font) b.fonts.display = resolveFamily(display_font, b.fonts.files); if (caption_font) b.fonts.body = resolveFamily(caption_font, b.fonts.files);
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
     if (path.isAbsolute(logo)) {

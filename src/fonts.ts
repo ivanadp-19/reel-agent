@@ -81,6 +81,14 @@ export function clientFont(file: string, family?: string, weight?: number, itali
   const fam = (family ?? base.split(/[-_]/)[0].replace(/([a-z])([A-Z])/g, '$1 $2')).trim().slice(0, 40);
   return {family: fam, file, weight: weight ?? guess, ...(italic ?? /italic|oblique/.test(style) ? {italic: true} : {})};
 }
+// a family as the user typed it ("DejaVu Sans", "helvetica") → the catalog name or
+// the kit's registered family, ignoring case, spaces, - and _; unknown names pass through
+const squash = (s: string) => s.toLowerCase().replace(/[\s_-]+/g, '');
+export function resolveFamily(name: string, files: ClientFont[] = []): string {
+  if (isCatalog(name)) return name;
+  const k = squash(name);
+  return files.find((f) => squash(f.family) === k)?.family ?? (Object.keys(LOADERS) as string[]).find((c) => squash(c) === k) ?? name;
+}
 // heaviest weight a family has, catalog or client
 export const heaviest = (name: string, files: ClientFont[] = []): number =>
   isCatalog(name) ? HEAVIEST[name] : Math.max(400, ...files.filter((f) => f.family === name).map((f) => f.weight));

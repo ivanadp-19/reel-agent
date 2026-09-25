@@ -61,3 +61,12 @@ test("César's caption spec validates: Helvetica Bold (client file) white with a
   assert.ok(!brandSchema.safeParse({...kit, fonts: {files: [{family: 'X', file: '/etc/x.ttf', weight: 400}]}}).success);
   assert.ok(!brandSchema.safeParse({...kit, fonts: {files: [{family: 'X', file: '../x.ttf', weight: 400}]}}).success);
 });
+
+test('a client font family is recognized however it is typed', async () => {
+  const {clientFont, resolveFamily} = await import('../src/fonts.ts');
+  const files = [clientFont('fonts/DejaVuSans-Bold.ttf')];
+  assert.equal(files[0].family, 'Deja Vu Sans'); // what the file name gives
+  for (const typed of ['DejaVu Sans', 'dejavu-sans', 'Deja Vu Sans']) assert.equal(resolveFamily(typed, files), 'Deja Vu Sans');
+  assert.equal(resolveFamily('bebas neue'), 'Bebas Neue');
+  assert.equal(resolveFamily('Unknown Face', files), 'Unknown Face');
+});
