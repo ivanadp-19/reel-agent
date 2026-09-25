@@ -799,6 +799,19 @@ process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e))
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 try { ensureSfx(); } catch (e) { console.error('sfx:', e.message); }
+
+// Export cleanup for a deploy with no system cron that can reach public/ (Railway's volume):
+// REEL_CLEANUP_EVERY_H=N runs scripts/cleanup-exports.mjs every N hours (first run 5 min after boot),
+// in a child process, DRY-RUN unless REEL_CLEANUP_APPLY=1. Off when unset. On the VM use cron instead.
+const CLEANUP_EVERY_H = +(process.env.REEL_CLEANUP_EVERY_H || 0);
+if (CLEANUP_EVERY_H >= 1) {
+  const sweep = () => {
+    const c = spawn('node', ['scripts/cleanup-exports.mjs', ...(process.env.REEL_CLEANUP_APPLY === '1' ? ['--apply'] : [])], {cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit']});
+    c.on('error', (e) => console.error('cleanup-exports could not start:', e.message));
+  };
+  setTimeout(sweep, 5 * 60e3).unref();
+  setInterval(sweep, CLEANUP_EVERY_H * 3600e3).unref();
+}
 const PORT = +(process.env.REEL_PORT || 3333); // another port for a second backend on the same box (the MCP then needs REEL_API)
 const HOST = process.env.REEL_HOST || '127.0.0.1';
 const BIND_PORT = +(process.env.PORT || PORT);

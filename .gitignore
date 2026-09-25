@@ -41,3 +41,6 @@ editor/dist/
 
 # layered renders: cached masters (scripts/layers.mjs)
 .render-cache/
+
+# export cleanup log (scripts/cleanup-exports.mjs from cron)
+.cleanup.log
