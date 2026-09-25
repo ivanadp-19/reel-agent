@@ -53,9 +53,8 @@ export type Preset = {
   pageIn: {type: AnimIn; ms: number};
   pageOut: LeaveKind; // how a page leaves (src/motion.ts; cut = it stays until the next page)
   wordIn: ArriveKind; // build: how a plain word arrives at its onset (src/motion.ts)
-  fastBuildMs?: number; // build: cascade words from page start with this stagger instead of waiting for each
-  // word's spoken onset (César's reels: a 4-word phrase completes in ~180ms, not 1.5s of lip-sync dribble)
   keyIn: ArriveKind; // how a tier word arrives (at its onset in build mode, with the page otherwise)
+  fastBuildMs?: number; // build: target gap between words of a fast-spoken phrase (reference data; not read by the pager or renderer yet)
   holdMs: number; // a page stays this long after its last word (never past the next page)
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
@@ -161,12 +160,11 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'none', ms: 0},
     pageOut: 'cut',
     wordIn: 'ccSlideUp',
-    fastBuildMs: 45, // his reveal sheets: 'TODO A' -> 'TODO A LA MANO' inside 0.18s
+    fastBuildMs: 45, // his reveal sheets: 'TODO A' -> 'TODO A LA MANO' inside 0.18s — a fast phrase builds in ~45ms steps
     keyIn: 'highlightRise', // classifier highlights (keywords/questions/CTAs): per-char rise + white->yellow sweep (César 9:27)
     holdMs: 250, // César 9:47: NO captions during silence — page ends ~250ms after its last word; never hold through pauses
-    tiers: {1: {weight: 700, color: 'accent'}, 2: {weight: 700, color: 'accent'}}, // highlights: solid #FFE500, SAME size (his 9-reel sheet), distinct entry is the differentiator
-    layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true}, // v11: v9's natural-phrase paging restored (César 11:12: v10.x cut phrases mid-clause — 'NI BUSCAS ES'); unbreakable keeps name+number spans whole
-
+    tiers: {1: {weight: 700, color: 'accent', scale: 1}, 2: {weight: 700, color: 'accent', scale: 1}}, // highlights: solid #FFE500 at the SAME size as the white words (César's QC feedback on the render judge; was 1.15×), dynamic entry
+    layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true}, // reference-validated v11 values: v9's natural-phrase paging restored (César 11:12: v10.x cut phrases mid-clause). His reels: one line when it fits, 2 balanced lines when not; 3 lines / smaller size beat splitting a name (César 10:35)
     titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
   },
   // ---- Captions.ai-like packs ----
