@@ -321,7 +321,8 @@ const server = createServer(async (req, res) => {
     const h = req.headers.authorization || '';
     const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
     const i = b.indexOf(':');
-    const ok = i > 0 && AUTH[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), AUTH[b.slice(0, i)]);
+    const tokOK = req.headers['x-reel-token'] === TOKEN; // MCP/backend clients authenticate with the shared backend token instead of basic auth
+    const ok = tokOK || i > 0 && AUTH[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), AUTH[b.slice(0, i)]);
     if (!ok) { res.writeHead(401, {'WWW-Authenticate': 'Basic realm="reel-agent"'}); return res.end('auth required'); }
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
   } else {

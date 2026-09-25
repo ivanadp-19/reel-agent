@@ -44,6 +44,14 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const PROJECTS = path.join(PUBLIC, 'projects');
 const API = process.env.REEL_API || 'http://127.0.0.1:3333';
+// Railway public mode (REEL_API pointing at the hosted backend): the server
+// accepts the shared backend token instead of basic auth - send it on every call.
+const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+const _fetch = globalThis.fetch;
+globalThis.fetch = (u, o = {}) => {
+  if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
+  return _fetch(u, o);
+};
 const FPS = 30;
 
 // ---------- .env ----------
