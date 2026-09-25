@@ -89,9 +89,9 @@ test('retention: files of a project with a live link are kept, others are not', 
 // the same order as server/index.mjs: gate first, /r/ → the review handler, else the static files
 function serve(pub, {publicMode = true, now} = {}) {
   const auth = {ana: bcrypt.hashSync('pw', 4)};
-  const srv = http.createServer((req, res) => {
+  const srv = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
-    const g = gate(req, url, {publicMode, auth, tokens: ['backend-tok']});
+    const g = await gate(req, url, {publicMode, auth, tokens: ['backend-tok']});
     if (g.kind === 'review') return handleReview(req, res, url, {publicDir: pub, now});
     if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
     const f = path.join(pub, path.normalize(decodeURIComponent(url.pathname)));
@@ -129,10 +129,10 @@ test('gate: /exports stays behind auth (public mode) and loopback (local); /r/ i
     assert.equal((await get(srv, `/r/${token}`, {}, 'POST')).status, 405);
   } finally { srv.close(); }
   const local = {headers: {host: 'reels.example.com'}};
-  assert.equal(gate(local, new URL('http://x/exports/edited-1.mp4'), {publicMode: false}).status, 403);
-  assert.equal(gate(local, new URL('http://x/api/projects'), {publicMode: false}).status, 403);
-  assert.equal(gate(local, new URL(`http://x/r/${token}`), {publicMode: false}).kind, 'review', 'behind Caddy the page is reachable by any Host');
-  assert.equal(gate({headers: {host: '127.0.0.1:3333', origin: 'https://evil.example'}}, new URL('http://x/api/render'), {publicMode: false}).status, 403);
+  assert.equal((await gate(local, new URL('http://x/exports/edited-1.mp4'), {publicMode: false})).status, 403);
+  assert.equal((await gate(local, new URL('http://x/api/projects'), {publicMode: false})).status, 403);
+  assert.equal((await gate(local, new URL(`http://x/r/${token}`), {publicMode: false})).kind, 'review', 'behind Caddy the page is reachable by any Host');
+  assert.equal((await gate({headers: {host: '127.0.0.1:3333', origin: 'https://evil.example'}}, new URL('http://x/api/render'), {publicMode: false})).status, 403);
 });
 
 test('review routes: page, proxy with ranges 206/416, poster, download, privacy headers, expiry and revocation', async () => {

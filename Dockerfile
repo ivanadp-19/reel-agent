@@ -17,6 +17,6 @@ RUN mkdir -p .models \
   && curl -sSfL -o .models/yunet.onnx https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx \
   && curl -sSfL -o .models/selfie_segmenter.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite
 RUN npx vite build && npx remotion browser ensure
-ENV REEL_PUBLIC=1 REEL_DEVICE=cpu REEL_HOST=0.0.0.0 HF_HOME=/app/public/.hf NODE_ENV=production
+ENV REEL_PUBLIC=1 REEL_TRUST_PROXY=1 REEL_DEVICE=cpu REEL_HOST=0.0.0.0 HF_HOME=/app/public/.hf NODE_ENV=production
 EXPOSE 3333
 CMD ["node", "server/index.mjs"]
