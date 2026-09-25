@@ -17,16 +17,17 @@ const {clips, lang = 'auto', offMic = 'mark'} = JSON.parse(fs.readFileSync(proce
 if (!clips?.length) { console.error('no clips'); process.exit(1); }
 
 progress(2, 'Starting');
-transcribeClips(clips, (label) => progress(5, label), lang);
-const out = clips.map((clip) => {
+await transcribeClips(clips, (label) => progress(5, label), lang);
+const out = [];
+for (const clip of clips) {
   let words = [];
-  try { words = transcribeClip(clip, lang, offMic); } catch (e) { console.error(`SKIP ${clip.id}: ${String(e).slice(0, 120)}`); }
+  try { words = await transcribeClip(clip, lang, offMic); } catch (e) { console.error(`SKIP ${clip.id}: ${String(e).slice(0, 120)}`); }
   const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
-  return {
+  out.push({
     clipId: clip.id,
     source: sourceKey(clip),
     words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs),
-  };
-});
+  });
+}
 fs.writeFileSync(path.join(PUBLIC, 'transcript.json'), JSON.stringify(out));
 progress(100, `Done — ${out.reduce((n, c) => n + c.words.length, 0)} words`);

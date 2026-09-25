@@ -90,7 +90,7 @@ function detectFaces(clips) {
 
 // --- run ---
 progress(2, 'Starting');
-const words = assembleWords(clips, (idx, total, clip) =>
+const words = await assembleWords(clips, (idx, total, clip) =>
   progress(5 + Math.round((idx / total) * 80), clip.batch ? clip.label : `Transcribing ${clip.label ?? clip.id} (${idx + 1}/${total})`), lang, offMic,
 );
 progress(88, 'Finding faces');
