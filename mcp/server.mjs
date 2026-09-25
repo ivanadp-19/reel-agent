@@ -59,10 +59,12 @@ const API = process.env.REEL_API || 'http://127.0.0.1:3333';
 // accepts the shared backend token instead of basic auth - send it on every call.
 // REEL_BACKEND_TOKEN may list several (one per client): the first is the primary, the one this process uses.
 const TOK = process.env.REEL_BACKEND_TOKEN?.split(',')[0].trim() || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-const _fetch = globalThis.fetch;
-globalThis.fetch = (u, o = {}) => {
+// Module-scoped on purpose: every fetch() in this file adds the token to calls to API,
+// and nothing else is touched — the backend imports this module (the MCP over /mcp),
+// so patching globalThis.fetch would change fetch for its whole process.
+const fetch = (u, o = {}) => {
   if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
-  return _fetch(u, o);
+  return globalThis.fetch(u, o);
 };
 const FPS = 30;
 
