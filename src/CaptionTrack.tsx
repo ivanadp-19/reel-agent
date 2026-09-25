@@ -3,8 +3,7 @@ import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} 
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
-import {emojiFamily, fontFamily, type FontFamily} from './fonts';
-import {ensureProjectFont} from './projectFont';
+import {emojiFamily, fontFamily} from './fonts';
 import {legible, useBrand} from './brand';
 
 export type {Caption} from './captions';
@@ -13,7 +12,7 @@ const CLAMP = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 const SANS = new Set<string>(['Inter', 'Montserrat', 'Poppins']);
 
 // one word, styled by its tier; in build mode it appears at its own onset
-const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; underBox: boolean; onsetFrame: number; captionKeyIn?: ArriveKind}> = ({w, index, preset, accent, active, underBox, onsetFrame, captionKeyIn}) => {
+const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; underBox: boolean; onsetFrame: number}> = ({w, index, preset, accent, active, underBox, onsetFrame}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const tier = (w.tier ?? 0) as 0 | 1 | 2;
@@ -22,7 +21,7 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
   const spoken = frame >= onsetFrame;
   // arrival (src/motion.ts): tier words use the pack's keyIn, plain words its wordIn (build only).
   // In build mode a word arrives at its own onset; in page mode everything arrives with the page.
-  const kind: ArriveKind = tier ? (captionKeyIn ?? preset.keyIn) : build ? preset.wordIn : 'cut';
+  const kind: ArriveKind = tier ? preset.keyIn : build ? preset.wordIn : 'cut';
   const local = build ? frame - onsetFrame : frame;
   const m = arrive(kind, local, fps);
   // the tier's size is real layout (font-size) so the gap and the page box grow
@@ -42,28 +41,9 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
         : preset.colors.text;
   // not spoken yet: hidden (space reserved) or dimmed (karaoke) — plain text either way
   const dimmed = build && !spoken && preset.upcoming === 'dim';
-  const hidden = build && !spoken && (preset.upcoming === 'hidden' || preset.upcoming === 'collapse');
-  const collapsed = build && !spoken && preset.upcoming === 'collapse'; // no space: the spoken group recenters live
+  const hidden = build && !spoken && preset.upcoming === 'hidden';
   const opacity = hidden ? 0 : dimmed ? 1 : m.opacity;
   const styled = !dimmed && !hidden;
-  // César 9:27: classifier highlights (keywords / questions / CTAs) get a more dynamic entry —
-  // per-char rise (Remocn PerCharacterRise) + inline color sweep white -> #FFE500 (InlineHighlight)
-  const hlRise = kind === 'highlightRise' && !dimmed && !hidden;
-  // Apple-keynote kinetic type: word rises out of an overflow mask, soft blur settle, long ease-out
-  const appleMask = kind === 'appleMask' && !dimmed && !hidden;
-  const amT = appleMask ? interpolate(local, [0, ms(fps, 420)], [0, 1], {...CLAMP, easing: Easing.bezier(0.16, 1, 0.3, 1)}) : 1;
-  const amOp = appleMask ? interpolate(local, [0, ms(fps, 140)], [0, 1], CLAMP) : 1;
-  // Remocn TrackingIn: letter-spacing collapses from wide to normal with a spring snap
-  const trackIn = kind === 'trackingIn' && !dimmed && !hidden;
-  const trackSpring = trackIn ? spring({frame: local, fps, config: {damping: 14, stiffness: 180, mass: 0.7}}) : 1;
-  const trackOp = trackIn ? interpolate(local, [0, ms(fps, 90)], [0, 1], CLAMP) : 1;
-  // César 9:57: the sweep must FULLY finish before the page changes — complete by the word's own end
-  // (min 120ms so ultra-short words still read as a sweep, capped at 240ms so it never lags)
-  const wordDurF = Math.max(1, ((w.endMs - w.startMs) / 1000) * fps);
-  const hlSweepEnd = Math.min(ms(fps, 240), Math.max(ms(fps, 120), wordDurF));
-  const hlColorT = hlRise ? interpolate(local, [ms(fps, 60), hlSweepEnd], [0, 1], CLAMP) : 0;
-  const hlAccent = 'rgba(255,229,0,0.85)'; // #FFE500 at the 85% letter opacity (César 9:37)
-  const hlColor = hlRise ? (hlColorT >= 1 ? hlAccent : `color-mix(in srgb, ${hlAccent} ${Math.round(hlColorT * 100)}%, ${preset.colors.text})`) : undefined;
   // the word's emoji pops in at the word's onset, as its own item beside it
   const ePop = w.emoji ? spring({frame: build ? frame - onsetFrame : frame, fps, config: {damping: 10, stiffness: 200, mass: 0.6}}) : 0;
   const glow = t.glow && styled ? `0 0 0.2em ${accent}, 0 0 0.6em ${accent}99, ${preset.shadow || '0 2px 10px rgba(0,0,0,0.5)'}` : undefined;
@@ -80,20 +60,18 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
       <span
         data-w={index}
         style={{
-          display: collapsed ? 'none' : 'inline-block',
+          display: 'inline-block',
           position: 'relative',
           zIndex: 1,
           fontWeight: t.weight ?? preset.font.weight,
           fontStyle: t.italic || preset.font.italic ? 'italic' : undefined,
           fontFamily: t.font ? fontFamily(t.font) : undefined,
-          color: dimmed ? preset.colors.dim : gradient && styled ? 'transparent' : hlColor ?? color,
+          color: dimmed ? preset.colors.dim : gradient && styled ? 'transparent' : color,
           opacity,
           fontSize: t.scale && t.scale !== 1 ? `${t.scale}em` : undefined,
           transform: moving ? `translate(${m.dx.toFixed(1)}px, ${m.dy.toFixed(1)}px) scale(${m.scale.toFixed(3)})` : undefined,
-          ...(trackIn ? {letterSpacing: `${((1 - trackSpring) * 0.35).toFixed(3)}em`, opacity: trackOp} : {}),
           transformOrigin: 'center 70%',
           whiteSpace: 'pre',
-          ...(preset.font.fauxStrokePx ? {WebkitTextStroke: `${preset.font.fauxStrokePx}px currentColor`, paintOrder: 'stroke'} : {}),
           filter: filters || undefined,
           ...(layers
             // background-clip text: a text-shadow would paint over the gradient, so the shadow is the drop-shadow filter above
@@ -107,17 +85,7 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
           ...(t.underline && styled ? {borderBottom: `0.08em solid ${accent}`, paddingBottom: '0.02em'} : {}),
         }}
       >
-        {appleMask
-          ? <span style={{display: 'inline-block', overflow: 'hidden', verticalAlign: 'bottom'}}><span style={{display: 'inline-block', transform: `translateY(${((1 - amT) * 110).toFixed(1)}%)`, opacity: amOp, filter: amT < 0.999 ? `blur(${((1 - amT) * 5).toFixed(1)}px)` : undefined}}>{w.text}</span></span>
-          : hlRise
-          ? w.text.split('').map((ch, ci) => {
-              const cl = local - ci * ms(fps, 16); // César 9:57: faster entry
-              const ct = interpolate(cl, [0, ms(fps, 110)], [0, 1], {...CLAMP, easing: Easing.out(Easing.cubic)});
-              const co = interpolate(cl, [0, ms(fps, 45)], [0, 1], CLAMP);
-              const cb = (1 - ct) * 6; // motion blur while the char rises
-              return <span key={ci} style={{display: 'inline-block', transform: `translateY(${((1 - ct) * 0.55).toFixed(3)}em)`, opacity: co, filter: cb > 0.2 ? `blur(${cb.toFixed(1)}px)` : undefined}}>{ch}</span>;
-            })
-          : w.text}
+        {w.text}
       </span>
       {w.emoji ? <span style={{display: 'inline-block', fontFamily: emojiFamily(), fontStyle: 'normal', textShadow: 'none', opacity: Math.min(1, ePop * 1.5), transform: `scale(${interpolate(ePop, [0, 1], [0.2, 1])}) rotate(${interpolate(ePop, [0, 1], [-25, 0])}deg)`}}>{w.emoji}</span> : null}
     </>
@@ -207,7 +175,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         padding: '0 70px',
         opacity: a * ex.opacity,
         transform: [transform, ex.dy ? `translateY(${ex.dy.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
-        filter: [(preset.pageIn.type === 'blur' || preset.pageIn.type === 'slideUp') && a < 1 ? `blur(${((1 - a) * (preset.pageIn.type === 'blur' ? 10 : 6)).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
+        filter: [preset.pageIn.type === 'blur' && a < 1 ? `blur(${((1 - a) * 10).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
       }}
     >
       <div
@@ -219,9 +187,9 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
           justifyContent: float ? float.align : 'center',
           flexWrap: 'wrap',
           alignItems: 'baseline',
-          gap: `0 ${Math.round(fontSize * (preset.font.wordGapEm ?? 0.26))}px`,
+          gap: `0 ${Math.round(fontSize * 0.26)}px`,
           maxWidth: float ? '68%' : undefined,
-          fontFamily: preset.font.custom ? ensureProjectFont(preset.font.custom) : fontFamily(preset.font.family as FontFamily),
+          fontFamily: fontFamily(preset.font.family),
           fontSize,
           lineHeight: preset.font.lineHeight,
           letterSpacing: preset.font.trackingPx,
@@ -232,53 +200,18 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         }}
       >
         {box ? <div style={box} /> : null}
-  {(() => {
-        // César 10:35: a development name like 'Montealbán 326' must never split across lines.
-        // When layout.unbreakable, bonded pairs (Capitalized + Capitalized/digit) render inside a
-        // nowrap group so flex-wrap can never separate them, whatever the measured widths say.
-        const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
-        const canBond = !!(preset.layout && preset.layout.unbreakable);
-        const pairBond = (a: string, b: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(a) && /^[A-ZÁÉÍÓÚÑÜ0-9]/.test(b);
-        const els: React.ReactNode[] = [];
-        const wordEl = (i: number) => {
-          const w = caption.words[i];
-          return (
-            <Word
-              key={i}
-              w={w}
-              index={i}
-              preset={preset}
-              accent={accent}
-              active={absMs >= w.startMs && absMs <= w.endMs}
-              underBox={!!box && i === spokenIdx && !boxOff}
-              onsetFrame={onset(i)}
-              captionKeyIn={caption.keyIn}
-            />
-          );
-        };
-        for (let i = 0; i < caption.words.length; i++) {
-          const w = caption.words[i];
-          if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
-          const nxt = caption.words[i + 1];
-          if (canBond && nxt && !nxt.br && pairBond(w.text, nxt.text)) {
-            const run = [i];
-            let j = i;
-            while (j + 1 < caption.words.length && !caption.words[j + 1].br && pairBond(caption.words[j].text, caption.words[j + 1].text)) {
-              run.push(j + 1);
-              j++;
-            }
-            els.push(
-              <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
-                {run.map((k) => wordEl(k))}
-              </span>
-            );
-            i = j;
-          } else {
-            els.push(wordEl(i));
-          }
-        }
-        return els;
-      })()}
+        {caption.words.map((w, i) => (
+          <Word
+            key={i}
+            w={w}
+            index={i}
+            preset={preset}
+            accent={accent}
+            active={absMs >= w.startMs && absMs <= w.endMs}
+            underBox={!!box && i === spokenIdx && !boxOff}
+            onsetFrame={onset(i)}
+          />
+        ))}
       </div>
     </div>
   );
