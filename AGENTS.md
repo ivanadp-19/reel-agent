@@ -77,6 +77,23 @@ that edit the project and the final render refuse to run (`src/plan.ts`
 `planGate`, default-deny list in `mcp/server.mjs`); reads, proofs, searches and
 draft renders stay open. No plan screen in the editor for now.
 
+Every delivered render gets technical QC in parallel — the base master ships
+right away, labeled, and is never held back: the `render-judge` skill
+(`.agents/skills/render-judge/`) — a separate, hostile review pass (a
+subagent, or a cold pass where there is none) with a generic rubric of
+severities and thresholds (`checks.md`) plus per-client profiles
+(`profiles/<client>.json|md`, e.g. César's), fed by `judge.mjs`, which decides
+by rule what rules can decide (pauses, names split across pages, overflow,
+caption↔audio sync, repeated footage, script inserts, glossary, loudness,
+music under voice, grade vs the approved references, clean-master parity) and
+leaves the rest to the judge's eyes on contact sheets of the whole reel. Known
+noise (long takes, bright skies, dramatic pauses, capitalized "names") only
+counts once confirmed on the frame. PASS is labeled "QC técnico superado" —
+never "aprobado": only the client approves. FAIL → prioritized findings go out
+with the delivery → fix → next version → re-judge, at most 3 iterations, then
+escalate. Agent tooling, not a product feature: it reads the project and the
+render and never edits either.
+
 ## Headless runners
 
 - `scripts/claude-edit.sh <project> "<brief>"` — Claude Code with only `mcp__reel__*`, Read and Skill
