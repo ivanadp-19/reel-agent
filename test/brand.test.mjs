@@ -37,3 +37,53 @@ test('legible lightens a dark brand accent for text and leaves bright ones alone
   assert.ok(luminance(blue) >= 0.3 && luminance(blue) < 0.45, `${blue} ${luminance(blue)}`);
   assert.ok(parseInt(blue.slice(5, 7), 16) === 255, 'still blue');
 });
+
+test('client fonts: family and weight come from the file name unless given', async () => {
+  const {clientFont, heaviest} = await import('../src/fonts.ts');
+  assert.deepEqual(clientFont('fonts/Helvetica-Bold.ttf'), {family: 'Helvetica', file: 'fonts/Helvetica-Bold.ttf', weight: 700});
+  assert.deepEqual(clientFont('fonts/HelveticaNeue-BoldItalic.otf'), {family: 'Helvetica Neue', file: 'fonts/HelveticaNeue-BoldItalic.otf', weight: 700, italic: true});
+  assert.equal(clientFont('fonts/Brand_Black.woff2').weight, 900);
+  assert.equal(clientFont('fonts/x.ttf', 'Acme Sans', 500).family, 'Acme Sans');
+  assert.equal(heaviest('Helvetica', [clientFont('fonts/Helvetica-Bold.ttf'), clientFont('fonts/Helvetica-Regular.ttf')]), 700);
+  assert.equal(heaviest('Inter'), 800);
+});
+
+test("César's caption spec validates: Helvetica Bold (client file) white with a #FFE500 accent", async () => {
+  const {brandSchema, resolveBrand} = await import('../src/brand.ts');
+  const kit = {name: 'VIBEM', colors: {accent: '#FFE500'}, fonts: {body: 'Helvetica', files: [{family: 'Helvetica', file: 'fonts/Helvetica-Bold.ttf', weight: 700}]}};
+  const r = brandSchema.safeParse(kit);
+  assert.ok(r.success, JSON.stringify(r.error?.issues));
+  const k = resolveBrand(r.data);
+  assert.equal(k.body, 'Helvetica'); assert.equal(k.accent, '#FFE500'); assert.equal(k.fontFiles.length, 1);
+  // a family that is neither in the catalog nor in the kit's files is refused
+  assert.ok(!brandSchema.safeParse({...kit, fonts: {body: 'Helvetica'}}).success);
+  // font files must stay under public/
+  assert.ok(!brandSchema.safeParse({...kit, fonts: {files: [{family: 'X', file: '/etc/x.ttf', weight: 400}]}}).success);
+  assert.ok(!brandSchema.safeParse({...kit, fonts: {files: [{family: 'X', file: '../x.ttf', weight: 400}]}}).success);
+});
+
+test('a client font family is recognized however it is typed', async () => {
+  const {clientFont, resolveFamily} = await import('../src/fonts.ts');
+  const files = [clientFont('fonts/DejaVuSans-Bold.ttf')];
+  assert.equal(files[0].family, 'Deja Vu Sans'); // what the file name gives
+  for (const typed of ['DejaVu Sans', 'dejavu-sans', 'Deja Vu Sans']) assert.equal(resolveFamily(typed, files), 'Deja Vu Sans');
+  assert.equal(resolveFamily('bebas neue'), 'Bebas Neue');
+  assert.equal(resolveFamily('Unknown Face', files), 'Unknown Face');
+});
+
+test('style kits: a flexible spec from the client\'s words — known keys typed, any other preference kept', async () => {
+  const {brandSchema, mergeStyle, styleEffects, styleSchema} = await import('../src/brand.ts');
+  const words = {notes: 'Sin subtítulos por defecto. Color natural, nada quemado, piel sin naranja.', captions: 'off', grade: {look: 'natural', skin: 0.8, highlights: 0.7}, pace: 'rápido, cortes secos', zooms: 'nunca', maxReelSec: 45};
+  const st = styleSchema.parse(words);
+  assert.equal(st.zooms, 'nunca'); assert.equal(st.maxReelSec, 45); // not in the schema, kept
+  assert.ok(!styleSchema.safeParse({captions: 'sometimes'}).success);
+  assert.ok(!styleSchema.safeParse({grade: {look: 'teal-orange'}}).success, 'looks are the real ones');
+  assert.ok(!styleSchema.safeParse({weird: {nested: true}}).success, 'extra preferences are plain values');
+  // adjusted by prompt: key by key, null removes
+  const next = mergeStyle(st, {captions: 'on', grade: {adjust: {temperature: -0.2}}, zooms: null});
+  assert.equal(next.captions, 'on'); assert.equal(next.zooms, undefined);
+  assert.deepEqual(next.grade, {look: 'natural', skin: 0.8, highlights: 0.7, adjust: {temperature: -0.2}});
+  // what loading it does to a project
+  assert.deepEqual(styleEffects(st), {captionsOff: true, grade: {look: 'natural', skin: 0.8, highlights: 0.7}});
+  assert.ok(brandSchema.safeParse({colors: {accent: '#FFE500'}, style: st}).success);
+});

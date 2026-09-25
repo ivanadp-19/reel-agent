@@ -57,7 +57,7 @@ Por eso:
 
 | Trabajo | Stack | Estado |
 |---|---|---|
-| Transcripción | WhisperX `medium`, `--language` por proyecto, prompt por idioma que conserva muletillas, caché por fuente+idioma | Hecho. En CPU tarda ~3.5 min por 48 s: evaluar whisper.cpp (Metal) / parakeet-mlx |
+| Transcripción | WhisperX `medium`, `--language` por proyecto, prompt por idioma que conserva muletillas, caché por fuente+idioma. Opcional: Deepgram Nova-3 con `DEEPGRAM_API_KEY` (sube el audio del clip; misma caché, sin marca de motor; `punctuate` para que retomas, páginas y off-mic sigan viendo fin de frase; `filler_words` solo existe en inglés; WhisperX de respaldo) | Hecho. WhisperX en CPU tarda ~3.5 min por 48 s; con key, Deepgram en segundos. Pendiente: recall de muletillas en español con Deepgram |
 | Corte | 1) silencios (`trim-silence`), 2) candidatos de muletilla/retoma/off-mic/meta (`src/cuts.ts`), 3) snap del corte a la pausa, 4) el agente aprueba por `wordId`, 5) `cut_words ranges`. El autocut no corta donde WhisperX perdió palabras: `voiceSpans` (actividad de voz sobre el piso de ruido, `src/speech.ts`) puentea huecos del transcript con energía (≤ 1.5 s) y extiende cada segmento al borde de la voz; los huecos con palabras off-mic descartadas nunca se puentean | Hecho |
 | Color | HLG/PQ → SDR en el ingest (LUT generado, `src/hdr.ts`) → corrección automática acotada por fuente → look del catálogo con intensidad; aplicado en render como filtro SVG. El agente elige el look (`set_grade`) y verifica con `caption_proof` | Hecho (falta clip HDR real) |
 | Captions | Datos: página `{src, words[{text,start,end,tier,emoji?,sfx?}], preset, topPct}`. Render en Remotion con animaciones `f(frame)`, fuentes OFL empaquetadas, emoji Noto/Fluent, SFX CC0. Paginado, timing, safe zone y validación en código; el agente emite tiers/emoji/SFX/breaks | Base hecha (Inter empaquetada, cara local, glue ES). Presets: fase 1 |
@@ -138,7 +138,7 @@ Criterios:
 
 Entregables:
 - Biblioteca de B-roll propio: hecho (`add_broll_assets` + contact sheet, `tag_broll_asset`, `broll_library`, `suggest_broll` con las reglas de colocación y cobertura del negro; Pexels de respaldo vía `search_stock`).
-- Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`).
+- Transiciones: punch-in, zoom, whip blur, card zoom-out y split 2×2 hechos (`set_transitions`, patrón `punch-alternate`); speed ramp por pasos (`set_speed_ramp`); golpes de SFX sintetizados con ffmpeg (`set_audio sfx`); J-cuts y L-cuts por clip (`set_audio_cut`: el audio entra antes o sigue después del corte, hasta 4 s; `placeClips` decide los frames una vez para render, mute y herramienta; una pieza nueva de split/autocut nace sin J ni L).
 - Texto detrás del presentador: hecho (gráficos y páginas de captions con `behind`, cruzan cortes; `prepare_mattes`); falta el contorno dibujado (Chalk).
 - `end-card` hecho (logo del brand kit, título, CTA, handle).
 - Runners headless: `scripts/claude-edit.sh` y `scripts/codex-edit.sh` (Codex ignora el config del usuario, pre-aprueba solo el servidor `reel` con `default_tools_approval_mode=approve` y corre con sandbox read-only: un `touch` en el repo queda bloqueado, verificado). No hace falta tocar `~/.codex/config.toml`. La skill `.agents/skills/reel-edit` sirve a los dos.

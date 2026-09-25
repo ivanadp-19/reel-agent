@@ -1,8 +1,10 @@
-import React, {useRef, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
+import {pct, uploadClip} from './upload';
 import {placeClips, clipDurationSec} from '../src/timeline';
 
+type LibRow = {id: string; tags?: string[]};
 const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
 
 // Left "Assets" panel: source video clips (thumbnails) + audio.
@@ -12,9 +14,21 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   const clipInput = useRef<HTMLInputElement>(null);
   const brollInput = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState<string | null>(null);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [tags, setTags] = useState<Record<string, string[]>>({}); // library tags per asset id (suggest_broll matches on them)
+  const loadTags = () => fetch('/api/broll-library').then((r) => (r.ok ? r.json() : [])).then((l: LibRow[]) => setTags(Object.fromEntries(l.map((a) => [a.id, a.tags ?? []])))).catch(() => {});
+  useEffect(() => { loadTags(); }, [brollAssets.length]);
   if (!meta) return null;
+  // tag_broll_asset: 3–8 nouns for what is in the shot, in the reel's language
+  const editTags = async (id: string) => {
+    const v = window.prompt('Tags for this shot (comma-separated nouns, in the reel language — what suggest B-roll matches on)', (tags[id] ?? []).join(', '));
+    if (v == null) return;
+    const list = v.split(',').map((t) => t.trim()).filter(Boolean);
+    const r = await fetch(`/api/broll-library/${encodeURIComponent(id)}`, {method: 'POST', body: JSON.stringify({tags: list})}).then((x) => x.json()).catch(() => null);
+    if (r?.id) setTags({...tags, [id]: r.tags ?? []});
+  };
   const placed = placeClips(clips, meta.fps);
 
   const seekToClip = (startMs: number) => playerRef.current?.seekTo(Math.round((startMs / 1000) * meta.fps) + 1);
@@ -22,13 +36,19 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   // upload videos → backend remuxes/encodes + thumbnails → append to timeline
   const importFiles = async (files: File[]) => {
     const vids = files.filter((f) => f.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv)$/i.test(f.name));
+    setImportErrors([]);
     for (let i = 0; i < vids.length; i++) {
-      setImporting(`Importing ${vids[i].name} (${i + 1}/${vids.length})…`);
+      const what = `${vids[i].name} (${i + 1}/${vids.length})`;
+      setImporting(`Uploading ${what}…`);
       try {
-        const clip = await fetch('/api/add-clip?name=' + encodeURIComponent(vids[i].name), {method: 'POST', body: vids[i]}).then((r) => r.json());
-        if (clip?.id) addClip(clip);
-      } catch {
-        /* skip a failed file, keep going */
+        const clip = await uploadClip<Parameters<typeof addClip>[0]>(vids[i], {
+          progress: (loaded, total) => setImporting(`Uploading ${what} · ${pct(loaded, total)}%`),
+          processing: (progress, label) => setImporting(`${label} ${what} · ${progress}%`),
+        });
+        addClip(clip);
+      } catch (e) {
+        // show why, keep going with the next file
+        setImportErrors((l) => [...l, `${vids[i].name}: ${e instanceof Error ? e.message : String(e)}`]);
       }
     }
     setImporting(null);
@@ -78,7 +98,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
-      className={`w-64 bg-surface-container-low border-r flex flex-col h-full shrink-0 relative ${dragOver ? 'border-primary' : 'border-outline-variant'}`}
+      className={`w-full bg-surface-container-low flex flex-col flex-1 min-h-0 relative ${dragOver ? 'border-primary' : ''}`}
     >
       <input ref={clipInput} type="file" accept="video/*" multiple onChange={onPickClips} className="hidden" />
       <div className="p-4 border-b border-outline-variant flex justify-between items-center">
@@ -92,6 +112,12 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
         <div className="px-4 py-2 text-[11px] text-primary border-b border-outline-variant/30 flex items-center gap-2">
           <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
           <span className="truncate">{importing}</span>
+        </div>
+      )}
+      {importErrors.length > 0 && !importing && (
+        <div role="alert" className="px-4 py-2 text-[11px] text-error border-b border-outline-variant/30 flex items-start gap-2">
+          <span className="flex-1 break-words">{importErrors.join(' · ')}</span>
+          <button onClick={() => setImportErrors([])} title="Dismiss" className="material-symbols-outlined text-[14px] hover:brightness-125">close</button>
         </div>
       )}
       {dragOver && (
@@ -181,6 +207,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
                 <div key={a.id} className="group relative rounded-lg overflow-hidden border border-outline-variant/40">
                   <img src={a.thumb || '/' + a.src} alt={a.label} className="aspect-video object-cover w-full" />
                   <span className="absolute bottom-0.5 left-0.5 material-symbols-outlined text-[12px] text-white/90 drop-shadow">{a.kind === 'video' ? 'movie' : 'image'}</span>
+                  <button onClick={() => editTags(a.id)} title={tags[a.id]?.length ? `tags: ${tags[a.id].join(', ')}` : 'untagged — never suggested; click to tag'} className={`absolute bottom-0.5 right-0.5 material-symbols-outlined text-[12px] drop-shadow ${tags[a.id]?.length ? 'text-primary' : 'text-white/60'}`}>sell</button>
                   <button onClick={() => removeBrollAsset(a.id)} title="Remove" className="absolute top-0.5 right-0.5 w-5 h-5 rounded bg-surface-container-lowest/80 text-on-surface-variant hover:text-error opacity-0 group-hover:opacity-100 flex items-center justify-center">
                     <span className="material-symbols-outlined text-[14px]">close</span>
                   </button>
@@ -193,7 +220,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
               Add your footage…
             </button>
           )}
-          <p className="text-[10px] text-on-surface-variant/50 mt-2">Auto B-roll prefers these; falls back to Pexels.</p>
+          <p className="text-[10px] text-on-surface-variant/50 mt-2">Tag them (the label icon) so Suggest B-roll can place them; stock is the fallback.</p>
         </section>
       </div>
     </aside>

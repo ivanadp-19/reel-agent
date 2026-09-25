@@ -51,10 +51,10 @@ export const PersonLayer: React.FC<{mattes: Matte[]; clips: Clip[]; grade?: Proj
         <Sequence key={`${pc.clip.id}@${m.file}@${from}`} from={from} durationInFrames={dur} layout="none" name={`person ${pc.clip.id}`}>
           {outline ? (
             <div style={{position: 'absolute', inset: 0, filter: outlineFilter(oc, (outline.props as any).widthPx ?? 6, !!(outline.props as any).boil, frame)}}>
-              <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src)} transition={{clip: pc.clip, next: placed[i + 1]?.clip, offset: from - pc.fromFrame, durFrames: pc.durFrames}} />
+              <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src, pc.clip.id, m.file)} transition={{clip: pc.clip, next: placed[i + 1]?.clip, offset: from - pc.fromFrame, durFrames: pc.durFrames}} />
             </div>
           ) : null}
-          <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src)} transition={{clip: pc.clip, next: placed[i + 1]?.clip, offset: from - pc.fromFrame, durFrames: pc.durFrames}} />
+          <ClipMedia clip={pseudo} durFrames={dur} Comp={Comp} grade={gradeFor(grade, pc.clip.src, pc.clip.id, m.file)} transition={{clip: pc.clip, next: placed[i + 1]?.clip, offset: from - pc.fromFrame, durFrames: pc.durFrames}} />
         </Sequence>,
       );
     }

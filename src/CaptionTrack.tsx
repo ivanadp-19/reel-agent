@@ -1,7 +1,8 @@
 import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import type {Caption, CaptionWord} from './captions';
-import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
+import {FLOAT_SLOTS as FLOAT, type Preset, type TierStyle} from './captionPresets';
+import {captionPreset, fitPage} from './captionLayout';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily, type FontFamily} from './fonts';
 import {ensureProjectFont} from './projectFont';
@@ -10,7 +11,6 @@ import {legible, useBrand} from './brand';
 export type {Caption} from './captions';
 
 const CLAMP = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
-const SANS = new Set<string>(['Inter', 'Montserrat', 'Poppins']);
 
 // one word, styled by its tier; in build mode it appears at its own onset
 const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: string; active: boolean; underBox: boolean; onsetFrame: number; captionKeyIn?: ArriveKind}> = ({w, index, preset, accent, active, underBox, onsetFrame, captionKeyIn}) => {
@@ -130,7 +130,14 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const absMs = caption.startMs + (frame / fps) * 1000;
-  const fontSize = Math.round(preset.font.sizePx * (caption.scale ?? 1) * pageScale(preset, caption.words.length));
+  // Bonded pairs (layout.unbreakable) render inside a nowrap span so flex-wrap can never
+  // split a name ('MONTEALBÁN 326'); the page shrinks so the widest unbreakable unit fits
+  // the frame (César 10:35: "3 lines or a smaller size beat splitting a name"). Both come
+  // from src/captionLayout.ts, measured as rendered (case, tier scale) — the render judge
+  // reads the same function.
+  const {width: compWidth} = useVideoConfig();
+  const float0 = preset.position === 'float' && !caption.pin;
+  const {paired, fontSize} = fitPage(caption, preset, {compWidth, float: float0});
 
   // entrance + exit. Guarded for very short pages (1–2 frames after autocut /
   // clip clamping): interpolate() needs strictly increasing ranges.
@@ -237,31 +244,10 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         {box ? <div style={box} /> : null}
   {(() => {
         // César 10:35: a development name like 'Montealbán 326' must never split across lines.
-        // v10.2 (Felipe PR #12): nowrap the exact bonded PAIR only — never chain
-        // (A+B, B+C fused whole pages into one overflowing line). Pass 1 protects
-        // name+number pairs first so 'DESARROLLO MONTEALBÁN 326' groups
-        // {MONTEALBÁN 326}, not {DESARROLLO MONTEALBÁN}; pass 2 pairs up the rest.
-        // Groups never overlap, breaks stay legal everywhere else, flex-wrap keeps
-        // the page inside the frame.
+        // v10.2 exact-pair nowrap: bonded pairs (Capitalized + Capitalized/digit, name+number
+        // first, never chained — bondedPairs in src/captionLayout.ts) render inside a nowrap
+        // group so flex-wrap can never separate them, whatever the measured widths say.
         const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
-        const canBond = !!(preset.layout && preset.layout.unbreakable);
-        const capWord = (s: string) => /^[A-ZÁÉÍÓÚÑÜ]/.test(s);
-        const numWord = (s: string) => /^[0-9]/.test(s);
-        const brBefore = (i: number) => !!caption.words[i]?.br;
-        const groups = new Map<number, number>(); // start index -> size
-        const taken = new Set<number>();
-        if (canBond) {
-          for (let i = 0; i + 1 < caption.words.length; i++) {
-            if (brBefore(i + 1)) continue;
-            const a = caption.words[i], b = caption.words[i + 1];
-            if (capWord(a.text) && numWord(b.text)) { groups.set(i, 2); taken.add(i); taken.add(i + 1); }
-          }
-          for (let i = 0; i + 1 < caption.words.length; i++) {
-            if (taken.has(i) || taken.has(i + 1) || brBefore(i + 1)) continue;
-            const a = caption.words[i], b = caption.words[i + 1];
-            if (capWord(a.text) && capWord(b.text)) { groups.set(i, 2); taken.add(i); taken.add(i + 1); }
-          }
-        }
         const els: React.ReactNode[] = [];
         const wordEl = (i: number) => {
           const w = caption.words[i];
@@ -282,14 +268,13 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         for (let i = 0; i < caption.words.length; i++) {
           const w = caption.words[i];
           if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
-          const size = groups.get(i);
-          if (size) {
+          if (paired.has(i)) {
             els.push(
               <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
-                {Array.from({length: size}, (_, k) => wordEl(i + k))}
+                {wordEl(i)}{wordEl(i + 1)}
               </span>
             );
-            i += size - 1;
+            i++;
           } else {
             els.push(wordEl(i));
           }
@@ -308,11 +293,9 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
 export const CaptionTrack: React.FC<{captions: Caption[]; captionStyle?: string; behind?: boolean}> = ({captions, captionStyle, behind = false}) => {
   const {fps} = useVideoConfig();
   const kit = useBrand();
-  const base = presetOf(captionStyle);
-  // a brand kit overrides the pack's accent and (when it names one) its font —
-  // but only on sans packs: a pack whose identity is its face (condensed,
-  // serif, script) keeps it. Without a kit the pack's own palette wins over the project accent
-  const preset = kit.body && SANS.has(base.font.family) ? {...base, font: {...base.font, family: kit.body}} : base;
+  // a brand kit overrides the pack's accent and (when it names one) its font on sans packs
+  // (src/captionLayout.ts). Without a kit the pack's own palette wins over the project accent
+  const preset = captionPreset(captionStyle, kit.body); // may be a client font: fontFamily() resolves both
   if (!captions?.length) return null;
   const accent = kit.branded ? kit.accent : (preset.colors.accent ?? kit.accent);
   return (

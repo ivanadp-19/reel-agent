@@ -56,3 +56,20 @@ test('a caption under the hook moves just below it; with no room it stays and va
   assert.equal(avoidGraphics([huge], [tall]).at(0).topPct, 50);
   assert.ok(vp({clips: [clip], captions: [huge], graphics: [tall]}, 30).some((i) => i.code === 'overlap-graphic'));
 });
+
+test('transcriptIssues: an off-mic word listed on two pieces of one source counts once, in one run', async () => {
+  const {transcriptIssues} = await import('../src/validate.ts');
+  const w = (i, s, e, off) => ({i, word: `w${i}`, startMs: s, endMs: e, ...(off ? {off: true} : {})});
+  // w1 straddles the split at 1.5 s, so the transcript lists it on both pieces
+  const tr = [{clipId: 'a', source: 'S', words: [w(0, 0, 900), w(1, 1000, 2000, true)]}, {clipId: 'b', source: 'S', words: [w(1, 1000, 2000, true), w(2, 2100, 2600, true)]}];
+  const clips = [{id: 'a', src: 'clips/S.mp4', inSec: 0, outSec: 1.5, sourceDurationSec: 5}, {id: 'b', src: 'clips/S.mp4', inSec: 1.5, outSec: 3, sourceDurationSec: 5}];
+  const off = transcriptIssues({clips}, tr).filter((x) => x.code === 'off-mic');
+  assert.match(off.find((x) => x.ref === 'b').msg, /^b: 2 off-mic word\(s\) still in the cut: cut_words S:1…S:2 "w1 w2"/);
+});
+
+test('captions switched off (set_captions): their pages are not checked', () => {
+  const p = {clips: [clip], captionStyle: 'caja', captions: [page('c0', 500, 1500, [W('Todo', 500, 800), W('en', 900, 1500)], 5)], graphics: []};
+  assert.ok(codes(validateProject(p)).includes('glue'));
+  const off = codes(validateProject({...p, captionsOff: true}));
+  assert.ok(!off.includes('glue') && !off.includes('safe-top'), String(off));
+});

@@ -26,7 +26,7 @@ test('the reel MCP server has no shell, file-write or network-fetch tool', async
     for (const t of tools) assert.doesNotMatch(t.name, /bash|shell|exec|command|write_file|fetch_url|eval/i, t.name);
     // the only tools that take file paths copy media INTO public/ through the backend
     const pathTools = tools.filter((t) => /absolute (file )?path/i.test(JSON.stringify(t))).map((t) => t.name).sort();
-    assert.deepEqual(pathTools, ['add_broll', 'add_broll_assets', 'add_clips', 'set_brand', 'set_music']);
+    assert.deepEqual(pathTools, ['add_broll', 'add_broll_assets', 'add_clips', 'create_lut', 'set_brand', 'set_music']);
   } finally { await client.close(); }
 });
 

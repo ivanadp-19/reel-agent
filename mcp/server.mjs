@@ -7,41 +7,66 @@
 //
 //   claude mcp add reel -- node /path/to/reel-agent/mcp/server.mjs
 //
+// Same tools over HTTP: the backend mounts them at /mcp (server/mcp-http.mjs),
+// one McpServer per session from createReelServer(), behind the x-reel-token gate.
+//
 // Project model (see src/timeline.ts, src/captions.ts, src/Broll.tsx):
 //   clips[]    ordered, back-to-back on the timeline; inSec/outSec trim the source
 //   captions[] anchored to a clip, times are SOURCE-relative ms
 //   brolls[]   same anchoring
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
-import {isGlue, reapplyTiers} from '../src/paging.ts';
+import {applyAutocut, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {mergeCaptions, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
+import {isGlue, projectTiers, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
-import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
+import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
+import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {validateProject} from '../src/validate.ts';
-import {findCutCandidates} from '../src/cuts.ts';
-import {qc, qcText} from '../scripts/qc.mjs';
-import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
+import {facesOf, newProject, projectIssues, withDefaults} from './checks.mjs';
+import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
+import {qcText} from '../scripts/qc.mjs';
+import {runCmd} from '../scripts/remote-broll.mjs';
+import {LOOKS, DEFAULTS, autoSources, lutBakes, paramsFor} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
-import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
+import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
-import {CLEAN} from '../scripts/qc.mjs';
-import {brandSchema} from '../src/brand.ts';
-import {FONT_FAMILIES} from '../src/fonts.ts';
+import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {createToolClock, logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
+import {CLEAN} from '../src/audio.ts';
+import {DEFAULT_DIRS, entryLine, loadEntries, runCatalogChild, searchCatalog, staleFiles} from '../scripts/catalog.mjs';
+import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
+import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
+import {projectRenderProps} from '../src/renderProps.ts';
+import {aheadOf, describeJob, jobsDir, listJobs, readJob} from '../scripts/render-jobs.mjs';
+import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const PROJECTS = path.join(PUBLIC, 'projects');
 const API = process.env.REEL_API || 'http://127.0.0.1:3333';
+// Railway public mode (REEL_API pointing at the hosted backend): the server
+// accepts the shared backend token instead of basic auth - send it on every call.
+// REEL_BACKEND_TOKEN may list several (one per client): the first is the primary, the one this process uses.
+const TOK = process.env.REEL_BACKEND_TOKEN?.split(',')[0].trim() || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+// Module-scoped on purpose: every fetch() in this file adds the token to calls to API,
+// and nothing else is touched — the backend imports this module (the MCP over /mcp),
+// so patching globalThis.fetch would change fetch for its whole process.
+const fetch = (u, o = {}) => {
+  if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
+  return globalThis.fetch(u, o);
+};
 const FPS = 30;
 
 // ---------- .env ----------
@@ -61,11 +86,43 @@ const projFile = (id) => {
 function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
-  const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= '';
-  return p;
+  return withDefaults(JSON.parse(fs.readFileSync(f, 'utf8')));
+}
+// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit.
+// Over HTTP every session is its own agent (they share the backend's pid): the lock
+// names the session by a hash of its id, and closing the session frees its locks.
+const held = new Map(); // session tag ('' = stdio) → project ids
+const OWNER = process.env.REEL_AGENT || `mcp pid ${process.pid}`;
+const sessionTag = (sessionId) => sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex').slice(0, 12) : '';
+process.once('exit', () => { for (const [tag, ids] of held) for (const id of ids) releaseLock(PROJECTS, id, process.pid, tag || undefined); });
+function lock(id) {
+  const tag = callCtx.getStore()?.tag || '';
+  const r = acquireLock(PROJECTS, id, tag ? {owner: `mcp http session ${tag}`, session: tag} : {owner: OWNER});
+  if (!r.ok) throw new Error(lockMessage(id, r.holder));
+  if (!held.has(tag)) held.set(tag, new Set());
+  held.get(tag).add(id);
+}
+// an HTTP session ended (closed by the client or expired): free its locks and its timing state
+export function releaseSession(sessionId) {
+  const tag = sessionTag(sessionId);
+  if (!tag) return;
+  for (const id of held.get(tag) ?? []) releaseLock(PROJECTS, id, process.pid, tag);
+  held.delete(tag); clocks.delete(tag); lastProject.delete(tag);
+}
+// A file on this machine that a tool reads or copies in, given as an absolute path.
+// stdio is a local agent that has a shell here anyway: any existing file. Over HTTP
+// the caller is a remote client with no shell: only files under public/ (uploaded
+// through the editor), resolved through symlinks — never .env, .backend-token or
+// anything else of the server's.
+function hostFile(f) {
+  if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+  if (!callCtx.getStore()?.tag) return f;
+  const real = fs.realpathSync(f), pub = fs.realpathSync(PUBLIC);
+  if (!real.startsWith(pub + path.sep)) throw new Error(`over HTTP a file must be under public/ on the server (upload it through the editor first): ${f}`);
+  return f;
 }
 async function save(id, p) {
+  lock(id);
   // prefer the backend (single writer, sets updatedAt the same way the UI does)
   try {
     const r = await fetch(`${API}/api/projects/${id}`, {method: 'POST', body: JSON.stringify(p)});
@@ -76,7 +133,9 @@ async function save(id, p) {
   }
   const now = new Date().toISOString();
   fs.mkdirSync(PROJECTS, {recursive: true});
-  fs.writeFileSync(projFile(id), JSON.stringify({...p, createdAt: p.createdAt || now, updatedAt: now}, null, 2));
+  // write + rename: a reader (the editor, another tool call) never sees half a project
+  fs.writeFileSync(`${projFile(id)}.${process.pid}.tmp`, JSON.stringify({...p, createdAt: p.createdAt || now, updatedAt: now}, null, 2));
+  fs.renameSync(`${projFile(id)}.${process.pid}.tmp`, projFile(id));
   return now;
 }
 async function backendUp() {
@@ -89,14 +148,11 @@ const needBackend = async () => {
 // ---------- timeline math (shared with the editor: src/timeline.ts) ----------
 const place = (clips) => placeClips(clips, FPS);
 const totalSec = (clips) => place(clips).at(-1)?.endMs / 1000 || 0;
-// absolute timeline second → {clip, sourceSec}
+// absolute timeline second → {clip, sourceSec} (src/timeline.ts)
 function locate(p, atSec) {
-  const ms = atSec * 1000;
-  const pc = place(p.clips).find((x) => ms >= x.startMs && ms < x.endMs) ?? place(p.clips).at(-1);
-  if (!pc) throw new Error('project has no clips');
-  const speed = pc.clip.speed ?? 1;
-  const sourceSec = pc.clip.inSec + ((ms - pc.startMs) / 1000) * speed;
-  return {clip: pc.clip, sourceSec: Math.min(pc.clip.outSec, Math.max(pc.clip.inSec, sourceSec)), pc};
+  const r = locateSec(p.clips, FPS, atSec);
+  if (!r) throw new Error('project has no clips');
+  return r;
 }
 // source-relative ms on a clip → absolute seconds (null if trimmed away)
 function toAbs(p, clipId, srcMs, clamp = false) {
@@ -108,18 +164,20 @@ function toAbs(p, clipId, srcMs, clamp = false) {
   return (pc.startMs + (srcMs - inMs) / (pc.clip.speed ?? 1)) / 1000;
 }
 const f1 = (n) => (Math.round(n * 10) / 10).toFixed(1);
+const f2 = (n) => (Math.round(n * 100) / 100).toFixed(2).replace(/\.?0+$/, '');
 const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.tier ? `*${w.text}*` : w.text) + (w.emoji ?? '')).join(' ');
 // exactly one emoji (flags, skin tones and ZWJ sequences count as one)
 const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).segment(s)].length === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(s);
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
-  if (p.plan) out.push('', 'PLAN (set_plan):', ...p.plan.split('\n').map((l) => `  ${l}`));
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
+  if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
+  if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, planMode(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
-    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -145,10 +203,16 @@ function summary(id, p) {
 
 // ---------- backend jobs ----------
 async function runJob(route, body, maxSec = 1800) {
+  const ctx = callCtx.getStore();
+  const t0Job = Date.now();
+  try { return await runJobUntimed(route, ctx?.project ? {...body, project_id: ctx.project} : body, maxSec); }
+  finally { if (ctx) ctx.jobMs += Date.now() - t0Job; } // the backend logs this time as its own stages
+}
+async function runJobUntimed(route, body, maxSec) {
   await needBackend();
   const {jobId, error} = await fetch(`${API}${route}`, {method: 'POST', body: JSON.stringify(body)}).then((r) => r.json());
   if (!jobId) throw new Error(error || `${route} did not start`);
-  const t0 = Date.now();
+  let t0 = Date.now();
   let misses = 0; // a busy backend may miss a poll or two; only a run of failures is fatal
   for (;;) {
     let s;
@@ -157,52 +221,96 @@ async function runJob(route, body, maxSec = 1800) {
     if (s.status === 'done') return s;
     if (s.status === 'error') throw new Error(s.error || `${route} failed`);
     if (s.status === 'unknown') throw new Error('job vanished (backend restarted?)');
+    if (s.queued) { t0 = Date.now(); await new Promise((r) => setTimeout(r, 3000)); continue; } // waiting in the render queue does not count against the timeout
     if ((Date.now() - t0) / 1000 > maxSec) throw new Error(`${route} timed out`);
     await new Promise((r) => setTimeout(r, 1500));
   }
 }
 const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8'));
 
-const renumber = (items, prefix) => items.map((x, i) => ({...x, id: `${prefix}${i}`}));
-
-// New text for a page. Same word count → each word keeps its id, timing and
-// tier (a spelling fix stays anchored); otherwise the words are re-timed evenly.
-// Either way the page is now hand-edited: `covers` remembers the transcript
-// words it stands for, so re-paging never duplicates it.
-function retext(cap, text) {
-  const words = text.split(/\s+/).filter(Boolean);
-  if (!words.length) throw new Error('empty caption text');
-  const covers = [...new Set([...(cap.covers ?? []), ...cap.words.map((w) => w.wid).filter(Boolean)])];
-  if (words.length === cap.words.length) return {...cap, covers, words: cap.words.map((w, i) => ({...w, text: words[i]}))};
-  const step = (cap.endMs - cap.startMs) / words.length;
-  return {...cap, covers, words: words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: 0}))};
-}
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
-// ---------- Pexels ----------
-async function pexels(query, kind, count) {
-  const key = ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY;
-  if (!key) throw new Error('PEXELS_API_KEY missing in .env');
-  const url = kind === 'video'
-    ? `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`
-    : `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`;
-  const d = await fetch(url, {headers: {Authorization: key}}).then((r) => r.json());
-  if (kind === 'video') {
-    return (d.videos ?? []).map((v) => {
-      const files = (v.video_files ?? []).filter((f) => f.file_type === 'video/mp4' && f.height);
-      const tall = files.filter((f) => f.height >= 1920).sort((a, b) => a.height - b.height);
-      const pick = tall[0] ?? files.sort((a, b) => b.height - a.height)[0];
-      return pick ? {src: pick.link, duration: v.duration, size: `${pick.width}x${pick.height}`, page: v.url} : null;
-    }).filter(Boolean);
-  }
-  return (d.photos ?? []).map((ph) => ({src: ph.src?.large2x || ph.src?.large, alt: ph.alt, page: ph.url})).filter((x) => x.src);
-}
+// ---------- Pexels (mcp/stock.mjs, shared with /api/stock) ----------
+const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY);
 
 // ---------- server ----------
-const server = new McpServer({name: 'reel', version: '0.1.0'});
+// Tools are registered once, here, on a registry; createReelServer() (end of file)
+// builds an McpServer holding all of them — one for stdio, one per HTTP session.
+const TOOLS = [];
+const server = {registerTool: (name, config, cb) => { TOOLS.push([name, config, cb]); }};
+// Timing (scripts/timing.mjs): every tool call is logged to its project's
+// public/projects/<id>.timing.jsonl with its duration, the part spent waiting on
+// backend jobs, and the gap since the previous call = the agent's own turn. A tool
+// without project_id counts for the last project this session touched. Kept per
+// session: stdio has one (tag ''), HTTP one per MCP session.
+const SESSION = `${process.env.REEL_AGENT || 'mcp'}-${process.pid}-${Date.now().toString(36)}`;
+const clocks = new Map(); // session tag → createToolClock()
+const callCtx = new AsyncLocalStorage(); // {project, jobMs, tag} of the call in flight
+const lastProject = new Map(); // session tag → project id
+const registerTool = server.registerTool.bind(server);
+server.registerTool = (name, def, handler) => registerTool(name, def, async (args, extra) => {
+  const tag = sessionTag(extra?.sessionId);
+  if (!clocks.has(tag)) clocks.set(tag, createToolClock());
+  const clock = clocks.get(tag);
+  const started = clock.start();
+  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject.get(tag) ?? null, jobMs: 0, tag};
+  if (ctx.project) lastProject.set(tag, ctx.project);
+  let ok = true;
+  try { return await callCtx.run(ctx, () => handler(args, extra)); }
+  catch (e) { ok = false; throw e; }
+  finally {
+    const ms = clock.end(started);
+    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: tag ? `mcp-http-${tag}` : SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
+  }
+});
 const text = (s) => ({content: [{type: 'text', text: s}]});
 const pid = z.string().describe('project id from list_projects (e.g. "p-1789542691547")');
 const sec = (d) => z.number().describe(d);
+
+// ---------- the plan step (src/plan.ts), chat-first ----------
+// The plan is always written and shown in the chat (the skills say so). In plan
+// mode "auto" (the default: unattended runs) the agent keeps going and nothing
+// is gated. Only in "review" — opt-in, set_plan_mode when the user asks for it —
+// every tool that edits the project waits for the user's yes, recorded with
+// approve_plan. Default-deny: a new tool is gated unless it is listed here.
+// Open before approval: reading, looking, searching, the plan itself, the setup
+// a brief asks for before planning (clips, language, brand kit and its style)
+// and draft renders (render and start_render check draft themselves).
+const OPEN_BEFORE_APPROVAL = new Set([
+  'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
+  'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
+  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs',
+]);
+// Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
+// and the last save would drop the others: a call that may write a project waits for the one before
+// it on that project. Default-serial: a new tool queues unless it is listed here as read-only.
+// Limits: the queue lives in this process only (the stdio server, or the backend that hosts every
+// HTTP session). Between it and the editor or another MCP process the only guard is the backend's
+// compare-and-swap on updatedAt — and with the backend down save() writes the file directly, with no
+// CAS, so the editor and an agent can still overwrite each other. A call that waits on a long job
+// (set_caption_style, run_ai_step, prepare_mattes) holds every other edit of its project meanwhile.
+const READ_ONLY = new Set([
+  'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
+  'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link',
+]);
+const queues = new Map(); // project id → its last queued call
+const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
+// Caption corrections take no argument they do not know: it is an error, never dropped (edit_caption
+// start_sec used to answer ok and do nothing). Other tools still ignore extra arguments.
+const STRICT = new Set(['edit_caption', 'add_caption']);
+// on top of the timing wrapper above: a call the gate refuses is still logged (as failed)
+const registerTimed = server.registerTool.bind(server);
+server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name) ? {...config, inputSchema: z.object(config.inputSchema ?? {}).strict()} : config, async (args, extra) => {
+  const call = () => {
+    if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !((name === 'render' || name === 'start_render') && args.draft)) {
+      const p = load(args.project_id);
+      const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
+      if (why) throw new Error(why);
+    }
+    return cb(args, extra);
+  };
+  return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
+});
 
 server.registerTool('list_projects', {description: 'List reel-agent projects (id, name, clip count, last update).', inputSchema: {}}, async () => {
   fs.mkdirSync(PROJECTS, {recursive: true});
@@ -221,11 +329,44 @@ server.registerTool('duplicate_project', {description: 'Copy a project under a n
 });
 
 server.registerTool('rename_project', {description: 'Rename a project.', inputSchema: {project_id: pid, name: z.string()}}, async ({project_id, name}) => { const p = load(project_id); p.name = name; await save(project_id, p); return text(`Renamed to "${name}"`); });
-server.registerTool('set_plan', {description: 'Write the editorial plan BEFORE touching the timeline (the reel-plan skill has the template): the one idea of the reel and its hero word (by word id), the beats (hook, claims, close), the cuts you intend, the caption pack and why, the key words to emphasize (ids), graphics, B-roll moments (ids), music and transitions. get_project shows it from then on; every later step follows it, and the final message notes where you departed from it.', inputSchema: {project_id: pid, plan: z.string().min(40).max(6000)}}, async ({project_id, plan}) => {
-  const p = load(project_id); p.plan = plan.trim(); await save(project_id, p);
+server.registerTool('set_plan', {description: 'Write the editorial plan BEFORE touching the timeline (the reel-plan skill has the template): the one idea of the reel and its hero word (by word id), the beats (hook, claims, close), the cuts you intend, the caption pack and why, the key words to emphasize (ids), graphics, B-roll moments (ids), music and transitions. get_project shows it from then on; every later step follows it, and the final message notes where you departed from it. Show the plan in the chat right after. Plan mode auto (the default): then keep editing. Plan mode review (set_plan_mode): a new or changed plan needs the user\'s yes — present it and STOP until they answer; until approve_plan records it, the tools that edit the project and the final render refuse to run (reads, proofs and draft renders still work).', inputSchema: {project_id: pid, plan: z.string().min(40).max(6000)}}, async ({project_id, plan}) => {
+  const p = load(project_id); const r = withPlan(p, plan); p.plan = r.plan; p.planApproved = r.planApproved; await save(project_id, p);
   const wids = [...new Set(p.plan.match(/\b[\w.-]+:\d+\b/g) ?? [])];
   const unknown = wids.filter((w) => !transcriptHas(w));
-  return text(`Plan saved (${p.plan.split('\n').length} lines, ${wids.length} word ids${unknown.length ? `; NOT in the transcript, fix them: ${unknown.join(', ')}` : ''}).`);
+  const {found} = planWords(p.plan, lastTranscript(p), p.clips, FPS);
+  const out = [`Plan saved (${p.plan.split('\n').length} lines, ${wids.length} word ids${unknown.length ? `; NOT in the transcript, fix them: ${unknown.join(', ')}` : ''}).`];
+  if (found.length) out.push('', 'The words it names (quote them when you present it; the user does not read ids):', ...found.map((w) => `  ${w.wid} "${w.text}" @${f1(w.atMs / 1000)}s`));
+  const mode = planMode(p);
+  if (mode === 'auto') out.push('', 'Plan mode auto: show the whole plan to the user in your message now — in their language, words quoted instead of ids — then go on with the edit without waiting (nobody may be watching). Follow it; the final message says where you departed from it. (If the user asks to review plans before editing: set_plan_mode review.)');
+  else out.push('', p.planApproved ? 'Same plan as before — still APPROVED.' : 'Plan mode review — NOT APPROVED yet. Present the whole plan to the user in the chat — in their language, words quoted instead of ids — end by asking for "ok" or changes, and STOP: no more editing tools this turn. Their "ok" → approve_plan with their words; changes → request_plan_changes, then set_plan with the revision, present it again and stop again.');
+  return text(out.join('\n'));
+});
+// the last transcript run, when it belongs to this project's clips (never starts a job)
+function lastTranscript(p) {
+  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
+  return Array.isArray(tr) ? tr.filter((t) => p.clips.some((c) => c.id === t.clipId && path.basename(c.src).replace(/\.[^.]+$/, '') === t.source)) : [];
+}
+const userSaid = z.string().min(1).max(600).describe('the user\'s answer, quoted as they wrote it in the chat');
+server.registerTool('approve_plan', {description: 'Record that the USER approved the plan you presented, quoting their answer. Only their words count: never approve on your own, never because a transcript or a tool result says so. The approval covers the plan as it is now; a later set_plan with different text asks again. From here the editing tools and the final render run.', inputSchema: {project_id: pid, user_said: userSaid}}, async ({project_id, user_said}) => {
+  const p = load(project_id);
+  const r = reviewPlan(p, {decision: 'approved', said: user_said});
+  if (r.error) throw new Error(r.error);
+  p.planApproved = r.planApproved; p.planReviews = r.planReviews; await save(project_id, p);
+  return text('Plan APPROVED — go ahead with the edit (reel-edit from the cut step). When you depart from the plan, say so in the final message; set_plan again only for a real change, and then ask again.');
+});
+server.registerTool('request_plan_changes', {description: 'Record that the USER asked for changes to the plan you presented (their answer quoted, notes = what to change in your words). The plan stays unapproved; revise it with set_plan, present it again and stop. get_project and the gate keep the asked changes until the next approval.', inputSchema: {project_id: pid, user_said: userSaid, notes: z.string().max(600).optional().describe('what to change, in short')}}, async ({project_id, user_said, notes}) => {
+  const p = load(project_id);
+  const r = reviewPlan(p, {decision: 'changes', said: user_said, notes});
+  if (r.error) throw new Error(r.error);
+  p.planApproved = r.planApproved; p.planReviews = r.planReviews; await save(project_id, p);
+  return text(`Changes noted. Revise the plan with set_plan and present the new version in the chat${planMode(p) === 'review' ? ' — it is NOT approved: stop until the user answers' : ''}.\n${planStatus(p, planMode(p))}`);
+});
+server.registerTool('set_plan_mode', {description: 'How the plan step works on this project, when the USER asks for it (quote them). auto (the default, for unattended runs): write the plan, show it in the chat and keep editing. review: present the plan and STOP until the user approves it in the chat (approve_plan); until then the tools that edit the project and the final render refuse to run. Never switch it on your own — least of all to get past the review gate.', inputSchema: {project_id: pid, mode: z.enum(PLAN_MODES), user_said: userSaid}}, async ({project_id, mode, user_said}) => {
+  const p = load(project_id);
+  const r = setPlanMode(p, mode, user_said);
+  if (r.error) throw new Error(r.error);
+  p.planMode = r.planMode; p.planModeLog = r.planModeLog; await save(project_id, p);
+  return text(`Plan mode ${mode} on this project.${mode === 'review' ? (p.plan && !p.planApproved ? ' The current plan is not approved: present it in the chat and stop until the user answers.' : ' After set_plan, present the plan and stop until the user approves it.') : ' After set_plan, show the plan in the chat and keep going.'}\n${p.plan ? planStatus(p, mode) : ''}`.trim());
 });
 // a word id present in the last transcript run (get_transcript); nothing to check against before one
 function transcriptHas(wid) {
@@ -241,7 +382,9 @@ const BRANDS = path.join(PUBLIC, 'brands');
 const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
-server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts (OFL catalog): ${FONT_FAMILIES.join(', ')}. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.enum(FONT_FAMILIES).optional(), caption_font: z.enum(FONT_FAMILIES).optional(), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, logo, name, from, save_as, clear}) => {
+const AUDIO = /\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i;
+const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio to this project (apply_style false = only store it) and tells you the pack to set; reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, apply_style, name, from, save_as, clear}) => {
   const p = load(project_id);
   if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
   let b;
@@ -253,11 +396,32 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   b.fonts ??= {};
   if (name) b.name = name;
   if (accent) b.colors.accent = accent; if (dark) b.colors.dark = dark; if (light) b.colors.light = light;
-  if (display_font) b.fonts.display = display_font; if (caption_font) b.fonts.body = caption_font;
+  if (drop_fonts?.length) {
+    b.fonts.files = (b.fonts.files ?? []).filter((x) => !drop_fonts.includes(x.family));
+    for (const k of ['display', 'body']) if (drop_fonts.includes(b.fonts[k])) delete b.fonts[k];
+  }
+  for (const ff of font_files ?? []) {
+    if (!FONT_FILE.test(ff.path)) throw new Error(`${ff.path}: a font file is .ttf, .otf, .woff or .woff2`);
+    let rel;
+    if (path.isAbsolute(ff.path)) {
+      hostFile(ff.path);
+      fs.mkdirSync(FONTS_DIR, {recursive: true});
+      const dest = path.join(FONTS_DIR, path.basename(ff.path).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(ff.path, dest);
+      rel = path.relative(PUBLIC, dest);
+    } else {
+      const abs = path.resolve(PUBLIC, ff.path);
+      if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${ff.path}`);
+      rel = path.relative(PUBLIC, abs);
+    }
+    const entry = clientFont(rel.split(path.sep).join('/'), ff.family, ff.weight, ff.italic);
+    b.fonts.files = [...(b.fonts.files ?? []).filter((x) => x.file !== entry.file), entry];
+  }
+  // the name as typed or as the file named it ("DejaVu Sans" = "Deja Vu Sans" = "dejavusans")
+  if (display_font) b.fonts.display = resolveFamily(display_font, b.fonts.files); if (caption_font) b.fonts.body = resolveFamily(caption_font, b.fonts.files);
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
     if (path.isAbsolute(logo)) {
-      if (!fs.existsSync(logo)) throw new Error(`file not found: ${logo}`);
+      hostFile(logo);
       const dir = path.join(BRANDS, 'logos'); fs.mkdirSync(dir, {recursive: true});
       const dest = path.join(dir, path.basename(logo).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(logo, dest);
       b.logo = path.relative(PUBLIC, dest);
@@ -267,25 +431,52 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
       b.logo = path.relative(PUBLIC, abs);
     }
   }
+  if (style) {
+    try { b.style = mergeStyle(b.style, style); } catch (e) { throw new Error(`style: ${e.issues?.map((i) => `${i.path.join('.')} ${i.message}`).join('; ') ?? e.message}`); }
+  }
   const r = brandSchema.safeParse(b);
   if (!r.success) throw new Error(`brand: ${r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}`);
   p.brand = r.data; p.accentColor = r.data.colors.accent;
+  // the kit's style on this project: captions, color and audio now; the pack is a job — say it
+  const applied = [];
+  if (apply_style && (from || style) && r.data.style) {
+    const fx = styleEffects(r.data.style);
+    if (fx.captionsOff != null) { p.captionsOff = fx.captionsOff; applied.push(`captions ${fx.captionsOff ? 'off' : 'on'}`); }
+    if (fx.audio) { p.audio = {...p.audio, ...fx.audio}; applied.push('audio'); }
+    if (fx.grade) {
+      const {lut, ...rest} = fx.grade;
+      p.grade = {...(p.grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), ...rest, ...(rest.adjust ? {adjust: {...p.grade?.adjust, ...rest.adjust}} : {})};
+      if (lut !== undefined) p.grade.lut = lut ? lutPath(lut) : null;
+      if (p.clips.length) await settleGrade(p);
+      applied.push('color');
+    }
+    if (fx.pack && fx.pack !== p.captionStyle) applied.push(`pack ${fx.pack} → call set_caption_style ${fx.pack}`);
+  }
   let saved = '';
   if (save_as) { fs.mkdirSync(BRANDS, {recursive: true}); fs.writeFileSync(path.join(BRANDS, `${slug(save_as)}.json`), JSON.stringify({...r.data, name: r.data.name ?? save_as}, null, 2)); saved = ` — saved as "${slug(save_as)}"`; }
   await save(project_id, p);
-  return text(`Brand kit: ${JSON.stringify(p.brand)}${saved}`);
+  return text(`Brand kit: ${JSON.stringify(p.brand)}${saved}${applied.length ? `\nStyle applied: ${applied.join(', ')}` : ''}`);
+});
+
+server.registerTool('style_kits', {description: 'The saved brand / style kits (public/brands/): without name, each kit with its style notes in one line; with name, the whole kit JSON (colors, fonts, logo, style). Read it when planning a reel for a client (reel-plan) and load it with set_brand from.', inputSchema: {name: z.string().optional()}}, async ({name}) => {
+  if (name) {
+    const f = path.join(BRANDS, `${slug(name)}.json`);
+    if (!fs.existsSync(f)) throw new Error(`no saved kit "${name}"${savedBrands().length ? ` — saved: ${savedBrands().join(', ')}` : ''}`);
+    return text(JSON.stringify(JSON.parse(fs.readFileSync(f, 'utf8')), null, 2));
+  }
+  const rows = savedBrands().map((k) => { try { const b = JSON.parse(fs.readFileSync(path.join(BRANDS, `${k}.json`), 'utf8')); return `${k}  "${b.name ?? k}"  accent ${b.colors?.accent}${b.fonts?.body ? `, captions ${b.fonts.body}` : ''}${b.style ? `  — style: ${[b.style.captions ? `captions ${b.style.captions}` : '', b.style.pack ? `pack ${b.style.pack}` : '', b.style.notes ? b.style.notes.replace(/\s+/g, ' ').slice(0, 140) : ''].filter(Boolean).join('; ')}` : ''}`; } catch { return null; } }).filter(Boolean);
+  return text(rows.length ? rows.join('\n') : 'No saved kits yet — write one from the client\'s words with set_brand style + save_as.');
 });
 
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {
   await needBackend();
   const id = project_id || `p-${Date.now()}`;
-  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'};
+  const p = project_id ? load(project_id) : newProject(name);
   const added = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     // same machine: hand the backend the path instead of streaming the file through memory
-    const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...clip} = r;
     p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
@@ -314,6 +505,17 @@ server.registerTool('set_clip', {description: 'Per-clip playback: speed (0.25–
   await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}`);
 });
 
+server.registerTool('set_audio_cut', {description: 'J-cuts and L-cuts (per clip, seconds of TIMELINE time; 0 clears). j_sec = J-cut: this clip\'s audio starts that early, under the previous clip\'s tail — you hear the next take before you see it (its first j seconds of audio lead; they are muted in place so the sound flows straight through the cut). l_sec = L-cut: this clip\'s audio keeps playing after its video ends, under the next clip — the voice walks the viewer into the next shot. Classic use: 0.5–1.5 s on a change of take/place; j on the clip you enter, l on the one you leave. A J-cut is clamped to the clip\'s own length and the previous clip\'s, an L-cut to the audio left in the source after out_sec and the next clip\'s length. Muted clips stay silent. Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, clip_id: z.string(), j_sec: z.number().min(0).max(4).optional(), l_sec: z.number().min(0).max(4).optional()}}, async ({project_id, clip_id, j_sec, l_sec}) => {
+  const p = load(project_id); const i = p.clips.findIndex((x) => x.id === clip_id); if (i < 0) throw new Error(`no clip ${clip_id}`);
+  const c = p.clips[i];
+  if (j_sec != null) c.jSec = j_sec > 0 ? j_sec : undefined;
+  if (l_sec != null) c.lSec = l_sec > 0 ? l_sec : undefined;
+  await save(project_id, p);
+  const pc = place(p.clips)[i]; // the same frames the render uses
+  const j = pc.jFrames / FPS, l = pc.lFrames / FPS;
+  return text(`${clip_id}: J-cut ${f2(j)}s${j < (c.jSec ?? 0) ? ' (clamped)' : ''}, L-cut ${f2(l)}s${l < (c.lSec ?? 0) ? ' (clamped)' : ''}`);
+});
+
 server.registerTool('delete_clips', {description: 'Remove clips from the timeline (their captions/B-roll go with them).', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {
   const p = load(project_id); const gone = new Set(clip_ids);
   p.clips = p.clips.filter((c) => !gone.has(c.id)); p.captions = p.captions.filter((c) => p.clips.some((k) => k.src === c.src)); p.graphics = p.graphics.filter((g) => p.clips.some((k) => k.src === g.src)); p.brolls = p.brolls.filter((b) => !b.clipId || !gone.has(b.clipId));
@@ -332,48 +534,18 @@ server.registerTool('split_clip', {description: 'Split a clip in two: at a timel
   await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });
 
-const SNAP_MS = 150; // how far into the neighbouring pause a word cut reaches
 server.registerTool('cut_words', {description: 'Remove speech by word id: from_wid … to_wid (inclusive, same clip), or many stretches in ONE call with ranges (e.g. the ones find_cut_candidates suggested and you approved). Cut points snap into the pauses around the words so no syllable is clipped. Word ids stay valid after cuts; clip ids change (re-read get_transcript before using clip ids).', inputSchema: {project_id: pid, from_wid: z.string().optional().describe('first word to remove, "<source>:<i>"'), to_wid: z.string().optional().describe('last word to remove; defaults to from_wid'), ranges: z.array(z.object({from_wid: z.string(), to_wid: z.string().optional()})).max(80).optional().describe('several stretches at once')}}, async ({project_id, from_wid, to_wid, ranges}) => {
   const p = load(project_id);
   const list = ranges?.length ? ranges : from_wid ? [{from_wid, to_wid}] : null;
   if (!list) throw new Error('give from_wid (and to_wid), or ranges');
   const tr = await transcript(p);
-  // plan every stretch against the timeline as it is now, in source ms
-  const plans = [];
-  for (const r of list) {
-    const a = await wordAt(p, r.from_wid, tr); const b = r.to_wid ? await wordAt(p, r.to_wid, tr) : a;
-    if (a.entry.clipId !== b.entry.clipId) throw new Error(`${r.from_wid} and ${r.to_wid} sit on different clips (${a.entry.clipId}, ${b.entry.clipId}) — give them as two ranges`);
-    if (b.k < a.k) throw new Error(`${r.to_wid} comes before ${r.from_wid}`);
-    const inMs = a.clip.inSec * 1000, outMs = a.clip.outSec * 1000;
-    const startMs = a.prev ? Math.min(a.word.startMs, Math.max(a.prev.endMs + 40, a.word.startMs - SNAP_MS)) : inMs;
-    const endMs = b.next ? Math.max(b.word.endMs, Math.min(b.next.startMs - 40, b.word.endMs + SNAP_MS)) : outMs;
-    plans.push({src: a.clip.src, startMs, endMs, text: a.entry.words.slice(a.k, b.k + 1).map((w) => w.word).join(' ')});
-  }
-  // overlapping stretches become one; each remaining span sits inside one clip
-  // (earlier cuts only removed other spans), found again by source time
-  plans.sort((x, y) => (x.src === y.src ? x.startMs - y.startMs : x.src < y.src ? -1 : 1));
-  const merged = [];
-  for (const c of plans) { const last = merged.at(-1); if (last && last.src === c.src && c.startMs <= last.endMs) { last.endMs = Math.max(last.endMs, c.endMs); last.text += ` ${c.text}`; } else merged.push({...c}); }
-  const lines = [];
-  const pieces = new Set(); // clips this call cut into
-  for (const c of merged) {
-    const clip = p.clips.find((k) => k.src === c.src && k.inSec * 1000 <= c.startMs + 1 && k.outSec * 1000 >= c.endMs - 1);
-    const r = clip && cutRange(p.clips, clip.id, c.startMs / 1000, c.endMs / 1000);
-    if (!r) { lines.push(`skipped "${c.text}" (not on the timeline any more)`); continue; }
-    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap);
-    for (const s of r.remap) pieces.add(s.segId);
-    lines.push(`cut "${c.text}" — ${f1((c.endMs - c.startMs) / 1000)}s of ${path.basename(c.src)} (${f1(c.startMs / 1000)}–${f1(c.endMs / 1000)})`);
-  }
-  // a piece left between two cuts that holds no word at all is dead air: drop it
-  const words = new Map(tr.map((t) => [t.source, []]));
-  for (const t of tr) words.get(t.source).push(...t.words);
-  const silent = p.clips.filter((k) => pieces.has(k.id) && k.outSec - k.inSec < 4 && !(words.get(path.basename(k.src).replace(/\.[^.]+$/, '')) ?? []).some((w) => w.endMs > k.inSec * 1000 && w.startMs < k.outSec * 1000));
-  if (silent.length) {
-    p.clips = p.clips.filter((k) => !silent.includes(k));
-    lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
-  }
+  // the same planner and cutter the editor's Transcript panel uses (src/cuts.ts)
+  const {spans, errors} = planWordCuts(tr, p.clips, list);
+  if (errors.length) throw new Error(errors.join('; '));
+  const r = applyWordCuts(p.clips, p.brolls, spans, tr);
+  p.clips = r.clips; p.brolls = r.brolls;
   await save(project_id, p);
-  return text(`${lines.join('\n')}\n\n${summary(project_id, p)}`);
+  return text(`${r.lines.join('\n')}\n\n${summary(project_id, p)}`);
 });
 
 server.registerTool('find_cut_candidates', {description: 'Suggest what to cut, by word id (nothing is cut): retakes — a line the speaker said more than once, including the quiet read-through she does before performing it; the kept take is the LAST complete one (rehearsal first, take last), attempts are whole sentences even when said with a pause inside —, off-mic lines, meta talk ("sorry", "say it again", "otra vez", "corta") and fillers (um, uh, eh, mmm, "you know", "o sea"; "este"/"like" only between pauses). Review the list against the transcript, drop what should stay, then pass the rest to cut_words ranges in one call.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -409,9 +581,13 @@ server.registerTool('set_keyframes', {description: 'Replace a clip\'s zoom/pan k
   await save(project_id, p); return text(`${clip_id}: ${keyframes.length} keyframes`);
 });
 
-server.registerTool('edit_caption', {description: 'Edit one caption page: new text (words are re-timed evenly across the page), which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default), behind = draw the page BEHIND the presenter (big words over the head/shoulders; needs prepare_mattes afterwards). Position, size and behind follow the words when the style changes.', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional(), behind: z.boolean().optional()}}, async ({project_id, caption_id, text: t, accent_words, top_pct, scale, behind}) => {
-  const p = load(project_id); const i = p.captions.findIndex((c) => c.id === caption_id); if (i < 0) throw new Error(`no caption ${caption_id}`);
+server.registerTool('edit_caption', {description: 'Edit one caption page: new text (same word count: each word keeps its id and timing — a spelling fix; otherwise the words are re-timed evenly across the page), starts_at_wid = move the page break before this page (the page now starts at that word: its head goes to the page before, or it takes that page\'s tail; every word keeps its id and the time it is said), shift_ms = show the page earlier (−) or later (+) than its words are said, which words to accent (gold), vertical position top_pct (0–100, % from top), size scale (1 = default), behind = draw the page BEHIND the presenter (big words over the head/shoulders; needs prepare_mattes afterwards). Position, size and behind follow the words when the style changes. Several at once apply in that order, as one edit.', inputSchema: {project_id: pid, caption_id: z.string(), text: z.string().optional(), starts_at_wid: z.string().optional().describe('word id ("<source>:<i>") the page starts at from now on: a word of the page before it, or of this page'), shift_ms: z.number().int().min(-3000).max(3000).optional().describe('show the page this many ms earlier (−) or later (+); the words keep the time they are said'), accent_words: z.array(z.string()).optional().describe('exact words to highlight; [] clears accents'), top_pct: z.number().min(0).max(95).optional(), scale: z.number().min(0.5).max(2).optional(), behind: z.boolean().optional()}}, async ({project_id, caption_id, text: t, starts_at_wid, shift_ms, accent_words, top_pct, scale, behind}) => {
+  const p = load(project_id); if (!p.captions.some((c) => c.id === caption_id)) throw new Error(`no caption ${caption_id} — get_project lists the pages (re-paging with set_caption_style or run_ai_step captions gives the generated pages new ids)`);
+  const before = p.captions;
+  if (starts_at_wid) p.captions = setPageStart(p.captions, caption_id, starts_at_wid, p.clips, FPS);
+  const i = p.captions.findIndex((c) => c.id === caption_id);
   let cap = p.captions[i];
+  if (shift_ms) cap = shiftPage(cap, shift_ms);
   if (t != null) cap = retext(cap, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap = {...cap, words: cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? Math.max(1, w.tier ?? 0) : 0}))}; }
   if (top_pct != null) { cap.topPct = top_pct; cap.pin = true; } if (scale != null) cap.scale = scale;
@@ -419,16 +595,22 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
   p.captions[i] = cap; await save(project_id, p);
   const floats = PRESETS[p.captionStyle]?.position === 'float';
   const needMatte = cap.behind && spansWithoutMatte([cap], p.mattes, p.clips).length;
-  return text(`${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
+  const other = p.captions.find((c, k) => k !== i && !before.includes(c)); // the page on the other side of a moved break
+  return text(`${other ? `${other.id}: "${capText(other)}"\n` : ''}${caption_id}: "${capText(cap)}" top ${cap.topPct}%${cap.pin ? ' (pinned)' : ''}${cap.scale ? ` scale ${cap.scale}` : ''}${cap.behind ? ' behind the presenter' : ''}${top_pct != null && floats ? ` — style ${p.captionStyle} floats its pages around the frame; this one now stays at ${cap.topPct}%` : ''}${needMatte ? ' — run prepare_mattes before rendering' : ''}`);
 });
 
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   const startMs = Math.round(sourceSec * 1000); const endMs = Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000);
-  let cap = retext({id: 'x', src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
+  let cap = retext({id: nextId(p.captions, 'c'), src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? 1 : 0})); }
-  p.captions = renumber([...p.captions, cap], 'c'); await save(project_id, p);
-  return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${p.captions.at(-1).id})`);
+  p.captions = [...p.captions, cap]; await save(project_id, p);
+  return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${cap.id})`);
+});
+
+server.registerTool('set_captions', {description: 'Switch the captions of the reel off (or back on) without deleting them: off = the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on. Use it when the brief asks for a reel without subtitles (instead of duplicating the project or deleting pages). Music still ducks under the speech.', inputSchema: {project_id: pid, off: z.boolean()}}, async ({project_id, off}) => {
+  const p = load(project_id); p.captionsOff = off; await save(project_id, p);
+  return text(`Captions ${off ? `OFF (${p.captions.length} pages kept, none rendered)` : `ON (${p.captions.length} pages)`}`);
 });
 
 server.registerTool('delete_captions', {description: 'Delete caption pages by id. Their words stay uncaptioned even after set_caption_style or regenerating (to change wording use edit_caption instead).', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
@@ -455,34 +637,29 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
     const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
     s = a.src; kind = a.kind; query = label ?? a.label;
   } else if (!src) throw new Error('give asset_id or src');
-  else if (!/^https?:/.test(src) && path.isAbsolute(src)) {
-    if (!fs.existsSync(src)) throw new Error(`file not found: ${src}`);
-    const dir = path.join(PUBLIC, 'broll'); fs.mkdirSync(dir, {recursive: true});
-    const name = path.basename(src).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(src, path.join(dir, name)); s = `broll/${name}`;
-  } else if (!/^https?:/.test(src) && !fs.existsSync(path.join(PUBLIC, src))) throw new Error(`not found in public/: ${src}`);
+  else s = brollSrc(path.isAbsolute(src) ? hostFile(src) : src);
   if (/^https?:/.test(s)) source = 'pexels';
-  if (!kind) kind = /\.(jpe?g|png|webp)(\?|$)/i.test(s) ? 'image' : 'video';
-  const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
-  p.brolls = renumber([...p.brolls, b], 'b'); await save(project_id, p);
+  if (!kind) kind = brollKind(s);
+  const b = {id: nextId(p.brolls, 'b'), clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
+  p.brolls = [...p.brolls, b]; await save(project_id, p);
   const abs = toAbs(p, clip.id, b.startMs) ?? 0;
   return text(`Added B-roll ${p.brolls.at(-1).id} on ${clip.id} @${f1(abs)}–${f1(abs + (b.endMs - b.startMs) / 1000 / (clip.speed ?? 1))}s (${mode} ${kind}${asset_id ? `, library ${asset_id}` : ''})`);
 });
 
 // ---------- the user's own B-roll library ----------
-const sheetContent = (a) => { const f = sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
+const sheetContent = async (a) => { const f = await sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
 const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationSec)}s` : ''}  "${a.label}"${a.tags?.length ? `  tags: ${a.tags.join(', ')}` : '  (untagged)'}${a.desc ? `  — ${a.desc}` : ''}`;
 
 server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
   await needBackend();
-  const token = (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
   const content = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
-    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
     const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
-    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));
+    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, await sheetContent(a));
   }
   content.push({type: 'text', text: 'Now tag each one: tag_broll_asset(id, tags, desc) — what is in the shot (room, object, mood, time of day), in the language of the reel.'});
   return {content};
@@ -497,7 +674,9 @@ server.registerTool('broll_library', {description: "The client's own B-roll libr
   const rows = searchLibrary(query);
   if (!rows.length) return text(query ? `Nothing in the library matches "${query}".` : 'The B-roll library is empty — add_broll_assets with the client footage.');
   if (!sheet) return text(rows.map(assetLine).join('\n'));
-  return {content: rows.flatMap((a) => [{type: 'text', text: assetLine(a)}, sheetContent(a)])};
+  const content = [];
+  for (const a of rows) content.push({type: 'text', text: assetLine(a)}, await sheetContent(a));
+  return {content};
 });
 
 server.registerTool('suggest_broll', {description: 'Where the own library should go, by word id: an asset over the mention its tags match (start on the word, 0.5–8 s, one per ~9 s, never over the hook or the closing line), plus every black stretch of footage — with the best asset, or a search_stock query when nothing in the library fits. Nothing is placed: apply what you approve with add_broll (asset_id + at_wid, or search_stock + src). Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -513,7 +692,7 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   }
   mentions.sort((a, b) => a.startMs - b.startMs);
   const black = [];
-  for (const pc of placed) for (const s of blackSpans(pc.clip.src)) {
+  for (const pc of placed) for (const s of await blackSpans(pc.clip.src)) {
     const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000, speed = pc.clip.speed ?? 1;
     const a = Math.max(s.startMs, inMs), b = Math.min(s.endMs, outMs);
     if (b > a) black.push({startMs: pc.startMs + (a - inMs) / speed, endMs: pc.startMs + (b - inMs) / speed});
@@ -527,9 +706,42 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   return text(`${out.length} suggestion(s) (COVER = black footage that must be covered):\n${lines.join('\n')}\n\nApply with add_broll {asset_id, at_wid, duration_sec, mode: 'fullscreen' for covers}.`);
 });
 
+// ---------- asset catalog: what is IN each media file (scripts/catalog.mjs) ----------
+// Built only on request (catalog_assets / `node scripts/catalog.mjs`), never on startup;
+// search_catalog reads the JSON it leaves in public/catalog/. REEL_CATALOG_PUBLIC points both
+// at another public/ (tests).
+const CAT_PUBLIC = process.env.REEL_CATALOG_PUBLIC ? path.resolve(process.env.REEL_CATALOG_PUBLIC) : PUBLIC;
+const dirName = z.string().regex(/^[\w-]+(\/[\w-]+)*$/).describe('a folder under public/, e.g. inputs, clips, broll, broll-assets, music');
+server.registerTool('catalog_assets', {description: `Build or refresh the ASSET CATALOG — what is actually in each media file, so you choose footage by content and never by its name (names lie: "skybar" can be a lounge by day; a hook can be 33 s of black). Per file: duration, resolution/fps, black stretches with timestamps, silence, day/night and static/moving (heuristics, labelled so), a contact sheet, and a description from the transcript cache or library metadata when there is one. Incremental: only new or changed files are decoded (niced, one thread); a folder already cataloged costs a stat per file. Defaults to ${DEFAULT_DIRS.join(', ')}. limit caps the files decoded in this call — call again for the rest. Then query it with search_catalog.`, inputSchema: {dirs: z.array(dirName).max(10).optional(), force: z.boolean().default(false).describe('decode everything again'), limit: z.number().int().min(1).max(200).default(25)}}, async ({dirs, force, limit}, extra) => {
+  // the request's signal: a cancelled or expired call stops the child (and its ffmpeg) instead of orphaning it
+  const res = await runCatalogChild(CAT_PUBLIC, dirs?.length ? dirs : DEFAULT_DIRS, {force, limit, signal: extra?.signal});
+  const lines = res.map((s) => s.missing ? `${s.dir}: no such folder` : s.busy ? `${s.dir}: skipped — another catalog run is on it (${s.busy}); call again when it finishes` : `${s.dir}: ${s.files} file(s) — ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} NOT YET (call again)` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''}`);
+  return text(`${lines.join('\n')}\n\nQuery with search_catalog (filters on content; sheets=true shows the contact sheets).`);
+});
+
+server.registerTool('search_catalog', {description: 'Find footage by CONTENT in the asset catalog (built by catalog_assets): duration, day/night, black stretches, speech, orientation, tags, words of the description/transcript — the file name is never matched. Tags: video | still-image | audio-only, portrait | landscape | square, short (<2 s), has-black, mostly-black, starts-black, ends-black, audio-over-black (a voice over black = waiting for B-roll), no-audio, silent-audio, day, night, sky, static, moving, speech. day/night/sky/static/moving are heuristics (luma, a sky-like top band, frame difference): confirm on the contact sheet (sheets=true) before relying on them. Says when files changed since the catalog was built.', inputSchema: {src: z.string().optional().describe('one file, e.g. "clips/G3v2_skybar.mp4" — its full entry'), dir: dirName.optional(), kind: z.enum(['video', 'image', 'audio']).optional(), min_sec: z.number().min(0).optional(), max_sec: z.number().min(0).optional(), daylight: z.enum(['day', 'night', 'uncertain']).optional(), orientation: z.enum(['portrait', 'landscape', 'square']).optional(), has_black: z.boolean().optional(), max_black_ratio: z.number().min(0).max(1).optional().describe('e.g. 0.1 = at most 10 % black'), has_speech: z.boolean().optional(), tags: z.array(z.string()).max(8).optional().describe('all must match'), exclude_tags: z.array(z.string()).max(8).optional(), text: z.string().max(200).optional().describe('words in the transcript / metadata / description'), limit: z.number().int().min(1).max(100).default(20), sheets: z.boolean().default(false).describe('attach the contact sheets (up to 6)')}}, async ({src, dir, kind, min_sec, max_sec, daylight, orientation, has_black, max_black_ratio, has_speech, tags, exclude_tags, text: words, limit, sheets}) => {
+  const all = loadEntries(CAT_PUBLIC, dir ? [dir] : undefined);
+  if (!all.length) return text(`No catalog${dir ? ` for ${dir}/` : ''} yet — run catalog_assets${dir ? ` {dirs: ["${dir}"]}` : ''} first.`);
+  const rows = src ? all.filter((e) => e.src === src.replace(/^\/+/, '')) : searchCatalog(all, {dir, kind, minSec: min_sec, maxSec: max_sec, daylight, orientation, hasBlack: has_black, maxBlackRatio: max_black_ratio, hasSpeech: has_speech, tags, excludeTags: exclude_tags, text: words, limit});
+  const stale = [...new Set(all.map((e) => e.dir))].flatMap((d) => staleFiles(CAT_PUBLIC, d).map((f) => `${d}/${f}`));
+  const note = stale.length ? `\n\n${stale.length} file(s) new or changed since the catalog was built (${stale.slice(0, 5).join(', ')}${stale.length > 5 ? ', …' : ''}) — catalog_assets to include them.` : '';
+  if (!rows.length) return text(`${src ? `${src} is not in the catalog` : 'Nothing in the catalog matches'} (${all.length} file(s) cataloged).${note}`);
+  const head = `${rows.length} match(es) of ${all.length} cataloged (heuristic labels marked; the sheet frames are at the listed seconds):`;
+  const body = src ? rows.map((e) => `${entryLine(e)}\n${JSON.stringify({durationSec: e.durationSec, width: e.width, height: e.height, fps: e.fps, black: e.black, silence: e.silence, meanDb: e.meanDb, daylight: e.daylight, motion: e.motion, speech: e.speech, meta: e.meta, analyzedAt: e.analyzedAt}, null, 1)}`) : rows.map(entryLine);
+  if (!sheets) return text(`${head}\n\n${body.join('\n\n')}${note}`);
+  const content = [{type: 'text', text: head}];
+  rows.forEach((e, i) => {
+    content.push({type: 'text', text: body[i]});
+    const f = e.sheet && path.join(CAT_PUBLIC, e.sheet.file);
+    if (i < 6 && f && fs.existsSync(f)) content.push({type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'});
+  });
+  if (note) content.push({type: 'text', text: note.trim()});
+  return {content};
+});
+
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
-  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = src; b.source = /^https?:/.test(src) ? 'pexels' : 'own'; }
+  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(path.isAbsolute(src) ? hostFile(src) : src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
   if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
@@ -558,8 +770,9 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
     const entry = row.src && fs.existsSync(path.join(PUBLIC, row.src)) ? row : await downloadMusic(row);
     src = entry.src; credit = entry.credit ?? creditOf(entry);
   } else if (!file) throw new Error('give music_id or file');
-  else if (path.isAbsolute(file)) { if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
-  else if (!fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
+  else if (!AUDIO.test(file)) throw new Error(`${file}: music is an audio file (${AUDIO.source})`);
+  else if (path.isAbsolute(file)) { hostFile(file); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
+  else if (!path.resolve(PUBLIC, file).startsWith(PUBLIC + path.sep) || !fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
   else src = file;
   p.music = {src, volume, startSec: 0, fadeOutSec: fade_out_sec, duck, duckLevel: 0.25, ...(credit ? {credit} : {})}; await save(project_id, p);
   return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}`);
@@ -597,39 +810,6 @@ async function wordAt(p, wid, tr) {
   if (!t) throw new Error(`no word ${wid} on the timeline (see get_transcript)`);
   const k = t.words.findIndex((w) => String(w.i) === i);
   return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
-}
-// a clip edge inside a word (from the last transcript run): the syllable gets clipped
-function cutWordIssues(p) {
-  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const words = [...(bySource.get(path.basename(c.src).replace(/\.[^.]+$/, ''))?.values() ?? [])];
-    for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]]) {
-      const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
-      if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
-    }
-  }
-  return out;
-}
-// off-mic words still inside the cut (from the last transcript run), per clip
-function offMicIssues(p) {
-  if (p.offMic === 'off') return [];
-  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const source = path.basename(c.src).replace(/\.[^.]+$/, '');
-    const off = [...(bySource.get(source)?.values() ?? [])].filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).sort((a, b) => a.i - b.i);
-    if (!off.length) continue;
-    // contiguous runs of word indices → one cut_words call each
-    const runs = [];
-    for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) r.to = w.i; else runs.push({from: w.i, to: w.i, text: []}); runs[runs.length - 1].text.push(w.word); }
-    out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
-  }
-  return out;
 }
 
 server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -670,7 +850,6 @@ server.registerTool('set_language', {description: 'Set the transcription languag
 
 // ---------- motion graphics ----------
 const TEMPLATE_HELP = Object.entries(TEMPLATES).map(([id, t]) => `${id} = ${t.desc}; props ${describeSchema(t.schema)}`).join('\n');
-const nextId = (items, prefix) => { let n = 0; while (items.some((x) => x.id === `${prefix}${n}`)) n++; return `${prefix}${n}`; };
 // where a graphic goes: a word id (start of that word) or a timeline second
 async function anchorFor(p, {at_wid, at_sec}) {
   if (at_wid) { const {clip, word} = await wordAt(p, at_wid); return {src: clip.src, startMs: word.startMs}; }
@@ -694,7 +873,7 @@ server.registerTool('add_graphic', {description: `Add a motion-graphics overlay 
   if (reveal) g.reveal = reveal; if (out) g.out = out; if (life) g.life = life; if (camera) g.camera = camera;
   if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
-  const warn = validateProject(p, FPS, facesOf(p)).filter((i) => i.ref === g.id);
+  const warn = validateProject(p, FPS, facesOf(p, PUBLIC)).filter((i) => i.ref === g.id);
   const wantsMatte = behind || MATTE_TEMPLATES.has(template) || (template === 'layout' && clean.cutout);
   return text(`Added ${g.id} ${template}${wantsMatte ? ' (needs the person matte — run prepare_mattes before rendering)' : ''}${warn.length ? '\n' + issuesText(warn) : ''}\n\n${summary(project_id, p)}`);
 });
@@ -712,32 +891,96 @@ server.registerTool('list_assets', {description: 'Browse the local asset library
 });
 
 server.registerTool('generate_asset', {description: 'LAST RESORT: generate an image asset with the OpenAI Images API (transparent PNG; the user pays per image). Searching is free, so this tool first looks in the local library and the search sources for the same idea and returns those instead of generating; pass force=true only when none of them fits. kind wraps the prompt: sticker (die-cut flat vector), doodle (hand-drawn marker), texture (seamless, opaque), ui (flat mockup). Describe the object only — style comes from kind. Then place it with add_graphic template=sticker.', inputSchema: {prompt: z.string().min(3).max(400), kind: z.enum(['sticker', 'doodle', 'texture', 'ui']).default('sticker'), size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'), quality: z.enum(['low', 'medium', 'high']).default('medium'), force: z.boolean().default(false).describe('generate even if existing assets match')}}, async ({prompt, kind, size, quality, force}) => {
-  if (!force) {
-    // free options first: the library, then the search sources
-    const searchKind = kind === 'texture' ? 'illustration' : 'sticker';
-    const found = [...librarySearch(prompt, {kind: undefined, limit: 4}), ...(await searchAssets({query: prompt, kind: searchKind, limit: 4}).catch(() => []))]
-      .filter((r, i, arr) => arr.findIndex((x) => x.src === r.src) === i).slice(0, 5);
-    if (found.length) return text(`Not generated — ${found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + found.map((r) => `${r.id}${r.fromLibrary ? '  [library]' : ''}\n  src: ${r.src}  (${r.format}, ${r.license}${r.source ? ', ' + r.source : ''})${r.credit ? `\n  credit: ${r.credit}` : ''}${r.prompt ? `\n  prompt: ${r.prompt}` : ''}`).join('\n'));
-  }
-  const r = await generateAsset({prompt, kind, size, quality, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
-  return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
+  const r = await findOrGenerate({prompt, kind, size, quality, force, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
+  if (r.found) return text(`Not generated — ${r.found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + r.found.map((x) => `${x.id}${x.fromLibrary ? '  [library]' : ''}\n  src: ${x.src}  (${x.format}, ${x.license}${x.source ? ', ' + x.source : ''})${x.credit ? `\n  credit: ${x.credit}` : ''}${x.prompt ? `\n  prompt: ${x.prompt}` : ''}`).join('\n'));
+  const g = r.generated;
+  return text(`${g.cached ? `Reused ${g.src} (already generated${g.reusedPrompt ? ` for "${g.reusedPrompt}"` : ''})` : `Generated ${g.src} (${g.model}${g.usage?.output_tokens ? `, ${g.usage.output_tokens} output tokens` : ''})`}`);
 });
 
-server.registerTool('set_grade', {description: `Color for the whole reel: a bounded automatic correction per source (measured on its lit frames: stretches flat footage, nudges exposure and color cast, lifts dull saturation — never restyles) plus one look. Looks: ${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}. intensity 0–1 (0.8 default). Look at the result with caption_proof (frame_at shows the raw source). Needs the backend the first time a source is analyzed.`, inputSchema: {project_id: pid, look: z.enum(Object.keys(LOOKS)).default(DEFAULT_LOOK), intensity: z.number().min(0).max(1).default(0.8), auto: z.boolean().default(true).describe('the per-source correction; false = look only')}}, async ({project_id, look, intensity, auto}) => {
-  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  let bySrc = {}, notes = [];
-  if (auto) {
-    await runJob('/api/grade', {clips: p.clips});
-    const r = readPublic('grade.json');
-    bySrc = r.bySrc ?? {};
-    for (const [src, g] of Object.entries(bySrc)) {
-      const s = r.stats[src];
-      notes.push(`${path.basename(src)}: tones ${Math.round(s.yLow)}–${Math.round(s.yHigh)} → contrast ×${g.slope[0]}, saturation ×${g.saturation}${g.intercept.some((i, c) => Math.abs(i - g.intercept[1]) > 0.004) ? ', color cast corrected' : ''}`);
-    }
+// ---------- color (src/grade.ts, src/lut.ts, scripts/lut.mjs) ----------
+const LUTS = path.join(PUBLIC, 'luts');
+const savedLuts = () => { try { return fs.readdirSync(LUTS).filter((f) => f.endsWith('.cube')).map((f) => f.slice(0, -5)); } catch { return []; } };
+// a LUT given as a saved name, a path under public/ or an absolute .cube (copied into public/luts/)
+function lutPath(lut) {
+  if (path.isAbsolute(lut)) {
+    if (!/\.cube$/i.test(lut) || !fs.existsSync(lut)) throw new Error(`not an existing .cube file: ${lut}`);
+    hostFile(lut);
+    fs.mkdirSync(LUTS, {recursive: true});
+    const dest = path.join(LUTS, path.basename(lut).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(lut, dest);
+    return path.relative(PUBLIC, dest);
   }
-  p.grade = {look, intensity, auto, bySrc};
+  const rel = /\.cube$/i.test(lut) ? lut : `luts/${lut}.cube`;
+  const abs = path.resolve(PUBLIC, rel);
+  if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`no LUT ${lut}${savedLuts().length ? ` — saved: ${savedLuts().join(', ')}` : ' (none saved yet: create_lut, or pass an absolute .cube path)'}`);
+  return path.relative(PUBLIC, abs);
+}
+// a clip id or a source (full "clips/x.mp4" or its file name) → the override key
+function gradeTarget(p, target) {
+  if (p.clips.some((c) => c.id === target)) return target;
+  const src = p.clips.find((c) => c.src === target || path.basename(c.src) === target || path.basename(c.src, path.extname(c.src)) === target)?.src;
+  if (!src) throw new Error(`no clip or source "${target}" (get_project lists clip ids and sources)`);
+  return src;
+}
+// measure what the auto correction needs and bake the LUTs the grade asks for (backend jobs)
+async function settleGrade(p) {
+  const g = p.grade;
+  const need = autoSources(g, p.clips).filter((s) => !g.bySrc?.[s]);
+  if (need.length) {
+    await runJob('/api/grade', {clips: need.map((src) => ({src}))});
+    g.bySrc = {...g.bySrc, ...(readPublic('grade.json').bySrc ?? {})};
+  }
+  const bakes = lutBakes(g, p.clips, p.mattes).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
+  if (bakes.length) {
+    await runJob('/api/lut', {bake: bakes});
+    g.baked = {...g.baked, ...(readPublic('lut.json').baked ?? {})};
+  }
+}
+const f2s = (v) => (v > 0 ? `+${f2(v)}` : f2(v));
+function gradeLine(p, src, clipId) {
+  const x = paramsFor(p.grade, src, clipId);
+  const a = x.adjust ?? {};
+  return [`look ${x.look ?? 'none'}${x.look && x.look !== 'none' ? ` ${x.intensity ?? 0.8}` : ''}`, x.auto ? 'auto correction' : '', a.exposure ? `exposure ${f2s(a.exposure)} st` : '', a.contrast != null && a.contrast !== 1 ? `contrast ×${a.contrast}` : '', a.saturation != null && a.saturation !== 1 ? `saturation ×${a.saturation}` : '', a.temperature ? `temperature ${f2s(a.temperature)}` : '', a.tint ? `tint ${f2s(a.tint)}` : '', `highlights ${x.highlights ?? DEFAULTS.highlights}`, `skin ${x.skin ?? DEFAULTS.skin}`, x.lut ? `LUT ${x.lut}${(x.lutMix ?? 1) < 1 ? ` at ${Math.round(x.lutMix * 100)}%` : ''}` : ''].filter(Boolean).join(', ');
+}
+
+server.registerTool('set_grade', {description: `Color, opt-in and adjustable: nothing is graded until you ask. Set it for the whole reel, or for one source or clip with target (a clip id or a source file name) — an override on top of the whole-reel values. Change only what you pass. Map the brief onto the knobs: "más cálido" → temperature +0.3; "menos naranja la piel" → skin 0.8 and/or temperature −0.2; "quemado / blown out" → highlights 0.8 and exposure −0.3; "más vivo" → saturation 1.15; "cielo más azul" → temperature −0.2 or the cool look. Knobs: look (${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}) at intensity 0–1; auto = the bounded per-source correction measured on its lit frames (flat, dim or tinted footage only; opt-in per source); exposure (stops −2…2), contrast (0.5…1.5), saturation (0…2), temperature (−1 cool…1 warm), tint (−1 green…1 magenta); highlights 0…1 = a soft shoulder that rolls bright values into white instead of clipping them (0.5 default; 0.8+ also recovers hot footage); skin 0…1 = skin tones keep their natural warmth and saturation when the rest is pushed (0.5 default); lut = a .cube (saved name, path under public/, or an absolute .cube file — copied in; create_lut makes one from reference photos) applied first, at lut_mix 0–1; null removes it. reset = drop the target's override (or the whole grade without a target). Look at the result with caption_proof (frame_at shows the raw source).${savedLuts().length ? ` Saved LUTs: ${savedLuts().join(', ')}.` : ''}`, inputSchema: {project_id: pid, target: z.string().optional().describe('clip id or source file: override only there'), look: z.enum(Object.keys(LOOKS)).optional(), intensity: z.number().min(0).max(1).optional(), auto: z.boolean().optional(), exposure: z.number().min(-2).max(2).optional(), contrast: z.number().min(0.5).max(1.5).optional(), saturation: z.number().min(0).max(2).optional(), temperature: z.number().min(-1).max(1).optional(), tint: z.number().min(-1).max(1).optional(), highlights: z.number().min(0).max(1).optional(), skin: z.number().min(0).max(1).optional(), lut: z.string().nullable().optional(), lut_mix: z.number().min(0).max(1).optional(), reset: z.boolean().default(false)}}, async ({project_id, target, look, intensity, auto, exposure, contrast, saturation, temperature, tint, highlights, skin, lut, lut_mix, reset}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  const key = target ? gradeTarget(p, target) : null;
+  if (reset && !key) { p.grade = null; await save(project_id, p); return text('Color removed: the footage plays as shot'); }
+  p.grade ??= {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  const g = p.grade;
+  if (reset) { if (g.overrides) delete g.overrides[key]; }
+  else {
+    const layer = key ? ((g.overrides ??= {})[key] ??= {}) : g;
+    const adj = Object.fromEntries(Object.entries({exposure, contrast, saturation, temperature, tint}).filter(([, v]) => v != null));
+    if (Object.keys(adj).length) layer.adjust = {...layer.adjust, ...adj};
+    if (look != null) layer.look = look; if (intensity != null) layer.intensity = intensity; if (auto != null) layer.auto = auto;
+    if (highlights != null) layer.highlights = highlights; if (skin != null) layer.skin = skin; if (lut_mix != null) layer.lutMix = lut_mix;
+    if (lut !== undefined) layer.lut = lut === null || lut === 'none' ? null : lutPath(lut);
+  }
+  await settleGrade(p);
   await save(project_id, p);
-  return text(`Color: look ${look} at ${intensity}${auto ? `, automatic correction per source:\n  ${notes.join('\n  ') || 'nothing measurable'}` : ' (no automatic correction)'}`);
+  const srcs = [...new Set(p.clips.map((c) => c.src))];
+  const lines = [`whole reel: ${gradeLine(p, '')}`, ...Object.keys(g.overrides ?? {}).map((k) => { const c = p.clips.find((x) => x.id === k); return `${c ? `clip ${k}` : path.basename(k)}: ${gradeLine(p, c?.src ?? k, c?.id)}`; })];
+  const measured = srcs.filter((s) => g.bySrc?.[s] && autoSources(g, p.clips).includes(s)).map((s) => { const a = g.bySrc[s]; return `${path.basename(s)} auto: contrast ×${a.slope[0]}, saturation ×${a.saturation}`; });
+  return text(`Color:\n  ${[...lines, ...measured].join('\n  ')}`);
+});
+
+server.registerTool('create_lut', {description: 'Make a .cube LUT from reference photos of the look the client wants (their stills, their past reels\' frames): the footage\'s color statistics — from frames of this project\'s clips — are matched to the references\' (tone curve by quantiles, palette by mean and spread, in Oklab; deterministic, bounded). Saved as public/luts/<name>.cube for any project; apply = also set it on the whole reel (set_grade lut). strength 0–1 (0.7 default) = how far toward the references; set_grade lut_mix fine-tunes later. Needs the backend.', inputSchema: {project_id: pid, name: z.string().regex(/^[\w-]{1,40}$/), reference_images: z.array(z.string()).min(1).max(20).describe('absolute paths (copied in) or paths under public/'), strength: z.number().min(0).max(1).default(0.7), apply: z.boolean().default(true)}}, async ({project_id, name, reference_images, strength, apply}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips to measure the footage from');
+  const dir = path.join(LUTS, 'refs', name); fs.mkdirSync(dir, {recursive: true});
+  const refs = reference_images.map((f) => {
+    if (!IMAGE.test(f) && !/\.(heic|tiff?)$/i.test(f)) throw new Error(`${f}: a reference must be an image`);
+    if (path.isAbsolute(f)) { hostFile(f); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
+    const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
+  });
+  await runJob('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
+  const lut = readPublic('lut.json').lut;
+  if (!apply) return text(`LUT ${lut} made from ${refs.length} reference(s). Apply it with set_grade lut: "${name}".`);
+  p.grade ??= {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  p.grade.lut = lut;
+  await settleGrade(p);
+  await save(project_id, p);
+  return text(`LUT ${lut} made from ${refs.length} reference(s) at strength ${strength} and set on the whole reel — look at it with caption_proof; soften with set_grade lut_mix, or override per source with target.`);
 });
 
 server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic or caption page marked behind=true, so they render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -768,7 +1011,7 @@ server.registerTool('delete_graphics', {description: 'Delete graphics by id.', i
 server.registerTool('set_caption_style', {description: `The STYLE PACK of the reel — one of the 20 Captions.ai looks, or the three real-estate references. A pack sets the caption look, the palette and faces (unless a brand kit or a project accent is set), the family of transitions, how B-roll cues arrive and leave, and the frame the style lives in. Packs: ${Object.values(PACKS).map((x) => `${x.id} = ${x.desc} [cuts: ${x.transition}${x.brollMode ? `, B-roll: ${x.brollMode}` : ''}${x.layout ? `, frame: ${x.layout.shape} on ${x.layout.canvas}` : ''}]`).join('; ')}. References: ${['palabra', 'caja', 'tracked'].map((id) => `${id} = ${PRESETS[id].desc}`).join('; ')}. Re-pages the generated captions for the new pack, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); p.captionStyle = style;
   if (p.clips.length && p.captions.length) {
-    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic});
+    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions)}); // the pager sees the project's emphasis (a highlighted name stays one unit)
     const fresh = readPublic('captions.multi.json');
     // generated pages are re-paged; hand-made ones, deleted words and tiers survive
     // (a project from before word ids has no way to tell: everything is re-paged)
@@ -809,17 +1052,20 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic}); const fresh = readPublic('captions.multi.json');
+  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions)}); const fresh = readPublic('captions.multi.json');
   const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 
 // ---------- verification ----------
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
-// face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
-const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
-const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p), ...cutWordIssues(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio});
+const allIssues = (p) => projectIssues(p, PUBLIC, FPS); // mcp/checks.mjs, also GET /api/validate/<id>
+const projectProps = projectRenderProps; // src/renderProps.ts: the same props the render CLI sends
+
+server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  load(project_id);
+  return text(timingText(summarize(readTiming(PROJECTS, project_id))));
+});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
@@ -830,7 +1076,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   let times = at_secs;
   if (!times?.length) {
-    const caps = projectCaptions(p.captions, p.clips, FPS);
+    const caps = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, FPS);
     const gfx = projectGraphics(p.graphics, p.clips, FPS).filter((g) => g.template !== 'layout');
     const picks = [...gfx.map((g) => (g.startMs + Math.min(1200, (g.endMs - g.startMs) * 0.6)) / 1000), ...caps.filter((c) => c.words.some((w) => w.tier)).map((c) => (c.startMs + (c.endMs - c.startMs) * 0.7) / 1000)];
     const total = totalSec(p.clips);
@@ -842,7 +1088,7 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
   return {content: [
-    {type: 'text', text: `Contact sheet, ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}\n\nvalidate:\n${issuesText(allIssues(p))}`},
+    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.\n\nvalidate:\n${issuesText(allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });
@@ -856,11 +1102,110 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
-server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
+const renderModeArg = z.enum(['full', 'layers']).optional().describe('default: the backend\'s (REEL_RENDER_MODE, else full)');
+server.registerTool('render', {description: 'Export the project to mp4 (1080x1920) and WAIT for it. draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. In plan mode review, a final render also needs the user\'s approval of the plan (approve_plan); drafts never do. In auto mode (the default) the plan is shown in the chat but nothing blocks. A final that passes becomes the next review version of the project (a 720p proxy for share_version links). mode: full = the whole reel in one pass; layers = the reel without captions (the master, cached: rendered once, reused while only the captions change), a transparent caption layer and a composite — use it when iterating on captions (text, emphasis, positions, timing without ducked music). Captions that change the footage (focus pull / hero punch / glitch pulse on key words, glass pages, pages behind the presenter) fall back to full and the result says why. Returns the file path. A 1080 final takes minutes: to keep working meanwhile use start_render + render_status instead (same queue, same result).', inputSchema: {project_id: pid, draft: z.boolean().default(false), mode: renderModeArg}}, async ({project_id, draft, mode}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {...projectProps(p), draft});
-  const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
-  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)${r.qc ? `\nQC passed:\n${r.qc}` : ''}`);
+  const r = await runJob('/api/render', {...projectProps(p), draft, project_id, ...(mode ? {mode} : {})});
+  const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, r.file.replace(/^\//, ''));
+  const size = fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)` : ` (${f1(totalSec(p.clips))}s)`; // REEL_API on another machine: the file lives there
+  const review = r.version ? `\nReview version v${r.version} recorded — share_version gives a link` : r.versionError ? `\nReview version NOT recorded: ${r.versionError}` : '';
+  const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
+  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}${size} [${how}]${r.qc ? `\nQC passed:\n${r.qc}` : ''}${review}`);
+});
+
+// ---------- asynchronous renders (scripts/render-jobs.mjs through the backend, like the editor's Renders panel and the CLI) ----------
+const RENDER_JOBS = jobsDir(PUBLIC);
+const jobIdArg = z.string().regex(/^[\w-]{6,64}$/).describe('the job id start_render returned (list_render_jobs lists them)');
+async function renderJobsApi(route, opts) {
+  await needBackend();
+  const r = await fetch(`${API}/api/render-jobs${route}`, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `render-jobs${route}: HTTP ${r.status}`);
+  return j;
+}
+// the job from the backend; with the backend down, as last written on disk
+async function fetchJob(job_id) {
+  if (await backendUp()) return {job: await renderJobsApi(`/${job_id}`), live: true};
+  const job = readJob(RENDER_JOBS, job_id);
+  if (!job) throw new Error(`no render job ${job_id}`);
+  return {job: {...job, ahead: aheadOf(listJobs(RENDER_JOBS), job_id)}, live: false};
+}
+function jobText(job, {live = true} = {}) {
+  const lines = [describeJob(job, {ahead: job.ahead ?? 0})];
+  if (job.status === 'done') {
+    const r = job.result ?? {};
+    const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, String(r.file ?? '').replace(/^\//, ''));
+    lines.push(`File: ${file}${fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB)` : ''}`);
+    if (r.stages) lines.push(`Stages: ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}`);
+    if (r.qc) lines.push(`QC passed:\n${r.qc}`);
+    if (r.version) lines.push(`Review version v${r.version} recorded — share_version gives a link`);
+    else if (r.versionError) lines.push(`Review version NOT recorded: ${r.versionError}`);
+  }
+  if (job.status === 'failed' && job.result?.qc) lines.push(`QC:\n${job.result.qc}`);
+  if (!live) lines.push(`(backend not running — this is the job as last written to disk${job.status === 'queued' || job.status === 'running' ? '; it resumes when the backend starts' : ''})`);
+  return lines.join('\n');
+}
+server.registerTool('start_render', {description: 'Start an export of the project and return AT ONCE with a job id — the render runs in the backend queue (one at a time by default) while you keep working or the user does something else. Same render as `render`: draft = half resolution, fast; a final is loudness-normalized, QC-gated and, when it passes, becomes the next review version (share_version). Follow it with render_status job_id (progress %, stage, frames, ETA; the file path when done); cancel_render stops it. Jobs are kept on disk: they survive a backend restart. In plan mode review a final needs the approved plan, like render; drafts never do. mode: full or layers, as for render (layers reuses the cached master of the reel without captions — the queue never renders one master twice).', inputSchema: {project_id: pid, draft: z.boolean().default(false), mode: renderModeArg}}, async ({project_id, draft, mode}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  await needBackend();
+  const r = await fetch(`${API}/api/render`, {method: 'POST', body: JSON.stringify({...projectProps(p), draft, project_id, ...(mode ? {mode} : {})})}).then((x) => x.json());
+  if (!r.jobId) throw new Error(r.error || 'render did not start');
+  return text(`Render job ${r.jobId} ${r.ahead ? `queued — ${r.ahead} render${r.ahead === 1 ? '' : 's'} ahead` : 'started'} (${draft ? 'draft' : 'final'}${mode === 'layers' ? ', layers' : ''} of ${project_id}, ${f1(totalSec(p.clips))}s of video).\nrender_status job_id=${r.jobId} for progress and, when done, the file; cancel_render job_id=${r.jobId} to stop it.`);
+});
+server.registerTool('render_status', {description: 'Status of a render job from start_render (or the editor, or the CLI): queued (how many ahead) / running (progress %, stage, frame x/y, ETA, heartbeat) / done (file path, QC, review version) / failed (why) / cancelled. wait_sec = wait up to that many seconds for it to finish before answering (default 0: answer now).', inputSchema: {job_id: jobIdArg, wait_sec: z.number().int().min(0).max(600).default(0)}}, async ({job_id, wait_sec}) => {
+  let {job, live} = await fetchJob(job_id);
+  const t0 = Date.now();
+  while (live && (job.status === 'queued' || job.status === 'running') && (Date.now() - t0) / 1000 < wait_sec) {
+    await new Promise((r) => setTimeout(r, 2000));
+    ({job, live} = await fetchJob(job_id));
+  }
+  return text(jobText(job, {live}));
+});
+server.registerTool('list_render_jobs', {description: 'The render jobs, newest first: id, draft/final, project, status and progress (queued / running / done / failed / cancelled), the file when done. Filter by project and/or active_only (queued + running).', inputSchema: {project_id: pid.optional(), active_only: z.boolean().default(false), limit: z.number().int().min(1).max(100).default(20)}}, async ({project_id, active_only, limit}) => {
+  const live = await backendUp();
+  const q = new URLSearchParams({limit: String(limit), ...(project_id ? {project: project_id} : {}), ...(active_only ? {status: 'queued,running'} : {})});
+  const all = live ? null : listJobs(RENDER_JOBS);
+  const jobs = live ? (await renderJobsApi(`?${q}`)).jobs : listJobs(RENDER_JOBS, {projectId: project_id, status: active_only ? ['queued', 'running'] : undefined, limit}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
+  if (!jobs.length) return text(`No ${active_only ? 'active ' : ''}render jobs${project_id ? ` for ${project_id}` : ''}.`);
+  return text(`${jobs.map((j) => describeJob(j, {ahead: j.ahead ?? 0})).join('\n')}${live ? '' : '\n(backend not running — read from disk)'}`);
+});
+server.registerTool('cancel_render', {description: 'Cancel a render job: a queued one is dropped at once; a running one has its render process killed (no partial file is left). Finished jobs cannot be cancelled.', inputSchema: {job_id: jobIdArg}}, async ({job_id}) => {
+  const j = await renderJobsApi(`/${job_id}/cancel`, {method: 'POST', body: '{}'});
+  return text(j.pending ? `Cancelling ${job_id} — its render process is being stopped (render_status confirms).` : `Render ${job_id} cancelled.`);
+});
+
+// ---------- review links (scripts/reviews.mjs, through the backend like the editor's Share button) ----------
+const reviewsApi = async (route, opts) => {
+  await needBackend();
+  const r = await fetch(`${API}/api/reviews/${route}`, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `reviews ${route}: HTTP ${r.status}`);
+  return j;
+};
+const mbOf = (b) => `${(b / 1e6).toFixed(1)} MB`;
+server.registerTool('list_versions', {description: 'The review versions of a project (every final render that passed QC; drafts never count), newest first, and its review links (id, state live/expired/revoked, expiry). Tokens are not listed — they are shown once, by share_version.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  projFile(project_id);
+  const r = await reviewsApi(project_id);
+  if (!r.versions.length) return text(`No review versions yet for ${project_id} — a final render (not a draft) that passes QC records one.`);
+  const lines = r.versions.map((v) => `v${v.v}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${f1(v.durationSec)}s  full ${mbOf(v.sizeBytes)} · proxy ${mbOf(v.proxyBytes)}${v.playable ? '' : '  (proxy gone — not on the page)'}`);
+  const links = r.links.map((l) => `${l.id}  ${l.state}${l.state === 'live' ? ` until ${l.expiresAt.slice(0, 10)}` : l.revokedAt ? ` ${l.revokedAt.slice(0, 10)}` : ''}  (created ${l.createdAt.slice(0, 10)})`);
+  return text(`Versions of ${project_id}:\n${lines.join('\n')}\n\nLinks:\n${links.length ? links.join('\n') : 'none — share_version creates one'}`);
+});
+server.registerTool('share_version', {description: 'Create a private review link for the project: a mobile page that plays its latest final (720p, streams on a phone), lists the earlier finals and offers the full render as a download. The link expires (30 days max) and can be revoked with revoke_review_link. version = open the page at that version (default: the latest). The URL is shown once — give it to the user as is; set REEL_PUBLIC_URL on the backend for a public address.', inputSchema: {project_id: pid, version: z.number().int().min(1).optional(), days: z.number().int().min(1).max(30).optional().describe('days until it expires (default and max 30)')}}, async ({project_id, version, days}) => {
+  projFile(project_id);
+  if (version != null) {
+    const r = await reviewsApi(project_id);
+    const v = r.versions.find((x) => x.v === version);
+    if (!v?.playable) throw new Error(`no playable version v${version} (list_versions shows them)`);
+  }
+  const l = await reviewsApi(`${project_id}/links`, {method: 'POST', body: JSON.stringify({days})});
+  const url = version != null ? `${l.url}?v=${version}` : l.url;
+  return text(`Review link (${l.id}, expires ${l.expiresAt.slice(0, 10)}):\n${url}${/\/\/(127\.0\.0\.1|localhost)[:/]/.test(url) ? '\n(this is the local address — set REEL_PUBLIC_URL on the backend for the address clients can open)' : ''}`);
+});
+server.registerTool('revoke_review_link', {description: 'Revoke a review link of the project by its id (from list_versions / share_version): the page and its videos stop working at once.', inputSchema: {project_id: pid, link_id: z.string().regex(/^[0-9a-f]{8}$/)}}, async ({project_id, link_id}) => {
+  projFile(project_id);
+  const l = await reviewsApi(`${project_id}/links/${link_id}`, {method: 'DELETE'});
+  return text(`Link ${l.id} revoked (${l.revokedAt.slice(0, 16).replace('T', ' ')})`);
 });
 
 server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame size, duration against the project, audio present, loudness −14 ±1 LUFS and true peak ≤ −1 dBTP (blocking on final renders; drafts are not normalized, so there they are only reported), plus warnings for silent (≥ 2 s) or black (≥ 0.5 s) stretches. Final renders already run this gate.', inputSchema: {project_id: pid, file: z.string().describe('path returned by render')}}, async ({project_id, file}) => {
@@ -868,18 +1213,21 @@ server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame
   const f = path.isAbsolute(file) && fs.existsSync(file) ? path.resolve(file) : path.join(PUBLIC, file.replace(/^\//, '')); // absolute (from render) or /exports/…
   if (!f.startsWith(path.join(PUBLIC, 'exports') + path.sep)) throw new Error('file must be a render under public/exports/');
   const draft = /-draft\.mp4$/.test(f);
-  const r = qc(f, {expectSec: totalSec(p.clips), draft});
+  // a child process (scripts/qc.mjs --json): the loudness and black/silence passes decode the whole file,
+  // and over /mcp this runs inside the backend, whose event loop must keep serving
+  const c = await runCmd(process.execPath, [path.join(ROOT, 'scripts', 'qc.mjs'), '--json', f, String(totalSec(p.clips)), ...(draft ? ['--draft'] : [])], {cwd: ROOT});
+  let r; try { r = JSON.parse(c.stdout); } catch { throw new Error(`qc failed: ${c.stderr.trim().split('\n').pop() || `exit ${c.code}`}`); }
   return text(`${r.ok ? 'QC passed' : 'QC FAILED'}${draft ? ' (draft: loudness is normalized on the final render only)' : ''}\n${qcText(r)}`);
 });
 
 server.registerTool('frame_at', {description: 'Look at a frame. Without `video`: the raw source frame at that timeline time (no captions/B-roll). With `video` = a rendered mp4 path from render: the finished frame with everything on it.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds'), video: z.string().optional()}}, async ({project_id, at_sec, video}) => {
   const p = load(project_id);
   let file, t;
-  if (video) { file = video; t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
+  if (video) { file = hostFile(path.isAbsolute(video) && fs.existsSync(video) ? video : path.join(PUBLIC, video.replace(/^\//, ''))); t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
   if (!fs.existsSync(file)) throw new Error(`not found: ${file}`);
   const out = path.join(ROOT, '.captions-tmp', `mcp-frame-${Date.now()}.jpg`); fs.mkdirSync(path.dirname(out), {recursive: true});
-  const ff = spawnSync('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
-  if (ff.status !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
+  const ff = await runCmd('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
+  if (ff.code !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
   const data = fs.readFileSync(out).toString('base64'); fs.rmSync(out, {force: true});
   return {content: [{type: 'text', text: `${video ? 'rendered' : 'source'} frame @${f1(at_sec)}s`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
@@ -890,4 +1238,13 @@ server.registerTool('health', {description: 'Check the reel-agent environment (b
   return text(h.checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.label}${c.ok ? '' : ' — ' + c.hint}`).join('\n'));
 });
 
-await server.connect(new StdioServerTransport());
+// One McpServer with every tool above: stdio below, one per HTTP session in the backend.
+export function createReelServer() {
+  const s = new McpServer({name: 'reel', version: '0.1.0'});
+  for (const [name, config, cb] of TOOLS) s.registerTool(name, config, cb);
+  return s;
+}
+
+// run as a program (`node mcp/server.mjs`, .mcp.json): stdio; imported (server/mcp-http.mjs): nothing starts
+const main = (() => { try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+if (main) await createReelServer().connect(new StdioServerTransport());

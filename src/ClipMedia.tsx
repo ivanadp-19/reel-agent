@@ -1,7 +1,7 @@
 import React from 'react';
 import {staticFile, useCurrentFrame, useVideoConfig} from 'remotion';
 import {sampleTransform, type Clip} from './timeline';
-import type {Grade} from './grade';
+import type {RenderGrade} from './grade';
 import {toneColor, transitionFx} from './transitions';
 
 
@@ -9,10 +9,50 @@ import {toneColor, transitionFx} from './transitions';
 // passes the footage clip), offset = frames between the clip start and this Sequence
 export type TransitionCtx = {clip: Clip; next?: Clip; offset: number; durFrames: number};
 
+// Skin mask (the Chai–Ngan box in YCbCr, Cr 133–173 / Cb 77–127 of 255) as four
+// ramps, each in the alpha of one feColorMatrix, multiplied by arithmetic
+// composites. Full inside the box; the ramps fade outward so deep and light skin
+// at its edges stays covered, while the Cr floor stays strict: neutral grays and
+// whites are never taken for skin.
+const RAMPS = [
+  '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  25 -20.935 -4.065 0 -0.48', // Cr ≥ ~133 (0 on neutrals)
+  '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  -16.667 13.957 2.71 0 6.867', // Cr ≤ ~173, fading to ~181
+  '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  -5.623 -11.043 16.667 0 7.667', // Cb ≥ ~77, fading from ~69
+  '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  5.623 11.043 -16.667 0 0.867', // Cb ≤ ~127, fading to ~135
+];
+const Tables: React.FC<{t: [number[], number[], number[]]; in: string; result: string}> = ({t, in: input, result}) => (
+  <feComponentTransfer in={input} result={result}>
+    <feFuncR type="table" tableValues={t[0].join(' ')} />
+    <feFuncG type="table" tableValues={t[1].join(' ')} />
+    <feFuncB type="table" tableValues={t[2].join(' ')} />
+  </feComponentTransfer>
+);
+// the grade of src/grade.ts as one SVG filter: tone tables (the shoulder rolls the
+// highlights off), saturation, and — when the rest is pushed — skin-toned pixels
+// graded with less warmth and saturation, blended in through the skin mask
+const GradeFilter: React.FC<{id: string; g: RenderGrade}> = ({id, g}) => (
+  <filter id={id} x={0} y={0} width={1} height={1} colorInterpolationFilters="sRGB">
+    <Tables t={g.tables} in="SourceGraphic" result="toned" />
+    <feColorMatrix in="toned" type="saturate" values={String(g.saturation)} result="main" />
+    {g.skin ? (
+      <>
+        {RAMPS.map((v, i) => <feColorMatrix key={i} in="SourceGraphic" type="matrix" values={v} result={`r${i}`} />)}
+        <feComposite in="r0" in2="r1" operator="arithmetic" k1={1} k2={0} k3={0} k4={0} result="cr" />
+        <feComposite in="r2" in2="r3" operator="arithmetic" k1={1} k2={0} k3={0} k4={0} result="cb" />
+        <feComposite in="cr" in2="cb" operator="arithmetic" k1={1} k2={0} k3={0} k4={0} result="mask" />
+        <Tables t={g.skin.tables} in="SourceGraphic" result="skinToned" />
+        <feColorMatrix in="skinToned" type="saturate" values={String(g.skin.saturation)} result="skinSat" />
+        <feComposite in="skinSat" in2="mask" operator="in" result="skin" />
+        <feComposite in="skin" in2="main" operator="over" />
+      </>
+    ) : null}
+  </filter>
+);
+
 // one clip's media with its keyframed zoom/pan transform applied, and its color
-// grade (per-channel levels as an SVG filter, then saturation)
+// grade (GradeFilter; a LUT is already baked into grade.media)
 // jMuteFrames: the J-cut lead that already played under the previous clip (placeClips decides it)
-export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: Grade | null; accent?: string; transition?: TransitionCtx; jMuteFrames?: number}> = ({clip, durFrames, Comp, grade, accent = '#FFB020', transition, jMuteFrames = 0}) => {
+export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.ElementType; grade?: RenderGrade | null; accent?: string; transition?: TransitionCtx; jMuteFrames?: number}> = ({clip, durFrames, Comp, grade, accent = '#FFB020', transition, jMuteFrames = 0}) => {
   const {fps} = useVideoConfig();
   const frame = useCurrentFrame(); // relative to this clip's Sequence
   const speed = clip.speed ?? 1;
@@ -54,15 +94,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
     >
       {grade || dissolve ? (
         <svg width={0} height={0} style={{position: 'absolute'}} aria-hidden>
-          {grade ? (
-            <filter id={fid} colorInterpolationFilters="sRGB">
-              <feComponentTransfer>
-                <feFuncR type="linear" slope={grade.slope[0]} intercept={grade.intercept[0]} />
-                <feFuncG type="linear" slope={grade.slope[1]} intercept={grade.intercept[1]} />
-                <feFuncB type="linear" slope={grade.slope[2]} intercept={grade.intercept[2]} />
-              </feComponentTransfer>
-            </filter>
-          ) : null}
+          {grade ? <GradeFilter id={fid} g={grade} /> : null}
           {dissolve ? (
             <filter id={did} x={0} y={0} width={1} height={1} colorInterpolationFilters="sRGB">
               <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves={3} seed={dissolve.seed} result="raw" />
@@ -89,13 +121,13 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
       {tiles ? tiles.map(([l, t, fx2, fy]) => (
         <div key={`${l}${t}`} style={{position: 'absolute', left: `${l}%`, top: `${t}%`, width: '50%', height: '50%', overflow: 'hidden', transform: `translate(${fx2 * 130 * fly}%, ${fy * 130 * fly}%) rotate(${fx2 * fy * 6 * fly}deg) scale(${1 - 0.15 * fly})`, boxShadow: '0 10px 40px rgba(0,0,0,0.45)'}}>
           <div style={{position: 'absolute', left: `${-l * 2}%`, top: `${-t * 2}%`, width: '200%', height: '200%'}}>
-            <Comp src={staticFile(clip.src)} playbackRate={speed} trimBefore={trimBefore} trimAfter={trimBefore + Math.round(durFrames * speed)} muted style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}} />
+            <Comp src={staticFile(grade?.media ?? clip.src)} playbackRate={speed} trimBefore={trimBefore} trimAfter={trimBefore + Math.round(durFrames * speed)} muted style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})` : undefined}} />
           </div>
         </div>
       )) : null}
       <div style={{width: '100%', height: '100%', transformOrigin: '50% 38%', transform: moving ? `${drop}${spin}${smear}translateX(${fx.dx}%) scale(${fx.scale})` : undefined, filter: [moving && fx.blur > 0.2 ? `blur(${(fx.blur * (smear ? 0.4 : 1)).toFixed(1)}px)` : '', split, dissolve ? `url(#${did})` : ''].filter(Boolean).join(' ') || undefined, ...(exitStyle ?? {}), ...(fx?.enterMask ? {clipPath: fx.enterMask} : {}), ...(tiles ? {visibility: 'hidden' as const} : {})}}>
       <Comp
-        src={staticFile(clip.src)}
+        src={staticFile(grade?.media ?? clip.src)}
         playbackRate={speed}
         trimBefore={trimBefore}
         // source frames consumed = timeline frames × speed (keeps the trimmed
@@ -106,7 +138,7 @@ export const ClipMedia: React.FC<{clip: Clip; durFrames: number; Comp: React.Ele
         // a J-cut lead already played the first jMuteFrames of this audio under
         // the previous clip — mute them here so it flows through the cut, no echo
         volume={clip.muted ? 0 : jMuteFrames > 0 ? (f: number) => (f < jMuteFrames ? 0 : clip.volume ?? 1) : clip.volume ?? 1}
-        style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})${grade.saturation !== 1 ? ` saturate(${grade.saturation})` : ''}` : undefined}}
+        style={{width: '100%', height: '100%', objectFit: 'cover', filter: grade ? `url(#${fid})` : undefined}}
       />
       </div>
       {fx?.ring ? <div style={{position: 'absolute', left: `${(fx.ring.cx - fx.ring.r).toFixed(2)}%`, top: `${(fx.ring.cy - (fx.ring.r * 1080) / 1920).toFixed(2)}%`, width: `${(2 * fx.ring.r).toFixed(2)}%`, height: `${((2 * fx.ring.r * 1080) / 1920).toFixed(2)}%`, border: `4px solid ${accent}`, borderRadius: '50%', boxSizing: 'border-box', pointerEvents: 'none'}} /> : null}

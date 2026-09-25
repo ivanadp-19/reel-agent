@@ -3,12 +3,17 @@ import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
-import {reapplyTiers} from '../src/paging';
+import {projectTiers, reapplyTiers} from '../src/paging';
+import {chooseRenderMode, type RenderMode} from '../src/layers';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
+import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
+import {pollJob} from './jobs';
+import {SharePanel} from './SharePanel';
+import {RenderJobs, cancelRender, fmtSec} from './RenderJobs';
 
 const fmt = (sec: number) => {
   const s = Math.max(0, sec);
@@ -27,48 +32,19 @@ const isVisibleNode = (el: HTMLElement | null): boolean => {
   return true;
 };
 
-// Poll a background job to completion with dead-job (server restart) + timeout guards.
-function pollJob(
-  base: string,
-  jobId: string,
-  onProgress: (s: {label?: string; progress?: number}) => void,
-  onDone: () => void,
-  onFail: (msg: string) => void,
-  maxAttempts = 600, // ×1.5s ≈ 15 min (exports pass a higher cap)
-) {
-  let attempts = 0;
-  let netFails = 0;
-  const poll = setInterval(async () => {
-    attempts++;
-    let s: {status?: string; label?: string; progress?: number; error?: string};
-    try {
-      s = await fetch(`${base}/${jobId}`).then((x) => x.json());
-      netFails = 0;
-    } catch {
-      if (++netFails > 5) { clearInterval(poll); onFail('Lost connection to the server'); }
-      return;
-    }
-    if (s.status === 'running') {
-      onProgress(s);
-      if (attempts > maxAttempts) { clearInterval(poll); onFail('Timed out'); }
-      return;
-    }
-    clearInterval(poll);
-    if (s.status === 'done') onDone();
-    else onFail(s.error || (s.status === 'unknown' ? 'Job not found (server restarted?)' : 'Failed'));
-  }, 1500);
-}
-
 const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; jobId?: string; progress?: number; file?: string; qc?: string; label?: string; etaSec?: number | null; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string} | null>(null);
+  const stopFollow = useRef<(() => void) | null>(null);
+  // full = one pass; layers = cached master + caption layer + composite (scripts/layers.mjs); remembered per browser
+  const [renderMode, setRenderMode] = useState<RenderMode>(() => { try { return localStorage.getItem('reel.renderMode') === 'layers' ? 'layers' : 'full'; } catch { return 'full'; } });
   const [generating, setGenerating] = useState(false);
   const [genLabel, setGenLabel] = useState('');
   const [trimming, setTrimming] = useState(false);
@@ -76,6 +52,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   const [playing, setPlaying] = useState(false);
   const [boxRect, setBoxRect] = useState<{left: number; top: number; w: number; h: number} | null>(null);
   const [notice, setNotice] = useState<{msg: string; kind: 'error' | 'ok'} | null>(null);
+  const [left, setLeft] = useState<'assets' | 'transcript'>('assets'); // left column: media, or the words (get_transcript / cut_words)
   const notify = (msg: string, kind: 'error' | 'ok') => {
     setNotice({msg, kind});
     window.setTimeout(() => setNotice(null), kind === 'error' ? 6000 : 3000);
@@ -85,8 +62,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   // per-frame currentFrame updates — otherwise the Player re-syncs the video
   // every frame and stutters/repeats a fraction of a second.
   const inputProps = useMemo(
-    () => ({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio}),
-    [clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio],
+    () => ({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff}),
+    [clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff],
   );
 
   // (project load + Start/Editor routing live in App.tsx)
@@ -100,7 +77,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -110,7 +87,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff]);
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
@@ -203,24 +180,50 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     );
   });
 
+  // Exports are render jobs on the backend (scripts/render-jobs.mjs): they keep going when
+  // this tab closes; reopening the project picks the one in flight back up (below).
+  const followRender = (jobId: string) => {
+    stopFollow.current?.();
+    setExp({status: 'running', jobId, progress: 0});
+    stopFollow.current = pollJob(
+      '/api/render', jobId,
+      (s) => setExp({status: 'running', jobId, progress: s.progress ?? 0, label: s.label, etaSec: s.etaSec}), // "Queued — n renders ahead" while it waits its turn
+      async () => {
+        const s = await fetch('/api/render/' + jobId).then((x) => x.json());
+        setExp(s);
+        notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
+      },
+      (msg) => {
+        setExp({status: 'error', jobId});
+        if (msg.startsWith('cancelled')) notify('Export cancelled', 'ok');
+        else notify('Export failed: ' + msg, 'error');
+      },
+      2400, // renders can take a while — allow up to ~1h
+    );
+  };
+  useEffect(() => {
+    stopFollow.current?.(); stopFollow.current = null;
+    setExp(null);
+    if (!projectId) return;
+    fetch(`/api/render-jobs?project=${encodeURIComponent(projectId)}&status=queued,running`).then((r) => r.json()).then((j) => {
+      const jobs: {id: string; status: string}[] = j.jobs ?? []; // newest first
+      const job = jobs.find((x) => x.status === 'running') ?? jobs.at(-1); // the one rendering, else the next in line
+      if (job) followRender(job.id);
+    }).catch(() => {});
+    return () => { stopFollow.current?.(); stopFollow.current = null; };
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the backend decides with the same function; here it only tells the user ahead of time
+  const layersBlocked = useMemo(() => chooseRenderMode('layers', {clips, captions, graphics, captionStyle, captionsOff}, 30).reasons, [clips, captions, graphics, captionStyle, captionsOff]);
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
-      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, draft})}).then((x) => x.json());
-      pollJob(
-        '/api/render', r.jobId,
-        (s) => setExp({status: 'running', progress: s.progress ?? 0}),
-        async () => {
-          const s = await fetch('/api/render/' + r.jobId).then((x) => x.json());
-          setExp(s);
-          notify('Export ready', 'ok');
-        },
-        (msg) => { setExp({status: 'error'}); notify('Export failed: ' + msg, 'error'); },
-        2400, // renders can take a while — allow up to ~1h
-      );
-    } catch {
+      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, mode: renderMode, project_id: projectId})}).then((x) => x.json());
+      if (!r.jobId) throw new Error(r.error || 'no job');
+      followRender(r.jobId);
+    } catch (e) {
       setExp({status: 'error'});
-      notify('Could not start export', 'error');
+      notify('Could not start export: ' + (e as Error).message, 'error');
     }
   };
 
@@ -229,7 +232,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId, tiers: projectTiers(captions)})}).then((x) => x.json());
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
@@ -257,7 +260,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     setTrimming(true);
     setTrimLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang, offMic})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/trim-silence', {method: 'POST', body: JSON.stringify({clips, lang, offMic, project_id: projectId})}).then((x) => x.json());
       pollJob(
         '/api/trim-silence', jobId,
         (s) => setTrimLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
@@ -477,9 +480,31 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
             <span className={`material-symbols-outlined text-[18px] ${trimming ? 'animate-spin' : ''}`}>{trimming ? 'progress_activity' : 'cut'}</span>
             {trimming ? (trimLabel || 'Cutting…') : 'Autocut'}
           </button>
-          {exp?.status === 'running' && <span className="text-body-sm text-on-surface-variant">Rendering… {exp.progress ?? 0}%</span>}
+          {exp?.status === 'running' && (
+            <span className="text-body-sm text-on-surface-variant whitespace-nowrap" title="The render runs on the backend — you can close this tab; Renders lists it">
+              {exp.label?.startsWith('Queued') ? exp.label : `${exp.label ?? 'Rendering'}… ${exp.progress ?? 0}%${exp.etaSec ? ` · ~${fmtSec(exp.etaSec)} left` : ''}`}
+              {exp.jobId && <button onClick={() => cancelRender(exp.jobId!).catch((e) => notify('Could not cancel: ' + e.message, 'error'))} className="ml-2 text-error hover:underline">Cancel</button>}
+            </span>
+          )}
           {exp?.status === 'done' && exp.file && <a href={exp.file} download className="text-body-sm text-[#39d98a]">↓ Download mp4</a>}
-          {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
+          {exp?.status === 'done' && exp.qc && <span title={exp.qc} className="text-body-sm text-on-surface-variant cursor-help">QC ✓</span>}
+          {exp?.status === 'done' && exp.stages && (
+            <span title={`${exp.mode}${exp.master ? `, master ${exp.master}` : ''}: ${Object.entries(exp.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}${exp.fallback ? `\nlayers → full: ${exp.fallback.join('; ')}` : ''}`} className="text-body-sm text-on-surface-variant cursor-help">
+              {exp.mode === 'layers' ? `Layers${exp.master === 'cached' ? ' (master reused)' : ''}` : 'Full'}
+            </span>
+          )}
+          <RenderJobs projectId={projectId} refreshKey={`${exp?.jobId}:${exp?.status}`} notify={notify} />
+          <SharePanel projectId={projectId} refreshKey={exp?.version} notify={notify} />
+          {exp?.status === 'error' && <span className="text-body-sm text-error">Render stopped</span>}
+          <select
+            value={renderMode}
+            onChange={(e) => { const m = e.target.value as RenderMode; setRenderMode(m); try { localStorage.setItem('reel.renderMode', m); } catch {} }}
+            title={layersBlocked.length ? `Layers falls back to Full for this reel: ${layersBlocked.join('; ')}` : 'Full = the whole reel in one pass. Layers = the reel without captions is rendered once and reused; a caption edit only re-renders the caption layer and composites it'}
+            className="bg-transparent px-2 py-1.5 rounded-lg border border-outline-variant text-on-surface-variant text-body-md font-bold"
+          >
+            <option value="full">Render: full</option>
+            <option value="layers">Render: layers{layersBlocked.length ? ' (→ full)' : ''}</option>
+          </select>
           <button
             onClick={() => exportVideo(true)}
             disabled={exp?.status === 'running'}
@@ -496,7 +521,20 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
 
 
       <main className="flex-1 flex overflow-hidden">
-        <AssetsSidebar playerRef={playerRef} />
+        <div className={`${left === 'assets' ? 'w-64' : 'w-96'} shrink-0 flex flex-col h-full border-r border-outline-variant bg-surface-container-low`}>
+          <div className="flex border-b border-outline-variant shrink-0">
+            {(['assets', 'transcript'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setLeft(t)}
+                className={`flex-1 py-2 text-[10px] font-label-bold uppercase tracking-wider border-b-2 transition-colors ${left === t ? 'border-primary text-on-primary-container' : 'border-transparent text-on-surface-variant hover:text-on-surface'}`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          {left === 'assets' ? <AssetsSidebar playerRef={playerRef} /> : <TranscriptPanel playerRef={playerRef} notify={notify} />}
+        </div>
 
         {/* Preview + transport */}
         <section className="flex-1 bg-surface-dim flex flex-col min-w-0">
@@ -565,6 +603,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
           onStyleChange={(s) => { setCaptionStyle(s); if (captions.length) generateCaptions(true, s); }}
           generating={generating}
           progressLabel={genLabel}
+          notify={notify}
         />
       </main>
 

@@ -23,6 +23,12 @@ export type TimelineWord = {
 const GAP_MS = 450; // break on natural pauses (sentence rhythm)
 const PUNCT_ONLY = /^[.,!?;:()\-—¿¡]+$/;
 const SENT_END = /[.!?]$/;
+// abbreviations end in a period without ending the sentence ("Sr. Pérez", "Av. Reforma");
+// "No." / "Núm." only before a number ("No. 5") — "Te dije que no." ends a sentence
+const ABBR = /^(sr|sra|srta|dr|dra|lic|ing|arq|av|avda|blvd|col|mr|mrs|ms|st)\.$/i;
+const NUMBER_ABBR = /^(no|núm|num|nro)\.$/i;
+export const endsSentence = (word: string, next?: string) =>
+  SENT_END.test(word) && !ABBR.test(word) && !(NUMBER_ABBR.test(word) && /^\d/.test(next ?? ''));
 const CLAUSE_END = /[,;:]$/; // soft break after a clause
 export const toDisplay = (w: string) => w.replace(/[.,;:]+$/g, '').replace(/^[.,;:¿¡]+/g, '');
 
@@ -56,14 +62,14 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     const bn = (b.word ?? b.text ?? '').replace(/^[.,;:¿¡]+/, '');
     return /^[A-ZÁÉÍÓÚÑ]/.test(a.text) && (/^[A-ZÁÉÍÓÚÑ]/.test(bn) || /^\d/.test(bn));
   };
-  const pages: {src: string; words: CaptionWord[]; start: number; end: number}[] = [];
+  const pages: {src: string; words: CaptionWord[]; start: number; end: number; sent?: boolean}[] = [];
   let cur: CaptionWord[] = [];
   let curSrc = '';
   let curClip = '';
   let skipParen = false;
   const chars = () => cur.reduce((n, w) => n + w.text.length + 1, -1);
-  const flush = () => {
-    if (cur.length) pages.push({src: curSrc, words: cur, start: cur[0].startMs, end: cur[cur.length - 1].endMs});
+  const flush = (sent = false) => {
+    if (cur.length) pages.push({src: curSrc, words: cur, start: cur[0].startMs, end: cur[cur.length - 1].endMs, sent});
     cur = [];
   };
   words.forEach((w, i) => {
@@ -85,7 +91,9 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     const sameClipNext = !!next && next.clipId === w.clipId;
     const gapAfter = sameClipNext && next.startMs - w.endMs > GAP_MS;
     const full = cur.length >= maxWords || chars() >= maxCharsLine;
-    if (SENT_END.test(w.word) && !bonded(cur[cur.length - 1], next)) flush();
+    // a sentence end always ends the page, bond or not: a bonded pair is two capitalized words, and
+    // every sentence starts with one ('…del Carmen. Está cerca' was one page); César: one page per sentence
+    if (endsSentence(w.word, next?.word)) flush(true);
     else if (next && !sameClipNext) flush(); // clip boundary
     else if (!isGlue(display) && !bonded(cur[cur.length - 1], next) && (full || gapAfter || CLAUSE_END.test(w.word))) flush();
     else if (full && isGlue(display)) {
@@ -110,10 +118,12 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       const p = pages[k];
       const prev = pages[k - 1];
       // ...unless that word starts a guion sentence: merging it back would glue the
-      // new sentence's head onto the previous sentence's tail (the 'MINUTOS SALÓN' defect)
-      if (p.words.length === 1 && !p.words[0].sentenceStart && p.src === prev.src && p.start - prev.end < 350 && prev.words.length <= maxWords) {
+      // new sentence's head onto the previous sentence's tail (the 'MINUTOS SALÓN' defect),
+      // and never across a sentence end ("¿Vienes? | Sí." stays two pages: one page per sentence)
+      if (p.words.length === 1 && !p.words[0].sentenceStart && p.src === prev.src && p.start - prev.end < 350 && prev.words.length <= maxWords && !prev.sent) {
         prev.words.push(...p.words);
         prev.end = p.end;
+        prev.sent = p.sent;
         pages.splice(k, 1);
       }
     }
@@ -128,6 +138,20 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     endMs: p.end,
     topPct: topBySrc[p.src] ?? DEFAULT_TOP,
   }));
+}
+
+// The project's own emphasis (annotate_captions, the editor) as word id → tier, for the pager:
+// re-paging must see it BEFORE it pages, or a span the agent highlighted to keep a name together
+// ('Playa del Carmen') is split again and only re-colored afterwards (reapplyTiers).
+export function projectTiers(captions: Caption[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const c of captions) for (const w of c.words) if (w.wid && (w.tier ?? 0) > 0) out[w.wid] = Math.max(out[w.wid] ?? 0, w.tier!);
+  return out;
+}
+// raise transcript words to the project's tiers (never lowers the classifier's)
+export function withTiers<T extends {wid?: string; tier?: number}>(words: T[], tiers: Record<string, number> = {}): T[] {
+  for (const w of words) { const t = w.wid ? tiers[w.wid] : undefined; if (t && t > (w.tier ?? 0)) w.tier = t; }
+  return words;
 }
 
 // carry annotations from old pages onto freshly paged ones, by word id: word

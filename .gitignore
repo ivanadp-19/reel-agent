@@ -33,5 +33,17 @@ public/*
 # reference videos for style study (copyrighted, never commit)
 .refs/
 
-# per-run secret between the backend and the MCP server
+# per-run secret between the backend and the MCP server; pids for npm run stop
 .backend-token
+# per-user CLI tokens (sha256 only) and their resumable upload parts (server/tokens.mjs, server/uploads.mjs)
+.reel-tokens.json
+.uploads/
+.backend.pid
+.dev.pid
+editor/dist/
+
+# layered renders: cached masters (scripts/layers.mjs)
+.render-cache/
+
+# export cleanup log (scripts/cleanup-exports.mjs from cron)
+.cleanup.log

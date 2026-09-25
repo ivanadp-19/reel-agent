@@ -10,13 +10,10 @@ import {spawnSync} from 'node:child_process';
 
 export const TARGET = {I: -14, tolerance: 1, TP: -1, tpAim: -1.5, LRA: 11};
 
-// optional voice cleanup before loudness (final render only): ffmpeg's own
-// denoiser + a low cut, no external models
-export const CLEAN = {
-  off: {desc: 'nothing', af: ''},
-  light: {desc: 'low cut at 80 Hz + gentle spectral denoise (room hiss, hum)', af: 'highpass=f=80,afftdn=nf=-25:nr=10:nt=w'},
-  strong: {desc: 'low cut at 100 Hz + heavier denoise + de-esser', af: 'highpass=f=100,afftdn=nf=-30:nr=18:nt=w,deesser=i=0.35'},
-};
+// optional voice cleanup before loudness (final render only): src/audio.ts
+import {CLEAN} from '../src/audio.ts';
+import {blankLead, frameStats} from './first-frame.mjs';
+export {CLEAN};
 
 const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 26});
 
@@ -89,6 +86,9 @@ export function qc(file, {expectSec, draft = false} = {}) {
     add('silence', !silent.length, silent.length ? silent.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 2 s', 'no silent stretch ≥ 2 s', false);
   }
   const black = stretches(['-i', file, '-an', '-vf', 'blackdetect=d=0.5:pix_th=0.08', '-f', 'null', '-'], /black_start:([\d.]+) black_end:([\d.]+)/g);
+  // frame 0 a flat field while frame 1 is footage (scripts/first-frame.mjs; the render runner repairs it, this is the gate)
+  const lead = frameStats(file);
+  add('first frame', !blankLead(lead), lead[0] ? `Y ${lead[0].ymin}–${lead[0].ymax}, U ${lead[0].uavg}, V ${lead[0].vavg}` : 'unreadable', 'footage (not a flat field before the first real frame)', !draft);
   add('black', !black.length, black.length ? black.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 0.5 s', 'no black stretch ≥ 0.5 s (fine when intended)', false);
   return {ok: checks.every((c) => c.ok || !c.blocking), checks};
 }
@@ -97,10 +97,16 @@ export const qcText = (r) => r.checks.map((c) => `${c.ok ? '✓' : c.blocking ? 
 
 // CLI:
 //   node scripts/qc.mjs <file.mp4> [expectSec]              → report, exit 1 on failure
+//   node scripts/qc.mjs --json <file.mp4> [expectSec] [--draft] → QC only; JSON on stdout
 //   node scripts/qc.mjs --finalize <file.mp4> <expectSec>   → normalize, then QC; JSON on stdout
 //     (the backend runs this as a child process so its event loop never blocks)
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
+  if (args[0] === '--json') { // node scripts/qc.mjs --json <file.mp4> [expectSec] [--draft] → the qc() report as JSON (the MCP qc tool)
+    const [, file, expect, flag] = args;
+    console.log(JSON.stringify(qc(path.resolve(file), {expectSec: expect ? +expect : undefined, draft: flag === '--draft'})));
+    process.exit(0);
+  }
   if (args[0] === '--finalize') {
     const [, file, expect, clean] = args;
     const ln = normalizeLoudness(path.resolve(file), clean && clean in CLEAN ? clean : 'off');

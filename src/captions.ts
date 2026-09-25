@@ -4,7 +4,7 @@
 // splits, autocut segments, reorders, speed changes and duplicated takes all
 // keep the right words on screen — and words inside a removed range disappear.
 
-import {placeClips, type Clip} from './timeline.ts';
+import {nextId, placeClips, type Clip} from './timeline.ts';
 
 export type CaptionWord = {
   wid?: string; // `${source}:${index}` from the transcript; absent on hand-typed words
@@ -31,6 +31,7 @@ export type Caption = {
   pin?: boolean; // explicit vertical position: float presets honor topPct instead of cycling
   covers?: string[]; // hand-edited page: the transcript word ids it stands in for (re-paging skips them)
   behind?: boolean; // drawn behind the presenter (needs a person matte for its span, like behind graphics)
+  shiftMs?: number; // shown this far off the time its words are said (edit_caption shift_ms): the text moves, the speech does not
   // projected only:
   clipId?: string; // the clip this projected page sits on
   holdMaxMs?: number; // clip's end — the visual hold must not bleed into the next clip
@@ -59,7 +60,8 @@ export function projectCaptions(captions: Caption[], clips: Clip[], fps: number)
       const outMs = pc.clip.outSec * 1000;
       // honoring playback speed (slow-mo stretches the words with the speech)
       const speed = pc.clip.speed ?? 1;
-      const toAbs = (srcMs: number) => pc.startMs + (srcMs - inMs) / speed;
+      const sh = cap.shiftMs ?? 0; // a nudged page moves on the timeline, never out of its clip
+      const toAbs = (srcMs: number) => { const t = pc.startMs + (srcMs - inMs) / speed; return sh ? Math.min(pc.endMs, Math.max(pc.startMs, t + sh)) : t; };
       const words = cap.words
         .filter((w) => w.endMs > inMs && w.startMs < outMs)
         .map((w) => ({...w, startMs: toAbs(Math.max(w.startMs, inMs)), endMs: toAbs(Math.min(w.endMs, outMs))}));
@@ -108,9 +110,63 @@ export function mergeCaptions(existing: Caption[], fresh: Caption[], clips: Clip
     .filter((f) => f.words.length)
     .map((f) => ({...f, startMs: f.words[0].startMs, endMs: f.words[f.words.length - 1].endMs}))
     .filter((f) => !kept.some((k) => overlaps(k, f)));
-  let n = kept.reduce((m, c) => Math.max(m, +(c.id.match(/^c(\d+)$/)?.[1] ?? -1) + 1), 0);
-  return {captions: [...kept, ...added.map((c) => ({...c, id: `c${n++}`}))], added: added.length};
+  // numbered past every existing page, dropped ones included: a re-paged page never inherits an old id
+  return {captions: [...kept, ...added.map((c, k) => ({...c, id: nextId(existing, 'c', k)}))], added: added.length};
 }
+
+// ---- hand corrections (edit_caption, the editor's Captions tab) ----
+// A corrected page spans its words and is hand-edited from then on: `covers` = the transcript
+// words it stands for (minus the ones another page shows now), so re-paging keeps it as it is.
+function handPage(c: Caption, words: CaptionWord[], elsewhere: CaptionWord[] = []): Caption {
+  const out = new Set(elsewhere.map((w) => w.wid));
+  const covers = [...(c.covers ?? []), ...c.words.map((w) => w.wid), ...words.map((w) => w.wid)].filter((x): x is string => !!x && !out.has(x));
+  return {...c, words, startMs: words[0].startMs, endMs: words[words.length - 1].endMs, covers: [...new Set(covers)]};
+}
+
+// New text. Same word count → each word keeps its id, time and tier (a spelling fix stays
+// anchored); otherwise the words are re-timed evenly over the page, a word that was there keeps its tier.
+export function retext(cap: Caption, text: string): Caption {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) throw new Error('empty caption text');
+  if (words.length === cap.words.length) return handPage(cap, cap.words.map((w, i) => ({...w, text: words[i]})));
+  const tiers = new Map(cap.words.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
+  const step = (cap.endMs - cap.startMs) / words.length;
+  return handPage(cap, words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: tiers.get(t.toLowerCase()) ?? 0})));
+}
+
+// The page before `cap` whose break with it setPageStart moves: the page shown right before it on
+// the timeline that is also the one before it in its source. Only then are their words one run, said
+// and shown in that order; with reordered clips or a duplicated take the page before it in the source
+// can sit anywhere on screen, and none is returned.
+export function pageBefore(captions: Caption[], cap: Caption, clips: Clip[], fps: number): Caption | undefined {
+  const prev = captions.filter((c) => c.src === cap.src && c !== cap && c.startMs < cap.startMs).sort((a, b) => b.startMs - a.startMs)[0];
+  if (!prev) return undefined;
+  const shown = projectCaptions(captions, clips, fps).sort((a, b) => a.startMs - b.startMs);
+  return shown.some((c, i) => i > 0 && c.id === cap.id && shown[i - 1].id === prev.id) ? prev : undefined;
+}
+
+// Move the page break before page `id`: it now starts at transcript word `wid` — a word of the
+// page before it (whose tail joins this page) or of this page (whose head joins the page before).
+// Words keep their ids, times and emphasis. Errors are worded for the agent.
+export function setPageStart(captions: Caption[], id: string, wid: string, clips: Clip[], fps: number): Caption[] {
+  const cap = captions.find((c) => c.id === id);
+  if (!cap) throw new Error(`no caption ${id}`);
+  const prev = pageBefore(captions, cap, clips, fps);
+  const inCap = cap.words.findIndex((w) => w.wid === wid);
+  const inPrev = prev ? prev.words.findIndex((w) => w.wid === wid) : -1;
+  const alone = `${id} has no page right before it on screen from the same take (first page, or clips reordered)`;
+  if (inCap < 0 && inPrev < 0) throw new Error(`${wid} is not in ${id}${prev ? ` or the page before it (${prev.id})` : `, and ${alone}`} — the break moves between neighbors; a retyped page has no word ids (use text on both pages)`);
+  if (inCap === 0) return captions;
+  if (!prev) throw new Error(`${alone}: no page to hand words to`);
+  if (inPrev === 0) throw new Error(`that would leave ${prev.id} empty — delete_captions ${prev.id} instead`);
+  const all = [...prev.words, ...cap.words];
+  const k = inCap >= 0 ? prev.words.length + inCap : inPrev;
+  const [a, b] = [all.slice(0, k), all.slice(k)];
+  return captions.map((c) => (c === prev ? handPage(prev, a, b) : c === cap ? handPage(cap, b, a) : c));
+}
+
+// Nudge when a page is shown (ms): its words keep the time they are said; only the page moves on screen.
+export const shiftPage = (cap: Caption, ms: number): Caption => ({...handPage(cap, cap.words), shiftMs: (cap.shiftMs ?? 0) + ms});
 
 // Focus pull (Prism): while a tier-2 word is on screen the footage blurs. Spans
 // in the pages' own time base, from just before the word's onset to the end of

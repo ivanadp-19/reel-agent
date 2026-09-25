@@ -56,3 +56,9 @@ test('a full page breaks before its trailing function words, not after them', ()
   const pages = pageWords(words, PRESETS.focus).map((p) => p.words.map((w) => w.text).join(' '));
   assert.deepEqual(pages, ['They all lied to us', 'about this one thing']);
 });
+
+test('a sentence end always ends the page, even between bonded capitalized words (vibem); abbreviations do not', () => {
+  const ws = ['Vive', 'en', 'Playa', 'del', 'Carmen.', 'Está', 'cerca', 'del', 'Sr.', 'Pérez.'].map((w, i) => ({wid: `a:${i}`, word: w, startMs: i * 400, endMs: i * 400 + 350, srcStartMs: i * 400, srcEndMs: i * 400 + 350, clipId: 'a', src: 'clips/a.mp4'}));
+  const pages = pageWords(ws, PRESETS.vibem).map((p) => p.words.map((w) => w.text).join(' '));
+  assert.deepEqual(pages, ['Vive en Playa del Carmen', 'Está cerca del Sr Pérez']);
+});

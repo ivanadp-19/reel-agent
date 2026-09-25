@@ -268,7 +268,7 @@ export type Life = (typeof LIFE_KINDS)[number];
 export const STAR_PX: Record<string, number> = {sm: 230, md: 310, lg: 400}; // starburst diameter
 // oversized: the font size that makes the word ~1.3× the 1080 px frame width
 export const OVERSIZED_FAMILY: Record<string, FontFamily> = {condensed: 'Anton', display: 'Montserrat', serif: 'Playfair Display'};
-export const oversizedPx = (text: string, font = 'condensed', family?: FontFamily) =>
+export const oversizedPx = (text: string, font = 'condensed', family?: FontFamily | string) =>
   Math.round((1080 * 1.3) / Math.max(1, textWidthEm(String(text).toUpperCase(), family ?? OVERSIZED_FAMILY[font] ?? 'Anton')));
 export const isTemplate = (id: string): id is TemplateId => id in TEMPLATES;
 
@@ -307,6 +307,34 @@ export function describeSchema(schema: z.ZodType): string {
     case 'object': return `{${Object.entries(d.shape).map(([k, v]) => `${k}: ${describeSchema(v as z.ZodType)}`).join(', ')}}${note}`;
     default: return String(d.type) + note;
   }
+}
+
+// the same walk, as form fields for the editor: one entry per prop, rows for arrays of objects
+export type Field = {key: string; kind: 'string' | 'number' | 'boolean' | 'enum' | 'array' | 'unknown'; required: boolean; default?: unknown; options?: string[]; min?: number; max?: number; item?: Field[]; desc?: string};
+export function fieldsOf(schema: z.ZodType): Field[] {
+  const unwrap = (s: any): any => (s.def.type === 'pipe' ? unwrap(s.def.out) : s.def.type === 'optional' || s.def.type === 'default' ? unwrap(s.def.innerType) : s);
+  const obj = unwrap(schema);
+  if (obj.def.type !== 'object') return [];
+  return Object.entries(obj.def.shape as Record<string, z.ZodType>).map(([key, v]) => {
+    let s: any = v, required = true, dflt: unknown;
+    for (;;) {
+      if (s.def.type === 'optional') { required = false; s = s.def.innerType; }
+      else if (s.def.type === 'default') { required = false; dflt = s.def.defaultValue; s = s.def.innerType; }
+      else if (s.def.type === 'pipe') s = s.def.out;
+      else break;
+    }
+    const d = s.def;
+    const check = (name: string, k: string) => d.checks?.find((c: any) => c._zod.def.check === name)?._zod.def[k];
+    const f: Field = {key, kind: 'unknown', required, ...(dflt !== undefined ? {default: dflt} : {}), ...(v.description ? {desc: v.description} : {})};
+    switch (d.type) {
+      case 'string': f.kind = 'string'; f.max = check('max_length', 'maximum'); break;
+      case 'number': f.kind = 'number'; f.min = check('greater_than', 'value'); f.max = check('less_than', 'value'); break;
+      case 'boolean': f.kind = 'boolean'; break;
+      case 'enum': f.kind = 'enum'; f.options = Object.keys(d.entries); break;
+      case 'array': f.kind = 'array'; f.min = check('min_length', 'minimum'); f.max = check('max_length', 'maximum'); f.item = fieldsOf(d.element); break;
+    }
+    return f;
+  });
 }
 
 // validate + fill defaults; throws a readable message on bad props

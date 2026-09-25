@@ -1,0 +1,619 @@
+import {after, test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawn, spawnSync} from 'node:child_process';
+import {aheadOf, createRenderJobs, descendants, describeJob, killTree, legacyView, listJobs, pidAlive, prune, readJob, writeJob} from '../scripts/render-jobs.mjs';
+import {createRenderRunner, etaFor, overall, parseRemotion} from '../scripts/render-runner.mjs';
+import {createMasterCache} from '../scripts/layers.mjs';
+
+const tmps = [];
+const tmpdir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'render-jobs-')); tmps.push(d); return d; };
+const kids = [];
+after(() => {
+  for (const p of kids) try { process.kill(p, 'SIGKILL'); } catch {}
+  for (const d of tmps) fs.rmSync(d, {recursive: true, force: true});
+});
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const until = async (fn, ms = 5000) => { const t = Date.now(); while (!fn()) { if (Date.now() - t > ms) throw new Error('timed out waiting'); await sleep(10); } };
+const quiet = () => {};
+// a pid that surely is not running any more
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+
+// Stand-ins for `remotion render` and `scripts/qc.mjs --finalize` (written at test time:
+// node --test would run any .mjs under test/ as a test file). The fake render prints the
+// same non-TTY progress lines; the props say how it behaves:
+// {fake: {mode: 'ok' | 'fail' | 'hang' | 'die' | 'gate', frames, delayMs}}.
+const FAKE_RENDER = `import fs from 'node:fs';
+const [outFile, propsFile] = process.argv.slice(2);
+const {mode = 'ok', frames = 6, delayMs = 5} = JSON.parse(fs.readFileSync(propsFile, 'utf8')).fake ?? {};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+console.log('Bundling 50%');
+console.log('Bundled code');
+for (let i = 1; i <= frames; i++) {
+  await sleep(delayMs);
+  console.log('Rendered ' + i + '/' + frames + ', time remaining: 1s');
+  if (mode === 'die' && i === 2) process.kill(process.pid, 'SIGKILL');
+  if (mode === 'fail' && i === 3) { console.error('Error: boom in frame 3'); process.exit(1); }
+  if (mode === 'hang' && i === 2) { fs.writeFileSync(outFile, 'partial'); setInterval(() => {}, 1e6); } // like Remotion: a half-written file, then stuck
+  // 'gate': stop after frame 4 until the test writes <outFile>.go (a mid-render state it can read at leisure)
+  if (mode === 'gate' && i === 4) while (!fs.existsSync(outFile + '.go')) await sleep(5);
+}
+if (mode !== 'hang') { console.log('Encoded ' + frames + '/' + frames); fs.writeFileSync(outFile, 'fake mp4'); }
+`;
+const FAKE_FINALIZE = `const ok = process.argv[2].indexOf('qcfail-me') < 0;
+if (process.argv[3] === 'hang') {
+  // like qc.mjs normalizing: a half-written .loudnorm.mp4 next to the render, then stuck
+  require('node:fs').writeFileSync(process.argv[2].replace(/\\.mp4$/, '.loudnorm.mp4'), 'half');
+  console.error('normalizing');
+  setInterval(() => {}, 1e6);
+} else console.log(JSON.stringify({ok, error: null, checks: ok ? [] : [{name: 'loudness', value: '-20 LUFS', want: '-14 ±1', ok: false, blocking: true}], text: ok ? '✓ fake qc' : '✗ loudness'}));
+`;
+
+// a public/ + root with the fakes, a job store and a runner over them
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner} = {}) {
+  const root = tmpdir();
+  const pub = path.join(root, 'public');
+  fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'fake-render.mjs'), FAKE_RENDER);
+  fs.writeFileSync(path.join(root, 'fake-finalize.cjs'), FAKE_FINALIZE);
+  const calls = {render: 0, master: 0, captions: 0, composite: 0, record: [], updates: [], timing: []};
+  const fake = (kind) => ({outFile, propsFile}) => { calls[kind]++; return [process.execPath, [path.join(root, 'fake-render.mjs'), outFile, propsFile]]; };
+  const commands = {
+    render: fake('render'),
+    master: fake('master'),
+    captions: fake('captions'),
+    // the composite: the master (the fake caption "layer" is a file) copied to the export
+    composite: ({master, outFile}) => { calls.composite++; return [process.execPath, ['-e', 'require("fs").copyFileSync(process.argv[1], process.argv[2])', master, outFile]]; },
+    finalize: ({outFile}) => [process.execPath, [path.join(root, 'fake-finalize.cjs'), outFile, finalizeMode]],
+  };
+  const run = runner ?? createRenderRunner({
+    root, publicDir: pub, commands, masterCache, log: quiet, ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
+    logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
+    record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
+    unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; }),
+  });
+  const dir = path.join(pub, 'render-jobs');
+  const spy = (job, ctx) => run(job, {...ctx, props: ctx.props, update: (u) => { calls.updates.push({id: job.id, ...u}); ctx.update(u); }, setPid: ctx.setPid, signal: ctx.signal});
+  const jobs = createRenderJobs({dir, run: spy, workers, log: quiet, ...(stallMs ? {stallMs} : {}), ...(prepareStallMs ? {prepareStallMs} : {})});
+  return {root, pub, dir, jobs, calls};
+}
+const props = (fake = {}, extra = {}) => JSON.stringify({clips: [{id: 'c0'}], fake, ...extra});
+
+test('remotion progress lines → stage, fraction, frames; one overall 0–100 over the stages', () => {
+  assert.deepEqual(parseRemotion('Bundling 45%'), {stage: 'bundling', frac: 0.45});
+  assert.deepEqual(parseRemotion('Rendered 120/900, time remaining: 1m 3s'), {stage: 'rendering', frac: 120 / 900, frames: {done: 120, total: 900}});
+  assert.equal(parseRemotion('Encoded 900/900').stage, 'encoding');
+  assert.equal(parseRemotion('Getting compositions').stage, 'bundling');
+  assert.equal(parseRemotion('some chrome log line'), null);
+  // stages only move forward, drafts spend more of the bar rendering (no loudness/QC)
+  const order = ['preparing', 'bundling', 'rendering', 'encoding', 'finalizing', 'review'];
+  for (let i = 1; i < order.length; i++) assert.ok(overall(order[i], 0) >= overall(order[i - 1], 1), order[i]);
+  assert.ok(overall('rendering', 1, true) > overall('rendering', 1, false));
+  assert.ok(overall('review', 1) < 100, '100 only when done');
+  // ETA from the frame rate: 100 of 1000 frames in 10 s → ~90 s of frames left + the tail
+  const eta = etaFor({done: 100, total: 1000, sinceFirstFrameSec: 10, draft: true});
+  assert.ok(eta >= 90 && eta < 100, String(eta));
+  assert.equal(etaFor({done: 0, total: 10, sinceFirstFrameSec: 1}), null);
+});
+
+test('submit answers at once with a job id; the job and its props are on disk', async () => {
+  const {jobs, dir} = setup();
+  const t = Date.now();
+  const {job, ahead} = jobs.submit({props: props({frames: 3}), draft: true, projectId: 'p1', expectSec: 2});
+  assert.ok(Date.now() - t < 500, 'no waiting for the render');
+  assert.match(job.id, /^\d{13}[0-9a-f]{6}$/);
+  assert.equal(ahead, 0);
+  const onDisk = readJob(dir, job.id);
+  assert.equal(onDisk.projectId, 'p1'); assert.equal(onDisk.draft, true);
+  assert.ok(['queued', 'running'].includes(onDisk.status));
+  await jobs.idle();
+  const done = readJob(dir, job.id);
+  assert.equal(done.status, 'done'); assert.equal(done.progress, 100);
+  assert.equal(done.result.file, `/exports/edited-${job.id}-draft.mp4`);
+  assert.ok(fs.existsSync(done.result.path), 'the final file is where the job says');
+  assert.ok(!fs.existsSync(path.join(dir, `${job.id}.props.json`)), 'props removed once the job ended');
+  assert.ok(!fs.existsSync(path.join(dir, `${job.id}.claim`)));
+});
+
+test('progress: stages in order, frames, an ETA, heartbeat and progress timestamps', async () => {
+  const {jobs, dir, calls} = setup();
+  const {job} = jobs.submit({props: props({frames: 8, delayMs: 15, mode: 'gate'}), draft: false, projectId: 'p1', expectSec: 1});
+  // read it from disk mid-render, as another process would (the fake render waits at frame 4)
+  await until(() => readJob(dir, job.id)?.frames?.done === 4, 10000);
+  const mid = readJob(dir, job.id);
+  assert.equal(mid.stage, 'rendering');
+  assert.equal(mid.status, 'running');
+  assert.ok(mid.frames?.total === 8 && mid.progress >= 10 && mid.progress < 100);
+  assert.ok(mid.heartbeatAt && mid.progressAt && mid.startedAt);
+  assert.ok(Number.isInteger(mid.pid) && mid.pid > 0, 'the render pid is recorded');
+  await sleep(20); // frames 5–8 come later than the first one: the ETA has a rate to work from
+  fs.writeFileSync(path.join(path.dirname(dir), 'exports', `edited-${job.id}.mp4.go`), '');
+  await jobs.idle();
+  const stages = [...new Set(calls.updates.map((u) => u.stage))];
+  assert.deepEqual(stages, ['preparing', 'bundling', 'rendering', 'encoding', 'finalizing', 'review']);
+  const pcts = calls.updates.map((u) => u.progress);
+  assert.deepEqual(pcts, [...pcts].sort((a, b) => a - b), 'progress never goes back');
+  assert.ok(calls.updates.some((u) => Number.isFinite(u.etaSec)), 'an ETA while rendering');
+  const done = readJob(dir, job.id);
+  assert.equal(done.status, 'done');
+  assert.equal(done.result.qc, '✓ fake qc');
+  // registered for review-link: a final of a project → recordFinal with the job id
+  assert.equal(done.result.version, 1);
+  assert.equal(calls.record[0].projectId, 'p1'); assert.equal(calls.record[0].jobId, job.id); assert.equal(calls.record[0].draft, false);
+});
+
+test('jobs survive a restart: queued ones run in order on the next backend', async () => {
+  const s = setup();
+  // a backend that never starts anything (0 free slots: a foreign running job holds it)
+  const blocker = {id: '1000000000000aaaaaa', seq: 1, status: 'running', owner: process.pid, attempts: 1, createdAt: new Date().toISOString()};
+  writeJob(s.dir, blocker);
+  const a = s.jobs.submit({props: props({frames: 2}), draft: true});
+  const b = s.jobs.submit({props: props({frames: 2}), draft: true});
+  assert.equal(a.ahead, 1); assert.equal(b.ahead, 2);
+  assert.equal(readJob(s.dir, a.job.id).status, 'queued');
+  // "restart": the blocker's backend is gone (a dead owner), a new store opens the same dir
+  writeJob(s.dir, {...blocker, owner: deadPid(), attempts: 2});
+  const order = [];
+  const runner = createRenderRunner({root: s.root, publicDir: s.pub, log: quiet, commands: {render: ({outFile, propsFile}) => [process.execPath, [path.join(s.root, 'fake-render.mjs'), outFile, propsFile]]}});
+  const next = createRenderJobs({dir: s.dir, workers: 1, log: quiet, run: (job, ctx) => { order.push(job.id); return runner(job, ctx); }});
+  next.recover();
+  assert.equal(readJob(s.dir, blocker.id).status, 'failed', 'interrupted twice → failed');
+  assert.match(readJob(s.dir, blocker.id).error, /interrupted/);
+  next.pump();
+  await until(() => order.length === 2 && !next.running, 5000);
+  await next.idle();
+  assert.deepEqual(order, [a.job.id, b.job.id], 'FIFO across the restart');
+  assert.equal(readJob(s.dir, b.job.id).status, 'done');
+});
+
+test('a job running when its backend died is re-queued (its orphan render killed by pid, never a bystander)', async () => {
+  const {dir} = setup();
+  const id = '1700000000000abcdef';
+  // the render the dead backend left behind: its command line names the job
+  const orphan = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)', `.props-${id}.json`], {stdio: 'ignore'});
+  const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: 'ignore'});
+  kids.push(orphan.pid, bystander.pid);
+  fs.writeFileSync(path.join(dir, `${id}.props.json`), props());
+  fs.writeFileSync(path.join(dir, `${id}.claim`), String(deadPid()));
+  writeJob(dir, {id, seq: 5, status: 'running', owner: deadPid(), pid: orphan.pid, attempts: 1, draft: true, createdAt: new Date().toISOString()});
+  const killed = [];
+  const j2 = createRenderJobs({dir, workers: 1, log: quiet, run: () => new Promise(() => {}), kill: (pid, sig) => { killed.push(pid); try { process.kill(pid, sig); } catch {} return true; }});
+  j2.recover();
+  assert.deepEqual(killed, [orphan.pid], 'only the process whose command line is this job');
+  const r = readJob(dir, id);
+  assert.equal(r.status, 'queued'); assert.match(r.label, /restarted/);
+  assert.ok(!fs.existsSync(path.join(dir, `${id}.claim`)), 'the dead claim is gone');
+  // a pid that is alive but is not this job's render (pid reused) is never killed
+  writeJob(dir, {...r, status: 'running', owner: deadPid(), pid: bystander.pid, attempts: 1});
+  killed.length = 0;
+  j2.recover();
+  assert.deepEqual(killed, []);
+  assert.ok(pidAlive(bystander.pid));
+});
+
+test('serial by default: one render at a time; workers = N runs N', async () => {
+  const one = setup();
+  let max = 0;
+  const spyMax = () => { const n = listJobs(one.dir, {status: 'running'}).length; max = Math.max(max, n); };
+  const ids = [1, 2, 3].map(() => one.jobs.submit({props: props({frames: 4, delayMs: 10}), draft: true}).job.id);
+  const iv = setInterval(spyMax, 3);
+  await until(() => ids.every((id) => readJob(one.dir, id).status === 'done'), 8000);
+  clearInterval(iv);
+  assert.equal(max, 1);
+  assert.equal(one.jobs.workers, 1);
+  const two = setup({workers: 2});
+  const ids2 = [1, 2, 3].map(() => two.jobs.submit({props: props({frames: 6, delayMs: 20}), draft: true}).job.id);
+  await sleep(40);
+  assert.equal(listJobs(two.dir, {status: 'running'}).length, 2);
+  assert.equal(aheadOf(listJobs(two.dir), ids2[2]), 2);
+  await until(() => ids2.every((id) => readJob(two.dir, id).status === 'done'), 8000);
+});
+
+test('two backends on one public/ never run the same job twice', async () => {
+  const s = setup({workers: 2});
+  // another live backend has claimed this job (exclusive create) but not written 'running' yet
+  const q = {id: '1800000000000fedcba', seq: 9e15, status: 'queued', attempts: 0, createdAt: new Date().toISOString(), draft: true};
+  writeJob(s.dir, q);
+  fs.writeFileSync(path.join(s.dir, `${q.id}.props.json`), props());
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: 'ignore'});
+  kids.push(other.pid);
+  fs.writeFileSync(path.join(s.dir, `${q.id}.claim`), String(other.pid));
+  s.jobs.pump();
+  await sleep(50);
+  assert.equal(readJob(s.dir, q.id).status, 'queued', 'claimed elsewhere → not started here');
+  assert.equal(s.calls.render, 0);
+  // and the claim takes a slot: with workers 2, one more job may start here, not two
+  const a = s.jobs.submit({props: props({frames: 3, delayMs: 20}), draft: true}).job;
+  const b = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await sleep(30);
+  assert.equal(readJob(s.dir, a.id).status, 'running');
+  assert.equal(readJob(s.dir, b.id).status, 'queued');
+  // the other backend dies: its claim is dropped and the job runs here, once
+  other.kill('SIGKILL');
+  await until(() => !pidAlive(other.pid));
+  s.jobs.tick();
+  await until(() => [q.id, a.id, b.id].every((id) => readJob(s.dir, id).status === 'done'), 8000);
+  assert.equal(s.calls.render, 3);
+});
+
+test('cancel: a queued job ends at once; a running one has its process killed and leaves no file', async () => {
+  const {jobs, dir} = setup();
+  const run = jobs.submit({props: props({mode: 'hang', frames: 5, delayMs: 5}), draft: true}).job;
+  const waiting = jobs.submit({props: props(), draft: true}).job;
+  assert.equal(readJob(dir, waiting.id).status, 'queued');
+  const c1 = jobs.cancel(waiting.id);
+  assert.ok(c1.ok); assert.equal(readJob(dir, waiting.id).status, 'cancelled');
+  await until(() => readJob(dir, run.id).pid && readJob(dir, run.id).frames?.done >= 2);
+  const pid = readJob(dir, run.id).pid;
+  assert.ok(pidAlive(pid));
+  const c2 = jobs.cancel(run.id);
+  assert.ok(c2.ok && c2.pending);
+  await jobs.idle();
+  const r = readJob(dir, run.id);
+  assert.equal(r.status, 'cancelled');
+  await until(() => !pidAlive(pid), 7000);
+  assert.ok(!fs.existsSync(path.join(path.dirname(dir), 'exports', `edited-${run.id}-draft.mp4`)));
+  assert.equal(jobs.cancel(run.id).ok, false, 'already finished');
+  assert.match(jobs.cancel('nope123').error, /no render job/);
+  assert.equal(legacyView(r).status, 'error');
+  assert.match(legacyView(r).error, /cancelled/);
+});
+
+test('cancel through the .cancel file (the job runs on another backend): the owner stops it on its next tick', async () => {
+  const {jobs, dir} = setup();
+  const {job} = jobs.submit({props: props({mode: 'hang', frames: 5}), draft: true});
+  await until(() => readJob(dir, job.id).frames?.done >= 2);
+  fs.writeFileSync(path.join(dir, `${job.id}.cancel`), new Date().toISOString());
+  jobs.tick();
+  await jobs.idle();
+  assert.equal(readJob(dir, job.id).status, 'cancelled');
+});
+
+test('process failure: a render that errors or is killed marks the job failed with the reason', async () => {
+  const {jobs, dir} = setup();
+  const bad = jobs.submit({props: props({mode: 'fail'}), draft: true}).job;
+  const died = jobs.submit({props: props({mode: 'die'}), draft: true}).job;
+  await until(() => ['failed', 'done'].includes(readJob(dir, died.id).status), 8000);
+  assert.equal(readJob(dir, bad.id).status, 'failed');
+  assert.match(readJob(dir, bad.id).error, /boom in frame 3/);
+  assert.equal(readJob(dir, died.id).status, 'failed');
+  assert.match(readJob(dir, died.id).error, /SIGKILL|exited/);
+  assert.equal(legacyView(readJob(dir, died.id)).status, 'error');
+});
+
+test('heartbeat: a render process that dies without reporting, or stops making progress, fails the job', async () => {
+  const dir = path.join(tmpdir(), 'jobs');
+  const gone = deadPid();
+  // a runner that lost its child: the pid is dead and nothing settles
+  const lost = createRenderJobs({dir, workers: 1, log: quiet, run: (job, ctx) => { ctx.setPid(gone); return new Promise((_, rej) => ctx.signal.addEventListener('abort', () => rej(ctx.signal.reason))); }});
+  const {job} = lost.submit({props: props(), draft: true});
+  await sleep(10);
+  lost.tick(); // first tick: grace (the runner may be reporting the exit right now)
+  assert.equal(readJob(dir, job.id).status, 'running');
+  lost.tick();
+  await lost.idle();
+  assert.equal(readJob(dir, job.id).status, 'failed');
+  assert.match(readJob(dir, job.id).error, /died without reporting/);
+
+  // a render that hangs: no progress for stallMs → killed and failed
+  const dir2 = path.join(tmpdir(), 'jobs');
+  const hung = createRenderJobs({dir: dir2, workers: 1, stallMs: 30, log: quiet, run: (job, ctx) => { ctx.setPid(process.pid); return new Promise((_, rej) => ctx.signal.addEventListener('abort', () => rej(ctx.signal.reason))); }});
+  const h = hung.submit({props: props(), draft: true}).job;
+  hung.tick();
+  assert.equal(readJob(dir2, h.id).status, 'running');
+  const beat = readJob(dir2, h.id).heartbeatAt;
+  await sleep(60);
+  hung.tick();
+  await hung.idle();
+  assert.equal(readJob(dir2, h.id).status, 'failed');
+  assert.match(readJob(dir2, h.id).error, /no progress/);
+  assert.ok(beat, 'the heartbeat was written while it ran');
+});
+
+test('QC failure keeps the file as -qcfail and fails the job; drafts are never recorded as review versions', async () => {
+  const {jobs, dir, calls} = setup();
+  const fin = jobs.submit({props: props({frames: 2}), draft: false, projectId: null}).job;
+  const dr = jobs.submit({props: props({frames: 2}), draft: true, projectId: 'p1'}).job;
+  await until(() => readJob(dir, dr.id).status === 'done', 8000);
+  assert.equal(readJob(dir, fin.id).status, 'done');
+  assert.equal(readJob(dir, fin.id).result.version, undefined, 'a final without a project is not a version');
+  assert.equal(calls.record.length, 0, 'drafts never become versions');
+  // a failing gate (the fake finalize fails when the file name it gets says so)
+  const s2 = setup();
+  const failingRunner = createRenderRunner({
+    root: s2.root, publicDir: s2.pub, log: quiet,
+    commands: {
+      render: ({outFile, propsFile}) => [process.execPath, [path.join(s2.root, 'fake-render.mjs'), outFile, propsFile]],
+      finalize: ({outFile}) => [process.execPath, [path.join(s2.root, 'fake-finalize.cjs'), outFile + '.qcfail-me']],
+    },
+  });
+  const j3 = createRenderJobs({dir: path.join(s2.pub, 'render-jobs'), log: quiet, run: failingRunner});
+  const q = j3.submit({props: props({frames: 2}), draft: false, projectId: 'p1'}).job;
+  await j3.idle();
+  const r = readJob(j3.dir, q.id);
+  assert.equal(r.status, 'failed');
+  assert.match(r.error, /QC failed .*loudness/);
+  assert.ok(fs.existsSync(path.join(s2.pub, 'exports', `edited-${q.id}-qcfail.mp4`)));
+  assert.equal(r.result.qc, '✗ loudness');
+});
+
+// ---- layered renders (#17): the queue and the master cache together ----
+// the mode as asked; captions per props.fake.captions (default on); the master key from props.fake.key
+const layered = (over = {}) => {
+  const cacheDir = tmpdir();
+  return {
+    masterCache: createMasterCache(cacheDir),
+    chooseMode: (requested, p) => ({mode: requested, reasons: [], captions: p.fake?.captions !== false, ...(p.fake?.blocked ? {mode: 'full', reasons: [p.fake.blocked]} : {})}),
+    keyOf: (p, {draft}) => `k-${p.fake?.key ?? 'same'}-${draft ? 'd' : 'f'}`,
+    cacheDir,
+    ...over,
+  };
+};
+
+test('layers: the master is rendered once, cached, and the next render of the reel only redoes the caption layer', async () => {
+  const L = layered();
+  const s = setup(L);
+  const first = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s.jobs.idle();
+  const a = readJob(s.dir, first.id);
+  assert.equal(a.status, 'done');
+  assert.equal(a.mode, 'layers');
+  assert.deepEqual([a.result.mode, a.result.master], ['layers', 'rendered']);
+  assert.ok(['master', 'captions', 'composite', 'qc'].every((k) => k in a.result.stages), JSON.stringify(a.result.stages));
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4'], 'the complete master is in the cache, no .part');
+  assert.deepEqual([s.calls.master, s.calls.captions, s.calls.composite, s.calls.render], [1, 1, 1, 0]);
+  const second = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s.jobs.idle();
+  const b = readJob(s.dir, second.id);
+  assert.equal(b.result.master, 'cached');
+  assert.equal(s.calls.master, 1, 'no second master render');
+  assert.equal(s.calls.captions, 2);
+  // every stage in the project's timing log (drafts too, the finals here)
+  const stages = s.calls.timing.filter((t) => t.job === second.id).map((t) => t.stage);
+  assert.deepEqual(stages, ['captions', 'composite', 'qc']);
+  assert.ok(s.calls.timing.every((t) => t.project === 'p1'));
+  assert.equal(b.result.version, 2, 'a layered final is a review version like any other');
+});
+
+test('layers with 2 workers: two jobs needing one master render it once (single flight), the other waits for it', async () => {
+  const L = layered();
+  const s = setup({...L, workers: 2});
+  const a = s.jobs.submit({props: props({frames: 6, delayMs: 20}), draft: true, mode: 'layers'}).job;
+  const b = s.jobs.submit({props: props({frames: 6, delayMs: 20}), draft: true, mode: 'layers'}).job;
+  await until(() => [a.id, b.id].every((id) => ['done', 'failed'].includes(readJob(s.dir, id).status)), 8000);
+  assert.deepEqual([readJob(s.dir, a.id).status, readJob(s.dir, b.id).status], ['done', 'done']);
+  assert.equal(s.calls.master, 1);
+  assert.deepEqual([readJob(s.dir, a.id).result.master, readJob(s.dir, b.id).result.master].sort(), ['cached', 'rendered']);
+  assert.ok(s.calls.updates.some((u) => /Waiting for the same master/.test(u.label ?? '')));
+});
+
+test('layers: a master cancelled mid-pass never enters the cache and leaves no .part; the next job renders it', async () => {
+  const L = layered();
+  const s = setup(L);
+  const {job} = s.jobs.submit({props: props({mode: 'hang', frames: 5}), draft: true, mode: 'layers'});
+  await until(() => readJob(s.dir, job.id).frames?.done >= 2);
+  assert.match(readJob(s.dir, job.id).label, /master/);
+  assert.ok(fs.readdirSync(L.cacheDir).some((f) => f.includes('.part-')), 'the master is written as .part');
+  s.jobs.cancel(job.id);
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'cancelled');
+  assert.deepEqual(fs.readdirSync(L.cacheDir), [], 'nothing cached, no .part');
+  assert.deepEqual(exportsOf(s), []);
+  const next = s.jobs.submit({props: props({frames: 1}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, next.id).result.master, 'rendered');
+});
+
+test('layers falls back to full when the captions reach into the footage, and says why; no captions → the master is the reel', async () => {
+  const L = layered();
+  const s = setup(L);
+  const blocked = s.jobs.submit({props: props({frames: 1, blocked: 'hero punch on key words'}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  const r = readJob(s.dir, blocked.id).result;
+  assert.equal(r.mode, 'full');
+  assert.deepEqual(r.fallback, ['hero punch on key words']);
+  assert.deepEqual([s.calls.render, s.calls.master], [1, 0]);
+  assert.match(describeJob(readJob(s.dir, blocked.id)), /\[full\] \(layers → full: hero punch on key words\)/);
+  const bare = s.jobs.submit({props: props({frames: 1, captions: false, key: 'bare'}), draft: true, mode: 'layers'}).job;
+  await s.jobs.idle();
+  const r2 = readJob(s.dir, bare.id).result;
+  assert.deepEqual([r2.mode, r2.master], ['layers', 'rendered']);
+  assert.equal(s.calls.captions + s.calls.composite, 0);
+  assert.equal(fs.readFileSync(r2.path, 'utf8'), 'fake mp4');
+  // full by default: a job that names no mode renders in one pass
+  const plain = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, plain.id).result.mode, 'full');
+});
+
+test('prune drops the state of old finished jobs only — never an active job, never an mp4', () => {
+  const dir = path.join(tmpdir(), 'jobs');
+  const exp = path.join(path.dirname(dir), 'exports');
+  fs.mkdirSync(exp, {recursive: true});
+  const now = Date.parse('2026-09-25T12:00:00Z');
+  const old = new Date(now - 20 * 86400e3).toISOString(), fresh = new Date(now - 86400e3).toISOString();
+  writeJob(dir, {id: '1000000000001aaaaaa', seq: 1, status: 'done', createdAt: old, finishedAt: old, result: {file: '/exports/a.mp4'}});
+  writeJob(dir, {id: '1000000000002aaaaaa', seq: 2, status: 'failed', createdAt: old, finishedAt: old});
+  writeJob(dir, {id: '1000000000003aaaaaa', seq: 3, status: 'done', createdAt: fresh, finishedAt: fresh});
+  writeJob(dir, {id: '1000000000004aaaaaa', seq: 4, status: 'queued', createdAt: old});
+  fs.writeFileSync(path.join(exp, 'a.mp4'), 'keep me');
+  const gone = prune(dir, {days: 14, now});
+  assert.deepEqual(gone.sort(), ['1000000000001aaaaaa', '1000000000002aaaaaa']);
+  assert.deepEqual(listJobs(dir).map((j) => j.id).sort(), ['1000000000003aaaaaa', '1000000000004aaaaaa']);
+  assert.ok(fs.existsSync(path.join(exp, 'a.mp4')));
+});
+
+test('the poller view keeps the old /api/render/<id> shape; describeJob reads well', () => {
+  const now = Date.parse('2026-09-25T12:00:00Z');
+  const base = {id: '1000000000001aaaaaa', seq: 1, draft: false, projectId: 'p1', expectSec: 30, createdAt: new Date(now - 90e3).toISOString()};
+  assert.deepEqual(legacyView(null), {status: 'unknown'});
+  const q = legacyView({...base, status: 'queued'}, 2);
+  assert.equal(q.status, 'running'); assert.equal(q.queued, true); assert.equal(q.label, 'Queued — 2 renders ahead');
+  const d = legacyView({...base, status: 'done', result: {file: '/exports/x.mp4', version: 3, qc: 'ok'}});
+  assert.equal(d.status, 'done'); assert.equal(d.file, '/exports/x.mp4'); assert.equal(d.version, 3);
+  assert.equal(legacyView({...base, status: 'failed', error: 'boom'}).error, 'boom');
+  const running = describeJob({...base, status: 'running', progress: 42, label: 'Rendering frame 300/900', frames: {done: 300, total: 900}, etaSec: 95, startedAt: new Date(now - 60e3).toISOString(), heartbeatAt: new Date(now - 2e3).toISOString()}, {now});
+  assert.match(running, /RUNNING 42% — Rendering frame 300\/900 · ~1m35s left · running 1m00s/);
+  assert.match(describeJob({...base, status: 'running', progress: 5, startedAt: base.createdAt, heartbeatAt: new Date(now - 300e3).toISOString()}, {now}), /no heartbeat for 5m00s/);
+  assert.match(describeJob({...base, status: 'done', result: {path: '/abs/x.mp4', renderSec: 200, version: 2}}, {now}), /DONE → \/abs\/x\.mp4 \(3m20s for 30\.0s of video\) · review version v2/);
+  assert.match(describeJob({...base, status: 'queued'}, {now, ahead: 1}), /QUEUED — 1 render ahead/);
+});
+
+test('between processes (review proxy, copying) the heartbeat does not take the job for dead, nor for stalled', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = setup({stallMs: 20, record: async () => { await gate; return {v: 7}; }});
+  const {job} = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', expectSec: 1});
+  await until(() => readJob(s.dir, job.id)?.stage === 'review', 8000);
+  assert.equal(readJob(s.dir, job.id).pid, null, 'the finalize process has exited: no pid to watch');
+  for (let i = 0; i < 3; i++) { s.jobs.tick(); await sleep(30); } // longer than the stall limit, three ticks
+  assert.equal(readJob(s.dir, job.id).status, 'running');
+  release();
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'done');
+  assert.equal(readJob(s.dir, job.id).result.version, 7);
+});
+
+test('shutdown kills the renders a stopping backend runs; the next start re-queues them', async () => {
+  const s = setup();
+  const {job} = s.jobs.submit({props: props({mode: 'hang', frames: 5}), draft: true});
+  await until(() => readJob(s.dir, job.id).frames?.done >= 2);
+  const pid = readJob(s.dir, job.id).pid;
+  s.jobs.shutdown();
+  await until(() => !pidAlive(pid), 5000);
+  await s.jobs.idle();
+  // what a restart finds: still 'running' under the stopped backend (not failed) → re-queued
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'running');
+  writeJob(s.dir, {...j, owner: deadPid()}); // the stopped backend's pid is gone
+  const next = createRenderJobs({dir: s.dir, workers: 1, log: quiet, run: () => new Promise(() => {})});
+  next.recover();
+  assert.equal(readJob(s.dir, job.id).status, 'queued');
+});
+
+test('killTree reaches what runs in another process group below the render (Chrome does)', async () => {
+  // a detached parent (its own group) whose child starts a group of its own, like Remotion → Chrome
+  const parent = spawn(process.execPath, ['-e', `
+    const {spawn} = require('node:child_process');
+    const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {detached: true, stdio: 'ignore'});
+    console.log(c.pid); setInterval(() => {}, 1e6);`], {detached: true, stdio: ['ignore', 'pipe', 'ignore']});
+  const childPid = await new Promise((r) => parent.stdout.once('data', (d) => r(+String(d).trim())));
+  kids.push(parent.pid, childPid);
+  assert.ok(descendants(parent.pid).includes(childPid));
+  assert.ok(killTree(parent.pid, 'SIGKILL'));
+  await until(() => !pidAlive(parent.pid) && !pidAlive(childPid), 5000);
+});
+
+// ---- preparing: a hung download / bake must not hold the (serial) queue ----
+// a prepare that hangs and ignores its signal — the worst case the runner must survive
+const hungPrepare = (seen) => (raw, id, {signal}) => { seen.signal = signal; return new Promise(() => {}); };
+const exportsOf = (s) => fs.readdirSync(path.join(s.pub, 'exports'));
+
+test('cancel while preparing: the job ends at once even if the step ignores its signal, and the queue moves on', async () => {
+  const seen = {};
+  let calls = 0;
+  const s = setup({prepare: (raw, id, ctx) => (++calls === 1 ? hungPrepare(seen)(raw, id, ctx) : raw)});
+  const stuck = s.jobs.submit({props: props(), draft: true}).job;
+  const next = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await until(() => readJob(s.dir, stuck.id).stage === 'preparing');
+  assert.equal(readJob(s.dir, next.id).status, 'queued', 'serial: the next one waits');
+  assert.ok(s.jobs.cancel(stuck.id).ok);
+  await until(() => readJob(s.dir, stuck.id).status === 'cancelled', 2000);
+  assert.ok(seen.signal.aborted, 'prepare got the job signal (downloads and bakes stop on it)');
+  await until(() => readJob(s.dir, next.id).status === 'done', 5000);
+});
+
+test('a download stuck in preparing is caught by its own stall limit (the render limit does not apply there)', async () => {
+  const seen = {};
+  let calls = 0;
+  const s = setup({stallMs: 60e3, prepareStallMs: 30, prepare: (raw, id, ctx) => (++calls === 1 ? hungPrepare(seen)(raw, id, ctx) : raw)});
+  const stuck = s.jobs.submit({props: props(), draft: true}).job;
+  const next = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await until(() => readJob(s.dir, stuck.id).stage === 'preparing');
+  await sleep(60);
+  s.jobs.tick();
+  await until(() => readJob(s.dir, stuck.id).status === 'failed', 2000);
+  assert.match(readJob(s.dir, stuck.id).error, /no progress .*stage preparing/);
+  assert.ok(seen.signal.aborted);
+  await until(() => readJob(s.dir, next.id).status === 'done', 5000);
+});
+
+test('a slow download that keeps reporting (per MB) is not taken for stalled', async () => {
+  const s = setup({prepareStallMs: 40, prepare: async (raw, id, {progress}) => {
+    for (let mb = 1; mb <= 8; mb++) { await sleep(15); progress(0.1, `Downloading B-roll 1/1 · ${mb} MB`); }
+    return raw;
+  }});
+  const {job} = s.jobs.submit({props: props({frames: 1}), draft: true});
+  for (let i = 0; i < 6; i++) { await sleep(20); s.jobs.tick(); }
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'done');
+  assert.ok(s.calls.updates.some((u) => /· 8 MB/.test(u.label ?? '')), 'the MB count reaches the job');
+});
+
+// ---- cancel after the render: no half file, no review version ----
+test('cancel during finalizing: the render and finalize\'s half .loudnorm.mp4 are removed; nothing is recorded', async () => {
+  const s = setup({finalizeMode: 'hang'});
+  const {job} = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1'});
+  await until(() => exportsOf(s).some((f) => f.endsWith('.loudnorm.mp4')), 5000);
+  assert.equal(readJob(s.dir, job.id).stage, 'finalizing');
+  s.jobs.cancel(job.id);
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'cancelled');
+  assert.deepEqual(exportsOf(s).filter((f) => f.includes(job.id)), [], 'no file of the job is left');
+  assert.equal(s.calls.record.length, 0, 'no review version');
+});
+
+test('cancel while the review version is being recorded: the version is taken back', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = setup({record: async (o) => { s.calls.record.push(o); await gate; return {v: 4}; }});
+  const {job} = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1'});
+  await until(() => readJob(s.dir, job.id).stage === 'review', 5000);
+  assert.ok(s.calls.record[0].signal, 'record gets the job signal (the proxy ffmpeg stops on it)');
+  s.jobs.cancel(job.id);
+  release(); // the recording finishes after the cancel came in
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'cancelled');
+  assert.equal(j.result, undefined, 'no version on a cancelled job');
+  assert.deepEqual(s.calls.unrecord, [{projectId: 'p1', v: 4}]);
+  assert.deepEqual(exportsOf(s).filter((f) => f.includes(job.id)), []);
+});
+
+test('render records: every settled job leaves <mp4>.json with its project and kind (final, draft, qcfail); a cancel leaves none', async () => {
+  const s = setup();
+  const ex = path.join(s.pub, 'exports');
+  const rec = (name) => JSON.parse(fs.readFileSync(path.join(ex, `${name}.json`), 'utf8'));
+  const fin = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1'}).job;
+  const dr = s.jobs.submit({props: props({frames: 2}), draft: true, projectId: 'p1'}).job;
+  const loose = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: null}).job;
+  await s.jobs.idle();
+  assert.deepEqual([rec(`edited-${fin.id}.mp4`).projectId, rec(`edited-${fin.id}.mp4`).kind], ['p1', 'final']);
+  assert.equal(typeof rec(`edited-${fin.id}.mp4`).renderSec, 'number');
+  assert.deepEqual([rec(`edited-${dr.id}-draft.mp4`).projectId, rec(`edited-${dr.id}-draft.mp4`).kind], ['p1', 'draft']);
+  assert.deepEqual([rec(`edited-${loose.id}.mp4`).projectId, rec(`edited-${loose.id}.mp4`).kind], [null, 'final']);
+  // QC failure: the record follows the renamed file
+  const s2 = setup();
+  const failing = createRenderRunner({
+    root: s2.root, publicDir: s2.pub, log: quiet,
+    commands: {
+      render: ({outFile, propsFile}) => [process.execPath, [path.join(s2.root, 'fake-render.mjs'), outFile, propsFile]],
+      finalize: ({outFile}) => [process.execPath, [path.join(s2.root, 'fake-finalize.cjs'), outFile + '.qcfail-me']],
+    },
+  });
+  const j2 = createRenderJobs({dir: path.join(s2.pub, 'render-jobs'), log: quiet, run: failing});
+  const q = j2.submit({props: props({frames: 2}), draft: false, projectId: 'p2'}).job;
+  await j2.idle();
+  const qr = JSON.parse(fs.readFileSync(path.join(s2.pub, 'exports', `edited-${q.id}-qcfail.mp4.json`), 'utf8'));
+  assert.deepEqual([qr.projectId, qr.kind], ['p2', 'qcfail']);
+  assert.ok(!fs.existsSync(path.join(s2.pub, 'exports', `edited-${q.id}.mp4.json`)));
+  // a cancelled job: no record either
+  const s3 = setup();
+  const c = s3.jobs.submit({props: props({mode: 'gate', frames: 6, delayMs: 2}), draft: true, projectId: 'p1'}).job;
+  await until(() => readJob(s3.dir, c.id).frames?.done >= 4);
+  s3.jobs.cancel(c.id);
+  await s3.jobs.idle();
+  assert.deepEqual(exportsOf(s3).filter((f) => f.includes(c.id)), []);
+});
