@@ -29,7 +29,8 @@ import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, serveFile, tokenIn} from './http.mjs';
+import {gate, serveFile, tokenOk} from './http.mjs';
+import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
@@ -215,8 +216,16 @@ console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concu
 // the bcrypt hashes from REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same
 // hashes Caddy uses on the VM, so existing passwords keep working and no secret
 // crosses a chat. The review pages /r/<token> are the one public exception.
+// Browsers that cannot answer the basic-auth dialog use the form at /login instead
+// (server/session.mjs): same users, a signed session cookie keyed by
+// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN; ≤ 5 failed logins per IP per
+// minute, form and basic auth alike. The client IP comes from X-Forwarded-For only
+// behind REEL_TRUST_PROXY trusted hops (Railway: 1, set in the Dockerfile).
 const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
 const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').filter(Boolean).map((pair) => { const i = pair.indexOf(':'); return [pair.slice(0, i), pair.slice(i + 1)]; }));
+const SESSION_SECRET = process.env.REEL_SESSION_SECRET || TOKEN;
+const LOGIN_LIMITER = createLoginLimiter({max: 5, windowMs: 60e3});
+const TRUST_HOPS = trustedHops();
 const DIST = path.join(ROOT, 'editor', 'dist');
 function serveStatic(req, res, pathname) {
   const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
@@ -249,8 +258,9 @@ const mcpHttp = () => mcpHttpP ??= (async () => {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const g = gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS});
+  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
+  if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
   if (g.kind === 'mcp') { // token-gated MCP for remote agents
@@ -528,7 +538,7 @@ const server = createServer(async (req, res) => {
     // a local path (same machine, from the MCP server) skips the upload — token-gated, like add-clip
     const local = url.searchParams.get('path');
     if (local) {
-      if (!tokenIn([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
+      if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp|heic)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video or image file'});
     }
     const tmp = local ?? path.join(ROOT, `.upload-broll-${id}.bin`);
@@ -589,7 +599,7 @@ const server = createServer(async (req, res) => {
     // only with the run token, and only video files
     const local = url.searchParams.get('path');
     if (local) {
-      if (!tokenIn([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
+      if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
     }
     const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);

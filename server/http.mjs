@@ -3,7 +3,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import bcrypt from 'bcryptjs';
+import {checkPassword, clientIp, sessionUser} from './session.mjs';
 
 export const MIME = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.cube': 'text/plain', '.vtt': 'text/vtt', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon'};
 
@@ -41,43 +41,87 @@ export function serveFile(req, res, file, headers = {}) {
   fs.createReadStream(file).pipe(res);
 }
 
+// Is `given` one of `tokens`? In constant time: both sides hashed to equal-length
+// sha256 digests and compared with timingSafeEqual, every entry checked (no early
+// exit), so the answer's timing tells nothing about how much of a token matched.
+// The one token comparison of the backend: the gate, /mcp and the path ingest.
+const sha = (v) => crypto.createHash('sha256').update(String(v)).digest();
+export function tokenOk(tokens, given) {
+  if (typeof given !== 'string' || !given) return false;
+  const g = sha(given);
+  let ok = false;
+  for (const t of tokens || []) if (t && crypto.timingSafeEqual(sha(t), g)) ok = true;
+  return ok;
+}
+
+// Basic auth: bcrypt for every header not seen yet (a dummy hash when the user does
+// not exist), the login limiter on the attempts (counted before bcrypt, handed back on
+// success), then the verified header is remembered for a few minutes — as long as the
+// user's hash is unchanged — so an editor session does not pay bcrypt per request.
+// Identical headers in flight share one check.
+const BASIC_TTL_MS = 5 * 60e3;
+const basicOk = new Map(); // sha256(header) → {user, hash, exp}
+const basicPending = new Map(); // sha256(header) → Promise<user | null>
+async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
+  const b = Buffer.from(header.slice(6), 'base64').toString();
+  const i = b.indexOf(':');
+  if (i <= 0) return {user: null};
+  const user = b.slice(0, i);
+  const key = sha(header).toString('hex');
+  const hit = basicOk.get(key);
+  if (hit && hit.exp > now && Object.hasOwn(auth, hit.user) && auth[hit.user] === hit.hash) return {user: hit.user};
+  if (hit) basicOk.delete(key);
+  if (basicPending.has(key)) return {user: await basicPending.get(key)};
+  const wait = limiter?.attempt(ip, now) || 0;
+  if (wait) return {user: null, wait};
+  const check = checkPassword(auth, user, b.slice(i + 1)).then((ok) => {
+    if (!ok) return null;
+    limiter?.release(ip, now);
+    if (basicOk.size >= 1000) basicOk.clear();
+    basicOk.set(key, {user, hash: auth[user], exp: now + BASIC_TTL_MS});
+    return user;
+  }).finally(() => basicPending.delete(key));
+  basicPending.set(key, check);
+  return {user: await check};
+}
+
 // Who may reach a path. The review pages (/r/...) are public in both modes — the
 // token in the URL is the credential — and read-only; everything else keeps the
-// gate it had: basic auth or the backend token in public mode (Railway), loopback
+// gate it had: in public mode (Railway) the backend token (x-reel-token), the signed
+// session cookie of the form login (/login, server/session.mjs) or basic auth (failed
+// attempts share the login's limiter: 429 + Retry-After); a browser page load without
+// any is sent to /login, other requests get the 401 basic-auth challenge. Loopback
 // Host + localhost Origin otherwise. public/exports/* is never reachable without it.
 // The MCP over HTTP (/mcp, server/mcp-http.mjs) takes only the backend token, in
-// both modes — never the editor's basic auth: an agent is a client with its own
-// token (REEL_BACKEND_TOKEN lists one per client), revoked by removing it.
-// → {kind: 'review' | 'ping' | 'mcp' | 'ok'} or {kind: 'deny', status, headers, body}
+// both modes and before any other credential — never the editor's basic auth or its
+// session cookie: an agent is a client with its own token (REEL_BACKEND_TOKEN lists
+// one per client), revoked by removing it.
+// Async: basic auth runs bcrypt off the event loop.
+// → {kind: 'review' | 'ping' | 'login' | 'mcp' | 'ok'} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
+export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
 export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
-// Is `token` one of `tokens`? In constant time: both sides hashed to equal-length
-// digests and compared with timingSafeEqual, every entry checked (no early exit),
-// so the answer's timing tells nothing about how much of a token matched.
-const digest = (t) => crypto.createHash('sha256').update(String(t)).digest();
-export function tokenIn(tokens, token) {
-  if (typeof token !== 'string' || !token) return false;
-  const d = digest(token);
-  let hit = false;
-  for (const t of tokens) if (t && crypto.timingSafeEqual(d, digest(t))) hit = true;
-  return hit;
-}
-export function gate(req, url, {publicMode, auth = {}, tokens = []}) {
+export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0} = {}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
   const mcp = isMcpPath(url.pathname);
-  if (mcp && !tokenIn(tokens, req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
+  if (mcp && !tokenOk(tokens, req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
   if (mcp && publicMode) return {kind: 'mcp'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
+  if (publicMode && isLoginPath(url.pathname)) return {kind: 'login'};
   if (publicMode) {
     const h = req.headers.authorization || '';
-    const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
-    const i = b.indexOf(':');
-    const tokOK = tokenIn(tokens, req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
-    const ok = tokOK || (i > 0 && auth[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), auth[b.slice(0, i)]));
-    if (!ok) return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
-    return {kind: 'ok'};
+    // MCP/backend clients authenticate with the shared backend token instead of basic auth
+    if (tokenOk(tokens, req.headers['x-reel-token']) || sessionUser(req, sessionSecret, auth)) return {kind: 'ok'};
+    if (h.startsWith('Basic ')) {
+      const {user, wait} = await basicUser(h, auth, {limiter, ip: clientIp(req, hops)});
+      if (user) return {kind: 'ok'};
+      if (wait) return {kind: 'deny', status: 429, headers: {'Retry-After': String(wait), 'Content-Type': 'text/plain'}, body: 'too many attempts'};
+    }
+    const pageLoad = (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/') && !h && /text\/html/.test(req.headers.accept || '');
+    if (pageLoad) return {kind: 'deny', status: 303, headers: {Location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`, 'Cache-Control': 'no-store'}, body: ''};
+    return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
   }
   const host = (req.headers.host || '').replace(/:\d+$/, '');
   if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};

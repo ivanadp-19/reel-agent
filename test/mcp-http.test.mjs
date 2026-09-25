@@ -11,7 +11,7 @@ import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {gate, tokenIn} from '../server/http.mjs';
+import {gate, tokenOk} from '../server/http.mjs';
 import {createMcpHttp} from '../server/mcp-http.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -23,30 +23,30 @@ const TOKENS = [tokA, tokB];
 const req = (url, headers = {}) => ({headers: {host: 'localhost:3333', ...headers}, url});
 const basic = (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64');
 
-test('gate: /mcp needs a listed x-reel-token in both modes — basic auth does not open it', () => {
+test('gate: /mcp needs a listed x-reel-token in both modes — basic auth does not open it', async () => {
   const u = new URL('http://x/mcp');
   for (const publicMode of [true, false]) {
-    const none = gate(req('/mcp'), u, {publicMode, tokens: TOKENS});
+    const none = await gate(req('/mcp'), u, {publicMode, tokens: TOKENS});
     assert.equal(none.kind, 'deny'); assert.equal(none.status, 401);
-    assert.equal(gate(req('/mcp', {'x-reel-token': 'nope'}), u, {publicMode, tokens: TOKENS}).status, 401);
-    assert.equal(gate(req('/mcp', {'x-reel-token': tokB}), u, {publicMode, tokens: TOKENS}).kind, 'mcp', 'any client token of the list');
+    assert.equal((await gate(req('/mcp', {'x-reel-token': 'nope'}), u, {publicMode, tokens: TOKENS})).status, 401);
+    assert.equal((await gate(req('/mcp', {'x-reel-token': tokB}), u, {publicMode, tokens: TOKENS})).kind, 'mcp', 'any client token of the list');
   }
   // an editor login (basic auth) that opens /api/* does not open /mcp
   const auth = {editor: '$2a$04$invalidhashinvalidhashinvalidhashinvalidhashinv'};
-  assert.equal(gate(req('/mcp', {authorization: basic('editor', 'x')}), u, {publicMode: true, auth, tokens: TOKENS}).status, 401);
-  assert.equal(gate(req('/mcp', {'x-reel-token': ''}), u, {publicMode: true, tokens: TOKENS}).status, 401, 'an empty header is no token');
+  assert.equal((await gate(req('/mcp', {authorization: basic('editor', 'x')}), u, {publicMode: true, auth, tokens: TOKENS})).status, 401);
+  assert.equal((await gate(req('/mcp', {'x-reel-token': ''}), u, {publicMode: true, tokens: TOKENS})).status, 401, 'an empty header is no token');
   // local mode keeps its host check on top of the token
-  assert.equal(gate(req('/mcp', {'x-reel-token': tokA, host: 'evil.example'}), u, {publicMode: false, tokens: TOKENS}).status, 403);
+  assert.equal((await gate(req('/mcp', {'x-reel-token': tokA, host: 'evil.example'}), u, {publicMode: false, tokens: TOKENS})).status, 403);
   // other paths keep their gate
-  assert.equal(gate(req('/api/projects', {'x-reel-token': tokA}), new URL('http://x/api/projects'), {publicMode: true, tokens: TOKENS}).kind, 'ok');
+  assert.equal((await gate(req('/api/projects', {'x-reel-token': tokA}), new URL('http://x/api/projects'), {publicMode: true, tokens: TOKENS})).kind, 'ok');
 });
 
-test('tokenIn: a listed token, compared by digest — empty, missing, non-string and prefixes are not', () => {
-  assert.equal(tokenIn(TOKENS, tokA), true);
-  assert.equal(tokenIn(TOKENS, tokB), true);
-  for (const t of ['', undefined, null, [tokA], tokA.slice(0, -1), tokA + 'x', `${tokA},${tokB}`]) assert.equal(tokenIn(TOKENS, t), false, String(t));
-  assert.equal(tokenIn([], tokA), false);
-  assert.equal(tokenIn(['', tokA], ''), false, 'an empty entry never matches');
+test('tokenOk: a listed token, compared by digest — empty, missing, non-string and prefixes are not', () => {
+  assert.equal(tokenOk(TOKENS, tokA), true);
+  assert.equal(tokenOk(TOKENS, tokB), true);
+  for (const t of ['', undefined, null, [tokA], tokA.slice(0, -1), tokA + 'x', `${tokA},${tokB}`]) assert.equal(tokenOk(TOKENS, t), false, String(t));
+  assert.equal(tokenOk([], tokA), false);
+  assert.equal(tokenOk(['', tokA], ''), false, 'an empty entry never matches');
 });
 
 // Over /mcp the tools run inside the backend: a synchronous child (spawnSync / execSync)
@@ -65,7 +65,7 @@ const closed = [];
 before(async () => {
   mcp = createMcpHttp({createServer: createReelServer, onSessionClosed: (id) => { closed.push(id); releaseSession(id); }});
   srv = http.createServer(async (rq, rs) => {
-    const g = gate(rq, new URL(rq.url, 'http://localhost'), {publicMode: true, tokens: TOKENS});
+    const g = await gate(rq, new URL(rq.url, 'http://localhost'), {publicMode: true, tokens: TOKENS});
     if (g.kind === 'deny') { rs.writeHead(g.status, g.headers); return rs.end(g.body); }
     if (g.kind === 'mcp') return mcp.handle(rq, rs);
     rs.writeHead(404); rs.end();
@@ -138,7 +138,7 @@ async function backend({publicMode = true, tokens = [...TOKENS], ...opts} = {}) 
   const closedIds = [];
   const m = createMcpHttp({createServer: createReelServer, onSessionClosed: (id) => { closedIds.push(id); releaseSession(id); }, ...opts});
   const s = http.createServer(async (rq, rs) => {
-    const g = gate(rq, new URL(rq.url, 'http://localhost'), {publicMode, tokens});
+    const g = await gate(rq, new URL(rq.url, 'http://localhost'), {publicMode, tokens});
     if (g.kind === 'deny') { rs.writeHead(g.status, g.headers); return rs.end(g.body); }
     if (g.kind === 'mcp') return m.handle(rq, rs);
     rs.writeHead(404); rs.end();
