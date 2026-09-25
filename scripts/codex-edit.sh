@@ -8,16 +8,27 @@
 # without it Codex 0.156 rejects every MCP call in non-interactive mode), the
 # shell sandbox is read-only (a `touch` in the repo is blocked; verified), nothing
 # is persisted. The backend (npm start) must be running.
+#   scripts/codex-edit.sh <project_id> --reply "<your answer to the plan>" [log_file]
+# The agent shows its plan and keeps editing. If the brief asks to review the
+# plan first, the run stops after presenting it; nothing is persisted, so --reply starts a new run that reads the plan back
+# from the project (get_project) and acts on your answer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PROJECT="$1"; BRIEF="$2"; LOG="${3:-.captions-tmp/codex-$(date +%s).jsonl}"
+PROJECT="$1"; shift
+REPLY=""; if [ "${1:-}" = "--reply" ]; then REPLY="$2"; shift 2; else BRIEF="$1"; shift; fi
+LOG="${1:-.captions-tmp/codex-$(date +%s).jsonl}"
 mkdir -p "$(dirname "$LOG")"
 # who holds the project lock while this run edits it (scripts/project-lock.mjs)
 export REEL_AGENT="codex-edit ${PROJECT} ${LOG}"
 ROOT="$(pwd)"
 
-PROMPT="First read .agents/skills/reel-edit/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools (never edit files or run commands). Finish with validate + caption_proof, then render a draft and say what you did and what you would still improve."
+if [ -n "$REPLY" ]; then
+  PROMPT="First read .agents/skills/reel-edit/SKILL.md, .agents/skills/reel-plan/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. You presented this project's plan earlier (get_project shows it and whether it is approved). The user's answer to it: ${REPLY}
+Work only through the reel MCP tools (never edit files or run commands). Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
+else
+  PROMPT="First read .agents/skills/reel-edit/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. Brief: ${BRIEF}
+Work only through the reel MCP tools (never edit files or run commands). After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers with a new run. Finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+fi
 
 codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config \
   -C "$ROOT" -s read-only \
