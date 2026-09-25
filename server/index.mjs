@@ -11,12 +11,12 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
+import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -187,6 +187,69 @@ async function localizeRemoteBrolls(props) {
     b.src = `broll/${name}`;
   }
 }
+
+// ---- render queue (scripts/render-queue.mjs): `workers` exports at once, the rest wait ----
+const PLAN = renderPlan();
+console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concurrency}`);
+// one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
+function renderJob({raw, draft, expectSec, clean}, id) {
+  return new Promise((settle) => {
+    const propsFile = path.join(ROOT, `.props-${id}.json`);
+    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
+    const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
+    const outFile = path.join(EXPORTS, outName);
+    fs.writeFileSync(propsFile, raw);
+    renders[id] = {status: 'running', progress: 0};
+    const t0 = Date.now();
+    // Draft: half resolution + ultrafast — for quick checks
+    const child = spawn('npx', renderArgs({outFile, propsFile, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes}), {cwd: ROOT});
+    let errTail = ''; // keep the tail of output so failures show a real message
+    const onProgress = (d) => {
+      const s = String(d);
+      const m = s.match(/Rendered\s+(\d+)\/(\d+)/);
+      if (m) renders[id].progress = Math.round((+m[1] / +m[2]) * 100);
+      errTail = (errTail + s).slice(-2000);
+    };
+    child.stdout.on('data', onProgress);
+    child.stderr.on('data', onProgress);
+    child.on('close', (code) => {
+      fs.rmSync(propsFile, {force: true});
+      fs.rmSync(links, {recursive: true, force: true});
+      const secs = Math.round((Date.now() - t0) / 1000);
+      if (code === 0) console.log(`render ${id} ${draft ? 'draft ' : ''}took ${secs}s for ${expectSec?.toFixed(1)}s of video`);
+      if (code === 0 && draft) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, renderSec: secs}; settle(); }
+      else if (code === 0) {
+        // final: two-pass loudness to −14 LUFS, then the QC gate, in a child
+        // process (a few seconds of ffmpeg must not block this event loop). A render
+        // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
+        renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
+        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
+        let out = '';
+        fin.stdout.on('data', (d) => (out += d));
+        fin.stderr.on('data', (d) => process.stderr.write(d));
+        fin.on('close', () => {
+          let r;
+          try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
+          if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs};
+          else {
+            const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
+            try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
+            renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text};
+          }
+          settle();
+        });
+      } else {
+        const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
+        console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);
+        renders[id] = {status: 'error', error: line || `render exited ${code}`};
+        settle();
+      }
+    });
+    child.on('error', (e) => { renders[id] = {status: 'error', error: `render could not start: ${e.message}`}; settle(); });
+  });
+}
+const renderQueue = createQueue(PLAN.workers, renderJob);
 
 // The backend has no auth, so only local callers may reach it:
 // - Host must be loopback (DNS-rebinding pages send a foreign Host header)
@@ -608,71 +671,18 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
-    const id = String(Date.now());
-    const propsFile = path.join(ROOT, `.props-${id}.json`);
-    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
-    const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
-    const outFile = path.join(EXPORTS, outName);
-    fs.writeFileSync(propsFile, raw);
-    renders[id] = {status: 'running', progress: 0};
-
-    // tuned for a many-core machine: higher concurrency + faster x264 preset +
-    // a big OffthreadVideo cache (lots of trimmed segments seek the sources a lot).
-    // Draft: half resolution + ultrafast — for quick checks, ~40% faster.
-    // scale to the machine: leave 2 cores for the browser/encoder, cap the
-    // OffthreadVideo cache at a quarter of RAM (max 4 GB)
-    const concurrency = Math.max(2, Math.min(16, os.cpus().length - 2));
-    const cacheBytes = Math.min(4e9, Math.max(5e8, Math.floor(os.totalmem() / 4)));
-    const args = [
-      'remotion', 'render', 'MultiClip', outFile, `--props=${propsFile}`, `--public-dir=${links}`,
-      `--concurrency=${concurrency}`,
-      `--x264-preset=${draft ? 'ultrafast' : 'veryfast'}`,
-      `--offthreadvideo-cache-size-in-bytes=${cacheBytes}`,
-      ...(draft ? ['--scale=0.5'] : []),
-    ];
-    const child = spawn('npx', args, {cwd: ROOT});
-    let errTail = ''; // keep the tail of output so failures show a real message
-    const onProgress = (d) => {
-      const s = String(d);
-      const m = s.match(/Rendered\s+(\d+)\/(\d+)/);
-      if (m) renders[id].progress = Math.round((+m[1] / +m[2]) * 100);
-      errTail = (errTail + s).slice(-2000);
-    };
-    child.stdout.on('data', onProgress);
-    child.stderr.on('data', onProgress);
-    child.on('close', (code) => {
-      fs.rmSync(propsFile, {force: true});
-      fs.rmSync(links, {recursive: true, force: true});
-      if (code === 0 && draft) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`};
-      else if (code === 0) {
-        // final: two-pass loudness to −14 LUFS, then the QC gate, in a child
-        // process (a few seconds of ffmpeg must not block this event loop). A render
-        // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
-        renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
-        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
-        let out = '';
-        fin.stdout.on('data', (d) => (out += d));
-        fin.stderr.on('data', (d) => process.stderr.write(d));
-        fin.on('close', () => {
-          let r;
-          try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
-          if (r.ok) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text}; return; }
-          const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-          try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
-          renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text};
-        });
-      } else {
-        const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
-        console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);
-        renders[id] = {status: 'error', error: line || `render exited ${code}`};
-      }
-    });
-    return json(res, 200, {jobId: id});
+    const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
+    // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
+    renders[id] = {status: 'running', progress: 0, queued: true};
+    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean});
+    if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
+    return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
   }
   if (req.method === 'GET' && url.pathname.startsWith('/api/render/')) {
     const id = url.pathname.split('/').pop();
-    return json(res, 200, renders[id] ?? {status: 'unknown'});
+    const r = renders[id];
+    if (r?.queued) { const n = renderQueue.ahead(id); return json(res, 200, {...r, ahead: n, label: `Queued — ${n} render${n === 1 ? '' : 's'} ahead`}); }
+    return json(res, 200, r ?? {status: 'unknown'});
   }
 
   json(res, 404, {error: 'not found'});
@@ -683,4 +693,5 @@ process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e))
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
 
 try { ensureSfx(); } catch (e) { console.error('sfx:', e.message); }
-server.listen(3333, '127.0.0.1', () => console.log('editor backend → http://127.0.0.1:3333'));
+const PORT = +(process.env.REEL_PORT || 3333); // another port for a second backend on the same box (the MCP then needs REEL_API)
+server.listen(PORT, '127.0.0.1', () => console.log(`editor backend → http://127.0.0.1:${PORT}`));
