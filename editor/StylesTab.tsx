@@ -3,13 +3,12 @@ import {useEditor} from './store';
 import {PRESETS, type PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
 import {FONT_FAMILIES, type ClientFont} from '../src/fonts';
-import {LOOKS, type ProjectGrade} from '../src/grade';
-import type {Brand} from '../src/brand';
-import {runJob, readPublic} from './jobs';
-import {Btn, IconBtn, Label, Section, Select, TextInput, Toggle} from './ui';
+import {styleEffects, styleSchema, type Brand, type Style} from '../src/brand';
+import {ColorSection} from './ColorSection';
+import {Btn, IconBtn, Label, Section, Select, TextInput} from './ui';
 
 // Styles tab: style pack + accent (as before), the brand kit (set_brand) and
-// color (set_grade).
+// color (set_grade / create_lut, ColorSection).
 
 const ACCENT_SWATCHES = ['#FFB020', '#c2c1ff', '#ffb785', '#adc6ff', '#39d98a', '#ff6b8b'];
 const HEX = /^#[0-9a-fA-F]{6}$/;
@@ -27,9 +26,8 @@ const ColorField: React.FC<{label: string; value?: string; fallback: string; onC
 );
 
 export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: (msg: string, kind: 'error' | 'ok') => void}> = ({onStyleChange, notify}) => {
-  const {clips, accentColor, captionStyle, brand, grade, setAccentColor, setBrand, setGrade} = useEditor();
+  const {accentColor, captionStyle, brand, grade, audio, setAccentColor, setBrand, setGrade, setAudio, setCaptionsOff} = useEditor();
   const [kits, setKits] = useState<Kit[]>([]);
-  const [analyzing, setAnalyzing] = useState<string | null>(null);
   const logoInput = useRef<HTMLInputElement>(null);
   const fontInput = useRef<HTMLInputElement>(null);
   const loadKits = () => fetch('/api/brands').then((r) => (r.ok ? r.json() : [])).then((l) => setKits(Array.isArray(l) ? l : [])).catch(() => setKits([]));
@@ -39,7 +37,28 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
   const loadKit = async (slug: string) => {
     if (!slug) return;
     const k = await fetch(`/api/brands/${slug}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    if (k?.colors?.accent) { setBrand(k); notify(`Brand kit "${k.name ?? slug}" loaded`, 'ok'); } else notify('Could not load that kit', 'error');
+    if (!k?.colors?.accent) return notify('Could not load that kit', 'error');
+    setBrand(k);
+    // its style on this project, as set_brand from does (src/brand.ts styleEffects); a LUT is baked by the render if not yet
+    const fx = styleEffects(k.style);
+    if (fx.captionsOff != null) setCaptionsOff(fx.captionsOff);
+    if (fx.audio) setAudio({...(audio ?? {}), ...fx.audio});
+    if (fx.grade) setGrade({...(grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), ...fx.grade, ...(fx.grade.adjust ? {adjust: {...grade?.adjust, ...fx.grade.adjust}} : {})});
+    if (fx.pack && fx.pack in PRESETS && fx.pack !== captionStyle) onStyleChange(fx.pack as PresetId);
+    notify(`Brand kit "${k.name ?? slug}" loaded${k.style ? ' with its style' : ''}`, 'ok');
+  };
+  // the kit's style: notes in words + the other preferences as JSON (validated by styleSchema)
+  const {notes = '', ...prefs} = brand?.style ?? {};
+  const [prefsText, setPrefsText] = useState('');
+  const [prefsErr, setPrefsErr] = useState<string | null>(null);
+  useEffect(() => { setPrefsText(Object.keys(prefs).length ? JSON.stringify(prefs, null, 1) : ''); setPrefsErr(null); }, [brand?.name, JSON.stringify(prefs)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const setStyle = (st: Style) => patchBrand((b) => { const clean = Object.fromEntries(Object.entries(st).filter(([, v]) => v !== '' && v != null)); return Object.keys(clean).length ? {...b, style: clean as Style} : (({style: _, ...rest}) => rest)(b); });
+  const commitPrefs = () => {
+    let obj: unknown = {};
+    try { obj = prefsText.trim() ? JSON.parse(prefsText) : {}; } catch { return setPrefsErr('not valid JSON'); }
+    const r = styleSchema.safeParse({...(obj as object), ...(notes ? {notes} : {})});
+    if (!r.success) return setPrefsErr(r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; '));
+    setPrefsErr(null); setStyle(r.data);
   };
   const saveKit = async () => {
     if (!brand) return;
@@ -71,17 +90,6 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
   });
   const clientFamilies = [...new Set((brand?.fonts?.files ?? []).map((x) => x.family))];
   const fontOptions = [...clientFamilies.map((f) => ({value: f, label: `${f} (client font)`})), ...FONT_FAMILIES.map((f) => ({value: f as string}))];
-
-  const analyze = async (g: ProjectGrade) => {
-    setAnalyzing('Starting…');
-    try {
-      await runJob('/api/grade', {clips}, (s) => setAnalyzing(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const r = await readPublic<{bySrc?: ProjectGrade['bySrc']}>('grade.json');
-      setGrade({...g, auto: true, bySrc: r.bySrc ?? {}});
-      notify(`Analyzed ${Object.keys(r.bySrc ?? {}).length} source(s)`, 'ok');
-    } catch (e) { notify('Color analysis failed: ' + (e as Error).message, 'error'); }
-    setAnalyzing(null);
-  };
 
   return (
     <div className="space-y-5">
@@ -141,6 +149,10 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
                 {brand.logo && <IconBtn icon="close" title="Remove logo" onClick={() => patchBrand(({logo: _, ...b}) => b)} />}
               </div>
             </div>
+            <Label>Style — how this client edits (read by the plan)</Label>
+            <textarea value={notes} onChange={(e) => setStyle({...prefs, notes: e.target.value} as Style)} rows={3} placeholder="In their words: sin subtítulos, cortes secos, color natural, piel sin naranja…" className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[12px] resize-y" />
+            <textarea value={prefsText} onChange={(e) => setPrefsText(e.target.value)} onBlur={commitPrefs} rows={prefsText ? Math.min(10, prefsText.split('\n').length + 1) : 2} placeholder='Preferences as JSON: {"captions": "off", "pack": "palabra", "grade": {"look": "natural", "skin": 0.8}, "pace": "rápido"}' className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[11px] font-mono resize-y" />
+            {prefsErr && <p className="text-[11px] text-error">{prefsErr}</p>}
             <div className="flex gap-2">
               <Btn onClick={saveKit} className="flex-1">Save as kit…</Btn>
               <Btn onClick={() => { setBrand(null); notify('Brand kit removed', 'ok'); }} className="flex-1">Remove kit</Btn>
@@ -154,25 +166,7 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
         )}
       </Section>
 
-      <Section title="Color" hint="A bounded automatic correction per source plus one look, applied at render and in the preview.">
-        {grade ? (
-          <>
-            <Select value={grade.look} onChange={(look) => setGrade({...grade, look})} options={Object.values(LOOKS).map((l) => ({value: l.id, label: `${l.id} — ${l.desc}`, title: l.desc}))} />
-            <Label>Intensity: {Math.round(grade.intensity * 100)}%</Label>
-            <input type="range" min={0} max={100} value={Math.round(grade.intensity * 100)} onChange={(e) => setGrade({...grade, intensity: Number(e.target.value) / 100})} className="w-full accent-primary" />
-            <div className="flex items-center justify-between" title="Measure each source's lit frames and correct exposure, contrast, cast and saturation within bounds">
-              <Label>Automatic correction {grade.auto && !Object.keys(grade.bySrc ?? {}).length ? '(analyze first)' : ''}</Label>
-              <Toggle on={grade.auto} onChange={(on) => (on ? analyze(grade) : setGrade({...grade, auto: false}))} />
-            </div>
-            <div className="flex gap-2">
-              <Btn onClick={() => analyze(grade)} disabled={!!analyzing || !clips.length} className="flex-1">{analyzing ?? 'Analyze sources'}</Btn>
-              <Btn onClick={() => setGrade(null)} className="flex-1">Remove</Btn>
-            </div>
-          </>
-        ) : (
-          <Btn primary onClick={() => setGrade({look: 'clean', intensity: 0.8, auto: false, bySrc: {}})} className="w-full">Enable color</Btn>
-        )}
-      </Section>
+      <ColorSection notify={notify} />
     </div>
   );
 };

@@ -70,3 +70,20 @@ test('a client font family is recognized however it is typed', async () => {
   assert.equal(resolveFamily('bebas neue'), 'Bebas Neue');
   assert.equal(resolveFamily('Unknown Face', files), 'Unknown Face');
 });
+
+test('style kits: a flexible spec from the client\'s words — known keys typed, any other preference kept', async () => {
+  const {brandSchema, mergeStyle, styleEffects, styleSchema} = await import('../src/brand.ts');
+  const words = {notes: 'Sin subtítulos por defecto. Color natural, nada quemado, piel sin naranja.', captions: 'off', grade: {look: 'natural', skin: 0.8, highlights: 0.7}, pace: 'rápido, cortes secos', zooms: 'nunca', maxReelSec: 45};
+  const st = styleSchema.parse(words);
+  assert.equal(st.zooms, 'nunca'); assert.equal(st.maxReelSec, 45); // not in the schema, kept
+  assert.ok(!styleSchema.safeParse({captions: 'sometimes'}).success);
+  assert.ok(!styleSchema.safeParse({grade: {look: 'teal-orange'}}).success, 'looks are the real ones');
+  assert.ok(!styleSchema.safeParse({weird: {nested: true}}).success, 'extra preferences are plain values');
+  // adjusted by prompt: key by key, null removes
+  const next = mergeStyle(st, {captions: 'on', grade: {adjust: {temperature: -0.2}}, zooms: null});
+  assert.equal(next.captions, 'on'); assert.equal(next.zooms, undefined);
+  assert.deepEqual(next.grade, {look: 'natural', skin: 0.8, highlights: 0.7, adjust: {temperature: -0.2}});
+  // what loading it does to a project
+  assert.deepEqual(styleEffects(st), {captionsOff: true, grade: {look: 'natural', skin: 0.8, highlights: 0.7}});
+  assert.ok(brandSchema.safeParse({colors: {accent: '#FFE500'}, style: st}).success);
+});
