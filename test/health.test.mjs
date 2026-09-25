@@ -6,6 +6,25 @@ test('whisperxCheck: installed venv is ok and names the device', () => {
   const c = whisperxCheck({venv: true, env: {}, device: 'cuda'});
   assert.equal(c.ok, true);
   assert.equal(c.label, 'WhisperX (cuda)');
+  assert.ok(!c.optional);
+});
+
+test('whisperxCheck: installed venv with Deepgram active is still plain ok, not optional', () => {
+  const c = whisperxCheck({venv: true, env: {DEEPGRAM_API_KEY: 'k'}});
+  assert.equal(c.ok, true);
+  assert.equal(c.label, 'WhisperX (cpu)');
+  assert.ok(!c.optional);
+  const forced = whisperxCheck({venv: true, env: {DEEPGRAM_API_KEY: 'k'}, device: 'cuda'});
+  assert.equal(forced.ok, true);
+  assert.equal(forced.label, 'WhisperX (cuda)');
+  assert.ok(!forced.optional);
+});
+
+test('whisperxCheck: installed venv without a Deepgram key is ok, not optional', () => {
+  const c = whisperxCheck({venv: true, env: {}});
+  assert.equal(c.ok, true);
+  assert.equal(c.label, 'WhisperX (cpu)');
+  assert.ok(!c.optional);
 });
 
 test('whisperxCheck: no venv and no Deepgram is a blocking miss with the setup hint', () => {
@@ -17,7 +36,7 @@ test('whisperxCheck: no venv and no Deepgram is a blocking miss with the setup h
 
 test('whisperxCheck: no venv with Deepgram active is optional, not missing', () => {
   const c = whisperxCheck({venv: false, env: {DEEPGRAM_API_KEY: 'k'}});
-  assert.equal(c.ok, true);
+  assert.equal(c.ok, false);
   assert.equal(c.optional, true);
   assert.equal(c.label, 'WhisperX (optional — Deepgram active)');
   assert.match(c.hint, /Deepgram handles transcription; WhisperX is only the local fallback/);
