@@ -1,18 +1,18 @@
-// Render queue: every export (editor button, MCP render, headless runs) goes
-// through one queue in the backend instead of a spawn per request or renders
-// chained by hand with nohup. `workers` renders run at once, each with
+// Render sizing: every export (editor button, MCP render / start_render, the CLI,
+// headless runs) goes through one queue in the backend (scripts/render-jobs.mjs: jobs
+// on disk) instead of a spawn per request or renders chained by hand with nohup. `workers` renders run at once, each with
 // `concurrency` Chrome tabs; the rest wait their turn (the status says how many
 // are ahead). Sized for the machine by renderPlan — see research/render-benchmark.md
 // for the numbers on the 2-vCPU VM. scripts/render-bench.mjs measures it.
 import os from 'node:os';
 
-// How many renders at once and how many tabs each. Default: all the cores for ONE
-// render at a time up to 8 cores (a second render only splits the same CPUs and
-// doubles the RAM), then a worker per 8 cores. REEL_RENDER_WORKERS /
-// REEL_RENDER_CONCURRENCY override it.
+// How many renders at once and how many tabs each. Default: SERIAL — one render at
+// a time with all the cores (a second render only splits the same CPUs and doubles
+// the RAM; the jobs wait in scripts/render-jobs.mjs). REEL_RENDER_WORKERS = N runs up
+// to N at once (still capped by RAM); REEL_RENDER_CONCURRENCY sets the tabs.
 export function renderPlan({cpus = os.cpus().length, memBytes = os.totalmem(), env = process.env} = {}) {
   const byRam = Math.max(1, Math.floor(memBytes / 3e9)); // a render with its Chrome and compositor peaks around 2–3 GB
-  const workers = Math.max(1, Math.min(+env.REEL_RENDER_WORKERS || Math.max(1, Math.floor(cpus / 8)), byRam));
+  const workers = Math.max(1, Math.min(Math.floor(+env.REEL_RENDER_WORKERS) || 1, byRam));
   // leave a core per render for the encoder once there are cores to spare
   const perWorker = Math.floor(cpus / workers);
   const concurrency = Math.max(1, Math.min(16, +env.REEL_RENDER_CONCURRENCY || (perWorker > 4 ? perWorker - 2 : perWorker)));
@@ -31,8 +31,9 @@ export function renderArgs({outFile, propsFile, publicDir, draft, concurrency, c
   ];
 }
 
-// FIFO with `workers` slots. run(job) returns a promise; the next job starts when
-// a slot frees, whatever happened to the previous one.
+// In-memory FIFO with `workers` slots (scripts/render-bench.mjs; the backend's queue
+// is the persistent one in scripts/render-jobs.mjs). run(job) returns a promise; the
+// next job starts when a slot frees, whatever happened to the previous one.
 export function createQueue(workers, run) {
   const waiting = [];
   let running = 0;

@@ -26,6 +26,7 @@
     "studio": "remotion studio",
     "typecheck": "tsc --noEmit",
     "mcp": "node mcp/server.mjs",
+    "render": "node scripts/render-cli.mjs",
     "test": "node --test"
   },
   "dependencies": {

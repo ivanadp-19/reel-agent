@@ -42,6 +42,8 @@ import {CLEAN} from '../src/audio.ts';
 import {DEFAULT_DIRS, entryLine, loadEntries, runCatalogChild, searchCatalog, staleFiles} from '../scripts/catalog.mjs';
 import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
+import {projectRenderProps} from '../src/renderProps.ts';
+import {aheadOf, describeJob, jobsDir, listJobs, readJob} from '../scripts/render-jobs.mjs';
 import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -247,18 +249,18 @@ const sec = (d) => z.number().describe(d);
 // approve_plan. Default-deny: a new tool is gated unless it is listed here.
 // Open before approval: reading, looking, searching, the plan itself, the setup
 // a brief asks for before planning (clips, language, brand kit and its style)
-// and draft renders (render checks draft itself).
+// and draft renders (render and start_render check draft themselves).
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
-  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc',
+  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs',
 ]);
 // on top of the timing wrapper above: a call the gate refuses is still logged (as failed)
 const registerTimed = server.registerTool.bind(server);
 server.registerTool = (name, config, cb) => registerTimed(name, config, async (args, extra) => {
-  if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !(name === 'render' && args.draft)) {
+  if (args?.project_id && !OPEN_BEFORE_APPROVAL.has(name) && !((name === 'render' || name === 'start_render') && args.draft)) {
     const p = load(args.project_id);
-    const why = planGate(p, name === 'render' ? 'The final render' : name, planMode(p));
+    const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
     if (why) throw new Error(why);
   }
   return cb(args, extra);
@@ -1012,7 +1014,7 @@ const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level ===
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
-const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio, captionsOff: p.captionsOff});
+const projectProps = projectRenderProps; // src/renderProps.ts: the same props the render CLI sends
 
 server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   load(project_id);
@@ -1054,14 +1056,76 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
-server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, -14 LUFS, true peak <= -1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. In plan mode review, a final render also needs the user\'s approval of the plan (approve_plan); drafts never do. In auto mode (the default) the plan is shown in the chat but nothing blocks. A final that passes becomes the next review version of the project (a 720p proxy for share_version links). mode: full = the whole reel in one pass; layers = the reel without captions (the master, cached: rendered once, reused while only the captions change), a transparent caption layer and a composite — use it when iterating on captions (text, emphasis, positions, timing without ducked music). Captions that change the footage (focus pull / hero punch / glitch pulse on key words, glass pages, pages behind the presenter) fall back to full and the result says why. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false), mode: z.enum(['full', 'layers']).optional().describe('default: the backend\'s (REEL_RENDER_MODE, else full)')}}, async ({project_id, draft, mode}) => {
+const renderModeArg = z.enum(['full', 'layers']).optional().describe('default: the backend\'s (REEL_RENDER_MODE, else full)');
+server.registerTool('render', {description: 'Export the project to mp4 (1080x1920) and WAIT for it. draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. In plan mode review, a final render also needs the user\'s approval of the plan (approve_plan); drafts never do. In auto mode (the default) the plan is shown in the chat but nothing blocks. A final that passes becomes the next review version of the project (a 720p proxy for share_version links). mode: full = the whole reel in one pass; layers = the reel without captions (the master, cached: rendered once, reused while only the captions change), a transparent caption layer and a composite — use it when iterating on captions (text, emphasis, positions, timing without ducked music). Captions that change the footage (focus pull / hero punch / glitch pulse on key words, glass pages, pages behind the presenter) fall back to full and the result says why. Returns the file path. A 1080 final takes minutes: to keep working meanwhile use start_render + render_status instead (same queue, same result).', inputSchema: {project_id: pid, draft: z.boolean().default(false), mode: renderModeArg}}, async ({project_id, draft, mode}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const r = await runJob('/api/render', {...projectProps(p), draft, project_id, ...(mode ? {mode} : {})});
-  const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
+  const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, r.file.replace(/^\//, ''));
   const size = fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)` : ` (${f1(totalSec(p.clips))}s)`; // REEL_API on another machine: the file lives there
   const review = r.version ? `\nReview version v${r.version} recorded — share_version gives a link` : r.versionError ? `\nReview version NOT recorded: ${r.versionError}` : '';
   const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}${size} [${how}]${r.qc ? `\nQC passed:\n${r.qc}` : ''}${review}`);
+});
+
+// ---------- asynchronous renders (scripts/render-jobs.mjs through the backend, like the editor's Renders panel and the CLI) ----------
+const RENDER_JOBS = jobsDir(PUBLIC);
+const jobIdArg = z.string().regex(/^[\w-]{6,64}$/).describe('the job id start_render returned (list_render_jobs lists them)');
+async function renderJobsApi(route, opts) {
+  await needBackend();
+  const r = await fetch(`${API}/api/render-jobs${route}`, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `render-jobs${route}: HTTP ${r.status}`);
+  return j;
+}
+// the job from the backend; with the backend down, as last written on disk
+async function fetchJob(job_id) {
+  if (await backendUp()) return {job: await renderJobsApi(`/${job_id}`), live: true};
+  const job = readJob(RENDER_JOBS, job_id);
+  if (!job) throw new Error(`no render job ${job_id}`);
+  return {job: {...job, ahead: aheadOf(listJobs(RENDER_JOBS), job_id)}, live: false};
+}
+function jobText(job, {live = true} = {}) {
+  const lines = [describeJob(job, {ahead: job.ahead ?? 0})];
+  if (job.status === 'done') {
+    const r = job.result ?? {};
+    const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, String(r.file ?? '').replace(/^\//, ''));
+    lines.push(`File: ${file}${fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB)` : ''}`);
+    if (r.stages) lines.push(`Stages: ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}`);
+    if (r.qc) lines.push(`QC passed:\n${r.qc}`);
+    if (r.version) lines.push(`Review version v${r.version} recorded — share_version gives a link`);
+    else if (r.versionError) lines.push(`Review version NOT recorded: ${r.versionError}`);
+  }
+  if (job.status === 'failed' && job.result?.qc) lines.push(`QC:\n${job.result.qc}`);
+  if (!live) lines.push(`(backend not running — this is the job as last written to disk${job.status === 'queued' || job.status === 'running' ? '; it resumes when the backend starts' : ''})`);
+  return lines.join('\n');
+}
+server.registerTool('start_render', {description: 'Start an export of the project and return AT ONCE with a job id — the render runs in the backend queue (one at a time by default) while you keep working or the user does something else. Same render as `render`: draft = half resolution, fast; a final is loudness-normalized, QC-gated and, when it passes, becomes the next review version (share_version). Follow it with render_status job_id (progress %, stage, frames, ETA; the file path when done); cancel_render stops it. Jobs are kept on disk: they survive a backend restart. In plan mode review a final needs the approved plan, like render; drafts never do. mode: full or layers, as for render (layers reuses the cached master of the reel without captions — the queue never renders one master twice).', inputSchema: {project_id: pid, draft: z.boolean().default(false), mode: renderModeArg}}, async ({project_id, draft, mode}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  await needBackend();
+  const r = await fetch(`${API}/api/render`, {method: 'POST', body: JSON.stringify({...projectProps(p), draft, project_id, ...(mode ? {mode} : {})})}).then((x) => x.json());
+  if (!r.jobId) throw new Error(r.error || 'render did not start');
+  return text(`Render job ${r.jobId} ${r.ahead ? `queued — ${r.ahead} render${r.ahead === 1 ? '' : 's'} ahead` : 'started'} (${draft ? 'draft' : 'final'}${mode === 'layers' ? ', layers' : ''} of ${project_id}, ${f1(totalSec(p.clips))}s of video).\nrender_status job_id=${r.jobId} for progress and, when done, the file; cancel_render job_id=${r.jobId} to stop it.`);
+});
+server.registerTool('render_status', {description: 'Status of a render job from start_render (or the editor, or the CLI): queued (how many ahead) / running (progress %, stage, frame x/y, ETA, heartbeat) / done (file path, QC, review version) / failed (why) / cancelled. wait_sec = wait up to that many seconds for it to finish before answering (default 0: answer now).', inputSchema: {job_id: jobIdArg, wait_sec: z.number().int().min(0).max(600).default(0)}}, async ({job_id, wait_sec}) => {
+  let {job, live} = await fetchJob(job_id);
+  const t0 = Date.now();
+  while (live && (job.status === 'queued' || job.status === 'running') && (Date.now() - t0) / 1000 < wait_sec) {
+    await new Promise((r) => setTimeout(r, 2000));
+    ({job, live} = await fetchJob(job_id));
+  }
+  return text(jobText(job, {live}));
+});
+server.registerTool('list_render_jobs', {description: 'The render jobs, newest first: id, draft/final, project, status and progress (queued / running / done / failed / cancelled), the file when done. Filter by project and/or active_only (queued + running).', inputSchema: {project_id: pid.optional(), active_only: z.boolean().default(false), limit: z.number().int().min(1).max(100).default(20)}}, async ({project_id, active_only, limit}) => {
+  const live = await backendUp();
+  const q = new URLSearchParams({limit: String(limit), ...(project_id ? {project: project_id} : {}), ...(active_only ? {status: 'queued,running'} : {})});
+  const all = live ? null : listJobs(RENDER_JOBS);
+  const jobs = live ? (await renderJobsApi(`?${q}`)).jobs : listJobs(RENDER_JOBS, {projectId: project_id, status: active_only ? ['queued', 'running'] : undefined, limit}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
+  if (!jobs.length) return text(`No ${active_only ? 'active ' : ''}render jobs${project_id ? ` for ${project_id}` : ''}.`);
+  return text(`${jobs.map((j) => describeJob(j, {ahead: j.ahead ?? 0})).join('\n')}${live ? '' : '\n(backend not running — read from disk)'}`);
+});
+server.registerTool('cancel_render', {description: 'Cancel a render job: a queued one is dropped at once; a running one has its render process killed (no partial file is left). Finished jobs cannot be cancelled.', inputSchema: {job_id: jobIdArg}}, async ({job_id}) => {
+  const j = await renderJobsApi(`/${job_id}/cancel`, {method: 'POST', body: '{}'});
+  return text(j.pending ? `Cancelling ${job_id} — its render process is being stopped (render_status confirms).` : `Render ${job_id} cancelled.`);
 });
 
 // ---------- review links (scripts/reviews.mjs, through the backend like the editor's Share button) ----------

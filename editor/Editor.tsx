@@ -13,6 +13,7 @@ import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
 import {pollJob} from './jobs';
 import {SharePanel} from './SharePanel';
+import {RenderJobs, cancelRender, fmtSec} from './RenderJobs';
 
 const fmt = (sec: number) => {
   const s = Math.max(0, sec);
@@ -40,7 +41,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; jobId?: string; progress?: number; file?: string; qc?: string; label?: string; etaSec?: number | null; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string} | null>(null);
+  const stopFollow = useRef<(() => void) | null>(null);
   // full = one pass; layers = cached master + caption layer + composite (scripts/layers.mjs); remembered per browser
   const [renderMode, setRenderMode] = useState<RenderMode>(() => { try { return localStorage.getItem('reel.renderMode') === 'layers' ? 'layers' : 'full'; } catch { return 'full'; } });
   const [generating, setGenerating] = useState(false);
@@ -178,26 +180,50 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     );
   });
 
+  // Exports are render jobs on the backend (scripts/render-jobs.mjs): they keep going when
+  // this tab closes; reopening the project picks the one in flight back up (below).
+  const followRender = (jobId: string) => {
+    stopFollow.current?.();
+    setExp({status: 'running', jobId, progress: 0});
+    stopFollow.current = pollJob(
+      '/api/render', jobId,
+      (s) => setExp({status: 'running', jobId, progress: s.progress ?? 0, label: s.label, etaSec: s.etaSec}), // "Queued — n renders ahead" while it waits its turn
+      async () => {
+        const s = await fetch('/api/render/' + jobId).then((x) => x.json());
+        setExp(s);
+        notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
+      },
+      (msg) => {
+        setExp({status: 'error', jobId});
+        if (msg.startsWith('cancelled')) notify('Export cancelled', 'ok');
+        else notify('Export failed: ' + msg, 'error');
+      },
+      2400, // renders can take a while — allow up to ~1h
+    );
+  };
+  useEffect(() => {
+    stopFollow.current?.(); stopFollow.current = null;
+    setExp(null);
+    if (!projectId) return;
+    fetch(`/api/render-jobs?project=${encodeURIComponent(projectId)}&status=queued,running`).then((r) => r.json()).then((j) => {
+      const jobs: {id: string; status: string}[] = j.jobs ?? []; // newest first
+      const job = jobs.find((x) => x.status === 'running') ?? jobs.at(-1); // the one rendering, else the next in line
+      if (job) followRender(job.id);
+    }).catch(() => {});
+    return () => { stopFollow.current?.(); stopFollow.current = null; };
+  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // the backend decides with the same function; here it only tells the user ahead of time
   const layersBlocked = useMemo(() => chooseRenderMode('layers', {clips, captions, graphics, captionStyle, captionsOff}, 30).reasons, [clips, captions, graphics, captionStyle, captionsOff]);
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
       const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, mode: renderMode, project_id: projectId})}).then((x) => x.json());
-      pollJob(
-        '/api/render', r.jobId,
-        (s) => setExp({status: 'running', progress: s.progress ?? 0, label: s.label}), // "Queued — n renders ahead" while it waits its turn
-        async () => {
-          const s = await fetch('/api/render/' + r.jobId).then((x) => x.json());
-          setExp(s);
-          notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
-        },
-        (msg) => { setExp({status: 'error'}); notify('Export failed: ' + msg, 'error'); },
-        2400, // renders can take a while — allow up to ~1h
-      );
-    } catch {
+      if (!r.jobId) throw new Error(r.error || 'no job');
+      followRender(r.jobId);
+    } catch (e) {
       setExp({status: 'error'});
-      notify('Could not start export', 'error');
+      notify('Could not start export: ' + (e as Error).message, 'error');
     }
   };
 
@@ -454,7 +480,12 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
             <span className={`material-symbols-outlined text-[18px] ${trimming ? 'animate-spin' : ''}`}>{trimming ? 'progress_activity' : 'cut'}</span>
             {trimming ? (trimLabel || 'Cutting…') : 'Autocut'}
           </button>
-          {exp?.status === 'running' && <span className="text-body-sm text-on-surface-variant">{exp.label?.startsWith('Queued') ? exp.label : `Rendering… ${exp.progress ?? 0}%`}</span>}
+          {exp?.status === 'running' && (
+            <span className="text-body-sm text-on-surface-variant whitespace-nowrap" title="The render runs on the backend — you can close this tab; Renders lists it">
+              {exp.label?.startsWith('Queued') ? exp.label : `${exp.label ?? 'Rendering'}… ${exp.progress ?? 0}%${exp.etaSec ? ` · ~${fmtSec(exp.etaSec)} left` : ''}`}
+              {exp.jobId && <button onClick={() => cancelRender(exp.jobId!).catch((e) => notify('Could not cancel: ' + e.message, 'error'))} className="ml-2 text-error hover:underline">Cancel</button>}
+            </span>
+          )}
           {exp?.status === 'done' && exp.file && <a href={exp.file} download className="text-body-sm text-[#39d98a]">↓ Download mp4</a>}
           {exp?.status === 'done' && exp.qc && <span title={exp.qc} className="text-body-sm text-on-surface-variant cursor-help">QC ✓</span>}
           {exp?.status === 'done' && exp.stages && (
@@ -462,8 +493,9 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
               {exp.mode === 'layers' ? `Layers${exp.master === 'cached' ? ' (master reused)' : ''}` : 'Full'}
             </span>
           )}
+          <RenderJobs projectId={projectId} refreshKey={`${exp?.jobId}:${exp?.status}`} notify={notify} />
           <SharePanel projectId={projectId} refreshKey={exp?.version} notify={notify} />
-          {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
+          {exp?.status === 'error' && <span className="text-body-sm text-error">Render stopped</span>}
           <select
             value={renderMode}
             onChange={(e) => { const m = e.target.value as RenderMode; setRenderMode(m); try { localStorage.setItem('reel.renderMode', m); } catch {} }}

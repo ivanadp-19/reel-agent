@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
-import {createLink, hashToken, loadReviews, proxyArgs, recordFinal, recordVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
+import {createLink, hashToken, loadReviews, proxyArgs, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
 import {handleReview} from '../server/review.mjs';
 
@@ -30,7 +30,7 @@ function fixture(n = 2) {
     const proxy = path.join(pub, `.proxy-${i}`), poster = path.join(pub, `.poster-${i}`);
     fs.writeFileSync(proxy, Buffer.from(Array.from({length: 1000}, (_, k) => k % 256)));
     fs.writeFileSync(poster, 'jpeg');
-    recordVersion(dir, 'p-1', {file: full, proxyTmp: proxy, posterTmp: poster, durationSec: 12.345, sizeBytes: 5000, publicDir: pub, now: T0 + i});
+    recordVersion(dir, 'p-1', {file: full, proxyTmp: proxy, posterTmp: poster, durationSec: 12.345, sizeBytes: 5000, publicDir: pub, jobId: `job-${i}`, now: T0 + i});
   }
   return {pub, dir};
 }
@@ -45,6 +45,7 @@ test('versions: numbered, full + generated proxy/poster recorded, outside the pr
   assert.equal(v2.poster, 'reviews/p-1/v2.jpg');
   assert.deepEqual(v2.generated, ['reviews/p-1/v2.mp4', 'reviews/p-1/v2.jpg'], 'the files this feature made are marked');
   assert.equal(v2.durationSec, 12.35);
+  assert.equal(v2.job, 'job-2', 'the render job it came from (public/render-jobs/)');
   assert.equal(r.managedBy, 'review-link');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pub, 'projects', 'p-1.json'), 'utf8')), {name: 'Café <promo>'}, 'the project JSON is untouched');
   assert.throws(() => loadReviews(dir, '../x'), /bad project id/);
@@ -239,4 +240,23 @@ test('recordFinal: only a final that passed QC, for a project, becomes a version
 test('proxy settings: 720p H.264 CRF 26 veryfast with faststart', () => {
   const a = proxyArgs('in.mp4', 'out.mp4');
   for (const [k, v] of [['-c:v', 'libx264'], ['-preset', 'veryfast'], ['-crf', '26'], ['-movflags', '+faststart'], ['-vf', 'scale=720:-2']]) assert.equal(a[a.indexOf(k) + 1], v);
+});
+
+test('a version taken back (its render job was cancelled): entry and proxy/poster gone, the full render and the others stay', () => {
+  const {pub, dir} = fixture(3);
+  assert.equal(removeVersion(dir, 'p-1', 3, pub), true);
+  const r = loadReviews(dir, 'p-1');
+  assert.deepEqual(r.versions.map((v) => v.v), [1, 2]);
+  assert.ok(!fs.existsSync(path.join(pub, 'reviews/p-1/v3.mp4')) && !fs.existsSync(path.join(pub, 'reviews/p-1/v3.jpg')));
+  assert.ok(fs.existsSync(path.join(pub, 'exports/edited-3.mp4')), 'the export is not this feature\'s to delete');
+  assert.ok(fs.existsSync(path.join(pub, 'reviews/p-1/v2.mp4')));
+  assert.equal(removeVersion(dir, 'p-1', 9, pub), false);
+});
+
+test('recordFinal of a cancelled render job records nothing', async () => {
+  const {pub, dir} = fixture(1);
+  const ac = new AbortController();
+  ac.abort(new Error('cancelled by request'));
+  await assert.rejects(recordFinal({draft: false, qcOk: true, projectId: 'p-1', outFile: path.join(pub, 'exports/edited-1.mp4'), dir, publicDir: pub, jobId: 'j1', signal: ac.signal}), /cancelled/);
+  assert.deepEqual(loadReviews(dir, 'p-1').versions.map((v) => v.v), [1]);
 });
