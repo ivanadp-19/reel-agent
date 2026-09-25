@@ -13,7 +13,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import {assembleWords, sourceKey} from './lib-transcribe.mjs';
-import {applyHighlights, heuristicClassify, CLASSIFY_PROMPT} from '../src/highlights.ts';
+import {applyHighlights, heuristicClassify, guardHighlights, CLASSIFY_PROMPT} from '../src/highlights.ts';
 import {pageWords, withTiers, DEFAULT_TOP} from '../src/paging.ts';
 import {reconcileWords, reconciliationLine} from '../src/guion.ts';
 import {presetOf} from '../src/captionPresets.ts';
@@ -110,13 +110,14 @@ let words = await assembleWords(clips, (idx, total, clip) =>
 );
 // César 9:27: classification pass — keywords / questions / CTAs become yellow highlight
 // captions. LLM pass when OPENAI_API_KEY is set (cached per transcript hash); deterministic
-// heuristic otherwise. The agent can still adjust tiers via MCP afterwards. The guion (readGuion)
-// lets the pass fix spelling/accents to match it.
+// heuristic otherwise. Either way the spans pass refineSpans (at most 2 a sentence, no function
+// or promotional words — src/highlights.ts). The agent can still adjust tiers via MCP afterwards.
+// The guion (readGuion) lets the pass fix spelling/accents to match it.
 async function classifyHighlights(words) {
-  const key = crypto.createHash('sha1').update(words.map((w) => `${w.wid}:${w.word}`).join('|')).digest('hex');
+  const key = crypto.createHash('sha1').update(CLASSIFY_PROMPT + '\n' + words.map((w) => `${w.wid}:${w.word}`).join('|')).digest('hex'); // a new prompt re-asks
   const cache = path.join(TMP, 'highlights.json');
   if (fs.existsSync(cache)) {
-    try { const j = JSON.parse(fs.readFileSync(cache, 'utf8')); if (j.key === key) return j.res; } catch {}
+    try { const j = JSON.parse(fs.readFileSync(cache, 'utf8')); if (j.key === key) return guardHighlights(words, j.res); } catch {}
   }
   if (process.env.OPENAI_API_KEY) {
     try {
@@ -134,7 +135,7 @@ async function classifyHighlights(words) {
         const parsed = JSON.parse(j.choices[0].message.content);
         const res = {spans: parsed.spans ?? [], fixes: parsed.fixes ?? []};
         fs.writeFileSync(cache, JSON.stringify({key, res}));
-        return res;
+        return guardHighlights(words, res);
       }
       console.error(`highlight classifier HTTP ${r.status} — heuristic fallback`);
     } catch (e) {
