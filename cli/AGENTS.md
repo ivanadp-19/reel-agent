@@ -71,6 +71,14 @@ file, or one anyone can read — and otherwise uploads it in 8 MB chunks that
 resume after a dropped connection (files of hundreds of MB are fine). `--upload`
 always uploads.
 
+## Your own token (remote users)
+
+Signed in to the editor in a browser (form login or basic auth)? Open
+`<backend>/cli-token`: **Generate token** shows the token once, with the commands
+that save it to `~/.config/reel/token` (0600) and set `REEL_URL`; the same page
+lists your tokens and revokes them. No admin needed, nothing sent through chat.
+A token cannot mint another one — the page needs the browser session.
+
 ## Admins
 
 A token is made by an admin — the backend token (`REEL_BACKEND_TOKEN`) or a user
