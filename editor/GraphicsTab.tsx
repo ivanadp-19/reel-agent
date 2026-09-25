@@ -3,6 +3,7 @@ import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {TEMPLATES, LIFE_KINDS, OUT_KINDS, REVEAL_KINDS, fieldsOf, parseProps, projectGraphics, type Field, type Graphic, type TemplateId} from '../src/graphicTemplates';
 import {Btn, IconBtn, Label, NumberInput, Section, Select, TextInput, Toggle, fmtSec} from './ui';
+import {AssetPicker} from './AssetPicker';
 
 // Graphics tab: add_graphic / edit_graphic / delete_graphics in the editor.
 // Props forms are generated from each template's zod schema (fieldsOf), so a
@@ -105,6 +106,7 @@ export const GraphicsTab: React.FC<{playerRef: React.RefObject<PlayerRef | null>
               <IconBtn icon="delete" title="Delete graphic" danger onClick={() => { removeGraphic(sel.id); select(null); }} />
             </div>
           </div>
+          {sel.template === 'sticker' && <AssetPicker value={String(editProps?.src ?? '')} onPick={(src) => setEdit({id: sel.id, props: {...(editProps ?? {}), src}})} notify={notify} />}
           <PropsForm fields={selFields} value={editProps ?? {}} onChange={(p) => setEdit({id: sel.id, props: p})} />
           {edit?.id === sel.id && <Btn primary onClick={applyProps} className="w-full">Apply props</Btn>}
           <div className="grid grid-cols-2 gap-2">
@@ -132,6 +134,7 @@ export const GraphicsTab: React.FC<{playerRef: React.RefObject<PlayerRef | null>
       <Section title="Add graphic" hint="Anchored to the word under the playhead; it follows cuts and reorders.">
         <Select value={template} onChange={(t) => pickTemplate(t as TemplateId)} options={TEMPLATE_IDS.map((id) => ({value: id, title: TEMPLATES[id].desc}))} />
         <p className="text-[11px] text-on-surface-variant/60">{TEMPLATES[template].desc}</p>
+        {template === 'sticker' && <AssetPicker value={String(draft.src ?? '')} onPick={(src) => setDraft({...draft, src})} notify={notify} />}
         <PropsForm fields={fieldsOf(TEMPLATES[template].schema)} value={draft} onChange={setDraft} />
         <Btn primary onClick={add} disabled={!clips.length} className="w-full"><span className="material-symbols-outlined text-[16px]">add</span>Add at playhead</Btn>
       </Section>

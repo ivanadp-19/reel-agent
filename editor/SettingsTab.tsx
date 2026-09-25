@@ -6,7 +6,9 @@ import {validateProject, transcriptIssues, type Issue} from '../src/validate';
 import type {TClip} from '../src/cuts';
 import type {Matte} from '../src/Person';
 import {runJob, readPublic} from './jobs';
-import {Btn, Label, Row, Section, Select, Toggle} from './ui';
+import {Btn, Label, Row, Section, Select, TextInput, Toggle} from './ui';
+
+type MusicRow = {id: string; title: string; creator: string; license: string; durationSec: number; url: string; page?: string; source?: string};
 
 // Settings tab: music (as before), audio options (set_audio), the agent's plan
 // (set_plan), the pre-render checks (validate, prepare_mattes) and project info.
@@ -17,7 +19,35 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
   const {meta, clips, music, captions, graphics, mattes, captionStyle, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [mq, setMq] = useState('');
+  const [mrows, setMrows] = useState<MusicRow[] | null>(null);
+  const [mbusy, setMbusy] = useState<string | null>(null);
   if (!meta) return null;
+  // search_music / set_music music_id: clean licenses (Openverse CC0 / CC BY), credit kept with the project
+  const searchMusic = async () => {
+    if (mq.trim().length < 2) return;
+    setMbusy('…');
+    try {
+      const r = await fetch(`/api/music/search?q=${encodeURIComponent(mq)}&limit=6`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'search failed');
+      setMrows(d);
+      if (!d.length) notify('No tracks for that — try other mood or genre words', 'ok');
+    } catch (e) { notify('Music search: ' + (e as Error).message, 'error'); }
+    setMbusy(null);
+  };
+  const pickMusic = async (row: MusicRow) => {
+    setMbusy('Downloading…');
+    try {
+      const r = await fetch('/api/music/pick', {method: 'POST', body: JSON.stringify(row)});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'download failed');
+      setMusic({src: d.src, volume: 0.25, startSec: 0, fadeOutSec: 1.5, duck: true, duckLevel: 0.25, credit: d.credit});
+      setMrows(null);
+      notify('Music set — the credit line is kept with the project', 'ok');
+    } catch (e) { notify('Music: ' + (e as Error).message, 'error'); }
+    setMbusy(null);
+  };
   const needMatte = spansWithoutMatte([...graphics, ...captions], mattes, clips);
 
   const validate = async () => {
@@ -61,7 +91,24 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
             )}
           </>
         ) : (
-          <p className="text-body-sm text-on-surface-variant/60">No music. Add a track in the Assets panel.</p>
+          <p className="text-body-sm text-on-surface-variant/60">No music. Upload a track in the Assets panel, or search one below.</p>
+        )}
+        <div className="flex gap-1 pt-1">
+          <TextInput value={mq} onChange={setMq} placeholder="mood or genre: upbeat corporate, lo-fi…" />
+          <Btn onClick={searchMusic} disabled={!!mbusy || mq.trim().length < 2}>{mbusy ?? 'Search'}</Btn>
+        </div>
+        {mrows && mrows.length > 0 && (
+          <div className="space-y-1">
+            {mrows.map((r) => (
+              <div key={r.id} className="flex items-center gap-2 p-1.5 rounded border border-outline-variant/30 bg-surface-variant/20 text-[11px]">
+                <div className="flex-1 min-w-0">
+                  <p className="text-on-surface truncate" title={r.title}>{r.title}</p>
+                  <p className="text-on-surface-variant/70 truncate">{r.creator} · {r.durationSec}s · {r.license}</p>
+                </div>
+                <Btn onClick={() => pickMusic(r)} disabled={!!mbusy}>Use</Btn>
+              </div>
+            ))}
+          </div>
         )}
       </Section>
 

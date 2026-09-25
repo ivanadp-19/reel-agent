@@ -1,8 +1,9 @@
-import React, {useRef, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {placeClips, clipDurationSec} from '../src/timeline';
 
+type LibRow = {id: string; tags?: string[]};
 const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
 
 // Left "Assets" panel: source video clips (thumbnails) + audio.
@@ -14,7 +15,18 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   const [importing, setImporting] = useState<string | null>(null);
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [tags, setTags] = useState<Record<string, string[]>>({}); // library tags per asset id (suggest_broll matches on them)
+  const loadTags = () => fetch('/api/broll-library').then((r) => (r.ok ? r.json() : [])).then((l: LibRow[]) => setTags(Object.fromEntries(l.map((a) => [a.id, a.tags ?? []])))).catch(() => {});
+  useEffect(() => { loadTags(); }, [brollAssets.length]);
   if (!meta) return null;
+  // tag_broll_asset: 3–8 nouns for what is in the shot, in the reel's language
+  const editTags = async (id: string) => {
+    const v = window.prompt('Tags for this shot (comma-separated nouns, in the reel language — what suggest B-roll matches on)', (tags[id] ?? []).join(', '));
+    if (v == null) return;
+    const list = v.split(',').map((t) => t.trim()).filter(Boolean);
+    const r = await fetch(`/api/broll-library/${encodeURIComponent(id)}`, {method: 'POST', body: JSON.stringify({tags: list})}).then((x) => x.json()).catch(() => null);
+    if (r?.id) setTags({...tags, [id]: r.tags ?? []});
+  };
   const placed = placeClips(clips, meta.fps);
 
   const seekToClip = (startMs: number) => playerRef.current?.seekTo(Math.round((startMs / 1000) * meta.fps) + 1);
@@ -181,6 +193,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
                 <div key={a.id} className="group relative rounded-lg overflow-hidden border border-outline-variant/40">
                   <img src={a.thumb || '/' + a.src} alt={a.label} className="aspect-video object-cover w-full" />
                   <span className="absolute bottom-0.5 left-0.5 material-symbols-outlined text-[12px] text-white/90 drop-shadow">{a.kind === 'video' ? 'movie' : 'image'}</span>
+                  <button onClick={() => editTags(a.id)} title={tags[a.id]?.length ? `tags: ${tags[a.id].join(', ')}` : 'untagged — never suggested; click to tag'} className={`absolute bottom-0.5 right-0.5 material-symbols-outlined text-[12px] drop-shadow ${tags[a.id]?.length ? 'text-primary' : 'text-white/60'}`}>sell</button>
                   <button onClick={() => removeBrollAsset(a.id)} title="Remove" className="absolute top-0.5 right-0.5 w-5 h-5 rounded bg-surface-container-lowest/80 text-on-surface-variant hover:text-error opacity-0 group-hover:opacity-100 flex items-center justify-center">
                     <span className="material-symbols-outlined text-[14px]">close</span>
                   </button>
@@ -193,7 +206,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
               Add your footage…
             </button>
           )}
-          <p className="text-[10px] text-on-surface-variant/50 mt-2">Auto B-roll prefers these; falls back to Pexels.</p>
+          <p className="text-[10px] text-on-surface-variant/50 mt-2">Tag them (the label icon) so Suggest B-roll can place them; stock is the fallback.</p>
         </section>
       </div>
     </aside>

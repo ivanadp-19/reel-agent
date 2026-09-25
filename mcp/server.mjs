@@ -23,7 +23,8 @@ import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
-import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
+import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
+import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {transcriptIssues, validateProject} from '../src/validate.ts';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
@@ -177,24 +178,8 @@ function retext(cap, text) {
 }
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
-// ---------- Pexels ----------
-async function pexels(query, kind, count) {
-  const key = ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY;
-  if (!key) throw new Error('PEXELS_API_KEY missing in .env');
-  const url = kind === 'video'
-    ? `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`
-    : `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`;
-  const d = await fetch(url, {headers: {Authorization: key}}).then((r) => r.json());
-  if (kind === 'video') {
-    return (d.videos ?? []).map((v) => {
-      const files = (v.video_files ?? []).filter((f) => f.file_type === 'video/mp4' && f.height);
-      const tall = files.filter((f) => f.height >= 1920).sort((a, b) => a.height - b.height);
-      const pick = tall[0] ?? files.sort((a, b) => b.height - a.height)[0];
-      return pick ? {src: pick.link, duration: v.duration, size: `${pick.width}x${pick.height}`, page: v.url} : null;
-    }).filter(Boolean);
-  }
-  return (d.photos ?? []).map((ph) => ({src: ph.src?.large2x || ph.src?.large, alt: ph.alt, page: ph.url})).filter((x) => x.src);
-}
+// ---------- Pexels (mcp/stock.mjs, shared with /api/stock) ----------
+const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY);
 
 // ---------- server ----------
 const server = new McpServer({name: 'reel', version: '0.1.0'});
@@ -663,15 +648,10 @@ server.registerTool('list_assets', {description: 'Browse the local asset library
 });
 
 server.registerTool('generate_asset', {description: 'LAST RESORT: generate an image asset with the OpenAI Images API (transparent PNG; the user pays per image). Searching is free, so this tool first looks in the local library and the search sources for the same idea and returns those instead of generating; pass force=true only when none of them fits. kind wraps the prompt: sticker (die-cut flat vector), doodle (hand-drawn marker), texture (seamless, opaque), ui (flat mockup). Describe the object only — style comes from kind. Then place it with add_graphic template=sticker.', inputSchema: {prompt: z.string().min(3).max(400), kind: z.enum(['sticker', 'doodle', 'texture', 'ui']).default('sticker'), size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'), quality: z.enum(['low', 'medium', 'high']).default('medium'), force: z.boolean().default(false).describe('generate even if existing assets match')}}, async ({prompt, kind, size, quality, force}) => {
-  if (!force) {
-    // free options first: the library, then the search sources
-    const searchKind = kind === 'texture' ? 'illustration' : 'sticker';
-    const found = [...librarySearch(prompt, {kind: undefined, limit: 4}), ...(await searchAssets({query: prompt, kind: searchKind, limit: 4}).catch(() => []))]
-      .filter((r, i, arr) => arr.findIndex((x) => x.src === r.src) === i).slice(0, 5);
-    if (found.length) return text(`Not generated — ${found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + found.map((r) => `${r.id}${r.fromLibrary ? '  [library]' : ''}\n  src: ${r.src}  (${r.format}, ${r.license}${r.source ? ', ' + r.source : ''})${r.credit ? `\n  credit: ${r.credit}` : ''}${r.prompt ? `\n  prompt: ${r.prompt}` : ''}`).join('\n'));
-  }
-  const r = await generateAsset({prompt, kind, size, quality, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
-  return text(`${r.cached ? `Reused ${r.src} (already generated${r.reusedPrompt ? ` for "${r.reusedPrompt}"` : ''})` : `Generated ${r.src} (${r.model}${r.usage?.output_tokens ? `, ${r.usage.output_tokens} output tokens` : ''})`}`);
+  const r = await findOrGenerate({prompt, kind, size, quality, force, apiKey: ENV.OPENAI_API_KEY || process.env.OPENAI_API_KEY, model: ENV.REEL_IMAGE_MODEL || process.env.REEL_IMAGE_MODEL || 'gpt-image-1.5'});
+  if (r.found) return text(`Not generated — ${r.found.length} existing asset(s) match "${prompt}". Use one of these, or call again with force=true if none fits:\n` + r.found.map((x) => `${x.id}${x.fromLibrary ? '  [library]' : ''}\n  src: ${x.src}  (${x.format}, ${x.license}${x.source ? ', ' + x.source : ''})${x.credit ? `\n  credit: ${x.credit}` : ''}${x.prompt ? `\n  prompt: ${x.prompt}` : ''}`).join('\n'));
+  const g = r.generated;
+  return text(`${g.cached ? `Reused ${g.src} (already generated${g.reusedPrompt ? ` for "${g.reusedPrompt}"` : ''})` : `Generated ${g.src} (${g.model}${g.usage?.output_tokens ? `, ${g.usage.output_tokens} output tokens` : ''})`}`);
 });
 
 server.registerTool('set_grade', {description: `Color for the whole reel: a bounded automatic correction per source (measured on its lit frames: stretches flat footage, nudges exposure and color cast, lifts dull saturation — never restyles) plus one look. Looks: ${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}. intensity 0–1 (0.8 default). Look at the result with caption_proof (frame_at shows the raw source). Needs the backend the first time a source is analyzed.`, inputSchema: {project_id: pid, look: z.enum(Object.keys(LOOKS)).default(DEFAULT_LOOK), intensity: z.number().min(0).max(1).default(0.8), auto: z.boolean().default(true).describe('the per-source correction; false = look only')}}, async ({project_id, look, intensity, auto}) => {

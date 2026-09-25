@@ -9,6 +9,7 @@ import {PACKS} from '../src/stylePacks';
 import {ENTERS, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {GraphicsTab} from './GraphicsTab';
+import {BrollSuggestions, StockSearch, type LibAsset} from './BrollSourcing';
 import {StylesTab} from './StylesTab';
 import {SettingsTab} from './SettingsTab';
 import {Btn, IconBtn, Label, NumberInput, Row, Section, Select, Toggle, fmtSec} from './ui';
@@ -44,13 +45,14 @@ export const Inspector: React.FC<{
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
-  const [library, setLibrary] = useState<BrollAsset[]>([]); // the machine's own B-roll library (MCP add_broll_assets)
+  const [library, setLibrary] = useState<LibAsset[]>([]); // the machine's own B-roll library (add_broll_assets / the Assets panel), with tags
+  const [stockQuery, setStockQuery] = useState<string | undefined>(undefined);
   const [newCue, setNewCue] = useState<{asset: string; mode: BrollItem['mode']; sec: number}>({asset: '', mode: 'inset', sec: 3});
   // a clip selected anywhere (timeline, assets, preview) opens its tab
   useEffect(() => { if (selectedClipId) setTab('Clip'); }, [selectedClipId]);
   useEffect(() => {
     if (tab !== 'B-roll') return;
-    fetch(`/broll-assets/library.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).then((l) => setLibrary(Array.isArray(l) ? l : [])).catch(() => setLibrary([]));
+    fetch('/api/broll-library').then((r) => (r.ok ? r.json() : [])).then((l) => setLibrary(Array.isArray(l) ? l : [])).catch(() => setLibrary([]));
   }, [tab]);
   if (!meta) return null;
 
@@ -61,7 +63,7 @@ export const Inspector: React.FC<{
   const placedSel = selClip && placeClips(clips, meta.fps).find((p) => p.clip.id === selClip.id);
   const seekMs = (ms: number) => playerRef.current?.seekTo(Math.round((ms / 1000) * meta.fps));
   const packKind = PACKS[captionStyle]?.transition ?? 'whip';
-  const assets: BrollAsset[] = [...brollAssets, ...library.filter((a) => !brollAssets.some((b) => b.id === a.id))];
+  const assets: BrollAsset[] = [...brollAssets, ...library.filter((a) => !brollAssets.some((b) => b.id === a.id)).map((a) => ({id: a.id, src: a.src, kind: a.kind, label: a.label}))];
   const rampPieces = ramp.steps;
   const rampOk = selClip ? (selClip.outSec - selClip.inSec) / rampPieces >= 0.3 : false;
 
@@ -268,7 +270,7 @@ export const Inspector: React.FC<{
 
         {tab === 'B-roll' && (
           <div className="space-y-5">
-            <Section title="Add at playhead" hint={assets.length ? 'Your own footage first (Assets panel or the agent’s library); the agent adds stock and suggestions.' : 'Add your footage in the Assets panel, or ask the agent — it uses your footage first, stock as fallback.'}>
+            <Section title="Add at playhead" hint={assets.length ? 'Your own footage first (Assets panel or the library).' : 'Add your footage in the Assets panel; stock below is the fallback.'}>
               {assets.length > 0 && (
                 <>
                   <Select value={newCue.asset || assets[0].id} onChange={(asset) => setNewCue({...newCue, asset})} options={assets.map((a) => ({value: a.id, label: `${a.kind === 'video' ? '🎬' : '🖼'} ${a.label}`}))} />
@@ -280,6 +282,8 @@ export const Inspector: React.FC<{
                 </>
               )}
             </Section>
+            <BrollSuggestions library={library} mode={newCue.mode} notify={notify} onStockQuery={(q) => setStockQuery(q)} />
+            <StockSearch key={stockQuery ?? ''} initialQuery={stockQuery} notify={notify} />
 
             {!brolls.length ? (
               <p className="text-body-sm text-on-surface-variant/60">No B-roll yet.</p>

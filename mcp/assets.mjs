@@ -220,6 +220,18 @@ export const wrapPrompt = (kind, prompt) => ({
   ui: `${prompt}. Clean flat UI element mockup, isolated on a transparent background.`,
 }[kind] ?? prompt);
 
+// Free options first (the library, then the search sources); generate only when
+// nothing matches or force=true. Shared by generate_asset and /api/assets/generate.
+export async function findOrGenerate({prompt, kind = 'sticker', size, quality, force = false, apiKey, model}) {
+  if (!force) {
+    const searchKind = kind === 'texture' ? 'illustration' : 'sticker';
+    const found = [...librarySearch(prompt, {kind: undefined, limit: 4}), ...(await searchAssets({query: prompt, kind: searchKind, limit: 4}).catch(() => []))]
+      .filter((r, i, arr) => arr.findIndex((x) => x.src === r.src) === i).slice(0, 5);
+    if (found.length) return {found};
+  }
+  return {generated: await generateAsset({prompt, kind, size, quality, apiKey, model})};
+}
+
 export async function generateAsset({prompt, kind = 'sticker', size = '1024x1024', quality = 'medium', apiKey, model}) {
   if (!apiKey) throw new Error('OPENAI_API_KEY missing in .env — generate_asset needs it (search_asset works without keys)');
   const full = wrapPrompt(kind, prompt);
