@@ -927,11 +927,47 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
-server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
+server.registerTool('render', {description: 'Export the project to mp4 (1080x1920). draft = half resolution, fast, audio untouched. A final render is loudness-normalized (two-pass, −14 LUFS, true peak ≤ −1 dBTP) and must pass the QC gate (size, duration, audio, loudness); if it does not, the render fails with the reasons. A final that passes becomes the next review version of the project (a 720p proxy for share_version links). Returns the file path.', inputSchema: {project_id: pid, draft: z.boolean().default(false)}}, async ({project_id, draft}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const r = await runJob('/api/render', {...projectProps(p), draft});
+  const r = await runJob('/api/render', {...projectProps(p), draft, project_id});
   const file = path.join(PUBLIC, r.file.replace(/^\//, ''));
-  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}  (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)${r.qc ? `\nQC passed:\n${r.qc}` : ''}`);
+  const size = fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p.clips))}s)` : ` (${f1(totalSec(p.clips))}s)`; // REEL_API on another machine: the file lives there
+  const review = r.version ? `\nReview version v${r.version} recorded — share_version gives a link` : r.versionError ? `\nReview version NOT recorded: ${r.versionError}` : '';
+  return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}${size}${r.qc ? `\nQC passed:\n${r.qc}` : ''}${review}`);
+});
+
+// ---------- review links (scripts/reviews.mjs, through the backend like the editor's Share button) ----------
+const reviewsApi = async (route, opts) => {
+  await needBackend();
+  const r = await fetch(`${API}/api/reviews/${route}`, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `reviews ${route}: HTTP ${r.status}`);
+  return j;
+};
+const mbOf = (b) => `${(b / 1e6).toFixed(1)} MB`;
+server.registerTool('list_versions', {description: 'The review versions of a project (every final render that passed QC; drafts never count), newest first, and its review links (id, state live/expired/revoked, expiry). Tokens are not listed — they are shown once, by share_version.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  projFile(project_id);
+  const r = await reviewsApi(project_id);
+  if (!r.versions.length) return text(`No review versions yet for ${project_id} — a final render (not a draft) that passes QC records one.`);
+  const lines = r.versions.map((v) => `v${v.v}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${f1(v.durationSec)}s  full ${mbOf(v.sizeBytes)} · proxy ${mbOf(v.proxyBytes)}${v.playable ? '' : '  (proxy gone — not on the page)'}`);
+  const links = r.links.map((l) => `${l.id}  ${l.state}${l.state === 'live' ? ` until ${l.expiresAt.slice(0, 10)}` : l.revokedAt ? ` ${l.revokedAt.slice(0, 10)}` : ''}  (created ${l.createdAt.slice(0, 10)})`);
+  return text(`Versions of ${project_id}:\n${lines.join('\n')}\n\nLinks:\n${links.length ? links.join('\n') : 'none — share_version creates one'}`);
+});
+server.registerTool('share_version', {description: 'Create a private review link for the project: a mobile page that plays its latest final (720p, streams on a phone), lists the earlier finals and offers the full render as a download. The link expires (30 days max) and can be revoked with revoke_review_link. version = open the page at that version (default: the latest). The URL is shown once — give it to the user as is; set REEL_PUBLIC_URL on the backend for a public address.', inputSchema: {project_id: pid, version: z.number().int().min(1).optional(), days: z.number().int().min(1).max(30).optional().describe('days until it expires (default and max 30)')}}, async ({project_id, version, days}) => {
+  projFile(project_id);
+  if (version != null) {
+    const r = await reviewsApi(project_id);
+    const v = r.versions.find((x) => x.v === version);
+    if (!v?.playable) throw new Error(`no playable version v${version} (list_versions shows them)`);
+  }
+  const l = await reviewsApi(`${project_id}/links`, {method: 'POST', body: JSON.stringify({days})});
+  const url = version != null ? `${l.url}?v=${version}` : l.url;
+  return text(`Review link (${l.id}, expires ${l.expiresAt.slice(0, 10)}):\n${url}${/\/\/(127\.0\.0\.1|localhost)[:/]/.test(url) ? '\n(this is the local address — set REEL_PUBLIC_URL on the backend for the address clients can open)' : ''}`);
+});
+server.registerTool('revoke_review_link', {description: 'Revoke a review link of the project by its id (from list_versions / share_version): the page and its videos stop working at once.', inputSchema: {project_id: pid, link_id: z.string().regex(/^[0-9a-f]{8}$/)}}, async ({project_id, link_id}) => {
+  projFile(project_id);
+  const l = await reviewsApi(`${project_id}/links/${link_id}`, {method: 'DELETE'});
+  return text(`Link ${l.id} revoked (${l.revokedAt.slice(0, 16).replace('T', ' ')})`);
 });
 
 server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame size, duration against the project, audio present, loudness −14 ±1 LUFS and true peak ≤ −1 dBTP (blocking on final renders; drafts are not normalized, so there they are only reported), plus warnings for silent (≥ 2 s) or black (≥ 0.5 s) stretches. Final renders already run this gate.', inputSchema: {project_id: pid, file: z.string().describe('path returned by render')}}, async ({project_id, file}) => {

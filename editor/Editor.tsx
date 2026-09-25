@@ -11,6 +11,7 @@ import {AssetsSidebar} from './AssetsSidebar';
 import {TranscriptPanel} from './TranscriptPanel';
 import {Inspector} from './Inspector';
 import {pollJob} from './jobs';
+import {SharePanel} from './SharePanel';
 
 const fmt = (sec: number) => {
   const s = Math.max(0, sec);
@@ -38,7 +39,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string; version?: number; versionError?: string} | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genLabel, setGenLabel] = useState('');
   const [trimming, setTrimming] = useState(false);
@@ -177,14 +178,14 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
-      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft})}).then((x) => x.json());
+      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, project_id: projectId})}).then((x) => x.json());
       pollJob(
         '/api/render', r.jobId,
         (s) => setExp({status: 'running', progress: s.progress ?? 0, label: s.label}), // "Queued — n renders ahead" while it waits its turn
         async () => {
           const s = await fetch('/api/render/' + r.jobId).then((x) => x.json());
           setExp(s);
-          notify('Export ready', 'ok');
+          notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
         },
         (msg) => { setExp({status: 'error'}); notify('Export failed: ' + msg, 'error'); },
         2400, // renders can take a while — allow up to ~1h
@@ -451,6 +452,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
           {exp?.status === 'running' && <span className="text-body-sm text-on-surface-variant">{exp.label?.startsWith('Queued') ? exp.label : `Rendering… ${exp.progress ?? 0}%`}</span>}
           {exp?.status === 'done' && exp.file && <a href={exp.file} download className="text-body-sm text-[#39d98a]">↓ Download mp4</a>}
           {exp?.status === 'done' && exp.qc && <span title={exp.qc} className="text-body-sm text-on-surface-variant cursor-help">QC ✓</span>}
+          <SharePanel projectId={projectId} refreshKey={exp?.version} notify={notify} />
           {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
           <button
             onClick={() => exportVideo(true)}
