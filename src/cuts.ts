@@ -11,6 +11,8 @@
 // (up to JOIN_MS), so a take said with a pause in it competes whole against a rehearsal read in
 // one breath. Pure: no fs. Words carry source-relative ms and their index in the source transcript.
 
+import {longestSilenceMs, voiceSpans, type Loudness} from './speech.ts';
+
 export type TWord = {i: number; word: string; startMs: number; endMs: number; off?: boolean};
 export type TClip = {clipId: string; source: string; words: TWord[]};
 export type Candidate = {kind: 'filler' | 'meta' | 'retake' | 'off-mic'; clipId: string; from: string; to: string; text: string; keep?: {from: string; text: string}; note?: string};
@@ -155,21 +157,61 @@ export function findCutCandidates(clips: TClip[], opts: {gapMs?: number; windowM
 // inside the clip's own trim window. Words are the source's (source ms); only
 // those under the clip count — a piece of a take must never grow back into the
 // rest of the source.
-export const AUTOCUT = {gapMs: 600, leadPad: 0.1, trailPad: 0.3, innerPad: 0.08, minLen: 0.35};
-export function speechSegments(words: {startMs: number; endMs: number}[], clip: {inSec: number; outSec: number}, o = AUTOCUT): {inSec: number; outSec: number}[] {
+//
+// Words come from WhisperX, and WhisperX drops words it cannot align (a quiet
+// presenter, fillers, overlap): a transcript gap is not always silence. With
+// `loud` (the per-source loudness track, see speech.ts) a pause of up to
+// bridgeMaxMs whose silences are all shorter than gapMs (a voice fills the
+// hole) is NOT a cut point, and each run
+// grows to the edges of the voice span it lives in, so a swallowed "eh…" or a
+// clipped last word stays in the take. Gaps without energy keep the old
+// behavior: they are cut. With `dropOff`, off-mic words (a second voice away
+// from the mic) count as silence — and since they explain the energy in their
+// gap, that gap is never bridged back into the take.
+export const AUTOCUT = {gapMs: 600, leadPad: 0.1, trailPad: 0.3, innerPad: 0.08, minLen: 0.35, bridgeMaxMs: 1500};
+export function speechSegments(
+  words: {startMs: number; endMs: number; off?: boolean}[],
+  clip: {inSec: number; outSec: number},
+  o: typeof AUTOCUT & {loud?: Loudness; dropOff?: boolean} = AUTOCUT,
+): {inSec: number; outSec: number}[] {
   const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
-  const ws = words.filter((w) => w.endMs > inMs && w.startMs < outMs);
+  const all = words.filter((w) => w.endMs > inMs && w.startMs < outMs);
+  const off = o.dropOff ? all.filter((w) => w.off) : [];
+  const ws = o.dropOff ? all.filter((w) => !w.off) : all;
   if (!ws.length) return [];
+  const spans = o.loud ? voiceSpans(o.loud) : [];
+  const bridgeMax = o.bridgeMaxMs;
+  const offIn = (aMs: number, bMs: number) => off.some((w) => w.startMs < bMs && w.endMs > aMs);
+  // a pause worth keeping: short enough, no silence longer than gapMs inside it
+  // (the voice fills the hole), and not explained by an off-mic word we drop
+  const bridgeable = (aMs: number, bMs: number) => bMs - aMs <= bridgeMax && !offIn(aMs, bMs) && longestSilenceMs(spans, aMs, bMs) <= o.gapMs;
   const runs: [number, number][] = [];
   let start = ws[0].startMs;
   ws.forEach((w, k) => {
     const next = ws[k + 1];
-    if (!next || next.startMs - w.endMs > o.gapMs) { runs.push([start, w.endMs]); if (next) start = next.startMs; }
+    // a dropped off-mic word splits the take however short the gaps around it are
+    if (!next || offIn(w.endMs, next.startMs) || (next.startMs - w.endMs > o.gapMs && !bridgeable(w.endMs, next.startMs))) {
+      runs.push([start, w.endMs]);
+      if (next) start = next.startMs;
+    }
   });
-  return runs
+  // grow each run to the edges of the voice span it lives in (never more than
+  // bridgeMax past its words, never into an off-mic word we are dropping)
+  const grown = runs.map(([a, b]): [number, number] => {
+    const head = spans.find(([s, e]) => s * 1000 <= a && e * 1000 >= a);
+    const tail = spans.find(([s, e]) => s * 1000 <= b && e * 1000 >= b);
+    let lo = head && a - head[0] * 1000 <= bridgeMax ? head[0] * 1000 : a;
+    let hi = tail && tail[1] * 1000 - b <= bridgeMax ? tail[1] * 1000 : b;
+    for (const w of off) {
+      if (w.startMs < a && w.endMs > lo) lo = Math.min(a, Math.max(lo, w.endMs));
+      if (w.endMs > b && w.startMs < hi) hi = Math.max(b, Math.min(hi, w.startMs));
+    }
+    return [lo, hi];
+  });
+  return grown
     .map(([a, b], i) => ({
       inSec: Math.max(clip.inSec, a / 1000 - (i === 0 ? o.leadPad : o.innerPad)),
-      outSec: Math.min(clip.outSec, b / 1000 + (i === runs.length - 1 ? o.trailPad : o.innerPad)),
+      outSec: Math.min(clip.outSec, b / 1000 + (i === grown.length - 1 ? o.trailPad : o.innerPad)),
     }))
     .filter((s) => s.outSec - s.inSec >= o.minLen);
 }

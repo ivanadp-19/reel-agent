@@ -1,10 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {flagOffMic, loudnessFromPcm, runsOf} from '../src/speech.ts';
+import {paint, track} from './loud.mjs';
 
-// loudness track at 50 windows/s; paint(a, b, db) sets a span in seconds
-const track = (sec) => ({fps: 50, db: new Array(Math.round(sec * 50)).fill(-60)});
-const paint = (t, a, b, db) => { for (let i = Math.round(a * 50); i < Math.round(b * 50); i++) t.db[i] = db; };
 const W = (word, a, b) => ({word, startMs: a * 1000, endMs: b * 1000});
 
 test('a quieter take before the loud repeat is flagged off-mic', () => {
@@ -62,4 +60,39 @@ test('one speaker, or two at the same level: nothing is off-mic by speaker; a so
   assert.ok(flagOffMicBySpeaker(words, t).every((w) => !w.off));
   const mono = assignSpeakers(dialogue, [[0.9, 7.8, 'SPEAKER_00']]);
   assert.deepEqual(offMicSpeakers(mono, t), []);
+});
+
+
+import {longestSilenceMs, voiceSpans} from '../src/speech.ts';
+
+test('voiceSpans: speech above the noise floor, silence skipped, short dips bridged', () => {
+  const t = track(12); // 50 windows/s at -60
+  paint(t, 1, 3, -25); // phrase
+  paint(t, 5, 5.05, -20); // a 50 ms click: too short, dropped
+  paint(t, 7, 7.5, -24); paint(t, 7.6, 8.2, -23); // two words with a 100 ms dip: one span
+  const spans = voiceSpans(t);
+  assert.deepEqual(spans, [[1, 3], [7, 8.2]]);
+  assert.equal(longestSilenceMs(spans, 7000, 7400), 0); // inside a phrase
+  assert.equal(longestSilenceMs(spans, 3000, 6900), 3900); // nothing in it
+  assert.equal(longestSilenceMs(spans, 2000, 7200), 4000); // 3 → 7
+});
+
+test('voiceSpans: a voice still talking when the track ends is a span too', () => {
+  const t = track(4);
+  paint(t, 1, 4, -25);
+  assert.deepEqual(voiceSpans(t), [[1, 4]]);
+  paint(t, 3.9, 4, -60); // ends 100 ms before the track does: inside the dip
+  assert.deepEqual(voiceSpans(t), [[1, 3.9]]);
+});
+
+test('voiceSpans: a flat track has no voice (nothing stands out from the floor)', () => {
+  const t = track(4);
+  paint(t, 0, 4, -30);
+  assert.deepEqual(voiceSpans(t), []);
+});
+
+test('voiceSpans: quiet speech still counts when it clears the floor', () => {
+  const t = track(6);
+  paint(t, 2, 4, -44); // soft presenter, but the floor is -60
+  assert.deepEqual(voiceSpans(t), [[2, 4]]);
 });

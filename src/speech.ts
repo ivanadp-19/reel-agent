@@ -146,3 +146,50 @@ export function flagOffMicBySpeaker<T extends SpokenWord>(words: T[], loud: Loud
   if (!off.size) return words.some((w) => w.speaker) ? words : flagOffMic(words, loud, dropDb);
   return words.map((w) => (w.speaker && off.has(w.speaker) ? {...w, off: true} : w));
 }
+
+
+// Voice activity from the loudness track: the spans where the energy sits
+// clearly above the clip's own noise floor. WhisperX drops words (a quiet
+// presenter, fillers it does not align, overlap); the energy is still there,
+// so autocut can tell "a pause where the person is still talking" from real
+// silence instead of cutting through speech. Adaptive per source: the floor is
+// a low percentile of the track itself, the threshold rides VOICE_DB over it
+// (never below -45 dBFS). Dips up to dipMs are bridged (word gaps), blips
+// under blipMs dropped (clicks, bumps). No ML, no fs — works on any clip.
+export const VOICE_DB = 10; // how far above the noise floor a window must sit to count as voice
+const VOICE_DIP_MS = 150; // word gaps inside a phrase: shorter dips do not end a span
+const VOICE_BLIP_MS = 100; // an isolated bump shorter than this is not speech
+
+export function voiceSpans(loud: Loudness, opts: {voiceDb?: number; dipMs?: number; blipMs?: number} = {}): [startSec: number, endSec: number][] {
+  if (!loud?.db?.length) return [];
+  const {fps, db} = loud;
+  const voiceDb = opts.voiceDb ?? VOICE_DB;
+  const sorted = [...db].sort((a, b) => a - b);
+  const floor = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.15))];
+  const peak = sorted[Math.floor(sorted.length * 0.99)];
+  if (!Number.isFinite(floor) || peak - floor < voiceDb) return []; // one flat level: no voice stands out
+  const thresh = Math.max(floor + voiceDb, -45);
+  const dip = Math.max(1, Math.round(((opts.dipMs ?? VOICE_DIP_MS) / 1000) * fps));
+  const blipMs = opts.blipMs ?? VOICE_BLIP_MS;
+  const spans: [number, number][] = [];
+  let open = -1, lastOn = -1;
+  for (let i = 0; i <= db.length; i++) {
+    const on = i < db.length && db[i] >= thresh;
+    if (on) { if (open < 0) open = i; lastOn = i; }
+    else if (open >= 0 && (i === db.length || i - lastOn > dip)) { spans.push([open / fps, (lastOn + 1) / fps]); open = -1; }
+  }
+  return spans.filter(([a, b]) => (b - a) * 1000 >= blipMs);
+}
+
+// the longest stretch without voice inside the (aMs, bMs) gap: 0 when a span
+// covers it all, bMs - aMs when nothing in it is voice
+export function longestSilenceMs(spans: [number, number][], aMs: number, bMs: number): number {
+  let cur = aMs, worst = 0;
+  for (const [s, e] of spans) {
+    const s1 = s * 1000, e1 = e * 1000;
+    if (e1 <= aMs || s1 >= bMs) continue;
+    worst = Math.max(worst, s1 - cur);
+    cur = Math.max(cur, e1);
+  }
+  return Math.max(worst, bMs - cur);
+}
