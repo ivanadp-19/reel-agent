@@ -76,6 +76,7 @@ const json = (res, code, obj) => {
   res.end(JSON.stringify(obj));
 };
 
+const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
   '/api/captions': {route: '/api/captions', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
   '/api/trim-silence': {route: '/api/trim-silence', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
@@ -270,12 +271,19 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/music/search') {
     const q = url.searchParams.get('q') || '';
     if (q.trim().length < 2) return json(res, 400, {error: 'q required'});
-    try { return json(res, 200, await searchMusic(q, {limit: Math.min(10, +(url.searchParams.get('limit') || 6)), minSec: +(url.searchParams.get('min_sec') || 20)})); } catch (e) { return fail(e); }
+    try {
+      const rows = await searchMusic(q, {limit: Math.min(10, +(url.searchParams.get('limit') || 6)), minSec: +(url.searchParams.get('min_sec') || 20)});
+      for (const r of rows) musicRows.set(r.id, r); // what pick may download: only what Openverse returned
+      if (musicRows.size > 200) for (const k of [...musicRows.keys()].slice(0, musicRows.size - 200)) musicRows.delete(k);
+      return json(res, 200, rows);
+    } catch (e) { return fail(e); }
   }
   if (req.method === 'GET' && url.pathname === '/api/music/library') return json(res, 200, loadMusicLibrary());
   if (req.method === 'POST' && url.pathname === '/api/music/pick') {
-    let row; try { row = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
-    if (!row?.id || !/^https:\/\//.test(row.url ?? '')) return json(res, 400, {error: 'a search_music row is required'});
+    // the client names a track by id; the URL comes from the server's own search results or the library, never from the request
+    let b; try { b = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+    const row = musicRows.get(String(b?.id ?? '')) ?? loadMusicLibrary().find((r) => r.id === b?.id);
+    if (!row) return json(res, 404, {error: 'unknown track — search first'});
     try { const e = await downloadMusic(row); return json(res, 200, {src: e.src, credit: e.credit ?? creditOf(e)}); } catch (e) { return fail(e); }
   }
   if (req.method === 'GET' && url.pathname === '/api/assets') {

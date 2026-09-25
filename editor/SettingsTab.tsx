@@ -39,7 +39,7 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
   const pickMusic = async (row: MusicRow) => {
     setMbusy('Downloading…');
     try {
-      const r = await fetch('/api/music/pick', {method: 'POST', body: JSON.stringify(row)});
+      const r = await fetch('/api/music/pick', {method: 'POST', body: JSON.stringify({id: row.id})});
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'download failed');
       setMusic({src: d.src, volume: 0.25, startSec: 0, fadeOutSec: 1.5, duck: true, duckLevel: 0.25, credit: d.credit});
