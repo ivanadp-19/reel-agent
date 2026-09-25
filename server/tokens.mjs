@@ -3,7 +3,8 @@
 // <root>/.reel-tokens.json, mode 0600). The secret exists once — in the answer to
 // its creation — and the CLI reads it from the user's own ~/.config/reel/token.
 // Created / listed / revoked through /api/tokens by an admin: the backend token
-// (REEL_BACKEND_TOKEN / .backend-token) or a user token made with admin.
+// (REEL_BACKEND_TOKEN / .backend-token) or a user token made with admin; a user signed
+// in to the editor makes and revokes their own at /cli-token (server/cli-tokens.mjs).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -38,11 +39,12 @@ export function createTokenStore(file) {
       write([...read(), rec]);
       return {...pub(rec), token};
     },
-    // by token id, or every live token of a user
-    revoke(idOrUser, now = new Date()) {
+    // by token id, or every live token of a user (idOnly: the id alone — an id that
+    // happens to be a user's name never takes that user's tokens with it)
+    revoke(idOrUser, now = new Date(), {idOnly = false} = {}) {
       const gone = [];
       const tokens = read().map((t) => {
-        if (t.revokedAt || (t.id !== idOrUser && t.user !== idOrUser)) return t;
+        if (t.revokedAt || (t.id !== idOrUser && (idOnly || t.user !== idOrUser))) return t;
         gone.push(t.id);
         return {...t, revokedAt: now.toISOString()};
       });
