@@ -312,19 +312,19 @@ const tw = (arr) => arr.map((w, i) => ({wid: `a:${i}`, word: w, startMs: i * 400
 const pagesText = (ps) => ps.map((p) => p.words.map((w) => w.text).join(' '));
 
 test('split-name recipe end to end: the judge flags "Playa | del Carmen", its annotation reaches the pager, re-paging joins the name', () => {
-  const words = tw(['Vivir', 'junto', 'al', 'mar', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']);
+  const words = tw(['Vivir', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']);
   const before = pageWords(words, presetOf('vibem'));
-  assert.deepEqual(pagesText(before), ['Vivir junto al mar en Playa', 'del Carmen es fácil']);
+  assert.deepEqual(pagesText(before), ['Vivir en Playa', 'del Carmen es fácil']);
   const pages = before.map((c) => ({...c, clipId: 'a'}));
   const [f] = splitNameFindings(pages, [], 'vibem');
   assert.equal(f.kind, 'candidate');
   assert.deepEqual(f.fix.map((x) => x.tool), ['annotate_captions', 'set_caption_style']);
-  assert.deepEqual(f.fix[0].args.items.map((x) => x.wid), ['a:5', 'a:6', 'a:7']); // the whole name, connector included
+  assert.deepEqual(f.fix[0].args.items.map((x) => x.wid), ['a:2', 'a:3', 'a:4']); // the whole name, connector included
   // apply the recipe: annotate (project tiers) → set_caption_style passes them to the pager
   const tiers = Object.fromEntries(f.fix[0].args.items.map((x) => [x.wid, x.tier]));
   const annotated = pages.map((c) => ({...c, words: c.words.map((w) => (tiers[w.wid] ? {...w, tier: tiers[w.wid]} : w))}));
-  const after = pageWords(withTiers(tw(['Vivir', 'junto', 'al', 'mar', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']), projectTiers(annotated)), presetOf('vibem'));
-  assert.deepEqual(pagesText(after), ['Vivir junto al mar en Playa del Carmen', 'es fácil']);
+  const after = pageWords(withTiers(words, projectTiers(annotated)), presetOf('vibem'));
+  assert.deepEqual(pagesText(after), ['Vivir en Playa del Carmen', 'es fácil']);
   assert.deepEqual(splitNameFindings(after.map((c) => ({...c, clipId: 'a'})), [], 'vibem'), []); // fixed: no longer repeats until "stuck"
 });
 
@@ -341,7 +341,7 @@ test('"no." ends a sentence; "No. 5" does not; a one-word page never rejoins acr
   assert.equal(endsSentence('No.', '5'), false);
   assert.equal(endsSentence('Sr.', 'Pérez'), false);
   assert.deepEqual(pagesText(pageWords(tw(['Te', 'dije', 'que', 'no.', 'Vamos', 'ya.']), presetOf('vibem'))), ['Te dije que no', 'Vamos ya']);
-  assert.deepEqual(pagesText(pageWords(tw(['Es', 'el', 'No.', '5', 'de', 'la', 'calle.']), presetOf('vibem'))), ['Es el No 5', 'de la calle']);
+  assert.deepEqual(pagesText(pageWords(tw(['Es', 'el', 'No.', '5', 'de', 'la', 'calle.']), presetOf('vibem'))), ['Es el No 5 de la calle']);
   assert.deepEqual(pagesText(pageWords(tw(['¿Vienes?', 'Sí.']), presetOf('vibem'))), ['Vienes?', 'Sí']);
 });
 
