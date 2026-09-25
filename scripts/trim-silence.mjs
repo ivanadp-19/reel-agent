@@ -2,7 +2,7 @@
 // Splits a clip into speech segments at gaps > GAP_THRESH and drops the gaps.
 //
 // Input : JSON (argv[2]) = {clips:[{id,src,inSec,outSec,sourceDurationSec,...}]}
-// Output: public/trim-silence.json = {plan:[{id, segments:[{inSec,outSec}]}]}
+// Output: argv[3] (public/trim-silence.json by hand) = {plan:[{id, segments:[{inSec,outSec}]}]}
 // Uses the shared (cached) per-clip transcripts.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -47,6 +47,6 @@ for (const [i, clip] of clips.entries()) {
   plan.push({id: clip.id, segments});
 }
 
-fs.writeFileSync(path.join(PUBLIC, 'trim-silence.json'), JSON.stringify({plan}, null, 2));
+fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'trim-silence.json'), JSON.stringify({plan}, null, 2)); // argv[3]: the backend's file for this job
 const cuts = plan.reduce((n, p) => n + p.segments.length, 0);
 progress(100, `Done — ${plan.length} clip(s), ${cuts} segment(s)`);

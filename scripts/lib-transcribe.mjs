@@ -337,7 +337,5 @@ export async function assembleWords(clips, onProgress, lang = 'auto', offMic = '
     });
     offsetMs += (clip.outSec - clip.inSec) * 1000;
   }
-  // persist for reuse (e.g. B-roll detection without re-running)
-  fs.writeFileSync(path.join(PUBLIC, 'words.multi.json'), JSON.stringify(out, null, 2));
   return out;
 }

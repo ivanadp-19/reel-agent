@@ -5,7 +5,7 @@ import {spansWithoutMatte} from '../src/graphicTemplates';
 import {validateProject, transcriptIssues, type Issue} from '../src/validate';
 import type {TClip} from '../src/cuts';
 import type {Matte} from '../src/Person';
-import {runJob, readPublic} from './jobs';
+import {jobResult} from './jobs';
 import {Btn, Label, Row, Section, Select, TextInput, Toggle} from './ui';
 
 type MusicRow = {id: string; title: string; creator: string; license: string; durationSec: number; url: string; page?: string; source?: string};
@@ -60,14 +60,14 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
   const validate = async () => {
     // face boxes the captions job wrote, per source; the last transcript run for the off-mic / cut-word checks
     const faces = Object.fromEntries(await Promise.all(clips.map(async (c) => [c.src, await fetch(`/clips/faces/${sourceOf(c.src)}.json`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined)])));
-    const tr = await fetch(`/transcript.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
+    // this project's last transcript run (scripts/transcribe.mjs keeps one per project), never another project's
+    const tr = await fetch(`/projects/transcripts/${projectId}.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
     setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle, captionsOff}, meta.fps, faces), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
   };
   const prepareMattes = async () => {
     setBusy('Starting…');
     try {
-      await runJob('/api/matte', {spans: needMatte}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const done = await readPublic<Matte[]>('mattes.json');
+      const done = await jobResult<Matte[]>('/api/matte', {spans: needMatte}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       addMattes(Array.isArray(done) ? done : []);
       notify(`Matted ${done.length} span(s)`, 'ok');
     } catch (e) { notify('Mattes failed: ' + (e as Error).message, 'error'); }
