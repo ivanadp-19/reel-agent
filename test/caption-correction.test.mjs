@@ -151,3 +151,25 @@ test('ids stay put: adding a page never renames the others', async () => {
   });
 });
 
+// The editor polls the project while the agent saves: a save written in place was read half-way
+// (89 of ~7000 reads failed). Backend down, so the MCP server writes the file itself; this process
+// reads it in a loop meanwhile. A big project makes an in-place write take long enough to be seen.
+test('a project read while the agent saves it is never half a file', async () => {
+  const big = {...reel(), notes: 'x'.repeat(4e6)};
+  await withProject(async (call, read) => {
+    let reads = 0, torn = 0, saving = true;
+    const saves = (async () => {
+      for (let n = 0; n < 12; n++) assert.ok(!(await call('edit_caption', {caption_id: 'c4', text: `Llámame ${n % 2 ? 'hoy' : 'ya'}`})).err);
+      saving = false;
+    })();
+    while (saving) {
+      try { read(); reads++; } catch { torn++; }
+      await new Promise((r) => setImmediate(r));
+    }
+    await saves;
+    assert.equal(torn, 0, `${torn} of ${reads + torn} reads got half a project`);
+    assert.ok(reads > 0);
+    assert.equal(textOf(read().captions[4]), 'Llámame hoy');
+    assert.equal(read().notes.length, 4e6);
+  }, big);
+});

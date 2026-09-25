@@ -12,22 +12,22 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const TMP = path.join(ROOT, '.captions-tmp');
 // one bundle per MCP process, in its own dir with public/ as symlinks; removed on exit
 const WORK = path.join(TMP, `proof-bundle-${process.pid}`);
-// the promise, not its result: proofs asked in parallel (caption_proof + motion_proof in one turn)
-// share one bundle instead of writing two into one folder (EEXIST); a failed bundle is retried
-let bundled = null;
-function getBundle() {
-  bundled ??= (async () => {
-    sweepDead(TMP, 'proof-bundle-');
-    ensureSfx(); // the composition references public/sfx/*.wav
-    const links = linkPublic(path.join(ROOT, 'public'), path.join(WORK, 'public-links'));
-    const b = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
-    const clean = () => fs.rmSync(WORK, {recursive: true, force: true});
-    process.once('exit', clean);
-    for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { clean(); process.exit(0); });
-    return b;
-  })().catch((e) => { bundled = null; throw e; });
-  return bundled;
+// The promise, not its result: proofs asked in parallel (caption_proof + motion_proof in one turn)
+// share one bundle instead of writing two into one folder (EEXIST); a failed one is made again next call
+export function sharedOnce(make) {
+  let p = null;
+  return () => (p ??= make().catch((e) => { p = null; throw e; }));
 }
+const getBundle = sharedOnce(async () => {
+  sweepDead(TMP, 'proof-bundle-');
+  ensureSfx(); // the composition references public/sfx/*.wav
+  const links = linkPublic(path.join(ROOT, 'public'), path.join(WORK, 'public-links'));
+  const b = await bundle({entryPoint: path.join(ROOT, 'src', 'index.ts'), publicDir: links, outDir: path.join(WORK, 'bundle'), onSymlinkDetected: () => {}});
+  const clean = () => fs.rmSync(WORK, {recursive: true, force: true});
+  process.once('exit', clean);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { clean(); process.exit(0); });
+  return b;
+});
 
 // times in seconds → one JPEG contact sheet (path) + the stills
 export async function renderProof(props, times, outDir, scale = 0.35) {

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {tileFilter} from '../mcp/proof.mjs';
+import {sharedOnce, tileFilter} from '../mcp/proof.mjs';
 
 // César read the black padding of a proof as letterboxing of the video: every still is labeled
 test('proof tiles carry a STILL label strip and empty slots are gray, not black', () => {
@@ -22,4 +22,26 @@ test('the labeled filter runs in ffmpeg', {skip: spawnSync('ffmpeg', ['-version'
   // an ffmpeg without drawtext falls back to plain tiles in renderProof; here only report
   if (r.status !== 0 && /drawtext/.test(String(r.stderr))) return;
   assert.equal(r.status, 0, String(r.stderr));
+});
+
+// caption_proof + motion_proof in one turn: both asked for the bundle before the first one was
+// written, and the second bundler wrote into the same folder (EEXIST)
+test('proofs asked in parallel share one bundle; a failed bundle is made again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-bundle-'));
+  let made = 0, fail = true;
+  const get = sharedOnce(async () => {
+    made++;
+    await new Promise((r) => setTimeout(r, 20));
+    if (fail) { fail = false; throw new Error('bundler crashed'); }
+    fs.mkdirSync(path.join(dir, 'bundle')); // not recursive: a second writer is EEXIST, like the real bundle
+    return path.join(dir, 'bundle');
+  });
+  const first = await Promise.allSettled([get(), get()]);
+  assert.deepEqual(first.map((r) => r.status), ['rejected', 'rejected'], 'both callers see the one failure');
+  assert.equal(made, 1);
+  const [a, b] = await Promise.all([get(), get()]); // caption_proof + motion_proof
+  assert.equal(a, b);
+  assert.equal(made, 2, 'one bundle for both, made again after the failure');
+  assert.equal(await get(), a, 'later proofs reuse it');
+  fs.rmSync(dir, {recursive: true, force: true});
 });
