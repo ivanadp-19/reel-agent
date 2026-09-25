@@ -45,10 +45,10 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
   const {maxWords, maxCharsLine, unbreakable} = preset.layout;
   // César 10:35: a highlight span or a proper name + number ('Montealbán 326') is ONE unit —
   // never let a page boundary fall inside it (3 lines or a smaller size instead)
-  const bonded = (a: {text: string; tier?: number}, b?: TimelineWord) => {
+  const bonded = (a: {text: string; tier?: number}, b?: {text?: string; tier?: number; word?: string}) => {
     if (!unbreakable || !b) return false;
     if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) return true;
-    const bn = b.word.replace(/^[.,;:¿¡]+/, '');
+    const bn = (b.word ?? b.text ?? '').replace(/^[.,;:¿¡]+/, '');
     return /^[A-ZÁÉÍÓÚÑ]/.test(a.text) && (/^[A-ZÁÉÍÓÚÑ]/.test(bn) || /^\d/.test(bn));
   };
   const pages: {src: string; words: CaptionWord[]; start: number; end: number}[] = [];
@@ -86,7 +86,13 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       // they open the next page ("They all lied to us / about this one thing")
       let k = cur.length;
       while (k > 0 && isGlue(cur[k - 1].text)) k--;
-      if (k > 0) { const carry = cur.slice(k); cur = cur.slice(0, k); flush(); cur = carry; }
+      // ...but never carry-split inside a bonded unit: a highlight span like
+      // "salón para sesenta" has glue in the middle and must stay one page
+      while (k > 0 && k < cur.length && bonded(cur[k - 1], cur[k])) k++;
+      if (k === cur.length) {
+        // the whole page is one bonded unit: let it grow past maxWords (3 lines
+        // or a smaller size beat splitting it)
+      } else if (k > 0) { const carry = cur.slice(k); cur = cur.slice(0, k); flush(); cur = carry; }
       else if (cur.length >= maxWords + 2) flush();
     }
   });
