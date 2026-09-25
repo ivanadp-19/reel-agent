@@ -108,6 +108,7 @@ function toAbs(p, clipId, srcMs, clamp = false) {
   return (pc.startMs + (srcMs - inMs) / (pc.clip.speed ?? 1)) / 1000;
 }
 const f1 = (n) => (Math.round(n * 10) / 10).toFixed(1);
+const f2 = (n) => (Math.round(n * 100) / 100).toFixed(2).replace(/\.?0+$/, '');
 const capText = (c) => c.words.map((w) => (w.tier === 2 ? `**${w.text}**` : w.tier ? `*${w.text}*` : w.text) + (w.emoji ?? '')).join(' ');
 // exactly one emoji (flags, skin tones and ZWJ sequences count as one)
 const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).segment(s)].length === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(s);
@@ -119,7 +120,7 @@ function summary(id, p) {
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
     const c = pc.clip;
-    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -312,6 +313,17 @@ server.registerTool('set_clip', {description: 'Per-clip playback: speed (0.25–
   const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
   if (speed != null) c.speed = speed; if (volume != null) c.volume = volume; if (muted != null) c.muted = muted;
   await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}`);
+});
+
+server.registerTool('set_audio_cut', {description: 'J-cuts and L-cuts (per clip, seconds of TIMELINE time; 0 clears). j_sec = J-cut: this clip\'s audio starts that early, under the previous clip\'s tail — you hear the next take before you see it (its first j seconds of audio lead; they are muted in place so the sound flows straight through the cut). l_sec = L-cut: this clip\'s audio keeps playing after its video ends, under the next clip — the voice walks the viewer into the next shot. Classic use: 0.5–1.5 s on a change of take/place; j on the clip you enter, l on the one you leave. A J-cut is clamped to the clip\'s own length and the previous clip\'s, an L-cut to the audio left in the source after out_sec and the next clip\'s length. Muted clips stay silent. Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, clip_id: z.string(), j_sec: z.number().min(0).max(4).optional(), l_sec: z.number().min(0).max(4).optional()}}, async ({project_id, clip_id, j_sec, l_sec}) => {
+  const p = load(project_id); const i = p.clips.findIndex((x) => x.id === clip_id); if (i < 0) throw new Error(`no clip ${clip_id}`);
+  const c = p.clips[i];
+  if (j_sec != null) c.jSec = j_sec > 0 ? j_sec : undefined;
+  if (l_sec != null) c.lSec = l_sec > 0 ? l_sec : undefined;
+  await save(project_id, p);
+  const pc = place(p.clips)[i]; // the same frames the render uses
+  const j = pc.jFrames / FPS, l = pc.lFrames / FPS;
+  return text(`${clip_id}: J-cut ${f2(j)}s${j < (c.jSec ?? 0) ? ' (clamped)' : ''}, L-cut ${f2(l)}s${l < (c.lSec ?? 0) ? ' (clamped)' : ''}`);
 });
 
 server.registerTool('delete_clips', {description: 'Remove clips from the timeline (their captions/B-roll go with them).', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {
