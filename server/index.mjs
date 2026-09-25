@@ -21,6 +21,8 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
+import {ALPHA, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey} from '../scripts/layers.mjs';
+import {chooseRenderMode} from '../src/layers.ts';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -197,6 +199,12 @@ async function localizeRemoteBrolls(props) {
 // ---- render queue (scripts/render-queue.mjs): `workers` exports at once, the rest wait ----
 const PLAN = renderPlan();
 console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concurrency}`);
+const FPS = 30;
+// layered renders (scripts/layers.mjs): masters cached outside public/ (never bundled, never committed)
+const masterCache = createMasterCache(path.join(ROOT, '.render-cache', 'masters'));
+const CAPTION_ALPHA = process.env.REEL_CAPTION_ALPHA in ALPHA ? process.env.REEL_CAPTION_ALPHA : 'vp9';
+// the mode a render runs in when the request names none (full = the one-pass render)
+const DEFAULT_MODE = process.env.REEL_RENDER_MODE === 'layers' ? 'layers' : 'full';
 // one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
 // LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
 // baked here, before the render, so no clip silently plays ungraded
@@ -219,62 +227,108 @@ function renderJob(job, id) {
   renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
   return bakeMissing(job.raw, id).then((raw) => renderProps({...job, raw}, id), (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
 }
-function renderProps({raw, draft, expectSec, clean}, id) {
-  return new Promise((settle) => {
-    const propsFile = path.join(ROOT, `.props-${id}.json`);
-    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
-    const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
-    const outFile = path.join(EXPORTS, outName);
-    fs.writeFileSync(propsFile, raw);
-    renders[id] = {status: 'running', progress: 0};
-    const t0 = Date.now();
-    // Draft: half resolution + ultrafast — for quick checks
-    const child = spawn('npx', renderArgs({outFile, propsFile, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes}), {cwd: ROOT});
+// one `remotion render`: progress into renders[id] (scaled into [from, to] %), resolves {code, errTail}
+function remotion(args, id, {from = 0, to = 100} = {}) {
+  return new Promise((resolve) => {
+    const child = spawn('npx', args, {cwd: ROOT});
     let errTail = ''; // keep the tail of output so failures show a real message
     const onProgress = (d) => {
       const s = String(d);
       const m = s.match(/Rendered\s+(\d+)\/(\d+)/);
-      if (m) renders[id].progress = Math.round((+m[1] / +m[2]) * 100);
+      if (m) renders[id].progress = Math.round(from + ((to - from) * +m[1]) / +m[2]);
       errTail = (errTail + s).slice(-2000);
     };
     child.stdout.on('data', onProgress);
     child.stderr.on('data', onProgress);
-    child.on('close', (code) => {
-      fs.rmSync(propsFile, {force: true});
-      fs.rmSync(links, {recursive: true, force: true});
-      const secs = Math.round((Date.now() - t0) / 1000);
-      if (code === 0) console.log(`render ${id} ${draft ? 'draft ' : ''}took ${secs}s for ${expectSec?.toFixed(1)}s of video`);
-      if (code === 0 && draft) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, renderSec: secs}; settle(); }
-      else if (code === 0) {
-        // final: two-pass loudness to −14 LUFS, then the QC gate, in a child
-        // process (a few seconds of ffmpeg must not block this event loop). A render
-        // that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
-        renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC'};
-        const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
-        let out = '';
-        fin.stdout.on('data', (d) => (out += d));
-        fin.stderr.on('data', (d) => process.stderr.write(d));
-        fin.on('close', () => {
-          let r;
-          try { r = JSON.parse(out.trim().split('\n').pop()); } catch { r = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
-          if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs};
-          else {
-            const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-            try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
-            renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text};
-          }
-          settle();
-        });
-      } else {
-        const line = errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200);
-        console.error(`render ${id} failed:\n${errTail.slice(-1200)}`);
-        renders[id] = {status: 'error', error: line || `render exited ${code}`};
-        settle();
-      }
-    });
-    child.on('error', (e) => { renders[id] = {status: 'error', error: `render could not start: ${e.message}`}; settle(); });
+    child.on('close', (code) => resolve({code, errTail}));
+    child.on('error', (e) => resolve({code: -1, errTail: `render could not start: ${e.message}`}));
   });
+}
+const renderError = ({code, errTail}) => {
+  console.error(`render failed:\n${errTail.slice(-1200)}`);
+  return errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200) || `render exited ${code}`;
+};
+// final: two-pass loudness to −14 LUFS, then the QC gate, in a child process (a few
+// seconds of ffmpeg must not block this event loop) → the scripts/qc.mjs report
+function finalize(outFile, expectSec, clean) {
+  return new Promise((resolve) => {
+    const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
+    let out = '';
+    fin.stdout.on('data', (d) => (out += d));
+    fin.stderr.on('data', (d) => process.stderr.write(d));
+    fin.on('close', () => {
+      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve({ok: false, error: 'QC did not report', checks: [], text: ''}); }
+    });
+  });
+}
+
+// Two modes (src/layers.ts picks, scripts/layers.mjs builds):
+//   full   — the whole reel in one remotion pass (captions included)
+//   layers — the master without captions (cached by its inputs, scripts/layers.mjs),
+//            a transparent caption layer, an ffmpeg composite
+// then, final renders only, loudness + QC on the file that ships.
+async function renderProps({raw, draft, expectSec, clean, mode: requested}, id) {
+  const props = JSON.parse(raw);
+  const choice = chooseRenderMode(requested, props, FPS);
+  const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
+  const outFile = path.join(EXPORTS, outName);
+  // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+  const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
+  const tmp = [];
+  const propsFile = (name, p) => { const f = path.join(ROOT, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
+  const opts = {propsFile: null, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes};
+  const info = {mode: choice.mode, ...(choice.reasons.length ? {fallback: choice.reasons} : {})};
+  const stages = {};
+  const t0 = Date.now();
+  const stage = async (name, fn) => { const t = Date.now(); const r = await fn(); stages[name] = +((Date.now() - t) / 1000).toFixed(1); return r; };
+  if (choice.reasons.length) console.log(`render ${id}: layers → full (${choice.reasons.join('; ')})`);
+  try {
+    if (choice.mode === 'full') {
+      renders[id] = {status: 'running', progress: 0, ...info};
+      const r = await stage('render', () => remotion(renderArgs({...opts, outFile, propsFile: propsFile('', props)}), id));
+      if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
+    } else {
+      const key = masterKey(props, {code: codeVersion(ROOT), fps: FPS, draft, publicDir: PUBLIC});
+      let master = masterCache.get(key);
+      info.master = master ? 'cached' : 'rendered';
+      const split = choice.captions ? 70 : 100; // progress: the master is most of the work
+      if (!master) {
+        renders[id] = {status: 'running', progress: 0, label: 'Rendering master', ...info};
+        const part = path.join(masterCache.dir, `${key}.part-${id}.mp4`);
+        tmp.push(part);
+        const r = await stage('master', () => remotion(masterArgs({...opts, outFile: part, propsFile: propsFile('-master', {...props, captionsOff: true})}), id, {to: split}));
+        if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
+        master = masterCache.put(key, part);
+      }
+      if (choice.captions) {
+        renders[id] = {status: 'running', progress: split, label: 'Rendering captions layer', ...info};
+        const layerFile = path.join(ROOT, '.captions-tmp', `captions-${id}.${ALPHA[CAPTION_ALPHA].ext}`);
+        tmp.push(layerFile);
+        const r = await stage('captions', () => remotion(captionArgs({...opts, outFile: layerFile, propsFile: propsFile('-captions', {...props, layer: 'captions'}), alpha: CAPTION_ALPHA}), id, {from: split, to: 95}));
+        if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
+        renders[id] = {status: 'running', progress: 95, label: 'Compositing', ...info};
+        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layerFile, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft})));
+        if (c.code !== 0) { renders[id] = {status: 'error', error: `composite failed: ${c.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
+      } else fs.copyFileSync(master, outFile); // nothing to lay over it: the master is the reel
+    }
+    const secs = Math.round((Date.now() - t0) / 1000);
+    console.log(`render ${id} ${draft ? 'draft ' : ''}[${info.mode}${info.master ? `, master ${info.master}` : ''}] took ${secs}s for ${expectSec?.toFixed(1)}s of video ${JSON.stringify(stages)}`);
+    if (draft) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, renderSec: secs, stages, ...info}; return; }
+    // A render that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
+    renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC', ...info};
+    const r = await stage('qc', () => finalize(outFile, expectSec, clean));
+    if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, stages, ...info};
+    else {
+      const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
+      try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
+      renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text, stages, ...info};
+    }
+  } catch (e) {
+    renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300), ...info};
+  } finally {
+    for (const f of tmp) fs.rmSync(f, {force: true});
+    fs.rmSync(links, {recursive: true, force: true});
+  }
 }
 const renderQueue = createQueue(PLAN.workers, renderJob);
 
@@ -760,10 +814,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?}
     let draft = false;
-    let expectSec, clean = 'off';
+    let expectSec, clean = 'off', mode = DEFAULT_MODE;
     try {
       const props = JSON.parse(raw);
       draft = !!props.draft;
+      if (props.mode === 'full' || props.mode === 'layers') mode = props.mode;
       clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
       // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
@@ -777,7 +832,7 @@ const server = createServer(async (req, res) => {
     const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
     // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
     renders[id] = {status: 'running', progress: 0, queued: true};
-    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean});
+    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, mode});
     if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
   }

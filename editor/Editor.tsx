@@ -4,6 +4,7 @@ import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
 import {reapplyTiers} from '../src/paging';
+import {chooseRenderMode, type RenderMode} from '../src/layers';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
@@ -38,7 +39,9 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string; label?: string; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]} | null>(null);
+  // full = one pass; layers = cached master + caption layer + composite (scripts/layers.mjs); remembered per browser
+  const [renderMode, setRenderMode] = useState<RenderMode>(() => { try { return localStorage.getItem('reel.renderMode') === 'layers' ? 'layers' : 'full'; } catch { return 'full'; } });
   const [generating, setGenerating] = useState(false);
   const [genLabel, setGenLabel] = useState('');
   const [trimming, setTrimming] = useState(false);
@@ -174,10 +177,12 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     );
   });
 
+  // the backend decides with the same function; here it only tells the user ahead of time
+  const layersBlocked = useMemo(() => chooseRenderMode('layers', {clips, captions, graphics, captionStyle, captionsOff}, 30).reasons, [clips, captions, graphics, captionStyle, captionsOff]);
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {
-      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft})}).then((x) => x.json());
+      const r = await fetch('/api/render', {method: 'POST', body: JSON.stringify({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, draft, mode: renderMode})}).then((x) => x.json());
       pollJob(
         '/api/render', r.jobId,
         (s) => setExp({status: 'running', progress: s.progress ?? 0, label: s.label}), // "Queued — n renders ahead" while it waits its turn
@@ -451,7 +456,21 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
           {exp?.status === 'running' && <span className="text-body-sm text-on-surface-variant">{exp.label?.startsWith('Queued') ? exp.label : `Rendering… ${exp.progress ?? 0}%`}</span>}
           {exp?.status === 'done' && exp.file && <a href={exp.file} download className="text-body-sm text-[#39d98a]">↓ Download mp4</a>}
           {exp?.status === 'done' && exp.qc && <span title={exp.qc} className="text-body-sm text-on-surface-variant cursor-help">QC ✓</span>}
+          {exp?.status === 'done' && exp.stages && (
+            <span title={`${exp.mode}${exp.master ? `, master ${exp.master}` : ''}: ${Object.entries(exp.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}${exp.fallback ? `\nlayers → full: ${exp.fallback.join('; ')}` : ''}`} className="text-body-sm text-on-surface-variant cursor-help">
+              {exp.mode === 'layers' ? `Layers${exp.master === 'cached' ? ' (master reused)' : ''}` : 'Full'}
+            </span>
+          )}
           {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
+          <select
+            value={renderMode}
+            onChange={(e) => { const m = e.target.value as RenderMode; setRenderMode(m); try { localStorage.setItem('reel.renderMode', m); } catch {} }}
+            title={layersBlocked.length ? `Layers falls back to Full for this reel: ${layersBlocked.join('; ')}` : 'Full = the whole reel in one pass. Layers = the reel without captions is rendered once and reused; a caption edit only re-renders the caption layer and composites it'}
+            className="bg-transparent px-2 py-1.5 rounded-lg border border-outline-variant text-on-surface-variant text-body-md font-bold"
+          >
+            <option value="full">Render: full</option>
+            <option value="layers">Render: layers{layersBlocked.length ? ' (→ full)' : ''}</option>
+          </select>
           <button
             onClick={() => exportVideo(true)}
             disabled={exp?.status === 'running'}
