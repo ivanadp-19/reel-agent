@@ -1,7 +1,7 @@
 // Background jobs on the backend (captions, autocut, transcribe, grade, matte):
 // POST starts one, GET <route>/<id> reports it. Dead-job (server restart) and
 // timeout guards; network hiccups tolerated for a few polls.
-export type JobStatus = {status?: string; label?: string; progress?: number; error?: string};
+export type JobStatus = {status?: string; label?: string; progress?: number; error?: string; etaSec?: number | null};
 
 export function pollJob(
   base: string,
@@ -10,7 +10,7 @@ export function pollJob(
   onDone: () => void,
   onFail: (msg: string) => void,
   maxAttempts = 600, // ×1.5s ≈ 15 min (exports pass a higher cap)
-) {
+): () => void {
   let attempts = 0;
   let netFails = 0;
   const poll = setInterval(async () => {
@@ -32,6 +32,7 @@ export function pollJob(
     if (s.status === 'done') onDone();
     else onFail(s.error || (s.status === 'unknown' ? 'Job not found (server restarted?)' : 'Failed'));
   }, 1500);
+  return () => clearInterval(poll); // stop following (the job itself keeps running)
 }
 
 // start a job and wait for it (rejects with the backend's reason)

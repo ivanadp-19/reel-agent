@@ -5,28 +5,29 @@
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
 //   captions   — words → caption pages + face-aware placement (job)
 //   trim-silence — autocut plan (job)
-//   render     — export the MultiClip composition to mp4 (job); a final that passes QC
-//                becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
+//   render     — export the MultiClip composition to mp4: a job persisted on disk, queued,
+//                cancellable (/api/render, /api/render-jobs; scripts/render-jobs.mjs); a final that
+//                passes QC becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
 //   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
 //   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys)
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FILE, clientFont} from '../src/fonts.ts';
-import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
-import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
-import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey, probeColor} from '../scripts/layers.mjs';
-import {chooseRenderMode} from '../src/layers.ts';
+import {renderPlan} from '../scripts/render-queue.mjs';
+import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
+import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
+import {createRenderRunner} from '../scripts/render-runner.mjs';
+import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
-import {createLink, loadReviews, playableVersions, publicLink, recordFinal, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, serveFile} from './http.mjs';
 import {handleReview} from './review.mjs';
@@ -77,7 +78,6 @@ fs.writeFileSync(path.join(ROOT, '.backend-token'), TOKEN, {mode: 0o600});
 fs.writeFileSync(path.join(ROOT, '.backend.pid'), String(process.pid));
 process.once('exit', () => { try { if (fs.readFileSync(path.join(ROOT, '.backend.pid'), 'utf8') === String(process.pid)) fs.rmSync(path.join(ROOT, '.backend.pid')); } catch {} });
 
-const renders = {}; // jobId -> {status, progress, file, error}
 // backend work into the project's timing log (scripts/timing.mjs), when the request names the project
 const logStage = (project, stage, ms, extra = {}) => project && logTiming(PROJECTS_DIR, project, {kind: 'stage', stage, ms, ...extra});
 const captionJobs = {}; // jobId -> {status, progress, label, error}
@@ -155,70 +155,25 @@ async function health() {
   return {ok: checks.every((c) => c.ok || c.optional), checks};
 }
 
-// The only remote host we ever download from. Anything else in a B-roll src
-// (an agent talked into it by a transcript, a stray URL) is refused, and
-// redirects are re-checked hop by hop so a 302 cannot point at the LAN.
-const ALLOWED_REMOTE = /(^|\.)pexels\.com$/i;
-async function fetchAllowed(url, hops = 0) {
-  const u = new URL(url);
-  if (u.protocol !== 'https:' || !ALLOWED_REMOTE.test(u.hostname)) throw new Error(`refusing to download from ${u.hostname}: only Pexels URLs are fetched`);
-  const r = await fetch(u, {redirect: 'manual'});
-  if ([301, 302, 303, 307, 308].includes(r.status)) {
-    if (hops >= 3) throw new Error('too many redirects');
-    return fetchAllowed(new URL(r.headers.get('location') ?? '', u).href, hops + 1);
-  }
-  return r;
-}
-
-// download remote B-roll srcs into public/broll/ and rewrite props in place
+// remote (Pexels) B-roll is downloaded into public/broll/ before a render (scripts/remote-broll.mjs:
+// Pexels only, redirects re-checked, a deadline per download, abortable by the render job)
 const BROLL_DIR = path.join(PUBLIC, 'broll');
-async function localizeRemoteBrolls(props) {
-  const items = Array.isArray(props?.brolls) ? props.brolls : [];
-  fs.mkdirSync(BROLL_DIR, {recursive: true});
-  for (const b of items) {
-    if (!/^https?:\/\//.test(b.src ?? '')) continue;
-    const ext = b.kind === 'video' ? 'mp4' : (b.src.match(/\.(jpe?g|png|webp)(\?|$)/i)?.[1] ?? 'jpg');
-    // named by a hash of the whole URL: Pexels files of one size share their last
-    // characters ("…_1080_1920_30fps.mp4"), and a name from those made two cues share one file
-    const name = `px-${crypto.createHash('sha1').update(b.src).digest('hex').slice(0, 16)}.${ext}`;
-    const file = path.join(BROLL_DIR, name);
-    if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
-      const r = await fetchAllowed(b.src);
-      if (!r.ok) throw new Error(`B-roll download ${r.status}: ${b.src}`);
-      const tmp = file + '.part';
-      fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
-      if (ext === 'mp4') {
-        // Remotion's compositor fails on 4K sources ("Could not extract frame ...
-        // Request closed"); the output is 1080x1920 anyway, so cap the height.
-        const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=height', '-of', 'csv=p=0', tmp]);
-        const h = parseInt(probe.stdout, 10) || 0;
-        if (h > 1920) {
-          const small = file + '.small.mp4';
-          const enc = await run('ffmpeg', ['-y', '-i', tmp, '-vf', 'scale=-2:1920', '-c:v', 'libx264', '-preset', 'veryfast',
-            '-crf', '20', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', small]);
-          if (enc.code !== 0) throw new Error(`B-roll downscale failed: ${enc.stderr.slice(-200)}`);
-          fs.rmSync(tmp, {force: true});
-          fs.renameSync(small, file);
-        } else fs.renameSync(tmp, file);
-      } else fs.renameSync(tmp, file);
-    }
-    b.src = `broll/${name}`;
-  }
-}
 
-// ---- render queue (scripts/render-queue.mjs): `workers` exports at once, the rest wait ----
+// ---- render jobs (scripts/render-jobs.mjs + scripts/render-runner.mjs) ----
+// A render is a job on disk (public/render-jobs/): POST /api/render answers with its
+// id at once, the queue runs one at a time (REEL_RENDER_WORKERS = N for more), the
+// status survives a restart, a job whose process dies is failed. The editor, the MCP
+// (render, start_render, render_status, list_render_jobs, cancel_render) and the CLI
+// (scripts/render-cli.mjs) all go through the routes below.
 const PLAN = renderPlan();
-console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concurrency}`);
-const FPS = 30;
-// layered renders (scripts/layers.mjs): masters cached outside public/ (never bundled, never committed)
+// layered renders (scripts/layers.mjs, run by scripts/render-runner.mjs): masters cached outside public/ (never bundled, never committed)
 const masterCache = createMasterCache(path.join(ROOT, '.render-cache', 'masters'));
 const CAPTION_ALPHA = process.env.REEL_CAPTION_ALPHA in ALPHA ? process.env.REEL_CAPTION_ALPHA : 'png';
 // the mode a render runs in when the request names none (full = the one-pass render)
 const DEFAULT_MODE = process.env.REEL_RENDER_MODE === 'layers' ? 'layers' : 'full';
-// one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
 // LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
 // baked here, before the render, so no clip silently plays ungraded
-async function bakeMissing(raw, id) {
+async function bakeMissing(raw, id, {signal, setPid, progress} = {}) {
   const props = JSON.parse(raw);
   const g = props.grade;
   const missing = lutBakes(g, props.clips ?? [], props.mattes ?? []).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
@@ -226,150 +181,33 @@ async function bakeMissing(raw, id) {
   const inFile = path.join(ROOT, `.lut-${id}.json`), outFile = path.join(ROOT, '.captions-tmp', `lut-${id}.json`);
   fs.mkdirSync(path.dirname(outFile), {recursive: true});
   fs.writeFileSync(inFile, JSON.stringify({bake: missing}));
-  const r = await run('node', ['scripts/lut.mjs', inFile, outFile]);
-  fs.rmSync(inFile, {force: true});
+  progress?.(0.9, `Baking the LUT into ${missing.length} source${missing.length === 1 ? '' : 's'}`);
+  let r;
+  try { r = await runCmd('node', ['scripts/lut.mjs', inFile, outFile], {cwd: ROOT, signal, onPid: setPid}); }
+  finally { fs.rmSync(inFile, {force: true}); }
   if (r.code !== 0) throw new Error(explainFailure(r.stderr, 'LUT bake failed'));
   g.baked = {...g.baked, ...JSON.parse(fs.readFileSync(outFile, 'utf8')).baked};
   fs.rmSync(outFile, {force: true});
   return JSON.stringify(props);
 }
-function renderJob(job, id) {
-  renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
-  const t = Date.now();
-  if (t - job.queuedAt > 1000) logStage(job.project, 'queue', t - job.queuedAt, {job: id});
-  return bakeMissing(job.raw, id).then((raw) => { if (Date.now() - t > 1000) logStage(job.project, 'prepare', Date.now() - t, {job: id}); return renderProps({...job, raw}, id); }, (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
+// before the render (inside its queue slot, so the submit answers at once): remote
+// B-roll downloaded to disk, then the LUT bakes the grade still needs
+// — both abortable: a cancel or the preparing stall limit stops them (the job's signal)
+async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
+  const props = JSON.parse(raw);
+  await localizeRemoteBrolls(props, {dir: BROLL_DIR, signal, onPid: setPid, progress: (f, label) => progress?.(f * 0.8, label)});
+  return bakeMissing(JSON.stringify(props), id, {signal, setPid, progress});
 }
-// one `remotion render`: progress into renders[id] (scaled into [from, to] %), resolves {code, errTail}
-function remotion(args, id, {from = 0, to = 100} = {}) {
-  return new Promise((resolve) => {
-    const child = spawn('npx', args, {cwd: ROOT});
-    let errTail = ''; // keep the tail of output so failures show a real message
-    const onProgress = (d) => {
-      const s = String(d);
-      const m = s.match(/Rendered\s+(\d+)\/(\d+)/);
-      if (m) renders[id].progress = Math.round(from + ((to - from) * +m[1]) / +m[2]);
-      errTail = (errTail + s).slice(-2000);
-    };
-    child.stdout.on('data', onProgress);
-    child.stderr.on('data', onProgress);
-    child.on('close', (code) => resolve({code, errTail}));
-    child.on('error', (e) => resolve({code: -1, errTail: `render could not start: ${e.message}`}));
-  });
-}
-const renderError = ({code, errTail}) => {
-  console.error(`render failed:\n${errTail.slice(-1200)}`);
-  return errTail.split('\n').reverse().find((l) => /error|Error/.test(l))?.trim().slice(0, 200) || `render exited ${code}`;
-};
-// final: two-pass loudness to −14 LUFS, then the QC gate, in a child process (a few
-// seconds of ffmpeg must not block this event loop) → the scripts/qc.mjs report
-function finalize(outFile, expectSec, clean) {
-  return new Promise((resolve) => {
-    const fin = spawn('node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)], {cwd: ROOT});
-    let out = '';
-    fin.stdout.on('data', (d) => (out += d));
-    fin.stderr.on('data', (d) => process.stderr.write(d));
-    fin.on('close', () => {
-      try { resolve(JSON.parse(out.trim().split('\n').pop())); } catch { resolve({ok: false, error: 'QC did not report', checks: [], text: ''}); }
-    });
-  });
-}
-
-// Two modes (src/layers.ts picks, scripts/layers.mjs builds):
-//   full   — the whole reel in one remotion pass (captions included)
-//   layers — the master without captions (cached by its inputs, scripts/layers.mjs),
-//            a transparent caption layer, an ffmpeg composite
-// then, final renders only, loudness + QC on the file that ships.
-async function renderProps({raw, draft, expectSec, clean, mode: requested, project, projectId}, id) {
-  const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
-  const outFile = path.join(EXPORTS, outName);
-  const tmp = [];
-  const info = {};
-  let links = null;
-  // everything that can throw is inside the try: a job that fails must say so, never hang in "running"
-  try {
-    const props = JSON.parse(raw);
-    const choice = chooseRenderMode(requested, props, FPS);
-    info.mode = choice.mode;
-    if (choice.reasons.length) info.fallback = choice.reasons;
-    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-    links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
-    const propsFile = (name, p) => { const f = path.join(ROOT, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
-    const opts = {propsFile: null, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes};
-    const stages = {};
-    const t0 = Date.now();
-    const stage = async (name, fn) => {
-      const t = Date.now();
-      const r = await fn();
-      const ms = Date.now() - t;
-      stages[name] = +(ms / 1000).toFixed(1);
-      logStage(project, name, ms, {job: id, mode: choice.mode, draft, ...(name === 'render' || name === 'master' ? {videoSec: expectSec} : {}), ...(r?.code || r?.ok === false ? {ok: false} : {})});
-      return r;
-    };
-    if (choice.reasons.length) console.log(`render ${id}: layers → full (${choice.reasons.join('; ')})`);
-    if (choice.mode === 'full') {
-      renders[id] = {status: 'running', progress: 0, ...info};
-      const r = await stage('render', () => remotion(renderArgs({...opts, outFile, propsFile: propsFile('', props)}), id));
-      if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
-    } else {
-      const key = masterKey(props, {code: codeVersion(ROOT), fps: FPS, draft, publicDir: PUBLIC});
-      let master = masterCache.get(key);
-      info.master = master ? 'cached' : 'rendered';
-      const split = choice.captions ? 70 : 100; // progress: the master is most of the work
-      if (!master) {
-        renders[id] = {status: 'running', progress: 0, label: 'Rendering master', ...info};
-        const part = path.join(masterCache.dir, `${key}.part-${id}.mp4`);
-        tmp.push(part);
-        const r = await stage('master', () => remotion(masterArgs({...opts, outFile: part, propsFile: propsFile('-master', {...props, captionsOff: true})}), id, {to: split}));
-        if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
-        master = masterCache.put(key, part);
-      }
-      if (choice.captions) {
-        renders[id] = {status: 'running', progress: split, label: 'Rendering captions layer', ...info};
-        // Remotion reads any dot in a sequence folder's path as an extension and refuses it (.captions-tmp would): the OS temp dir
-        const frames = path.join(os.tmpdir(), `reel-captions-${id}`);
-        tmp.push(frames);
-        const r = await stage('captions', () => remotion(captionArgs({...opts, outFile: frames, propsFile: propsFile('-captions', {...props, layer: 'captions'})}), id, {from: split, to: 92}));
-        if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
-        let layer = frames;
-        const enc = ALPHA[CAPTION_ALPHA].ext && alphaEncodeArgs({frames, outFile: (layer = `${frames}.${ALPHA[CAPTION_ALPHA].ext}`), alpha: CAPTION_ALPHA, fps: FPS});
-        if (enc) {
-          tmp.push(layer);
-          renders[id] = {status: 'running', progress: 92, label: `Encoding captions layer (${CAPTION_ALPHA})`, ...info};
-          const e = await stage('encode', () => run('ffmpeg', enc));
-          if (e.code !== 0) { renders[id] = {status: 'error', error: `captions layer encode failed: ${e.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
-        }
-        renders[id] = {status: 'running', progress: 95, label: 'Compositing', ...info};
-        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft, color: probeColor(master)})));
-        if (c.code !== 0) { renders[id] = {status: 'error', error: `composite failed: ${c.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
-      } else fs.copyFileSync(master, outFile); // nothing to lay over it: the master is the reel
-    }
-    const secs = Math.round((Date.now() - t0) / 1000);
-    console.log(`render ${id} ${draft ? 'draft ' : ''}[${info.mode}${info.master ? `, master ${info.master}` : ''}] took ${secs}s for ${expectSec?.toFixed(1)}s of video ${JSON.stringify(stages)}`);
-    if (draft) { renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, renderSec: secs, stages, ...info}; return; }
-    // A render that fails QC is kept as *-qcfail.mp4 for inspection and reported as an error.
-    renders[id] = {status: 'running', progress: 100, label: 'Loudness + QC', ...info};
-    const r = await stage('qc', () => finalize(outFile, expectSec, clean));
-    if (r.ok && projectId) {
-      // a final that passed QC becomes a review version of its project: 720p proxy + poster
-      // (inside this queue slot), numbered and recorded; the render is done either way
-      renders[id] = {status: 'running', progress: 100, label: 'Review proxy', ...info};
-      const done = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, stages, projectId, ...info};
-      try { renders[id] = {...done, version: (await recordFinal({draft, qcOk: r.ok, projectId, outFile, dir: REVIEWS, publicDir: PUBLIC, jobId: id})).v}; }
-      catch (e) { renders[id] = {...done, versionError: String(e?.message ?? e).slice(0, 200)}; }
-    } else if (r.ok) renders[id] = {status: 'done', progress: 100, file: `/exports/${outName}`, qc: r.text, renderSec: secs, stages, ...info};
-    else {
-      const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-      try { fs.renameSync(outFile, path.join(EXPORTS, failed)); } catch {}
-      renders[id] = {status: 'error', error: `QC failed (kept as /exports/${failed}): ${[r.error, ...r.checks.filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ')}`, qc: r.text, stages, ...info};
-    }
-  } catch (e) {
-    renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300), ...info};
-  } finally {
-    for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
-    if (links) fs.rmSync(links, {recursive: true, force: true});
-  }
-}
-const renderQueue = createQueue(PLAN.workers, renderJob);
+const RENDER_JOBS = jobsDir(PUBLIC);
+const renderJobs = createRenderJobs({
+  dir: RENDER_JOBS,
+  workers: PLAN.workers,
+  // full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version
+  run: createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage}),
+}).start();
+// stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
+for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
+console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
 
 // Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
 // locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
@@ -881,12 +719,19 @@ const server = createServer(async (req, res) => {
     return json(res, 405, {error: 'method not allowed'});
   }
 
-  // ---- E9: запустить рендер ----
   // where a project's time went (scripts/timing.mjs) — the MCP's timing_report reads the same log
   if (req.method === 'GET' && url.pathname.startsWith('/api/timing/')) {
     const s = summarize(readTiming(PROJECTS_DIR, decodeURIComponent(url.pathname.split('/').pop())));
     return json(res, 200, {...s, text: timingText(s)});
   }
+
+  // ---- render jobs ----
+  //   POST   /api/render {…props, draft?, mode?, project_id?} → {jobId, status: 'queued', ahead} at once
+  //   GET    /api/render/<id>                → the job in the shape pollers read (running / done / error)
+  //   GET    /api/render-jobs?project=&status=&limit= → {jobs (newest first, each with ahead), workers}
+  //   GET    /api/render-jobs/<id>           → the job as stored + ahead
+  //   POST   /api/render-jobs/<id>/cancel    → cancelled (queued: at once; running: its process is killed)
+  //   POST   /api/render-jobs/prune {days?}  → {removed}: state of finished jobs older than days (never the mp4s)
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?}
     let draft = false;
@@ -901,29 +746,49 @@ const server = createServer(async (req, res) => {
         if (fs.existsSync(path.join(PROJECTS_DIR, `${props.project_id}.json`))) projectId = String(props.project_id);
       }
       delete props.project_id;
+      if (!Array.isArray(props.clips) || !props.clips.length) throw new Error('no clips on the timeline');
       clean = props.audio?.clean ?? 'off';
       expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
-      // Remote (Pexels) B-roll is fetched by headless Chrome during the render and
-      // that fetch was failing mid-way on big files. Download every remote asset
-      // once into public/broll/ and render from disk instead.
-      await localizeRemoteBrolls(props);
       raw = JSON.stringify(props);
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
-    const id = `${Date.now()}${crypto.randomBytes(2).toString('hex')}`; // parallel agents may submit in the same ms
-    // queued: the status reads "running" with a label so every client keeps polling (queued: true, ahead: n)
-    renders[id] = {status: 'running', progress: 0, queued: true};
-    // project: timing log (drafts too); projectId: review version (finals only)
-    const ahead = renderQueue.push(id, {raw, draft, expectSec, clean, mode, project: projectId, projectId: draft ? null : projectId, queuedAt: Date.now()});
-    if (ahead) console.log(`render ${id} queued (${ahead} ahead)`);
-    return json(res, 200, {jobId: id, ...(ahead ? {queued: ahead} : {})});
+    // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode});
+    if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
+    return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {})});
   }
   if (req.method === 'GET' && url.pathname.startsWith('/api/render/')) {
     const id = url.pathname.split('/').pop();
-    const r = renders[id];
-    if (r?.queued) { const n = renderQueue.ahead(id); return json(res, 200, {...r, ahead: n, label: `Queued — ${n} render${n === 1 ? '' : 's'} ahead`}); }
-    return json(res, 200, r ?? {status: 'unknown'});
+    if (!/^[\w-]{6,64}$/.test(id)) return json(res, 200, {status: 'unknown'});
+    return json(res, 200, renderJobs.view(id));
+  }
+  if (url.pathname === '/api/render-jobs/prune' && req.method === 'POST') {
+    let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
+    const days = b.days == null ? undefined : Math.max(0, +b.days);
+    if (days != null && !Number.isFinite(days)) return json(res, 400, {error: 'days must be a number'});
+    return json(res, 200, {removed: renderJobs.prune(days != null ? {days} : {})});
+  }
+  const rj = url.pathname.match(/^\/api\/render-jobs(?:\/([\w-]{6,64}))?(\/cancel)?$/);
+  if (rj) {
+    const [, id, cancel] = rj;
+    const all = renderJobs.list();
+    const withAhead = (j) => ({...j, ahead: j.status === 'queued' ? aheadOf(all, j.id) : 0});
+    if (req.method === 'GET' && !id) {
+      const status = url.searchParams.get('status')?.split(',').filter(Boolean);
+      const project = url.searchParams.get('project') || undefined;
+      const limit = Math.min(200, +url.searchParams.get('limit') || 50);
+      return json(res, 200, {workers: renderJobs.workers, jobs: renderJobs.list({projectId: project, status, limit}).map(withAhead)});
+    }
+    if (req.method === 'GET' && id && !cancel) {
+      const j = renderJobs.get(id);
+      return j ? json(res, 200, withAhead(j)) : json(res, 404, {error: `no render job ${id}`});
+    }
+    if ((req.method === 'POST' && cancel) || (req.method === 'DELETE' && id && !cancel)) {
+      const r = renderJobs.cancel(id);
+      return r.ok ? json(res, 200, {...r.job, pending: !!r.pending}) : json(res, r.job ? 409 : 404, {error: r.error});
+    }
+    return json(res, 405, {error: 'method not allowed'});
   }
 
   json(res, 404, {error: 'not found'});
