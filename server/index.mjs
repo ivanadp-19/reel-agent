@@ -317,6 +317,7 @@ function serveStatic(req, res, pathname) {
 }
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (PUBLIC_MODE && url.pathname === '/api/ping') return json(res, 200, {ok: true}); // Railway healthcheck: no auth, no info
   if (PUBLIC_MODE) {
     const h = req.headers.authorization || '';
     const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
