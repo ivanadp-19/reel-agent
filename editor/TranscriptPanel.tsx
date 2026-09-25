@@ -3,7 +3,7 @@ import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {placeClips} from '../src/timeline';
 import {findCutCandidates, planWordCuts, type Candidate, type CutRange, type TClip} from '../src/cuts';
-import {runJob, readPublic} from './jobs';
+import {jobResult} from './jobs';
 import {Btn} from './ui';
 
 // Left column, "Transcript": the words of every clip in timeline order with
@@ -17,7 +17,7 @@ const widOf = (source: string, i: number) => `${source}:${i}`;
 const idxOf = (wid: string) => Number(wid.slice(wid.lastIndexOf(':') + 1));
 
 export const TranscriptPanel: React.FC<{playerRef: React.RefObject<PlayerRef | null>; notify: (msg: string, kind: 'error' | 'ok') => void}> = ({playerRef, notify}) => {
-  const {meta, clips, lang, offMic, currentFrame, cutWords, selectClip} = useEditor();
+  const {meta, projectId, clips, lang, offMic, currentFrame, cutWords, selectClip} = useEditor();
   const [tr, setTr] = useState<TClip[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [sel, setSel] = useState<{clipId: string; source: string; a: number; b: number} | null>(null);
@@ -31,8 +31,8 @@ export const TranscriptPanel: React.FC<{playerRef: React.RefObject<PlayerRef | n
     if (!clips.length) { setTr([]); return; }
     const id = ++runId.current;
     setBusy('Transcribing…');
-    runJob('/api/transcribe', {clips, lang, offMic}, (s) => setBusy(`${s.label ?? 'Transcribing'} ${s.progress ?? 0}%`))
-      .then(() => readPublic<TClip[]>('transcript.json'))
+    // project_id: the job keeps this project's last run for validate and the judge
+    jobResult<TClip[]>('/api/transcribe', {clips, lang, offMic, project_id: projectId}, (s) => setBusy(`${s.label ?? 'Transcribing'} ${s.progress ?? 0}%`))
       .then((t) => { if (id === runId.current) { setTr(Array.isArray(t) ? t : []); setSel(null); setCands(null); } })
       .catch((e) => notify('Transcription failed: ' + (e as Error).message, 'error'))
       .finally(() => { if (id === runId.current) setBusy(null); });

@@ -4,7 +4,7 @@ import {placeClips} from '../src/timeline';
 import {projectBrolls, type BrollItem} from '../src/brollModel';
 import {suggestBroll, type Suggestion} from '../src/brollMatch';
 import type {TClip} from '../src/cuts';
-import {runJob, readPublic} from './jobs';
+import {jobResult} from './jobs';
 import {Btn, Label, Section, Select, TextInput} from './ui';
 
 // B-roll sourcing in the editor: stock search (search_stock → add_broll) and
@@ -65,7 +65,7 @@ export const StockSearch: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
 };
 
 export const BrollSuggestions: React.FC<{library: LibAsset[]; mode: BrollItem['mode']; notify: (msg: string, kind: 'error' | 'ok') => void; onStockQuery: (q: string) => void}> = ({library, mode, notify, onStockQuery}) => {
-  const {meta, clips, brolls, lang, offMic, addBroll} = useEditor();
+  const {meta, projectId, clips, brolls, lang, offMic, addBroll} = useEditor();
   const [out, setOut] = useState<Suggestion[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   if (!meta) return null;
@@ -75,8 +75,7 @@ export const BrollSuggestions: React.FC<{library: LibAsset[]; mode: BrollItem['m
   const suggest = async () => {
     setBusy('Transcribing…');
     try {
-      await runJob('/api/transcribe', {clips, lang, offMic}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const tr = await readPublic<TClip[]>('transcript.json');
+      const tr = await jobResult<TClip[]>('/api/transcribe', {clips, lang, offMic, project_id: projectId}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       const placed = placeClips(clips, fps);
       const mentions: {wid: string; word: string; startMs: number; endMs: number}[] = [];
       for (const pc of placed) {

@@ -28,7 +28,7 @@ no report, run it yourself:
 node .agents/skills/render-judge/judge.mjs <project_id> <render.mp4> [--role master|captioned|extra] [--pair <other version>] [--profile <client>]
 ```
 
-- The `evidence` blocker (transcript missing / from another project) means:
+- The `evidence` blocker (no transcript for this project yet, or one from before a cut) means:
   `get_transcript <project_id>`, then run it again.
 - The report gives:
   - the label and the counts;

@@ -30,16 +30,15 @@ function reel() {
 const textOf = (c) => c.words.map((w) => w.text).join(' ');
 
 // the project in public/projects/ (where the MCP server reads it), the server on stdio, no backend (or `api`)
-async function withProject(fn, api = 'http://127.0.0.1:9') {
-  const id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+async function withProject(fn, api = 'http://127.0.0.1:9', project = reel(), id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`) {
   const file = path.join('public', 'projects', `${id}.json`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
-  fs.writeFileSync(file, JSON.stringify(reel()));
+  fs.writeFileSync(file, JSON.stringify(project));
   const client = new Client({name: 'test', version: '0'});
   await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: api, REEL_AGENT: 'caption-test'}}));
   const call = async (name, args) => { const r = await client.callTool({name, arguments: {project_id: id, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
-  try { await fn(call, read); } finally {
+  try { await fn(call, read, id); } finally {
     await client.close();
     for (const ext of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(file.replace(/\.json$/, ext), {force: true});
   }
@@ -141,13 +140,16 @@ test('ids stay put: adding a page never renames the others', async () => {
   });
 });
 
-// a backend whose captions job is done at once and hands back `result` (null: a backend from before job results)
-async function fakeBackend(result) {
+// a backend whose jobs are done at once and hand back `result` (null: a backend from before job results);
+// results = {'/api/captions': …, '/api/transcribe': …}, or one result for the captions job
+async function fakeBackend(results) {
+  const byRoute = results && !Array.isArray(results) ? results : {'/api/captions': results};
   const srv = http.createServer((req, res) => {
     const send = (code, o) => { res.writeHead(code, {'Content-Type': 'application/json'}); res.end(JSON.stringify(o)); };
     if (req.url === '/api/projects') return send(200, []);
-    if (req.method === 'POST' && req.url === '/api/captions') return send(200, {jobId: 'j1'});
-    if (req.url === '/api/captions/j1') return send(200, {status: 'done', progress: 100, ...(result ? {result} : {})});
+    if (req.method === 'POST' && req.url in byRoute) return send(200, {jobId: 'j1'});
+    const route = req.url.replace(/\/j1$/, '');
+    if (route in byRoute) return send(200, {status: 'done', progress: 100, ...(byRoute[route] ? {result: byRoute[route]} : {})});
     send(404, {error: 'not found'}); // a project save falls back to the file
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -196,6 +198,52 @@ test('two caption jobs at once (two projects): each one gets its own pages', asy
     }
   } finally {
     for (const n of names) fs.rmSync(path.join(transcripts, `${n}.es.json`), {force: true});
+    fs.rmSync(tmp, {recursive: true, force: true});
+  }
+});
+
+// ---- transcripts: the words a job just made, and each project's own last run ----
+const said0 = (src) => said(src).map(({word, startMs, endMs}) => ({word, startMs, endMs})); // a transcript cache entry
+
+test('get_transcript shows the words its own job made (never the file every job wrote)', async () => {
+  const tr = [{clipId: 'k0', source: 't', words: ['Solo', 'mío', 'Zacatecas'].map((word, i) => ({i, word, startMs: 200 + i * 300, endMs: 400 + i * 300}))}];
+  const B = await fakeBackend({'/api/transcribe': tr});
+  try {
+    await withProject(async (call) => {
+      const r = await call('get_transcript', {});
+      assert.ok(!r.err, r.text);
+      assert.match(r.text, /0:Solo 1:mío 2:Zacatecas/);
+    }, B.url);
+  } finally { B.close(); }
+});
+
+test('two projects transcribed one after the other: each reads its own last run (set_plan checks word ids against it)', async () => {
+  const transcripts = path.join('public', 'clips', 'transcripts');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'transcribe-jobs-'));
+  fs.mkdirSync(transcripts, {recursive: true});
+  const [a, b] = [`tra-${process.pid}`, `trb-${process.pid}`];
+  const ids = [`p-trtest-a-${process.pid}`, `p-trtest-b-${process.pid}`];
+  const project = (name) => ({...reel(), clips: [{id: 'k0', src: `clips/${name}.mp4`, inSec: 0, outSec: 6, sourceDurationSec: 6}], captions: []});
+  // the real transcribe job on a cached source (no WhisperX), as the backend runs it for a project
+  const transcribe = (name, id) => {
+    fs.writeFileSync(path.join(transcripts, `${name}.es.json`), JSON.stringify(said0(`clips/${name}.mp4`)));
+    const inFile = path.join(tmp, `${name}.in.json`);
+    fs.writeFileSync(inFile, JSON.stringify({clips: project(name).clips, lang: 'es', project_id: id}));
+    const child = spawn(process.execPath, ['scripts/transcribe.mjs', inFile, path.join(tmp, `${name}.out.json`)], {env: {...process.env, HF_TOKEN: ''}, stdio: 'ignore'});
+    return new Promise((resolve) => child.on('close', resolve));
+  };
+  try {
+    assert.equal(await transcribe(a, ids[0]), 0);
+    assert.equal(await transcribe(b, ids[1]), 0); // b ran last
+    const plan = `Hook on ${a}:2 (Ana), close on ${a}:17. And ${b}:9 from the other reel.`;
+    await withProject(async (call) => {
+      const r = await call('set_plan', {plan});
+      assert.match(r.text, new RegExp(`NOT in the transcript, fix them: ${b}:9\\)`), r.text);
+      assert.match(r.text, new RegExp(`${a}:2 "Ana,"`), 'the words of its own transcript are quoted');
+    }, undefined, project(a), ids[0]);
+  } finally {
+    for (const n of [a, b]) fs.rmSync(path.join(transcripts, `${n}.es.json`), {force: true});
+    for (const id of ids) fs.rmSync(path.join('public', 'projects', 'transcripts', `${id}.json`), {force: true});
     fs.rmSync(tmp, {recursive: true, force: true});
   }
 });
