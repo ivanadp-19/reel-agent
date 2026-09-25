@@ -247,6 +247,16 @@ function publicBase(req) {
   const proto = first(req.headers['x-forwarded-proto']) || 'http';
   return `${/^https?$/.test(proto) ? proto : 'http'}://${host}`;
 }
+// The MCP over HTTP (/mcp, server/mcp-http.mjs): the tools of mcp/server.mjs, loaded on
+// the first /mcp request. They talk to this backend over loopback with the primary
+// token (.backend-token), exactly as the stdio server does.
+let mcpHttpP = null;
+const mcpHttp = () => mcpHttpP ??= (async () => {
+  process.env.REEL_API ||= `http://127.0.0.1:${BIND_PORT}`;
+  const [{createReelServer, releaseSession}, {createMcpHttp}] = await Promise.all([import('../mcp/server.mjs'), import('./mcp-http.mjs')]);
+  return createMcpHttp({createServer: createReelServer, onSessionClosed: releaseSession, idleMs: +(process.env.REEL_MCP_IDLE_MIN || 60) * 60e3});
+})();
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS});
@@ -254,6 +264,10 @@ const server = createServer(async (req, res) => {
   if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
+  if (g.kind === 'mcp') { // token-gated MCP for remote agents
+    try { return await (await mcpHttp()).handle(req, res); }
+    catch (e) { console.error('mcp:', e); if (!res.headersSent) return json(res, 500, {error: 'mcp failed'}); return res.end(); }
+  }
   if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
@@ -361,7 +375,9 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/broll-library') {
     const rows = searchBrollLibrary(url.searchParams.get('q') || '');
-    return json(res, 200, rows.map((a) => { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, sheetFor(a)).split(path.sep).join('/'); } catch {} return {...a, sheet}; }));
+    const out = [];
+    for (const a of rows) { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, await sheetFor(a)).split(path.sep).join('/'); } catch {} out.push({...a, sheet}); }
+    return json(res, 200, out);
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/broll-library/')) {
     const id = decodeURIComponent(url.pathname.split('/').pop());
@@ -384,7 +400,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/black') {
     const src = url.searchParams.get('src') || '';
     if (!/^clips\/[\w.\-]+\.(mp4|mov|m4v|webm)$/i.test(src) || !fs.existsSync(path.join(PUBLIC, src))) return json(res, 400, {error: 'src must be a clip under public/clips'});
-    try { return json(res, 200, blackSpans(src)); } catch (e) { return fail(e); }
+    try { return json(res, 200, await blackSpans(src)); } catch (e) { return fail(e); }
   }
 
   // ---- brand kits: public/brands/<slug>.json (set_brand from / save_as, the Styles tab) ----
@@ -523,7 +539,7 @@ const server = createServer(async (req, res) => {
     // a local path (same machine, from the MCP server) skips the upload — token-gated, like add-clip
     const local = url.searchParams.get('path');
     if (local) {
-      if (!tokenOk(TOKENS, req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp|heic)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video or image file'});
     }
     const tmp = local ?? path.join(ROOT, `.upload-broll-${id}.bin`);
@@ -584,7 +600,7 @@ const server = createServer(async (req, res) => {
     // only with the run token, and only video files
     const local = url.searchParams.get('path');
     if (local) {
-      if (!tokenOk(TOKENS, req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
     }
     const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);

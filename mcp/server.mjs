@@ -7,13 +7,17 @@
 //
 //   claude mcp add reel -- node /path/to/reel-agent/mcp/server.mjs
 //
+// Same tools over HTTP: the backend mounts them at /mcp (server/mcp-http.mjs),
+// one McpServer per session from createReelServer(), behind the x-reel-token gate.
+//
 // Project model (see src/timeline.ts, src/captions.ts, src/Broll.tsx):
 //   clips[]    ordered, back-to-back on the timeline; inSec/outSec trim the source
 //   captions[] anchored to a clip, times are SOURCE-relative ms
 //   brolls[]   same anchoring
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
@@ -28,7 +32,8 @@ import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
 import {transcriptIssues, validateProject} from '../src/validate.ts';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
-import {qc, qcText} from '../scripts/qc.mjs';
+import {qcText} from '../scripts/qc.mjs';
+import {runCmd} from '../scripts/remote-broll.mjs';
 import {LOOKS, DEFAULTS, autoSources, lutBakes, paramsFor} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
 import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
@@ -52,11 +57,14 @@ const PROJECTS = path.join(PUBLIC, 'projects');
 const API = process.env.REEL_API || 'http://127.0.0.1:3333';
 // Railway public mode (REEL_API pointing at the hosted backend): the server
 // accepts the shared backend token instead of basic auth - send it on every call.
-const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-const _fetch = globalThis.fetch;
-globalThis.fetch = (u, o = {}) => {
+// REEL_BACKEND_TOKEN may list several (one per client): the first is the primary, the one this process uses.
+const TOK = process.env.REEL_BACKEND_TOKEN?.split(',')[0].trim() || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+// Module-scoped on purpose: every fetch() in this file adds the token to calls to API,
+// and nothing else is touched — the backend imports this module (the MCP over /mcp),
+// so patching globalThis.fetch would change fetch for its whole process.
+const fetch = (u, o = {}) => {
   if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
-  return _fetch(u, o);
+  return globalThis.fetch(u, o);
 };
 const FPS = 30;
 
@@ -81,14 +89,38 @@ function load(id) {
   p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.planApproved ??= false; p.planReviews ??= []; p.planMode ??= null; p.planModeLog ??= []; p.captionsOff ??= false;
   return p;
 }
-// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit
-const held = new Set();
+// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit.
+// Over HTTP every session is its own agent (they share the backend's pid): the lock
+// names the session by a hash of its id, and closing the session frees its locks.
+const held = new Map(); // session tag ('' = stdio) → project ids
 const OWNER = process.env.REEL_AGENT || `mcp pid ${process.pid}`;
-process.once('exit', () => { for (const id of held) releaseLock(PROJECTS, id); });
+const sessionTag = (sessionId) => sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex').slice(0, 12) : '';
+process.once('exit', () => { for (const [tag, ids] of held) for (const id of ids) releaseLock(PROJECTS, id, process.pid, tag || undefined); });
 function lock(id) {
-  const r = acquireLock(PROJECTS, id, {owner: OWNER});
+  const tag = callCtx.getStore()?.tag || '';
+  const r = acquireLock(PROJECTS, id, tag ? {owner: `mcp http session ${tag}`, session: tag} : {owner: OWNER});
   if (!r.ok) throw new Error(lockMessage(id, r.holder));
-  held.add(id);
+  if (!held.has(tag)) held.set(tag, new Set());
+  held.get(tag).add(id);
+}
+// an HTTP session ended (closed by the client or expired): free its locks and its timing state
+export function releaseSession(sessionId) {
+  const tag = sessionTag(sessionId);
+  if (!tag) return;
+  for (const id of held.get(tag) ?? []) releaseLock(PROJECTS, id, process.pid, tag);
+  held.delete(tag); clocks.delete(tag); lastProject.delete(tag);
+}
+// A file on this machine that a tool reads or copies in, given as an absolute path.
+// stdio is a local agent that has a shell here anyway: any existing file. Over HTTP
+// the caller is a remote client with no shell: only files under public/ (uploaded
+// through the editor), resolved through symlinks — never .env, .backend-token or
+// anything else of the server's.
+function hostFile(f) {
+  if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+  if (!callCtx.getStore()?.tag) return f;
+  const real = fs.realpathSync(f), pub = fs.realpathSync(PUBLIC);
+  if (!real.startsWith(pub + path.sep)) throw new Error(`over HTTP a file must be under public/ on the server (upload it through the editor first): ${f}`);
+  return f;
 }
 async function save(id, p) {
   lock(id);
@@ -215,26 +247,33 @@ const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY);
 
 // ---------- server ----------
-const server = new McpServer({name: 'reel', version: '0.1.0'});
+// Tools are registered once, here, on a registry; createReelServer() (end of file)
+// builds an McpServer holding all of them — one for stdio, one per HTTP session.
+const TOOLS = [];
+const server = {registerTool: (name, config, cb) => { TOOLS.push([name, config, cb]); }};
 // Timing (scripts/timing.mjs): every tool call is logged to its project's
 // public/projects/<id>.timing.jsonl with its duration, the part spent waiting on
 // backend jobs, and the gap since the previous call = the agent's own turn. A tool
-// without project_id counts for the last project this session touched.
+// without project_id counts for the last project this session touched. Kept per
+// session: stdio has one (tag ''), HTTP one per MCP session.
 const SESSION = `${process.env.REEL_AGENT || 'mcp'}-${process.pid}-${Date.now().toString(36)}`;
-const clock = createToolClock();
-const callCtx = new AsyncLocalStorage(); // {project, jobMs} of the call in flight
-let lastProject = null;
+const clocks = new Map(); // session tag → createToolClock()
+const callCtx = new AsyncLocalStorage(); // {project, jobMs, tag} of the call in flight
+const lastProject = new Map(); // session tag → project id
 const registerTool = server.registerTool.bind(server);
 server.registerTool = (name, def, handler) => registerTool(name, def, async (args, extra) => {
+  const tag = sessionTag(extra?.sessionId);
+  if (!clocks.has(tag)) clocks.set(tag, createToolClock());
+  const clock = clocks.get(tag);
   const started = clock.start();
-  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject, jobMs: 0};
-  if (ctx.project) lastProject = ctx.project;
+  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject.get(tag) ?? null, jobMs: 0, tag};
+  if (ctx.project) lastProject.set(tag, ctx.project);
   let ok = true;
   try { return await callCtx.run(ctx, () => handler(args, extra)); }
   catch (e) { ok = false; throw e; }
   finally {
     const ms = clock.end(started);
-    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
+    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: tag ? `mcp-http-${tag}` : SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
   }
 });
 const text = (s) => ({content: [{type: 'text', text: s}]});
@@ -336,6 +375,7 @@ const BRANDS = path.join(PUBLIC, 'brands');
 const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
+const AUDIO = /\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i;
 const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
 server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio to this project (apply_style false = only store it) and tells you the pack to set; reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, apply_style, name, from, save_as, clear}) => {
   const p = load(project_id);
@@ -357,7 +397,7 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
     if (!FONT_FILE.test(ff.path)) throw new Error(`${ff.path}: a font file is .ttf, .otf, .woff or .woff2`);
     let rel;
     if (path.isAbsolute(ff.path)) {
-      if (!fs.existsSync(ff.path)) throw new Error(`file not found: ${ff.path}`);
+      hostFile(ff.path);
       fs.mkdirSync(FONTS_DIR, {recursive: true});
       const dest = path.join(FONTS_DIR, path.basename(ff.path).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(ff.path, dest);
       rel = path.relative(PUBLIC, dest);
@@ -374,7 +414,7 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
     if (path.isAbsolute(logo)) {
-      if (!fs.existsSync(logo)) throw new Error(`file not found: ${logo}`);
+      hostFile(logo);
       const dir = path.join(BRANDS, 'logos'); fs.mkdirSync(dir, {recursive: true});
       const dest = path.join(dir, path.basename(logo).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(logo, dest);
       b.logo = path.relative(PUBLIC, dest);
@@ -427,10 +467,9 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'};
   const added = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     // same machine: hand the backend the path instead of streaming the file through memory
-    const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...clip} = r;
     p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
@@ -586,7 +625,7 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
     const a = loadLibrary().find((x) => x.id === asset_id); if (!a) throw new Error(`no library asset ${asset_id} (see broll_library)`);
     s = a.src; kind = a.kind; query = label ?? a.label;
   } else if (!src) throw new Error('give asset_id or src');
-  else s = brollSrc(src);
+  else s = brollSrc(path.isAbsolute(src) ? hostFile(src) : src);
   if (/^https?:/.test(s)) source = 'pexels';
   if (!kind) kind = brollKind(s);
   const b = {id: 'x', clipId: clip.id, startMs: Math.round(sourceSec * 1000), endMs: Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000), kind, mode, src: s, source, query, alternatives: [], ...(asset_id ? {assetId: asset_id} : {}), ...(arrive ? {arrive} : {}), ...(leave ? {leave} : {})};
@@ -596,20 +635,19 @@ server.registerTool('add_broll', {description: 'Overlay B-roll for duration_sec,
 });
 
 // ---------- the user's own B-roll library ----------
-const sheetContent = (a) => { const f = sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
+const sheetContent = async (a) => { const f = await sheetFor(a); return {type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'}; };
 const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationSec)}s` : ''}  "${a.label}"${a.tags?.length ? `  tags: ${a.tags.join(', ')}` : '  (untagged)'}${a.desc ? `  — ${a.desc}` : ''}`;
 
 server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
   await needBackend();
-  const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
   const content = [];
   for (const f of files) {
-    if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
+    hostFile(f);
     const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
-    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
     const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
-    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));
+    content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, await sheetContent(a));
   }
   content.push({type: 'text', text: 'Now tag each one: tag_broll_asset(id, tags, desc) — what is in the shot (room, object, mood, time of day), in the language of the reel.'});
   return {content};
@@ -624,7 +662,9 @@ server.registerTool('broll_library', {description: "The client's own B-roll libr
   const rows = searchLibrary(query);
   if (!rows.length) return text(query ? `Nothing in the library matches "${query}".` : 'The B-roll library is empty — add_broll_assets with the client footage.');
   if (!sheet) return text(rows.map(assetLine).join('\n'));
-  return {content: rows.flatMap((a) => [{type: 'text', text: assetLine(a)}, sheetContent(a)])};
+  const content = [];
+  for (const a of rows) content.push({type: 'text', text: assetLine(a)}, await sheetContent(a));
+  return {content};
 });
 
 server.registerTool('suggest_broll', {description: 'Where the own library should go, by word id: an asset over the mention its tags match (start on the word, 0.5–8 s, one per ~9 s, never over the hook or the closing line), plus every black stretch of footage — with the best asset, or a search_stock query when nothing in the library fits. Nothing is placed: apply what you approve with add_broll (asset_id + at_wid, or search_stock + src). Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -640,7 +680,7 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   }
   mentions.sort((a, b) => a.startMs - b.startMs);
   const black = [];
-  for (const pc of placed) for (const s of blackSpans(pc.clip.src)) {
+  for (const pc of placed) for (const s of await blackSpans(pc.clip.src)) {
     const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000, speed = pc.clip.speed ?? 1;
     const a = Math.max(s.startMs, inMs), b = Math.min(s.endMs, outMs);
     if (b > a) black.push({startMs: pc.startMs + (a - inMs) / speed, endMs: pc.startMs + (b - inMs) / speed});
@@ -689,7 +729,7 @@ server.registerTool('search_catalog', {description: 'Find footage by CONTENT in 
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
   const p = load(project_id); const b = p.brolls.find((x) => x.id === broll_id); if (!b) throw new Error(`no B-roll ${broll_id}`);
-  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
+  if (mode) b.mode = mode; if (scale != null) b.scale = scale; if (src) { b.src = brollSrc(path.isAbsolute(src) ? hostFile(src) : src); b.source = /^https?:/.test(b.src) ? 'pexels' : 'own'; b.kind = brollKind(b.src); delete b.assetId; }
   if (arrive) b.arrive = arrive; if (leave) b.leave = leave;
   if (start_sec != null) { const {clip, sourceSec} = locate(p, start_sec); b.clipId = clip.id; const len = b.endMs - b.startMs; b.startMs = Math.round(sourceSec * 1000); b.endMs = Math.min(Math.round(clip.outSec * 1000), b.startMs + len); }
   if (end_sec != null) { const {clip, sourceSec} = locate(p, end_sec); if (clip.id !== b.clipId) throw new Error('end must be on the same clip as the start'); b.endMs = Math.max(b.startMs + 300, Math.round(sourceSec * 1000)); }
@@ -718,8 +758,9 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
     const entry = row.src && fs.existsSync(path.join(PUBLIC, row.src)) ? row : await downloadMusic(row);
     src = entry.src; credit = entry.credit ?? creditOf(entry);
   } else if (!file) throw new Error('give music_id or file');
-  else if (path.isAbsolute(file)) { if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
-  else if (!fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
+  else if (!AUDIO.test(file)) throw new Error(`${file}: music is an audio file (${AUDIO.source})`);
+  else if (path.isAbsolute(file)) { hostFile(file); const dir = path.join(PUBLIC, 'music'); fs.mkdirSync(dir, {recursive: true}); const name = path.basename(file).replace(/[^\w.\-]/g, '_'); fs.copyFileSync(file, path.join(dir, name)); src = `music/${name}`; }
+  else if (!path.resolve(PUBLIC, file).startsWith(PUBLIC + path.sep) || !fs.existsSync(path.join(PUBLIC, file))) throw new Error(`not found in public/: ${file}`);
   else src = file;
   p.music = {src, volume, startSec: 0, fadeOutSec: fade_out_sec, duck, duckLevel: 0.25, ...(credit ? {credit} : {})}; await save(project_id, p);
   return text(`Music ${src} vol ${volume}, fade ${fade_out_sec}s, duck ${duck}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}`);
@@ -857,6 +898,7 @@ const savedLuts = () => { try { return fs.readdirSync(LUTS).filter((f) => f.ends
 function lutPath(lut) {
   if (path.isAbsolute(lut)) {
     if (!/\.cube$/i.test(lut) || !fs.existsSync(lut)) throw new Error(`not an existing .cube file: ${lut}`);
+    hostFile(lut);
     fs.mkdirSync(LUTS, {recursive: true});
     const dest = path.join(LUTS, path.basename(lut).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(lut, dest);
     return path.relative(PUBLIC, dest);
@@ -922,7 +964,7 @@ server.registerTool('create_lut', {description: 'Make a .cube LUT from reference
   const dir = path.join(LUTS, 'refs', name); fs.mkdirSync(dir, {recursive: true});
   const refs = reference_images.map((f) => {
     if (!IMAGE.test(f) && !/\.(heic|tiff?)$/i.test(f)) throw new Error(`${f}: a reference must be an image`);
-    if (path.isAbsolute(f)) { if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
+    if (path.isAbsolute(f)) { hostFile(f); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
     const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
   });
   await runJob('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
@@ -1167,18 +1209,21 @@ server.registerTool('qc', {description: 'Check a rendered mp4 from render: frame
   const f = path.isAbsolute(file) && fs.existsSync(file) ? path.resolve(file) : path.join(PUBLIC, file.replace(/^\//, '')); // absolute (from render) or /exports/…
   if (!f.startsWith(path.join(PUBLIC, 'exports') + path.sep)) throw new Error('file must be a render under public/exports/');
   const draft = /-draft\.mp4$/.test(f);
-  const r = qc(f, {expectSec: totalSec(p.clips), draft});
+  // a child process (scripts/qc.mjs --json): the loudness and black/silence passes decode the whole file,
+  // and over /mcp this runs inside the backend, whose event loop must keep serving
+  const c = await runCmd(process.execPath, [path.join(ROOT, 'scripts', 'qc.mjs'), '--json', f, String(totalSec(p.clips)), ...(draft ? ['--draft'] : [])], {cwd: ROOT});
+  let r; try { r = JSON.parse(c.stdout); } catch { throw new Error(`qc failed: ${c.stderr.trim().split('\n').pop() || `exit ${c.code}`}`); }
   return text(`${r.ok ? 'QC passed' : 'QC FAILED'}${draft ? ' (draft: loudness is normalized on the final render only)' : ''}\n${qcText(r)}`);
 });
 
 server.registerTool('frame_at', {description: 'Look at a frame. Without `video`: the raw source frame at that timeline time (no captions/B-roll). With `video` = a rendered mp4 path from render: the finished frame with everything on it.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds'), video: z.string().optional()}}, async ({project_id, at_sec, video}) => {
   const p = load(project_id);
   let file, t;
-  if (video) { file = video; t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
+  if (video) { file = hostFile(path.isAbsolute(video) && fs.existsSync(video) ? video : path.join(PUBLIC, video.replace(/^\//, ''))); t = at_sec; } else { const {clip, sourceSec} = locate(p, at_sec); file = path.join(PUBLIC, clip.src); t = sourceSec; }
   if (!fs.existsSync(file)) throw new Error(`not found: ${file}`);
   const out = path.join(ROOT, '.captions-tmp', `mcp-frame-${Date.now()}.jpg`); fs.mkdirSync(path.dirname(out), {recursive: true});
-  const ff = spawnSync('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
-  if (ff.status !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
+  const ff = await runCmd('ffmpeg', ['-y', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', out]);
+  if (ff.code !== 0 || !fs.existsSync(out)) throw new Error('ffmpeg could not extract the frame');
   const data = fs.readFileSync(out).toString('base64'); fs.rmSync(out, {force: true});
   return {content: [{type: 'text', text: `${video ? 'rendered' : 'source'} frame @${f1(at_sec)}s`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
@@ -1189,4 +1234,13 @@ server.registerTool('health', {description: 'Check the reel-agent environment (b
   return text(h.checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.label}${c.ok ? '' : ' — ' + c.hint}`).join('\n'));
 });
 
-await server.connect(new StdioServerTransport());
+// One McpServer with every tool above: stdio below, one per HTTP session in the backend.
+export function createReelServer() {
+  const s = new McpServer({name: 'reel', version: '0.1.0'});
+  for (const [name, config, cb] of TOOLS) s.registerTool(name, config, cb);
+  return s;
+}
+
+// run as a program (`node mcp/server.mjs`, .mcp.json): stdio; imported (server/mcp-http.mjs): nothing starts
+const main = (() => { try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+if (main) await createReelServer().connect(new StdioServerTransport());

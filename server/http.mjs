@@ -1,8 +1,8 @@
 // HTTP pieces of the backend that are tested on their own (test/reviews.test.mjs):
 // the access gate and the file server with byte ranges.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import {checkPassword, clientIp, sessionUser} from './session.mjs';
 
 export const MIME = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.cube': 'text/plain', '.vtt': 'text/vtt', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon'};
@@ -41,8 +41,10 @@ export function serveFile(req, res, file, headers = {}) {
   fs.createReadStream(file).pipe(res);
 }
 
-// The backend token in constant time: sha256 digests of both sides (equal length),
-// compared with timingSafeEqual, every configured token tried.
+// Is `given` one of `tokens`? In constant time: both sides hashed to equal-length
+// sha256 digests and compared with timingSafeEqual, every entry checked (no early
+// exit), so the answer's timing tells nothing about how much of a token matched.
+// The one token comparison of the backend: the gate, /mcp and the path ingest.
 const sha = (v) => crypto.createHash('sha256').update(String(v)).digest();
 export function tokenOk(tokens, given) {
   if (typeof given !== 'string' || !given) return false;
@@ -90,14 +92,22 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
 // attempts share the login's limiter: 429 + Retry-After); a browser page load without
 // any is sent to /login, other requests get the 401 basic-auth challenge. Loopback
 // Host + localhost Origin otherwise. public/exports/* is never reachable without it.
+// The MCP over HTTP (/mcp, server/mcp-http.mjs) takes only the backend token, in
+// both modes and before any other credential — never the editor's basic auth or its
+// session cookie: an agent is a client with its own token (REEL_BACKEND_TOKEN lists
+// one per client), revoked by removing it.
 // Async: basic auth runs bcrypt off the event loop.
-// → {kind: 'review' | 'ping' | 'login' | 'ok'} or {kind: 'deny', status, headers, body}
+// → {kind: 'review' | 'ping' | 'login' | 'mcp' | 'ok'} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
 export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
+export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
 export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0} = {}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
+  const mcp = isMcpPath(url.pathname);
+  if (mcp && !tokenOk(tokens, req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
+  if (mcp && publicMode) return {kind: 'mcp'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
   if (publicMode && isLoginPath(url.pathname)) return {kind: 'login'};
   if (publicMode) {
@@ -116,5 +126,5 @@ export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessio
   const host = (req.headers.host || '').replace(/:\d+$/, '');
   if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};
   if (req.headers.origin && !LOCAL_ORIGIN.test(req.headers.origin)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'bad origin'})};
-  return {kind: 'ok'};
+  return {kind: mcp ? 'mcp' : 'ok'};
 }
