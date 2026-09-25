@@ -26,8 +26,23 @@ test('clock: the gap between two calls is the agent turn; the first call has non
   const a = c.start(); t = 50; assert.equal(c.end(a), 50);
   assert.equal(a.gapMs, null);
   t = 4050; const b = c.start(); assert.equal(b.gapMs, 4000);
-  const p = c.start(); t = 4100; c.end(b); c.end(p);
-  t = 4000; assert.equal(c.start().gapMs, 0);
+  const p = c.start(); assert.equal(p.gapMs, 0, 'sent while b runs: same turn');
+  t = 4100; c.end(b); c.end(p);
+});
+
+test('clock: three parallel calls after one 20 s turn log one 20 s turn, not three', () => {
+  let t = 0;
+  const c = createToolClock(() => t);
+  c.end(c.start()); // the previous call ends at 0
+  t = 20000;
+  const calls = [c.start(), c.start(), c.start()]; // three frame_at in one turn
+  assert.deepEqual(calls.map((x) => x.gapMs), [20000, 0, 0]);
+  t = 21000; calls.forEach((x) => c.end(x));
+  const s = summarize(calls.map((x) => ({kind: 'tool', session: 's', tool: 'frame_at', ms: 1000, gapMs: x.gapMs})));
+  assert.equal(s.buckets.agent, 20);
+  assert.equal(s.turns, 1);
+  // back to sequential: the next gap counts from the last of them
+  t = 26000; assert.equal(c.start().gapMs, 5000);
 });
 
 test('summary: agent vs inspection vs backend stages, no double count of job waits, idle apart', () => {

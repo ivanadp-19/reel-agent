@@ -274,28 +274,32 @@ function finalize(outFile, expectSec, clean) {
 //            a transparent caption layer, an ffmpeg composite
 // then, final renders only, loudness + QC on the file that ships.
 async function renderProps({raw, draft, expectSec, clean, mode: requested, project}, id) {
-  const props = JSON.parse(raw);
-  const choice = chooseRenderMode(requested, props, FPS);
   const outName = `edited-${id}${draft ? '-draft' : ''}.mp4`;
   const outFile = path.join(EXPORTS, outName);
-  // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
-  const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
   const tmp = [];
-  const propsFile = (name, p) => { const f = path.join(ROOT, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
-  const opts = {propsFile: null, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes};
-  const info = {mode: choice.mode, ...(choice.reasons.length ? {fallback: choice.reasons} : {})};
-  const stages = {};
-  const t0 = Date.now();
-  const stage = async (name, fn) => {
-    const t = Date.now();
-    const r = await fn();
-    const ms = Date.now() - t;
-    stages[name] = +(ms / 1000).toFixed(1);
-    logStage(project, name, ms, {job: id, mode: choice.mode, draft, ...(name === 'render' || name === 'master' ? {videoSec: expectSec} : {}), ...(r?.code || r?.ok === false ? {ok: false} : {})});
-    return r;
-  };
-  if (choice.reasons.length) console.log(`render ${id}: layers → full (${choice.reasons.join('; ')})`);
+  const info = {};
+  let links = null;
+  // everything that can throw is inside the try: a job that fails must say so, never hang in "running"
   try {
+    const props = JSON.parse(raw);
+    const choice = chooseRenderMode(requested, props, FPS);
+    info.mode = choice.mode;
+    if (choice.reasons.length) info.fallback = choice.reasons;
+    // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
+    links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-${id}`));
+    const propsFile = (name, p) => { const f = path.join(ROOT, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
+    const opts = {propsFile: null, publicDir: links, draft, concurrency: PLAN.concurrency, cacheBytes: PLAN.cacheBytes};
+    const stages = {};
+    const t0 = Date.now();
+    const stage = async (name, fn) => {
+      const t = Date.now();
+      const r = await fn();
+      const ms = Date.now() - t;
+      stages[name] = +(ms / 1000).toFixed(1);
+      logStage(project, name, ms, {job: id, mode: choice.mode, draft, ...(name === 'render' || name === 'master' ? {videoSec: expectSec} : {}), ...(r?.code || r?.ok === false ? {ok: false} : {})});
+      return r;
+    };
+    if (choice.reasons.length) console.log(`render ${id}: layers → full (${choice.reasons.join('; ')})`);
     if (choice.mode === 'full') {
       renders[id] = {status: 'running', progress: 0, ...info};
       const r = await stage('render', () => remotion(renderArgs({...opts, outFile, propsFile: propsFile('', props)}), id));
@@ -349,7 +353,7 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested, proje
     renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300), ...info};
   } finally {
     for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
-    fs.rmSync(links, {recursive: true, force: true});
+    if (links) fs.rmSync(links, {recursive: true, force: true});
   }
 }
 const renderQueue = createQueue(PLAN.workers, renderJob);

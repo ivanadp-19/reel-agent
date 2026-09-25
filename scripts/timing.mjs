@@ -43,13 +43,21 @@ export function readTiming(projectsDir, id) {
 }
 
 // A session's tool calls one after the other: each call's gap is the agent's turn
-// before it. createToolClock() keeps that per MCP process.
+// before it. createToolClock() keeps that per MCP process. Calls the client sends in
+// parallel (one model turn, several tools) start while another is still in flight:
+// only the first of them carries the turn, the others get gapMs 0 — three frame_at
+// after 20 s of thinking are one 20 s turn, not three.
 export function createToolClock(now = () => Date.now()) {
   let lastEnd = null;
+  let inFlight = 0;
   return {
-    // calls the client sends in parallel overlap: no turn between them
-    start() { const t = now(); const gapMs = lastEnd == null ? null : Math.max(0, t - lastEnd); return {t, gapMs}; },
-    end(started) { lastEnd = now(); return lastEnd - started.t; },
+    start() {
+      const t = now();
+      const gapMs = inFlight > 0 ? 0 : lastEnd == null ? null : Math.max(0, t - lastEnd);
+      inFlight++;
+      return {t, gapMs};
+    },
+    end(started) { inFlight = Math.max(0, inFlight - 1); lastEnd = now(); return lastEnd - started.t; },
   };
 }
 
@@ -64,7 +72,7 @@ export function summarize(events) {
   for (const e of events) {
     if (e.kind === 'tool') {
       sessions.add(e.session);
-      if (e.gapMs != null) {
+      if (e.gapMs) { // null = a session's first call, 0 = sent in the same turn as a call still running
         if (e.gapMs > IDLE_MS) b.idle += e.gapMs;
         else { b.agent += e.gapMs; turns++; }
       }
