@@ -1,20 +1,37 @@
 #!/usr/bin/env bash
 # Run Claude Code headless on a project with ONLY the reel MCP tools.
 #   scripts/claude-edit.sh <project_id> "<brief>" [log_file]
+#   scripts/claude-edit.sh <project_id> --reply "<your answer to the plan>" [log_file]
 # Uses the `claude` CLI the user already installed and signed in to. No shell,
 # no file writes: the agent can only act through the MCP server (and Read, to
 # look at images). The backend (npm start) must be running.
+# The plan is reviewed in the chat: the first run ends with the plan presented
+# and waits; answer with --reply ("ok", or the changes you want), which resumes
+# the same conversation (session id kept in .captions-tmp/claude-<project>.session).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PROJECT="$1"; BRIEF="$2"; LOG="${3:-.captions-tmp/agent-$(date +%s).jsonl}"
-mkdir -p "$(dirname "$LOG")"
+PROJECT="$1"; shift
+REPLY=""; if [ "${1:-}" = "--reply" ]; then REPLY="$2"; shift 2; else BRIEF="$1"; shift; fi
+LOG="${1:-.captions-tmp/agent-$(date +%s).jsonl}"
+mkdir -p "$(dirname "$LOG")" .captions-tmp
+export SESSION_FILE=".captions-tmp/claude-${PROJECT}.session"
 # who holds the project lock while this run edits it (scripts/project-lock.mjs)
 export REEL_AGENT="claude-edit ${PROJECT} ${LOG}"
 
-PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools. Finish with validate + caption_proof, then render a draft and say what you did and what you would still improve."
+RESUME=()
+if [ -n "$REPLY" ]; then
+  if [ -s "$SESSION_FILE" ]; then
+    PROMPT="$REPLY"; RESUME=(--resume "$(cat "$SESSION_FILE")")
+  else
+    PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. You presented this project's plan earlier (get_project shows it and whether it is approved). The user's answer to it: ${REPLY}
+Work only through the reel MCP tools. Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
+  fi
+else
+  PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. Brief: ${BRIEF}
+Work only through the reel MCP tools. After set_plan, present the plan and stop: the user answers in the next message. Once they approve it, finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+fi
 
-claude -p "$PROMPT" \
+claude -p "$PROMPT" ${RESUME[@]+"${RESUME[@]}"} \
   --output-format stream-json --verbose \
   --mcp-config .mcp.json --strict-mcp-config \
   --allowedTools "mcp__reel__*,Read,Skill" \
@@ -26,6 +43,8 @@ claude -p "$PROMPT" \
     const rl = require("readline").createInterface({input: process.stdin});
     rl.on("line", (l) => {
       let e; try { e = JSON.parse(l); } catch { return; }
+      // keep the conversation for --reply
+      if (e.session_id && process.env.SESSION_FILE && (e.type === "system" || e.type === "result")) require("fs").writeFileSync(process.env.SESSION_FILE, e.session_id);
       const blocks = e.message?.content ?? [];
       for (const b of Array.isArray(blocks) ? blocks : []) {
         if (b.type === "tool_use") console.log(`→ ${b.name.replace("mcp__reel__", "")} ${JSON.stringify(b.input).slice(0, 140)}`);

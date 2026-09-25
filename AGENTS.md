@@ -60,14 +60,25 @@ labels → assets → framing → validate → caption_proof → render) is the 
 skill: `.agents/skills/reel-edit/SKILL.md` (`.claude/skills` links to the same
 folder). The plan step is its own skill, `reel-plan`: after the transcript the
 agent writes what it intends (hero word, beats, pack, key words, B-roll) with
-`set_plan`, and every later step follows it.
+`set_plan`, and every later step follows it. The review is chat-first: the agent
+presents the plan in the chat and stops until the user answers; their "ok" is
+recorded with `approve_plan` (changes: `request_plan_changes`, then a new
+`set_plan`). The project JSON keeps `planApproved` (a changed plan resets it) and
+the user's answers (`planReviews`). While a plan is unapproved, every MCP tool
+that edits the project and the final render refuse to run (`src/plan.ts`
+`planGate`, default-deny list in `mcp/server.mjs`); reads, proofs, searches and
+draft renders stay open. No approval screen in the editor for now: the human in
+the editor is the approver and is not gated.
 
 ## Headless runners
 
 - `scripts/claude-edit.sh <project> "<brief>"` — Claude Code with only `mcp__reel__*`, Read and Skill
 - `scripts/codex-edit.sh <project> "<brief>"` — Codex CLI with the user's config ignored, the reel server pre-approved and a read-only shell sandbox
 
-Both take the same brief; `scripts/run-report.mjs` measures a run from its JSONL log.
+Both take the same brief and stop once the plan is presented; answer with
+`<runner> <project> --reply "ok"` (or the changes you want): Claude resumes the
+same conversation, Codex (ephemeral) starts a run that reads the plan back from the
+project. `scripts/run-report.mjs` measures a run from its JSONL log.
 
 ## Commands
 
