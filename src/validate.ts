@@ -199,3 +199,28 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   if (totalMs > 5000 && !gfx.some((g) => g.startMs < 3000 && g.template !== 'layout') && !caps.some((c) => c.startMs < 1500)) issues.push({level: 'warn', code: 'hook', msg: 'nothing on screen in the first 3 s — reels need a hook'});
   return issues;
 }
+
+// Checks that need the last transcript run (public/transcript.json): off-mic
+// words still inside the cut, and clip edges that fall inside a word.
+import type {TClip} from './cuts.ts';
+const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
+export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[]): Issue[] {
+  const bySource = new Map<string, TClip['words']>();
+  for (const t of tr) bySource.set(t.source, [...(bySource.get(t.source) ?? []), ...t.words]);
+  const out: Issue[] = [];
+  for (const c of p.clips) {
+    const source = sourceOf(c.src);
+    const words = bySource.get(source) ?? [];
+    for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]] as const) {
+      const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
+      if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
+    }
+    if (p.offMic === 'off') continue;
+    const off = words.filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).sort((a, b) => a.i - b.i);
+    if (!off.length) continue;
+    const runs: {from: number; to: number; text: string[]}[] = [];
+    for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) { r.to = w.i; r.text.push(w.word); } else runs.push({from: w.i, to: w.i, text: [w.word]}); }
+    out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
+  }
+  return out;
+}

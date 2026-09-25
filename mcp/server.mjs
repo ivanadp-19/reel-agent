@@ -17,7 +17,7 @@ import {spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, cutRange, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {applyAutocut, cutRange, locateSec, placeClips, reanchor, splitClip} from '../src/timeline.ts';
 import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
 import {isGlue, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -25,7 +25,7 @@ import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
 import {searchAssets, generateAsset, listLibrary, librarySearch} from './assets.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
-import {validateProject} from '../src/validate.ts';
+import {transcriptIssues, validateProject} from '../src/validate.ts';
 import {findCutCandidates} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
 import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
@@ -34,7 +34,7 @@ import {blackSpans, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './b
 import {suggestBroll} from '../src/brollMatch.ts';
 import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
-import {CLEAN} from '../scripts/qc.mjs';
+import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
 import {FONT_FAMILIES} from '../src/fonts.ts';
 
@@ -89,14 +89,11 @@ const needBackend = async () => {
 // ---------- timeline math (shared with the editor: src/timeline.ts) ----------
 const place = (clips) => placeClips(clips, FPS);
 const totalSec = (clips) => place(clips).at(-1)?.endMs / 1000 || 0;
-// absolute timeline second → {clip, sourceSec}
+// absolute timeline second → {clip, sourceSec} (src/timeline.ts)
 function locate(p, atSec) {
-  const ms = atSec * 1000;
-  const pc = place(p.clips).find((x) => ms >= x.startMs && ms < x.endMs) ?? place(p.clips).at(-1);
-  if (!pc) throw new Error('project has no clips');
-  const speed = pc.clip.speed ?? 1;
-  const sourceSec = pc.clip.inSec + ((ms - pc.startMs) / 1000) * speed;
-  return {clip: pc.clip, sourceSec: Math.min(pc.clip.outSec, Math.max(pc.clip.inSec, sourceSec)), pc};
+  const r = locateSec(p.clips, FPS, atSec);
+  if (!r) throw new Error('project has no clips');
+  return r;
 }
 // source-relative ms on a clip → absolute seconds (null if trimmed away)
 function toAbs(p, clipId, srcMs, clamp = false) {
@@ -610,38 +607,10 @@ async function wordAt(p, wid, tr) {
   const k = t.words.findIndex((w) => String(w.i) === i);
   return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
 }
-// a clip edge inside a word (from the last transcript run): the syllable gets clipped
-function cutWordIssues(p) {
+// off-mic words left in the cut + clip edges inside a word (src/validate.ts), from the last transcript run
+function transcriptIssuesOf(p) {
   let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const words = [...(bySource.get(path.basename(c.src).replace(/\.[^.]+$/, ''))?.values() ?? [])];
-    for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]]) {
-      const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
-      if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
-    }
-  }
-  return out;
-}
-// off-mic words still inside the cut (from the last transcript run), per clip
-function offMicIssues(p) {
-  if (p.offMic === 'off') return [];
-  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  const bySource = new Map();
-  for (const t of tr) { const m = bySource.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); bySource.set(t.source, m); }
-  const out = [];
-  for (const c of p.clips) {
-    const source = path.basename(c.src).replace(/\.[^.]+$/, '');
-    const off = [...(bySource.get(source)?.values() ?? [])].filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).sort((a, b) => a.i - b.i);
-    if (!off.length) continue;
-    // contiguous runs of word indices → one cut_words call each
-    const runs = [];
-    for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) r.to = w.i; else runs.push({from: w.i, to: w.i, text: []}); runs[runs.length - 1].text.push(w.word); }
-    out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
-  }
-  return out;
+  return transcriptIssues(p, tr);
 }
 
 server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -830,7 +799,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
-const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...offMicIssues(p), ...cutWordIssues(p)];
+const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
 const projectProps = (p) => ({clips: p.clips, music: p.music, captions: p.captions, brolls: p.brolls, graphics: p.graphics, mattes: p.mattes, accentColor: p.accentColor, captionStyle: p.captionStyle, brand: p.brand, grade: p.grade, audio: p.audio});
 
 server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {

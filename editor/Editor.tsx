@@ -9,6 +9,7 @@ import {useEditor} from './store';
 import {Timeline} from './Timeline';
 import {AssetsSidebar} from './AssetsSidebar';
 import {Inspector} from './Inspector';
+import {pollJob} from './jobs';
 
 const fmt = (sec: number) => {
   const s = Math.max(0, sec);
@@ -27,48 +28,16 @@ const isVisibleNode = (el: HTMLElement | null): boolean => {
   return true;
 };
 
-// Poll a background job to completion with dead-job (server restart) + timeout guards.
-function pollJob(
-  base: string,
-  jobId: string,
-  onProgress: (s: {label?: string; progress?: number}) => void,
-  onDone: () => void,
-  onFail: (msg: string) => void,
-  maxAttempts = 600, // ×1.5s ≈ 15 min (exports pass a higher cap)
-) {
-  let attempts = 0;
-  let netFails = 0;
-  const poll = setInterval(async () => {
-    attempts++;
-    let s: {status?: string; label?: string; progress?: number; error?: string};
-    try {
-      s = await fetch(`${base}/${jobId}`).then((x) => x.json());
-      netFails = 0;
-    } catch {
-      if (++netFails > 5) { clearInterval(poll); onFail('Lost connection to the server'); }
-      return;
-    }
-    if (s.status === 'running') {
-      onProgress(s);
-      if (attempts > maxAttempts) { clearInterval(poll); onFail('Timed out'); }
-      return;
-    }
-    clearInterval(poll);
-    if (s.status === 'done') onDone();
-    else onFail(s.error || (s.status === 'unknown' ? 'Job not found (server restarted?)' : 'Failed'));
-  }, 1500);
-}
-
 const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; progress?: number; file?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; progress?: number; file?: string; qc?: string} | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genLabel, setGenLabel] = useState('');
   const [trimming, setTrimming] = useState(false);
@@ -100,7 +69,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -110,7 +79,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan]);
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
@@ -479,6 +448,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
           </button>
           {exp?.status === 'running' && <span className="text-body-sm text-on-surface-variant">Rendering… {exp.progress ?? 0}%</span>}
           {exp?.status === 'done' && exp.file && <a href={exp.file} download className="text-body-sm text-[#39d98a]">↓ Download mp4</a>}
+          {exp?.status === 'done' && exp.qc && <span title={exp.qc} className="text-body-sm text-on-surface-variant cursor-help">QC ✓</span>}
           {exp?.status === 'error' && <span className="text-body-sm text-error">Render error</span>}
           <button
             onClick={() => exportVideo(true)}
@@ -565,6 +535,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
           onStyleChange={(s) => { setCaptionStyle(s); if (captions.length) generateCaptions(true, s); }}
           generating={generating}
           progressLabel={genLabel}
+          notify={notify}
         />
       </main>
 

@@ -254,6 +254,40 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  // ---- brand kits: public/brands/<slug>.json (set_brand from / save_as, the Styles tab) ----
+  const BRANDS = path.join(PUBLIC, 'brands');
+  const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  if (req.method === 'GET' && url.pathname === '/api/brands') {
+    let files = []; try { files = fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')); } catch {}
+    return json(res, 200, files.map((f) => { try { return {slug: f.slice(0, -5), name: JSON.parse(fs.readFileSync(path.join(BRANDS, f), 'utf8')).name || f.slice(0, -5)}; } catch { return null; } }).filter(Boolean));
+  }
+  if (url.pathname.startsWith('/api/brands/')) {
+    const id = slug(decodeURIComponent(url.pathname.split('/').pop()));
+    if (!id) return json(res, 400, {error: 'bad kit name'});
+    const file = path.join(BRANDS, `${id}.json`);
+    if (req.method === 'GET') return fs.existsSync(file) ? json(res, 200, JSON.parse(fs.readFileSync(file, 'utf8'))) : json(res, 404, {error: 'not found'});
+    if (req.method === 'POST') {
+      let kit; try { kit = JSON.parse(await body(req)); } catch { return json(res, 400, {error: 'bad json'}); }
+      if (!/^#[0-9a-fA-F]{6}$/.test(kit?.colors?.accent ?? '')) return json(res, 400, {error: 'a kit needs colors.accent (#rrggbb)'});
+      fs.mkdirSync(BRANDS, {recursive: true});
+      fs.writeFileSync(file, JSON.stringify({...kit, name: kit.name || id}, null, 2));
+      return json(res, 200, {slug: id});
+    }
+  }
+
+  // ---- upload an image (brand logo) → public/brand/ ----
+  if (req.method === 'POST' && url.pathname === '/api/upload-image') {
+    const safe = (url.searchParams.get('name') || 'logo.png').replace(/[^\w.\-]/g, '_');
+    if (!/\.(png|jpe?g|webp|svg)$/i.test(safe)) return json(res, 400, {error: 'png, jpg, webp or svg'});
+    const dir = path.join(PUBLIC, 'brand');
+    fs.mkdirSync(dir, {recursive: true});
+    const ws = fs.createWriteStream(path.join(dir, safe));
+    req.pipe(ws);
+    ws.on('finish', () => json(res, 200, {src: `brand/${safe}`}));
+    ws.on('error', () => json(res, 500, {error: 'write failed'}));
+    return;
+  }
+
   // ---- upload a music track → public/music/ ----
   if (req.method === 'POST' && url.pathname === '/api/music') {
     const safe = (url.searchParams.get('name') || 'track.mp3').replace(/[^\w.\-]/g, '_');

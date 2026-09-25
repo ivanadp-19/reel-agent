@@ -302,6 +302,34 @@ export function describeSchema(schema: z.ZodType): string {
   }
 }
 
+// the same walk, as form fields for the editor: one entry per prop, rows for arrays of objects
+export type Field = {key: string; kind: 'string' | 'number' | 'boolean' | 'enum' | 'array' | 'unknown'; required: boolean; default?: unknown; options?: string[]; min?: number; max?: number; item?: Field[]; desc?: string};
+export function fieldsOf(schema: z.ZodType): Field[] {
+  const unwrap = (s: any): any => (s.def.type === 'pipe' ? unwrap(s.def.out) : s.def.type === 'optional' || s.def.type === 'default' ? unwrap(s.def.innerType) : s);
+  const obj = unwrap(schema);
+  if (obj.def.type !== 'object') return [];
+  return Object.entries(obj.def.shape as Record<string, z.ZodType>).map(([key, v]) => {
+    let s: any = v, required = true, dflt: unknown;
+    for (;;) {
+      if (s.def.type === 'optional') { required = false; s = s.def.innerType; }
+      else if (s.def.type === 'default') { required = false; dflt = s.def.defaultValue; s = s.def.innerType; }
+      else if (s.def.type === 'pipe') s = s.def.out;
+      else break;
+    }
+    const d = s.def;
+    const check = (name: string, k: string) => d.checks?.find((c: any) => c._zod.def.check === name)?._zod.def[k];
+    const f: Field = {key, kind: 'unknown', required, ...(dflt !== undefined ? {default: dflt} : {}), ...(v.description ? {desc: v.description} : {})};
+    switch (d.type) {
+      case 'string': f.kind = 'string'; f.max = check('max_length', 'maximum'); break;
+      case 'number': f.kind = 'number'; f.min = check('greater_than', 'value'); f.max = check('less_than', 'value'); break;
+      case 'boolean': f.kind = 'boolean'; break;
+      case 'enum': f.kind = 'enum'; f.options = Object.keys(d.entries); break;
+      case 'array': f.kind = 'array'; f.min = check('min_length', 'minimum'); f.max = check('max_length', 'maximum'); f.item = fieldsOf(d.element); break;
+    }
+    return f;
+  });
+}
+
 // validate + fill defaults; throws a readable message on bad props
 export function parseProps(template: TemplateId, props: unknown): Record<string, unknown> {
   const r = TEMPLATES[template].schema.safeParse(props);
