@@ -18,6 +18,7 @@ export type TimelineWord = {
   tier?: number; // 1 = classifier highlight (keyword/question/CTA)
   speaker?: string; // spk1, spk2… from diarization (who is talking)
   sentenceStart?: boolean; // a guion sentence begins on this word (v11.1) — break the page before it
+  asr?: string; // the ASR's own text, when guion reconciliation changed it (src/guion.ts)
 };
 
 const GAP_MS = 450; // break on natural pauses (sentence rhythm)
@@ -83,8 +84,7 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     if (cur.length && w.sentenceStart && !bonded(cur[cur.length - 1], w)) flush(); // guion sentence boundary
     curSrc = w.src;
     curClip = w.clipId;
-    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: w.tier ?? 0, ...(w.speaker ? {speaker: w.speaker} : {}), ...(w.sentenceStart ? {sentenceStart: true} : {})});
-
+    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: w.tier ?? 0, ...(w.speaker ? {speaker: w.speaker} : {}), ...(w.sentenceStart ? {sentenceStart: true} : {}), ...(w.asr != null ? {asr: w.asr} : {})});
     if (maxWords <= 1) { flush(); return; } // word-at-a-time preset
 
     const next = words[i + 1];

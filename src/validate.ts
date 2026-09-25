@@ -6,6 +6,7 @@ import {projectCaptions, type Caption} from './captions.ts';
 import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
+import {guionIssues} from './guion.ts';
 import type {Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
@@ -120,7 +121,7 @@ function hiddenShare(band: Band, g: Graphic, face: FaceBox): number {
 }
 const SINGLE_WORD = new Set(['big-word', 'oversized', 'fill-title']); // what may sit behind the head
 
-export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
+export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean; guion?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
   const issues: Issue[] = [];
   if (p.captionsOff) p = {...p, captions: []}; // captions switched off: nothing of them reaches the render
   const gfx = projectGraphics(p.graphics ?? [], p.clips, fps);
@@ -196,6 +197,9 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   }
   // behind graphics need a matte
   for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes, p.clips)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
+  // the guion's coverage (src/guion.ts): conflicts and missing / altered words are warnings for a
+  // human (the audio stays on screen); reconciliation-made timing errors are errors
+  if (p.guion?.trim() || p.captions.some((c) => c.words.some((w) => w.asr != null))) issues.push(...guionIssues(p.guion ?? '', caps, p.captions));
   // hook: something in the first 3 s
   if (totalMs > 5000 && !gfx.some((g) => g.startMs < 3000 && g.template !== 'layout') && !caps.some((c) => c.startMs < 1500)) issues.push({level: 'warn', code: 'hook', msg: 'nothing on screen in the first 3 s — reels need a hook'});
   return issues;

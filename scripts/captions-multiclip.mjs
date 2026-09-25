@@ -16,6 +16,7 @@ import {assembleWords, sourceKey} from './lib-transcribe.mjs';
 import {applyHighlights, heuristicClassify, CLASSIFY_PROMPT} from '../src/highlights.ts';
 import {pageWords, withTiers, DEFAULT_TOP} from '../src/paging.ts';
 import {applyGuionPunctuation} from '../src/highlights.ts';
+import {reconcileWords, reconciliationLine} from '../src/guion.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
 const ROOT = process.cwd();
@@ -23,7 +24,7 @@ const PUBLIC = path.join(ROOT, 'public');
 
 const progress = (pct, label) => console.log(`PROGRESS:${pct}:${label}`);
 
-const {clips, lang = 'auto', style, offMic = 'mark', tiers = {}} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const {clips, lang = 'auto', style, offMic = 'mark', tiers = {}, project_id, guion: sentGuion} = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (!clips?.length) {
   console.error('no clips');
   process.exit(1);
@@ -91,23 +92,33 @@ function detectFaces(clips) {
   return result;
 }
 
+// The guion (client script): the project's own (set_guion, the Captions tab), else REEL_GUION or
+// public/guion.txt as before. It reconciles the ASR words (src/guion.ts) and feeds the highlight pass.
+function readGuion() {
+  if (typeof sentGuion === 'string' && sentGuion.trim()) return sentGuion; // the caller's current project (the editor may not have saved yet)
+  if (typeof project_id === 'string' && /^[\w-]+$/.test(project_id)) {
+    try { const g = JSON.parse(fs.readFileSync(path.join(PUBLIC, 'projects', `${project_id}.json`), 'utf8')).guion; if (typeof g === 'string' && g.trim()) return g; } catch {}
+  }
+  const file = process.env.REEL_GUION ?? (fs.existsSync(path.join(PUBLIC, 'guion.txt')) ? path.join(PUBLIC, 'guion.txt') : null);
+  return file ? fs.readFileSync(file, 'utf8') : null;
+}
+const guion = readGuion();
+
 // --- run ---
 progress(2, 'Starting');
-const words = await assembleWords(clips, (idx, total, clip) =>
+let words = await assembleWords(clips, (idx, total, clip) =>
   progress(5 + Math.round((idx / total) * 80), clip.batch ? clip.label : `Transcribing ${clip.label ?? clip.id} (${idx + 1}/${total})`), lang, offMic,
 );
 // César 9:27: classification pass — keywords / questions / CTAs become yellow highlight
 // captions. LLM pass when OPENAI_API_KEY is set (cached per transcript hash); deterministic
-// heuristic otherwise. The agent can still adjust tiers via MCP afterwards. REEL_GUION (or
-// public/guion.txt) supplies the script so the pass can fix spelling/accents to match it.
+// heuristic otherwise. The agent can still adjust tiers via MCP afterwards. The guion (readGuion)
+// lets the pass fix spelling/accents to match it.
 async function classifyHighlights(words) {
   const key = crypto.createHash('sha1').update(words.map((w) => `${w.wid}:${w.word}`).join('|')).digest('hex');
   const cache = path.join(TMP, 'highlights.json');
   if (fs.existsSync(cache)) {
     try { const j = JSON.parse(fs.readFileSync(cache, 'utf8')); if (j.key === key) return j.res; } catch {}
   }
-  const guionPath = process.env.REEL_GUION ?? (fs.existsSync(path.join(PUBLIC, 'guion.txt')) ? path.join(PUBLIC, 'guion.txt') : null);
-  const guion = guionPath ? fs.readFileSync(guionPath, 'utf8') : null;
   if (process.env.OPENAI_API_KEY) {
     try {
       const body = {
@@ -134,6 +145,14 @@ async function classifyHighlights(words) {
   return {spans: heuristicClassify(words), fixes: []};
 }
 
+// the guion's wording over the ASR's where they align (keeping the ASR's time); conflicts and
+// ambiguous spans stay as heard — validate reports them (guionIssues)
+if (guion) {
+  const {words: fixed, report} = reconcileWords(words, guion);
+  words = fixed;
+  console.log(reconciliationLine(report));
+  for (const c of report.conflicts) console.log(`guion conflict (audio kept): "${c.asr}" vs guion "${c.guion}" at ${c.wid ?? '?'}`);
+}
 progress(84, 'Classifying highlights');
 const highlights = await classifyHighlights(words);
 const nHl = applyHighlights(words, highlights);

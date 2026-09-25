@@ -68,6 +68,12 @@ script, read it yourself too: the plan's list is a starting point, not the
 truth. A scene the script names that neither list has is a blocker you add
 (judgment).
 
+The words themselves: with the script attached (`set_guion`), captions take the
+script's wording where it aligns with the audio ("acomodan" → "acomoda a").
+Where the audio and the script say different things (G2: "70 invitados" said,
+60 written) **the audio wins** — his rule — and `validate-guion-conflict` goes to
+him as an advisory with both quoted; it never fails the reel.
+
 ## Picture integrity and promises (G10 V2)
 
 - **Black flashes.** His `blackdetect d=0.4` missed real blacks of 3–5 frames
