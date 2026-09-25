@@ -13,7 +13,7 @@
 //   brolls[]   same anchoring
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
@@ -37,6 +37,7 @@ import {projectBrolls} from '../src/brollModel.ts';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mjs';
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
+import {DEFAULT_DIRS, entryLine, loadEntries, searchCatalog, staleFiles} from '../scripts/catalog.mjs';
 import {brandSchema, mergeStyle, styleEffects} from '../src/brand.ts';
 import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.ts';
 
@@ -561,6 +562,49 @@ server.registerTool('suggest_broll', {description: 'Where the own library should
   if (!out.length) return text(`${lib.length ? 'No mention matches the library tags' : 'The library has no tagged assets'}${black.length ? '' : ', and there is no black footage to cover'}.${lib.length ? '' : ' add_broll_assets + tag_broll_asset first, or use search_stock.'}`);
   const lines = out.map((s) => `${s.cover ? 'COVER ' : '      '}${f1(s.startMs / 1000)}–${f1(s.endMs / 1000)}s  ${s.assetId ? `asset ${s.assetId}` : `search_stock "${s.query}"`}${s.atWid ? `  at_wid ${s.atWid}` : ''}  — ${s.why}`);
   return text(`${out.length} suggestion(s) (COVER = black footage that must be covered):\n${lines.join('\n')}\n\nApply with add_broll {asset_id, at_wid, duration_sec, mode: 'fullscreen' for covers}.`);
+});
+
+// ---------- asset catalog: what is IN each media file (scripts/catalog.mjs) ----------
+// Built only on request (catalog_assets / `node scripts/catalog.mjs`), never on startup;
+// search_catalog reads the JSON it leaves in public/catalog/. REEL_CATALOG_PUBLIC points both
+// at another public/ (tests).
+const CAT_PUBLIC = process.env.REEL_CATALOG_PUBLIC ? path.resolve(process.env.REEL_CATALOG_PUBLIC) : PUBLIC;
+const dirName = z.string().regex(/^[\w-]+(\/[\w-]+)*$/).describe('a folder under public/, e.g. inputs, clips, broll, broll-assets, music');
+function runCatalog(dirs, {force, limit}) {
+  const args = [path.join(ROOT, 'scripts', 'catalog.mjs'), '--json', '--public', CAT_PUBLIC, '--limit', String(limit), ...(force ? ['--force'] : []), ...dirs];
+  return new Promise((resolve, reject) => {
+    const ch = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']}); // renices itself (REEL_CATALOG_NICE)
+    let out = '', err = '';
+    ch.stdout.on('data', (d) => { out += d; }); ch.stderr.on('data', (d) => { err += d; });
+    ch.on('error', reject);
+    ch.on('close', (code) => { try { if (code !== 0) throw new Error(err.trim().split('\n').pop() || `exit ${code}`); resolve(JSON.parse(out)); } catch (e) { reject(new Error(`catalog failed: ${e.message}`)); } });
+  });
+}
+
+server.registerTool('catalog_assets', {description: `Build or refresh the ASSET CATALOG — what is actually in each media file, so you choose footage by content and never by its name (names lie: "skybar" can be a lounge by day; a hook can be 33 s of black). Per file: duration, resolution/fps, black stretches with timestamps, silence, day/night and static/moving (heuristics, labelled so), a contact sheet, and a description from the transcript cache or library metadata when there is one. Incremental: only new or changed files are decoded (niced, one thread); a folder already cataloged costs a stat per file. Defaults to ${DEFAULT_DIRS.join(', ')}. limit caps the files decoded in this call — call again for the rest. Then query it with search_catalog.`, inputSchema: {dirs: z.array(dirName).max(10).optional(), force: z.boolean().default(false).describe('decode everything again'), limit: z.number().int().min(1).max(200).default(25)}}, async ({dirs, force, limit}) => {
+  const res = await runCatalog(dirs?.length ? dirs : DEFAULT_DIRS, {force, limit});
+  const lines = res.map((s) => s.missing ? `${s.dir}: no such folder` : `${s.dir}: ${s.files} file(s) — ${s.analyzed.length} analyzed, ${s.reused} unchanged, ${s.removed.length} removed${s.pending ? `, ${s.pending} NOT YET (call again)` : ''}${s.errors.length ? `\n  errors: ${s.errors.join('; ')}` : ''}`);
+  return text(`${lines.join('\n')}\n\nQuery with search_catalog (filters on content; sheets=true shows the contact sheets).`);
+});
+
+server.registerTool('search_catalog', {description: 'Find footage by CONTENT in the asset catalog (built by catalog_assets): duration, day/night, black stretches, speech, orientation, tags, words of the description/transcript — the file name is never matched. Tags: video | still-image | audio-only, portrait | landscape | square, short (<2 s), has-black, mostly-black, starts-black, ends-black, audio-over-black (a voice over black = waiting for B-roll), no-audio, silent-audio, day, night, sky, static, moving, speech. day/night/sky/static/moving are heuristics (luma, a sky-like top band, frame difference): confirm on the contact sheet (sheets=true) before relying on them. Says when files changed since the catalog was built.', inputSchema: {src: z.string().optional().describe('one file, e.g. "clips/G3v2_skybar.mp4" — its full entry'), dir: dirName.optional(), kind: z.enum(['video', 'image', 'audio']).optional(), min_sec: z.number().min(0).optional(), max_sec: z.number().min(0).optional(), daylight: z.enum(['day', 'night', 'uncertain']).optional(), orientation: z.enum(['portrait', 'landscape', 'square']).optional(), has_black: z.boolean().optional(), max_black_ratio: z.number().min(0).max(1).optional().describe('e.g. 0.1 = at most 10 % black'), has_speech: z.boolean().optional(), tags: z.array(z.string()).max(8).optional().describe('all must match'), exclude_tags: z.array(z.string()).max(8).optional(), text: z.string().max(200).optional().describe('words in the transcript / metadata / description'), limit: z.number().int().min(1).max(100).default(20), sheets: z.boolean().default(false).describe('attach the contact sheets (up to 6)')}}, async ({src, dir, kind, min_sec, max_sec, daylight, orientation, has_black, max_black_ratio, has_speech, tags, exclude_tags, text: words, limit, sheets}) => {
+  const all = loadEntries(CAT_PUBLIC, dir ? [dir] : undefined);
+  if (!all.length) return text(`No catalog${dir ? ` for ${dir}/` : ''} yet — run catalog_assets${dir ? ` {dirs: ["${dir}"]}` : ''} first.`);
+  const rows = src ? all.filter((e) => e.src === src.replace(/^\/+/, '')) : searchCatalog(all, {dir, kind, minSec: min_sec, maxSec: max_sec, daylight, orientation, hasBlack: has_black, maxBlackRatio: max_black_ratio, hasSpeech: has_speech, tags, excludeTags: exclude_tags, text: words, limit});
+  const stale = [...new Set(all.map((e) => e.dir))].flatMap((d) => staleFiles(CAT_PUBLIC, d).map((f) => `${d}/${f}`));
+  const note = stale.length ? `\n\n${stale.length} file(s) new or changed since the catalog was built (${stale.slice(0, 5).join(', ')}${stale.length > 5 ? ', …' : ''}) — catalog_assets to include them.` : '';
+  if (!rows.length) return text(`${src ? `${src} is not in the catalog` : 'Nothing in the catalog matches'} (${all.length} file(s) cataloged).${note}`);
+  const head = `${rows.length} match(es) of ${all.length} cataloged (heuristic labels marked; the sheet frames are at the listed seconds):`;
+  const body = src ? rows.map((e) => `${entryLine(e)}\n${JSON.stringify({durationSec: e.durationSec, width: e.width, height: e.height, fps: e.fps, black: e.black, silence: e.silence, meanDb: e.meanDb, daylight: e.daylight, motion: e.motion, speech: e.speech, meta: e.meta, analyzedAt: e.analyzedAt}, null, 1)}`) : rows.map(entryLine);
+  if (!sheets) return text(`${head}\n\n${body.join('\n\n')}${note}`);
+  const content = [{type: 'text', text: head}];
+  rows.forEach((e, i) => {
+    content.push({type: 'text', text: body[i]});
+    const f = e.sheet && path.join(CAT_PUBLIC, e.sheet.file);
+    if (i < 6 && f && fs.existsSync(f)) content.push({type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: 'image/jpeg'});
+  });
+  if (note) content.push({type: 'text', text: note.trim()});
+  return {content};
 });
 
 server.registerTool('edit_broll', {description: 'Change a B-roll cue: mode, size scale, source URL/path, or move/resize it on the timeline (seconds).', inputSchema: {project_id: pid, broll_id: z.string(), mode: z.enum(['fullscreen', 'top', 'inset', 'card', 'carousel']).optional(), arrive: z.enum(['cut', 'slideUp', 'popFrom', 'slideRight']).optional(), leave: z.enum(['cut', 'slideDown', 'shrink', 'fall']).optional(), scale: z.number().min(0.3).max(3).optional(), src: z.string().optional(), start_sec: sec('new timeline start').optional(), end_sec: sec('new timeline end').optional()}}, async ({project_id, broll_id, mode, scale, src, start_sec, end_sec, arrive, leave}) => {
