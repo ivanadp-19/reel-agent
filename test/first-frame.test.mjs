@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {blankLead, frameStats, isFlat, openingReport, parseStats, repairArgs} from '../scripts/first-frame.mjs';
-import {probeColor} from '../scripts/layers.mjs';
+import {codeVersion, createMasterCache, probeColor} from '../scripts/layers.mjs';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {linkPublic} from '../scripts/public-links.mjs';
 
@@ -80,6 +80,80 @@ test('the render runner repairs a pass that comes out with a blank frame 0 and s
   const r2 = await run2({id: 'j2', draft: true}, {props: JSON.stringify(props), signal: ctrl.signal, update: () => {}, setPid: () => {}});
   assert.equal(r2.firstFrame, undefined);
   assert.equal(fs.readFileSync(r2.path).equals(fs.readFileSync(clean)), true, 'byte for byte the pass output');
+  fs.rmSync(d, {recursive: true, force: true});
+});
+
+// layers mode over a master already in the cache (cached before the guard existed): the hit is
+// checked and repaired in place, and what ships is checked too
+async function layersRun({captions}) {
+  const d = tmp();
+  const pub = path.join(d, 'public'); fs.mkdirSync(pub);
+  const cache = createMasterCache(path.join(d, 'masters'));
+  const blank = clip(path.join(d, 'blank.mp4'));
+  const part = path.join(cache.dir, 'k.part-seed.mp4');
+  fs.copyFileSync(blank, part);
+  cache.put('k', part); // the blank master production already has
+  const logs = [];
+  const run = createRenderRunner({
+    root: d, publicDir: pub, masterCache: cache, log: (m) => logs.push(m),
+    chooseMode: (requested) => ({mode: requested, reasons: [], captions}),
+    keyOf: () => 'k',
+    commands: {
+      master: () => { throw new Error('the master must come from the cache'); },
+      // a caption layer that is an empty folder, and a composite that lays nothing over the master
+      captions: ({outFile}) => ['mkdir', ['-p', outFile]],
+      composite: ({master, outFile}) => ['cp', [master, outFile]],
+    },
+  });
+  const r = await run({id: `j-${captions ? 'c' : 'n'}`, draft: true, mode: 'layers'}, {props: JSON.stringify({clips: [{id: 'c0', src: 'clips/a.mp4', inSec: 0, outSec: 1}], captions: []}), signal: new AbortController().signal, update: () => {}, setPid: () => {}});
+  return {d, r, cache, logs, blank};
+}
+
+test('layers, cache hit: a cached master with a blank frame 0 is repaired in the cache, and the export is footage (no captions: copy)', async () => {
+  const {d, r, cache, logs, blank} = await layersRun({captions: false});
+  assert.equal(r.master, 'cached');
+  assert.deepEqual(r.firstFrame.map((x) => x.pass), ['cached master'], 'repaired once, at the source: the copy is already clean');
+  assert.ok(!blankLead(frameStats(cache.get('k'))), 'the cache healed: the next hit is clean');
+  assert.ok(!blankLead(frameStats(r.path)), 'the export has footage on frame 0');
+  assert.equal(count(r.path), count(blank));
+  assert.equal(fs.readdirSync(cache.dir).filter((f) => f.includes('.part-')).length, 0, 'no repair leftovers in the cache');
+  assert.match(logs.join('\n'), /frame 0 of the cached master was a flat field/);
+  fs.rmSync(d, {recursive: true, force: true});
+});
+
+test('layers, cache hit with captions: repaired before the composite, so a caption on frame 0 never ships over the field', async () => {
+  const {d, r, cache} = await layersRun({captions: true});
+  assert.deepEqual(r.firstFrame.map((x) => x.pass), ['cached master']);
+  assert.ok(!blankLead(frameStats(cache.get('k'))));
+  assert.ok(!blankLead(frameStats(r.path)));
+  fs.rmSync(d, {recursive: true, force: true});
+});
+
+test('the export itself is checked: a composite that comes out with a blank frame 0 is repaired', async () => {
+  const d = tmp();
+  const pub = path.join(d, 'public'); fs.mkdirSync(pub);
+  const cache = createMasterCache(path.join(d, 'masters'));
+  const good = clip(path.join(d, 'good.mp4'), {lead: 0});
+  const part = path.join(cache.dir, 'k.part-seed.mp4'); fs.copyFileSync(good, part); cache.put('k', part);
+  const blank = clip(path.join(d, 'blank.mp4'));
+  const run = createRenderRunner({
+    root: d, publicDir: pub, masterCache: cache, log: () => {},
+    chooseMode: (requested) => ({mode: requested, reasons: [], captions: true}), keyOf: () => 'k',
+    commands: {captions: ({outFile}) => ['mkdir', ['-p', outFile]], composite: ({outFile}) => ['cp', [blank, outFile]]},
+  });
+  const r = await run({id: 'j3', draft: true, mode: 'layers'}, {props: JSON.stringify({clips: [{id: 'c0', src: 'clips/a.mp4', inSec: 0, outSec: 1}]}), signal: new AbortController().signal, update: () => {}, setPid: () => {}});
+  assert.deepEqual(r.firstFrame.map((x) => x.pass), ['composite']);
+  assert.ok(!blankLead(frameStats(r.path)));
+  fs.rmSync(d, {recursive: true, force: true});
+});
+
+test('the master key covers the guard: a change to scripts/first-frame.mjs is a new code version (old cached masters are not reused)', () => {
+  const d = tmp();
+  fs.mkdirSync(path.join(d, 'scripts'));
+  fs.writeFileSync(path.join(d, 'scripts', 'first-frame.mjs'), 'a');
+  const v = codeVersion(d);
+  fs.writeFileSync(path.join(d, 'scripts', 'first-frame.mjs'), 'b');
+  assert.notEqual(codeVersion(d), v);
   fs.rmSync(d, {recursive: true, force: true});
 });
 
