@@ -55,6 +55,7 @@ import {linkPublic} from './public-links.mjs';
 import {recordFinal, removeVersion} from './reviews.mjs';
 import {killTree} from './render-jobs.mjs';
 import {writeRenderRecord} from './render-records.mjs';
+import {oomKills, oomReason, renderEnv, signalCode} from './render-memory.mjs';
 
 // [from, to] of the overall percentage per stage; a draft has no finalizing / review
 export const STAGES = {
@@ -105,11 +106,16 @@ export function etaFor({done, total, sinceFirstFrameSec, draft, expectSec = 0}) 
 class RenderError extends Error { constructor(msg, result) { super(msg); this.result = result; } }
 
 // spawn a command as its own process group (killTree reaches npx → node → Chrome),
-// line by line to onLine; resolves {code, out, tail}; the signal kills it.
+// line by line to onLine; resolves {code, signal, out, tail, oomDelta}; the signal kills it.
+// A child that exits while something below it still holds its pipes open (Chrome left behind
+// after the kernel OOM-killed the CLI) settles EXIT_GRACE_MS after its exit, its group killed.
+const EXIT_GRACE_MS = 3000;
 function runChild(cmd, args, {cwd, signal, onLine, onPid, env}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
-    const child = spawn(cmd, args, {cwd, env: env ?? process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+    const oom0 = oomKills();
+    let child;
+    try { child = spawn(cmd, args, {cwd, env: env ?? process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe']}); } catch (e) { return reject(new Error(`${cmd} could not start: ${e.message}`)); }
     onPid?.(child.pid);
     let out = '', tail = '', buf = '';
     const feed = (d, isOut) => {
@@ -123,23 +129,49 @@ function runChild(cmd, args, {cwd, signal, onLine, onPid, env}) {
     };
     child.stdout.on('data', (d) => feed(d, true));
     child.stderr.on('data', (d) => feed(d, false));
-    let killTimer = null;
+    // a pipe error must never become an uncaught exception in the backend
+    child.stdout.on('error', () => {});
+    child.stderr.on('error', () => {});
+    let killTimer = null, graceTimer = null, settled = false;
     const onAbort = () => {
       killTree(child.pid, 'SIGTERM');
       killTimer = setTimeout(() => killTree(child.pid, 'SIGKILL'), 5000); killTimer.unref?.();
     };
     signal?.addEventListener('abort', onAbort, {once: true});
-    child.on('error', (e) => { signal?.removeEventListener('abort', onAbort); reject(new Error(`${cmd} could not start: ${e.message}`)); });
-    child.on('close', (code, sig) => {
+    const settle = (code, sig) => {
+      if (settled) return;
+      settled = true;
       onPid?.(null); // no process to watch until the next one starts (the heartbeat checks only a live pid)
       signal?.removeEventListener('abort', onAbort);
       if (killTimer) clearTimeout(killTimer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (buf.trim()) onLine?.(buf);
       if (signal?.aborted) return reject(signal.reason);
-      resolve({code: code ?? (sig ? 128 : 1), signal: sig, out, tail});
+      const oom1 = oomKills();
+      resolve({code: code ?? (sig ? signalCode(sig) : 1), signal: sig, out, tail, oomDelta: oom0 != null && oom1 != null ? oom1 - oom0 : 0});
+    };
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      onPid?.(null);
+      signal?.removeEventListener('abort', onAbort);
+      if (killTimer) clearTimeout(killTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      reject(new Error(`${cmd} could not start: ${e.message}`));
     });
+    child.on('exit', (code, sig) => {
+      graceTimer = setTimeout(() => {
+        killTree(child.pid, 'SIGKILL'); // its group: whatever it left behind holding the pipes
+        child.stdout.destroy(); child.stderr.destroy();
+        settle(code, sig);
+      }, EXIT_GRACE_MS);
+      graceTimer.unref?.();
+    });
+    child.on('close', settle);
   });
 }
+// a child that died of memory → the job's error names it (null: not a memory death)
+const memoryFailure = (r) => oomReason({code: r.code, signal: r.signal, tail: r.tail, oomDelta: r.oomDelta});
 
 // the defaults: the real remotion passes, ffmpeg and the real finalize; tests pass their own
 const passOpts = ({outFile, propsFile, publicDir, draft, plan}) => ({outFile, propsFile, publicDir, draft, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes});
@@ -201,6 +233,7 @@ export function createRenderRunner({
   writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,
+  childEnv = renderEnv(), // the Remotion passes' env: NODE_OPTIONS with the heap cap (scripts/render-memory.mjs)
 } = {}) {
   fs.mkdirSync(exportsDir, {recursive: true});
   commands = {...defaultCommands, ...commands};
@@ -284,7 +317,7 @@ export function createRenderRunner({
         let firstFrameAt = null, lastErr = '';
         const [cmd, args] = commands[kind]({outFile: outPath, propsFile: propsFile(kind === 'render' ? '' : `-${kind}`, pProps), publicDir: links, draft, plan, id});
         const r = await runChild(cmd, args, {
-          cwd: root, signal, onPid: ctx.setPid,
+          cwd: root, signal, onPid: ctx.setPid, env: childEnv,
           onLine: (l) => {
             if (/error/i.test(l)) lastErr = l.trim();
             const p = parseRemotion(l);
@@ -303,11 +336,15 @@ export function createRenderRunner({
         });
         if (r.code !== 0 || !fs.existsSync(outPath)) {
           log(`render ${id} ${kind} failed:\n${r.tail.slice(-1200)}`);
+          const oom = memoryFailure(r);
+          if (oom) { log(`render ${id} ${kind}: ${oom}`); throw Object.assign(new RenderError(oom), {code: 'OOM'}); }
           throw new RenderError(lastErr.slice(0, 300) || (r.signal ? `the render process was killed (${r.signal})` : `render exited ${r.code}`));
         }
       };
       const ffmpeg = async (argv, what) => {
         const r = await runChild(argv[0], argv[1], {cwd: root, signal, onPid: ctx.setPid});
+        const oom = r.code !== 0 && memoryFailure(r);
+        if (oom) throw Object.assign(new RenderError(`${what}: ${oom}`), {code: 'OOM'});
         if (r.code !== 0) throw new RenderError(`${what} failed: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
       };
       // a Remotion pass whose frame 0 is a flat, neutral field while frame 1 is footage
@@ -398,6 +435,8 @@ export function createRenderRunner({
       let qc;
       await timed('qc', async () => {
         const fin = await runChild(fcmd, fargs, {cwd: root, signal, onPid: ctx.setPid});
+        const oom = fin.code !== 0 && memoryFailure(fin);
+        if (oom) throw Object.assign(new RenderError(`loudness + QC: ${oom}`), {code: 'OOM'});
         try { qc = JSON.parse(fin.out.trim().split('\n').pop()); } catch { qc = {ok: false, error: 'QC did not report', checks: [], text: ''}; }
         if (!qc.ok) throw new Error('qc'); // logged as ok: false
       }).catch((e) => { if (signal.aborted || !qc) throw e; });

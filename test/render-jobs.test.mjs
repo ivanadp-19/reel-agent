@@ -35,6 +35,20 @@ for (let i = 1; i <= frames; i++) {
   await sleep(delayMs);
   console.log('Rendered ' + i + '/' + frames + ', time remaining: 1s');
   if (mode === 'die' && i === 2) process.kill(process.pid, 'SIGKILL');
+  // like V8 at its heap cap: the fatal message, then abort()
+  if (mode === 'heap' && i === 2) { console.error('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory'); process.abort(); }
+  // like the kernel killing the CLI while Chrome (below it, same group) still holds its stdout
+  if (mode === 'orphan' && i === 2) {
+    const {spawn} = await import('node:child_process');
+    const g = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: ['ignore', 'inherit', 'inherit']});
+    fs.writeFileSync(outFile + '.grandchild', String(g.pid));
+    process.kill(process.pid, 'SIGKILL');
+  }
+  // the heap limit a node process below the render gets (npx → remotion is node → node)
+  if (mode === 'heapcheck' && i === 1) {
+    const {execFileSync} = await import('node:child_process');
+    fs.writeFileSync(outFile + '.heap', execFileSync(process.execPath, ['-e', 'console.log(require("v8").getHeapStatistics().heap_size_limit)']).toString());
+  }
   if (mode === 'fail' && i === 3) { console.error('Error: boom in frame 3'); process.exit(1); }
   if (mode === 'hang' && i === 2) { fs.writeFileSync(outFile, 'partial'); setInterval(() => {}, 1e6); } // like Remotion: a half-written file, then stuck
   // 'gate': stop after frame 4 until the test writes <outFile>.go (a mid-render state it can read at leisure)
@@ -52,7 +66,7 @@ if (process.argv[3] === 'hang') {
 `;
 
 // a public/ + root with the fakes, a job store and a runner over them
-function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner} = {}) {
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner} = {}) {
   const root = tmpdir();
   const pub = path.join(root, 'public');
   fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
@@ -69,14 +83,14 @@ function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unre
     finalize: ({outFile}) => [process.execPath, [path.join(root, 'fake-finalize.cjs'), outFile, finalizeMode]],
   };
   const run = runner ?? createRenderRunner({
-    root, publicDir: pub, commands, masterCache, log: quiet, ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
+    root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
     logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
     record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
     unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; }),
   });
   const dir = path.join(pub, 'render-jobs');
   const spy = (job, ctx) => run(job, {...ctx, props: ctx.props, update: (u) => { calls.updates.push({id: job.id, ...u}); ctx.update(u); }, setPid: ctx.setPid, signal: ctx.signal});
-  const jobs = createRenderJobs({dir, run: spy, workers, log: quiet, ...(stallMs ? {stallMs} : {}), ...(prepareStallMs ? {prepareStallMs} : {})});
+  const jobs = createRenderJobs({dir, run: spy, workers, log: quiet, memory, ...(owner ? {owner} : {}), ...(stallMs ? {stallMs} : {}), ...(prepareStallMs ? {prepareStallMs} : {})});
   return {root, pub, dir, jobs, calls};
 }
 const props = (fake = {}, extra = {}) => JSON.stringify({clips: [{id: 'c0'}], fake, ...extra});
@@ -616,4 +630,111 @@ test('render records: every settled job leaves <mp4>.json with its project and k
   s3.jobs.cancel(c.id);
   await s3.jobs.idle();
   assert.deepEqual(exportsOf(s3).filter((f) => f.includes(c.id)), []);
+});
+
+// ---- the memory guard (scripts/render-memory.mjs) ----
+test('OOM: a render killed by SIGKILL or aborted at its heap cap fails as out of memory, and the queue goes on', async () => {
+  const {jobs, dir} = setup();
+  const killed = jobs.submit({props: props({mode: 'die'}), draft: true}).job;
+  const heap = jobs.submit({props: props({mode: 'heap'}), draft: true}).job;
+  const after = jobs.submit({props: props({frames: 2}), draft: true}).job;
+  await until(() => readJob(dir, after.id).status === 'done', 8000);
+  for (const [j, why] of [[killed, /SIGKILL/], [heap, /heap limit/]]) {
+    const k = readJob(dir, j.id);
+    assert.equal(k.status, 'failed');
+    assert.equal(k.errorCode, 'OOM');
+    assert.equal(k.label, 'Failed — out of memory');
+    assert.match(k.error, /^out of memory/);
+    assert.match(k.error, why);
+    assert.equal(legacyView(k).status, 'error');
+  }
+});
+
+test('OOM: a render that dies while something below it holds its pipes open still settles, its group killed', async () => {
+  const {jobs, dir, pub} = setup();
+  const {job} = jobs.submit({props: props({mode: 'orphan', frames: 5}), draft: true});
+  await until(() => readJob(dir, job.id).status === 'failed', 8000);
+  assert.match(readJob(dir, job.id).error, /out of memory.*SIGKILL/);
+  const g = +fs.readFileSync(path.join(pub, 'exports', `edited-${job.id}-draft.mp4.grandchild`), 'utf8');
+  kids.push(g);
+  await until(() => !pidAlive(g), 3000);
+});
+
+test('the heap cap reaches the node processes below the render (npx → remotion)', async () => {
+  const {jobs, dir, pub} = setup({childEnv: {...process.env, NODE_OPTIONS: '--max-old-space-size=300'}});
+  const {job} = jobs.submit({props: props({mode: 'heapcheck', frames: 1}), draft: true});
+  await until(() => readJob(dir, job.id).status === 'done', 8000);
+  const limit = +fs.readFileSync(path.join(pub, 'exports', `edited-${job.id}-draft.mp4.heap`), 'utf8') / 2 ** 20;
+  assert.ok(limit > 250 && limit < 600, `heap limit ${limit} MB`); // the old space cap + the young generation (~200 MB)
+});
+
+test('pre-flight memory: below the floor a queued job waits (and says so), then starts when memory is back', async () => {
+  let avail = 900;
+  const s = setup({memory: () => avail});
+  const {job} = s.jobs.submit({props: props({frames: 1}), draft: true});
+  const behind = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await sleep(30);
+  s.jobs.tick();
+  let j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'queued');
+  assert.equal(s.calls.render, 0);
+  assert.equal(j.memoryWait.availMb, 900);
+  assert.equal(j.memoryWait.needMb, 2560);
+  assert.equal(j.memoryWait.checks, 3); // at each submit and on the tick
+  assert.match(j.label, /waiting for memory \(900 MB available, needs 2560 MB\)/);
+  assert.match(legacyView(j).label, /waiting for memory/);
+  assert.match(describeJob(j), /waiting for memory/);
+  assert.equal(readJob(s.dir, behind.id).memoryWait, undefined, 'FIFO: only the head of the queue is checked');
+  avail = 8000;
+  s.jobs.tick();
+  await until(() => [job.id, behind.id].every((id) => readJob(s.dir, id).status === 'done'), 8000);
+  j = readJob(s.dir, job.id);
+  assert.equal(j.memoryWait, undefined);
+  assert.equal(j.memoryWaited.checks, 3);
+  // not measured (macOS) → no floor
+  const m = setup({memory: () => null});
+  const free = m.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await until(() => readJob(m.dir, free.id).status === 'done', 8000);
+});
+
+test('global render lock: a slot held by another live backend blocks a start; stale slots are taken over; a job gives its slot back', async () => {
+  const s = setup();
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: 'ignore'});
+  kids.push(other.pid);
+  // the other backend took the slot for a job it is starting: claimed, still 'queued' on disk
+  const theirs = {id: '1800000000000abcdef', seq: 1, status: 'queued', attempts: 0, createdAt: new Date().toISOString(), draft: true};
+  writeJob(s.dir, theirs);
+  fs.writeFileSync(path.join(s.dir, `${theirs.id}.claim`), String(other.pid));
+  fs.writeFileSync(path.join(s.dir, `${theirs.id}.props.json`), props());
+  const slot = path.join(s.dir, '.slot-0.lock');
+  fs.writeFileSync(slot, JSON.stringify({owner: other.pid, job: theirs.id}));
+  const mine = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await sleep(40);
+  assert.equal(readJob(s.dir, mine.id).status, 'queued');
+  assert.equal(s.calls.render, 0);
+  // their job ends (on disk) but the slot file stays behind: stale, taken over
+  writeJob(s.dir, {...theirs, status: 'done'});
+  fs.rmSync(path.join(s.dir, `${theirs.id}.claim`));
+  s.jobs.tick();
+  await until(() => readJob(s.dir, mine.id).status === 'done', 8000);
+  assert.ok(!fs.existsSync(slot), 'the slot is given back when the job settles');
+  // a slot of a dead backend is stale too
+  fs.writeFileSync(slot, JSON.stringify({owner: deadPid(), job: mine.id}));
+  const next = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
+  await until(() => readJob(s.dir, next.id).status === 'done', 8000);
+});
+
+test('global render lock: two backends on one public/ never render at the same time', async () => {
+  const a = setup();
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: 'ignore'});
+  kids.push(other.pid);
+  // backend B: same store, its own owner id (a live pid), its own runner
+  const b = createRenderJobs({dir: a.dir, run: (job, ctx) => createRenderRunner({root: a.root, publicDir: a.pub, log: quiet, commands: {render: ({outFile, propsFile}) => [process.execPath, [path.join(a.root, 'fake-render.mjs'), outFile, propsFile]]}})(job, ctx), workers: 1, owner: other.pid, log: quiet, memory: () => null});
+  const ids = [];
+  for (let i = 0; i < 3; i++) { ids.push(a.jobs.submit({props: props({frames: 3, delayMs: 10}), draft: true}).job.id); ids.push(b.submit({props: props({frames: 3, delayMs: 10}), draft: true}).job.id); }
+  let max = 0;
+  const iv = setInterval(() => { a.jobs.tick(); b.tick(); max = Math.max(max, listJobs(a.dir, {status: 'running'}).length, a.jobs.running + b.running); }, 2);
+  await until(() => ids.every((id) => readJob(a.dir, id).status === 'done'), 15000);
+  clearInterval(iv);
+  assert.equal(max, 1);
 });

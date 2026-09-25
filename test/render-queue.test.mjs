@@ -36,3 +36,9 @@ test('queue: N at once, FIFO, the rest wait and report how many are ahead', asyn
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(q2.running, 0); assert.equal(q2.waiting, 0);
 });
+
+test('the compositor frame cache is bounded (REEL_RENDER_CACHE_MB, default 1 GB) whatever the RAM', () => {
+  assert.equal(renderPlan({cpus: 8, memBytes: 32 * GB, env: {}}).cacheBytes, 1024 * 2 ** 20);
+  assert.equal(renderPlan({cpus: 2, memBytes: 2 * GB, env: {}}).cacheBytes, 5e8);
+  assert.equal(renderPlan({cpus: 8, memBytes: 32 * GB, env: {REEL_RENDER_CACHE_MB: '2048'}}).cacheBytes, 2048 * 2 ** 20);
+});

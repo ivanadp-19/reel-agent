@@ -31,6 +31,7 @@ import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 import {admitRender, aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
+import {oomReason} from '../scripts/render-memory.mjs';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
@@ -599,7 +600,12 @@ async function handle(req, res) {
     const child = spawn('ffmpeg', ['-v', 'error', '-i', abs, '-ac', '1', '-ar', '8000', '-f', 's16le', '-']);
     const bufs = [];
     child.stdout.on('data', (d) => bufs.push(d));
+    let answered = false;
+    // no ffmpeg (ENOENT): an 'error' event without a listener would be thrown at the backend
+    child.on('error', () => { if (!answered) { answered = true; json(res, 500, {error: 'ffmpeg could not start'}); } });
     child.on('close', (code) => {
+      if (answered) return;
+      answered = true;
       if (code !== 0 || !bufs.length) return json(res, 500, {error: 'ffmpeg failed'});
       const buf = Buffer.concat(bufs);
       const samples = Math.floor(buf.length / 2);
@@ -703,6 +709,8 @@ async function handle(req, res) {
     const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
     const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
+    // could not start (EAGAIN / ENOMEM under memory pressure): the job fails, the backend stays up
+    child.on('error', (e) => { fs.rmSync(inFile, {force: true}); job.store[id] = {status: 'error', error: `${job.name} could not start: ${e.message}`}; });
     let errTail = '';
     let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
@@ -720,7 +728,7 @@ async function handle(req, res) {
       errTail = (errTail + d).slice(-4000);
       process.stderr.write(d);
     });
-    child.on('close', (code) => {
+    child.on('close', (code, sig) => {
       fs.rmSync(inFile, {force: true});
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
       const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
@@ -733,7 +741,7 @@ async function handle(req, res) {
       }
       job.store[id] = code === 0
         ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {})}
-        : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
+        : {status: 'error', error: oomReason({code, signal: sig, tail: errTail, heap: 0, what: job.name}) ?? explainFailure(errTail, `${job.name} exited ${code ?? sig}`)};
     });
     return json(res, 200, {jobId: id});
   }
