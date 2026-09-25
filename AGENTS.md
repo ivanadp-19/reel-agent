@@ -60,22 +60,25 @@ labels → assets → framing → validate → caption_proof → render) is the 
 skill: `.agents/skills/reel-edit/SKILL.md` (`.claude/skills` links to the same
 folder). The plan step is its own skill, `reel-plan`: after the transcript the
 agent writes what it intends (hero word, beats, pack, key words, B-roll) with
-`set_plan`, and every later step follows it. The review is chat-first: the agent
-presents the plan in the chat and stops until the user answers; their "ok" is
-recorded with `approve_plan` (changes: `request_plan_changes`, then a new
-`set_plan`). The project JSON keeps `planApproved` (a changed plan resets it) and
-the user's answers (`planReviews`). While a plan is unapproved, every MCP tool
-that edits the project and the final render refuse to run (`src/plan.ts`
+`set_plan`, and every later step follows it. The plan is mandatory and always
+shown to the user in the chat; by default (plan mode `auto`, what unattended runs
+need) the agent then keeps editing without waiting. Waiting for approval is
+opt-in, only when the user asks for it: `set_plan_mode review` → the agent
+presents the plan and stops, the user's "ok" is recorded with `approve_plan`
+(changes: `request_plan_changes`, then a new `set_plan`). The project JSON keeps
+`planMode`, `planApproved` (a changed plan resets it) and the user's answers
+(`planReviews`). Only in review mode, while the plan is unapproved, the MCP tools
+that edit the project and the final render refuse to run (`src/plan.ts`
 `planGate`, default-deny list in `mcp/server.mjs`); reads, proofs, searches and
-draft renders stay open. No approval screen in the editor for now: the human in
-the editor is the approver and is not gated.
+draft renders stay open. No plan screen in the editor for now.
 
 ## Headless runners
 
 - `scripts/claude-edit.sh <project> "<brief>"` — Claude Code with only `mcp__reel__*`, Read and Skill
 - `scripts/codex-edit.sh <project> "<brief>"` — Codex CLI with the user's config ignored, the reel server pre-approved and a read-only shell sandbox
 
-Both take the same brief and stop once the plan is presented; answer with
+Both take the same brief; the agent shows its plan and edits through to a draft.
+If the brief asks to review the plan first, the run stops after it; answer with
 `<runner> <project> --reply "ok"` (or the changes you want): Claude resumes the
 same conversation, Codex (ephemeral) starts a run that reads the plan back from the
 project. `scripts/run-report.mjs` measures a run from its JSONL log.

@@ -9,8 +9,8 @@
 # shell sandbox is read-only (a `touch` in the repo is blocked; verified), nothing
 # is persisted. The backend (npm start) must be running.
 #   scripts/codex-edit.sh <project_id> --reply "<your answer to the plan>" [log_file]
-# The plan is reviewed in the chat: the first run ends with the plan presented;
-# nothing is persisted, so --reply starts a new run that reads the plan back
+# The agent shows its plan and keeps editing. If the brief asks to review the
+# plan first, the run stops after presenting it; nothing is persisted, so --reply starts a new run that reads the plan back
 # from the project (get_project) and acts on your answer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,7 +27,7 @@ if [ -n "$REPLY" ]; then
 Work only through the reel MCP tools (never edit files or run commands). Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
 else
   PROMPT="First read .agents/skills/reel-edit/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools (never edit files or run commands). After set_plan, present the plan and stop: the user answers with a new run. Once they approve it, finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+Work only through the reel MCP tools (never edit files or run commands). After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers with a new run. Finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
 fi
 
 codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config \

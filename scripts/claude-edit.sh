@@ -5,8 +5,8 @@
 # Uses the `claude` CLI the user already installed and signed in to. No shell,
 # no file writes: the agent can only act through the MCP server (and Read, to
 # look at images). The backend (npm start) must be running.
-# The plan is reviewed in the chat: the first run ends with the plan presented
-# and waits; answer with --reply ("ok", or the changes you want), which resumes
+# The agent shows its plan and keeps editing. If the brief asks to review the
+# plan first, the run stops after presenting it; answer with --reply ("ok", or the changes you want), which resumes
 # the same conversation (session id kept in .captions-tmp/claude-<project>.session).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,7 +28,7 @@ Work only through the reel MCP tools. Approved → approve_plan quoting them, th
   fi
 else
   PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools. After set_plan, present the plan and stop: the user answers in the next message. Once they approve it, finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+Work only through the reel MCP tools. After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers in the next message. Finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
 fi
 
 claude -p "$PROMPT" ${RESUME[@]+"${RESUME[@]}"} \

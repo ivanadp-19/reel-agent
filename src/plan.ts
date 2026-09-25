@@ -1,15 +1,26 @@
-// Plan approval, chat-first: the agent writes its plan (set_plan), presents it to
-// the user in the chat and stops; the user answers there ("ok" / "cambia la
-// música") and the agent records that answer (approve_plan / request_plan_changes).
-// Until the plan is approved, the MCP tools that edit the project and the final
-// render refuse to run. Pure (no JSX, no fs): the MCP server shares every rule here.
+// The plan step, chat-first. The agent always writes its plan (set_plan) and
+// shows it in the chat before editing — the point is to think before acting.
+// That discipline lives in the skills (reel-plan / reel-edit). What happens
+// after the plan is shown depends on the project's plan mode:
+//   auto (default — unattended runs, nobody to ask): keep going.
+//   review (opt-in, only when the user asks for it: set_plan_mode): present it
+//     and stop; the user answers in the chat and the agent records it
+//     (approve_plan / request_plan_changes). Until the plan is approved, the
+//     MCP tools that edit the project and the final render refuse to run.
+// Pure (no JSX, no fs): the MCP server shares every rule here.
 import {placeClips, type Clip} from './timeline.ts';
 import type {TClip} from './cuts.ts';
 
 // one answer of the user to the plan, in their words
 export type PlanReview = {decision: 'approved' | 'changes'; said: string; notes?: string; at: string};
 // what approval needs from a project
-export type Plannable = {plan?: string; planApproved?: boolean; planReviews?: PlanReview[]};
+export type Plannable = {plan?: string; planApproved?: boolean; planReviews?: PlanReview[]; planMode?: PlanMode | null};
+
+export type PlanMode = 'auto' | 'review';
+export const PLAN_MODES: PlanMode[] = ['auto', 'review'];
+const isMode = (m: unknown): m is PlanMode => PLAN_MODES.includes(m as PlanMode);
+// review only when the project was switched to it; anything else is auto
+export const planMode = (p: Plannable): PlanMode => (isMode(p.planMode) ? p.planMode : 'auto');
 
 const KEEP_REVIEWS = 12;
 
@@ -41,21 +52,23 @@ export function pendingChanges(p: Plannable): PlanReview[] {
 const quote = (r: PlanReview) => `"${r.said}"${r.notes ? ` (${r.notes})` : ''}`;
 
 // one line for get_project
-export function planStatus(p: Plannable): string {
+export function planStatus(p: Plannable, mode: PlanMode = planMode(p)): string {
   if (!p.plan?.trim()) return 'no plan';
   if (p.planApproved) {
     const yes = (p.planReviews ?? []).findLast((r) => r.decision === 'approved');
-    return `APPROVED by the user${yes ? ` — ${quote(yes)}` : ''}`;
+    return `APPROVED by the user${yes ? ` — ${quote(yes)}` : ''} (plan mode ${mode})`;
   }
   const asked = pendingChanges(p);
-  return `NOT APPROVED — present it in the chat and wait for the user's answer${asked.length ? `; changes asked: ${asked.map(quote).join('; ')}` : ''}`;
+  const changes = asked.length ? `; changes asked: ${asked.map(quote).join('; ')}` : '';
+  if (mode === 'auto') return `plan mode auto — shown in the chat, the edit goes on without waiting for approval${changes}`;
+  return `NOT APPROVED (plan mode review) — present it in the chat and wait for the user's answer${changes}`;
 }
 
-// null = go ahead; otherwise why not. No plan = nothing to approve (the gate is off).
-export function planGate(p: Plannable, action: string): string | null {
-  if (!p.plan?.trim() || p.planApproved) return null;
+// null = go ahead; otherwise why not. Auto mode, no plan, or an approved plan = go ahead.
+export function planGate(p: Plannable, action: string, mode: PlanMode = planMode(p)): string | null {
+  if (mode !== 'review' || !p.plan?.trim() || p.planApproved) return null;
   const asked = pendingChanges(p);
-  return `${action} waits for the user to approve the plan. Present the plan in the chat (get_project shows it) and STOP until they answer: "ok" → approve_plan with their words; changes → set_plan with the revised plan, present it again and stop.${asked.length ? ` Changes asked so far: ${asked.map(quote).join('; ')}.` : ''} Reading, looking (frame_at, caption_proof), searching and draft renders still work.`;
+  return `${action} waits for the user to approve the plan (plan mode review). Present the plan in the chat (get_project shows it) and STOP until they answer: "ok" → approve_plan with their words; changes → set_plan with the revised plan, present it again and stop.${asked.length ? ` Changes asked so far: ${asked.map(quote).join('; ')}.` : ''} Reading, looking (frame_at, caption_proof), searching and draft renders still work.`;
 }
 
 // ---- presenting the plan: the word ids it names, as words and where they sit ----
