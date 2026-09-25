@@ -12,6 +12,7 @@ import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
 import {BrandContext, resolveBrand, type Brand} from './brand';
+import {registerClientFonts} from './fonts';
 import {gradeFor, type ProjectGrade} from './grade';
 import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, toneColor, type Enter} from './transitions';
 import {ms as msToFrames} from './motion';
@@ -128,6 +129,7 @@ export const MultiClipVideo: React.FC<{
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
+  registerClientFonts(kit.fontFiles); // the client's own faces (public/fonts/), before any text asks for them
   const accentColor = kit.accent;
   const placed = placeClips(clips, fps);
   const totalFrames = totalDurationFrames(clips, fps);

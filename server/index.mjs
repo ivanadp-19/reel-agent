@@ -14,6 +14,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
+import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
@@ -414,6 +415,19 @@ const server = createServer(async (req, res) => {
     const ws = fs.createWriteStream(path.join(dir, safe));
     req.pipe(ws);
     ws.on('finish', () => json(res, 200, {src: `brand/${safe}`}));
+    ws.on('error', () => json(res, 500, {error: 'write failed'}));
+    return;
+  }
+
+  // ---- upload a client font file (brand kit) → public/fonts/ (gitignored, never in the repo) ----
+  if (req.method === 'POST' && url.pathname === '/api/upload-font') {
+    const safe = (url.searchParams.get('name') || '').replace(/[^\w.\-]/g, '_');
+    if (!FONT_FILE.test(safe)) return json(res, 400, {error: 'a .ttf, .otf, .woff or .woff2 file'});
+    const dir = path.join(PUBLIC, 'fonts');
+    fs.mkdirSync(dir, {recursive: true});
+    const ws = fs.createWriteStream(path.join(dir, safe));
+    req.pipe(ws);
+    ws.on('finish', () => json(res, 200, clientFont(`fonts/${safe}`))); // same guess as set_brand font_files
     ws.on('error', () => json(res, 500, {error: 'write failed'}));
     return;
   }

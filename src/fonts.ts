@@ -1,7 +1,11 @@
 // Font catalog (all OFL, bundled through @remotion/google-fonts so preview and
 // export use the same faces). A family is only downloaded when a preset asks
 // for it. Add a family here and it becomes available to every preset.
+// Client fonts (a brand's own Helvetica Bold…) are files the user brings: they
+// live under public/fonts/ (never in the repo) and a brand kit lists them
+// (`fonts.files`); registerClientFonts makes fontFamily() load them.
 
+import {cancelRender, continueRender, delayRender, staticFile} from 'remotion';
 import {loadFont as inter} from '@remotion/google-fonts/Inter';
 import {loadFont as montserrat} from '@remotion/google-fonts/Montserrat';
 import {loadFont as poppins} from '@remotion/google-fonts/Poppins';
@@ -65,9 +69,53 @@ export function emojiFamily(): string {
   return emojiCss;
 }
 
+// ---- client fonts ----
+export type ClientFont = {family: string; file: string; weight: number; italic?: boolean}; // file under public/, e.g. fonts/Helvetica-Bold.ttf
+export const FONT_FILE = /\.(ttf|otf|woff2?)$/i;
+export const isCatalog = (name: string): name is FontFamily => name in LOADERS;
+// a font file → its entry: family from the name ("Helvetica-Bold.ttf" → Helvetica), weight and italic from the style words
+export function clientFont(file: string, family?: string, weight?: number, italic?: boolean): ClientFont {
+  const base = file.split('/').pop()!.replace(FONT_FILE, '');
+  const style = base.split(/[-_ ]+/).slice(1).join(' ').toLowerCase();
+  const guess = /black|heavy/.test(style) ? 900 : /extra ?bold|ultra ?bold/.test(style) ? 800 : /semi ?bold|demi/.test(style) ? 600 : /bold/.test(style) ? 700 : /medium/.test(style) ? 500 : /light|thin/.test(style) ? 300 : 400;
+  const fam = (family ?? base.split(/[-_]/)[0].replace(/([a-z])([A-Z])/g, '$1 $2')).trim().slice(0, 40);
+  return {family: fam, file, weight: weight ?? guess, ...(italic ?? /italic|oblique/.test(style) ? {italic: true} : {})};
+}
+// heaviest weight a family has, catalog or client
+export const heaviest = (name: string, files: ClientFont[] = []): number =>
+  isCatalog(name) ? HEAVIEST[name] : Math.max(400, ...files.filter((f) => f.family === name).map((f) => f.weight));
+
+const client = new Map<string, ClientFont[]>(); // family → faces registered by the brand kit
+const faces = new Set<string>(); // files already requested
+// make a kit's client fonts known (the composition calls it with brand.fonts.files)
+export function registerClientFonts(files: ClientFont[] | undefined): void {
+  for (const f of files ?? []) {
+    const list = client.get(f.family) ?? [];
+    if (!list.some((x) => x.file === f.file)) client.set(f.family, [...list, f]);
+  }
+}
+// load a client family's files with the FontFace API; the render waits for them
+// (delayRender) and fails loudly when a file is missing — never a silent fallback face
+function loadClient(name: string): void {
+  if (typeof FontFace === 'undefined' || typeof document === 'undefined') return; // node (tests, the MCP)
+  for (const f of client.get(name) ?? []) {
+    if (faces.has(f.file)) continue;
+    faces.add(f.file);
+    const handle = delayRender(`client font ${f.family} (${f.file})`);
+    new FontFace(f.family, `url("${staticFile(f.file)}")`, {weight: String(f.weight), style: f.italic ? 'italic' : 'normal'}).load()
+      .then((face) => { (document.fonts as unknown as {add: (f: FontFace) => void}).add(face); continueRender(handle); })
+      .catch((e) => cancelRender(new Error(`client font ${f.family}: public/${f.file} did not load (${e}) — bring the file back or pick another font with set_brand`)));
+  }
+}
+
 const loaded = new Map<FontFamily, string>();
-// CSS font-family string for a catalog family (loads it on first use)
-export function fontFamily(name: FontFamily): string {
+// CSS font-family string for a catalog family (loads it on first use) or a
+// registered client font; an unknown name falls back to the system sans
+export function fontFamily(name: FontFamily | string): string {
+  if (!isCatalog(name)) {
+    loadClient(name);
+    return `"${name.replace(/"/g, '')}", system-ui, sans-serif`;
+  }
   let css = loaded.get(name);
   if (!css) {
     css = LOADERS[name]();

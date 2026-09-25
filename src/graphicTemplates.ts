@@ -261,7 +261,7 @@ export type Life = (typeof LIFE_KINDS)[number];
 export const STAR_PX: Record<string, number> = {sm: 230, md: 310, lg: 400}; // starburst diameter
 // oversized: the font size that makes the word ~1.3× the 1080 px frame width
 export const OVERSIZED_FAMILY: Record<string, FontFamily> = {condensed: 'Anton', display: 'Montserrat', serif: 'Playfair Display'};
-export const oversizedPx = (text: string, font = 'condensed', family?: FontFamily) =>
+export const oversizedPx = (text: string, font = 'condensed', family?: FontFamily | string) =>
   Math.round((1080 * 1.3) / Math.max(1, textWidthEm(String(text).toUpperCase(), family ?? OVERSIZED_FAMILY[font] ?? 'Anton')));
 export const isTemplate = (id: string): id is TemplateId => id in TEMPLATES;
 

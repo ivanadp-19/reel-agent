@@ -12,12 +12,13 @@ const ADVANCE: Record<FontFamily, [number, number]> = {
   'Courier Prime': [0.6, 0.6], 'Space Mono': [0.62, 0.62],
 };
 
-export function textWidthEm(text: string, family: FontFamily = 'Montserrat'): number {
-  const [up, lo] = ADVANCE[family] ?? ADVANCE.Montserrat;
+// a client font (not in the table) is estimated like Inter, a neutral grotesque
+export function textWidthEm(text: string, family: FontFamily | string = 'Montserrat'): number {
+  const [up, lo] = ADVANCE[family as FontFamily] ?? ADVANCE.Inter;
   return [...String(text)].reduce((n, ch) => n + (ch === ' ' ? 0.3 : /[.,:;'|!]/.test(ch) ? 0.3 : /[IJLijl1]/.test(ch) ? up * 0.5 : /\d/.test(ch) ? 0.62 : ch === ch.toUpperCase() && ch !== ch.toLowerCase() ? up : lo), 0);
 }
 
-export function fitSize(text: string, base: number, family: FontFamily = 'Montserrat', maxWidth = 960, minSize = 0): number {
+export function fitSize(text: string, base: number, family: FontFamily | string = 'Montserrat', maxWidth = 960, minSize = 0): number {
   const width = textWidthEm(text, family) * base;
   return width <= maxWidth ? base : Math.max(minSize, Math.floor((base * maxWidth) / width));
 }

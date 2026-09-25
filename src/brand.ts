@@ -5,10 +5,15 @@
 
 import {createContext, useContext} from 'react';
 import {z} from 'zod';
-import {FONT_FAMILIES, type FontFamily} from './fonts.ts';
+import {FONT_FILE, isCatalog, type ClientFont} from './fonts.ts';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'hex color like #FFB020');
-const family = z.enum(FONT_FAMILIES as [FontFamily, ...FontFamily[]]);
+const fontFile = z.object({
+  family: z.string().trim().min(1).max(40),
+  file: z.string().regex(FONT_FILE, 'a .ttf, .otf, .woff or .woff2 under public/').refine((f) => !f.startsWith('/') && !f.includes('..'), 'a path under public/, e.g. fonts/Helvetica-Bold.ttf'),
+  weight: z.number().int().min(100).max(900),
+  italic: z.boolean().optional(),
+});
 
 export const brandSchema = z.object({
   name: z.string().trim().max(40).optional(),
@@ -18,17 +23,24 @@ export const brandSchema = z.object({
     light: hex.optional().describe('light canvas / card background (default #f3f3f0)'),
   }),
   fonts: z.object({
-    display: family.optional().describe('headline font (graphics templates)'),
-    body: family.optional().describe('caption font (overrides the preset family)'),
-  }).default({}),
+    display: z.string().optional().describe('headline font (graphics templates): a catalog family or a client font of files'),
+    body: z.string().optional().describe('caption font (overrides the preset family): a catalog family or a client font of files'),
+    files: z.array(fontFile).max(12).optional().describe('client font files under public/fonts/ (the client\'s own faces, never in the repo)'),
+  }).default({}).superRefine((f, ctx) => {
+    for (const k of ['display', 'body'] as const) {
+      const name = f[k];
+      if (name && !isCatalog(name) && !f.files?.some((x) => x.family === name)) ctx.addIssue({code: 'custom', path: [k], message: `"${name}" is neither a catalog font nor one of the kit's font files`});
+    }
+  }),
   logo: z.string().optional().describe('image under public/, e.g. brands/acme.png'),
 });
-export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: FontFamily; body?: FontFamily}; logo?: string};
+// display / body: a catalog family (src/fonts.ts) or the family of one of `files`
+export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: string; body?: string; files?: ClientFont[]}; logo?: string};
 
 // what the renderer uses: every value resolved, `branded` = a kit is active
-export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: FontFamily; body?: FontFamily; script?: FontFamily; logo?: string};
+export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: string; body?: string; script?: string; logo?: string; fontFiles: ClientFont[]};
 // what a style pack brings when the project has no brand kit (src/stylePacks.ts)
-export type PackKit = {accent: string; dark: string; light: string; display?: FontFamily; script?: FontFamily};
+export type PackKit = {accent: string; dark: string; light: string; display?: string; script?: string};
 
 export const DEFAULT_ACCENT = '#FFB020';
 // a brand kit wins; else the project's own accent when it was set (not the default); else the pack's palette
@@ -43,6 +55,7 @@ export function resolveBrand(brand: Brand | null | undefined, accentColor?: stri
     body: brand?.fonts?.body,
     script: pack?.script,
     logo: brand?.logo,
+    fontFiles: brand?.fonts?.files ?? [],
   };
 }
 

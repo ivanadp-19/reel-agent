@@ -3,7 +3,7 @@ import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} 
 import type {Caption, CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, pageScale, presetOf, type Preset, type TierStyle} from './captionPresets';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
-import {emojiFamily, fontFamily} from './fonts';
+import {emojiFamily, fontFamily, type FontFamily} from './fonts';
 import {legible, useBrand} from './brand';
 
 export type {Caption} from './captions';
@@ -228,7 +228,7 @@ export const CaptionTrack: React.FC<{captions: Caption[]; captionStyle?: string;
   // a brand kit overrides the pack's accent and (when it names one) its font —
   // but only on sans packs: a pack whose identity is its face (condensed,
   // serif, script) keeps it. Without a kit the pack's own palette wins over the project accent
-  const preset = kit.body && SANS.has(base.font.family) ? {...base, font: {...base.font, family: kit.body}} : base;
+  const preset = kit.body && SANS.has(base.font.family) ? {...base, font: {...base.font, family: kit.body as FontFamily}} : base; // may be a client font: fontFamily() resolves both
   if (!captions?.length) return null;
   const accent = kit.branded ? kit.accent : (preset.colors.accent ?? kit.accent);
   return (

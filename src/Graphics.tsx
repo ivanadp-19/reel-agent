@@ -3,7 +3,7 @@ import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVide
 import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
 import {TEXT_REVEALS, arrive, layoutIn, layoutOut, leave, lifeFx, ms, revealText, scrambleChar, unfold, windowTrail, type ArriveKind, type LayoutIn, type LeaveKind, type TextReveal} from './motion';
 import {seedOf} from './transitions';
-import {fontFamily, HEAVIEST, type FontFamily} from './fonts';
+import {fontFamily, heaviest, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
 import {fitSize, textWidthEm} from './textFit';
 
@@ -17,11 +17,11 @@ const FACES: Record<FaceName, {family: FontFamily; weight: number; italic?: bool
   serif: {family: 'Playfair Display', weight: 700},
   'serif-italic': {family: 'Instrument Serif', weight: 400, italic: true},
 };
-type Face = {family: FontFamily; style: React.CSSProperties};
+type Face = {family: string; style: React.CSSProperties}; // a catalog family or a brand kit's client font
 const useFace = (name: unknown, fallback: FaceName = 'display'): Face => {
   const kit = useBrand();
   const key = (typeof name === 'string' && name in FACES ? name : fallback) as FaceName;
-  const f: {family: FontFamily; weight: number; italic?: boolean; spacing?: number} = key === 'display' && kit.display ? {family: kit.display, weight: HEAVIEST[kit.display]} : key === 'script' && kit.script ? {family: kit.script, weight: HEAVIEST[kit.script]} : FACES[key];
+  const f: {family: string; weight: number; italic?: boolean; spacing?: number} = key === 'display' && kit.display ? {family: kit.display, weight: heaviest(kit.display, kit.fontFiles)} : key === 'script' && kit.script ? {family: kit.script, weight: heaviest(kit.script)} : FACES[key];
   return {family: f.family, style: {fontFamily: fontFamily(f.family), fontWeight: f.weight, ...(f.italic ? {fontStyle: 'italic' as const} : {}), ...(f.spacing ? {letterSpacing: f.spacing} : {})}};
 };
 const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';

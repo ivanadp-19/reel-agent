@@ -38,7 +38,7 @@ import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from './music.mj
 import {acquireLock, lockMessage, releaseLock} from '../scripts/project-lock.mjs';
 import {CLEAN} from '../src/audio.ts';
 import {brandSchema} from '../src/brand.ts';
-import {FONT_FAMILIES} from '../src/fonts.ts';
+import {FONT_FAMILIES, FONT_FILE, clientFont} from '../src/fonts.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -236,7 +236,8 @@ const BRANDS = path.join(PUBLIC, 'brands');
 const slug = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
-server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts (OFL catalog): ${FONT_FAMILIES.join(', ')}. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.enum(FONT_FAMILIES).optional(), caption_font: z.enum(FONT_FAMILIES).optional(), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, logo, name, from, save_as, clear}) => {
+const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, name, from, save_as, clear}) => {
   const p = load(project_id);
   if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
   let b;
@@ -248,6 +249,26 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   b.fonts ??= {};
   if (name) b.name = name;
   if (accent) b.colors.accent = accent; if (dark) b.colors.dark = dark; if (light) b.colors.light = light;
+  if (drop_fonts?.length) {
+    b.fonts.files = (b.fonts.files ?? []).filter((x) => !drop_fonts.includes(x.family));
+    for (const k of ['display', 'body']) if (drop_fonts.includes(b.fonts[k])) delete b.fonts[k];
+  }
+  for (const ff of font_files ?? []) {
+    if (!FONT_FILE.test(ff.path)) throw new Error(`${ff.path}: a font file is .ttf, .otf, .woff or .woff2`);
+    let rel;
+    if (path.isAbsolute(ff.path)) {
+      if (!fs.existsSync(ff.path)) throw new Error(`file not found: ${ff.path}`);
+      fs.mkdirSync(FONTS_DIR, {recursive: true});
+      const dest = path.join(FONTS_DIR, path.basename(ff.path).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(ff.path, dest);
+      rel = path.relative(PUBLIC, dest);
+    } else {
+      const abs = path.resolve(PUBLIC, ff.path);
+      if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${ff.path}`);
+      rel = path.relative(PUBLIC, abs);
+    }
+    const entry = clientFont(rel.split(path.sep).join('/'), ff.family, ff.weight, ff.italic);
+    b.fonts.files = [...(b.fonts.files ?? []).filter((x) => x.file !== entry.file), entry];
+  }
   if (display_font) b.fonts.display = display_font; if (caption_font) b.fonts.body = caption_font;
   if (logo) {
     if (!IMAGE.test(logo)) throw new Error('logo must be a png, jpg, webp or svg');
