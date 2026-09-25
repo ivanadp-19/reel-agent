@@ -46,6 +46,7 @@ export const Inspector: React.FC<{
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
+  const [pageText, setPageText] = useState(''); // the hand-typed page (no JS dialog: automation-driven browsers cannot answer one)
   const [library, setLibrary] = useState<LibAsset[]>([]); // the machine's own B-roll library (add_broll_assets / the Assets panel), with tags
   const [stockQuery, setStockQuery] = useState<string | undefined>(undefined);
   const [newCue, setNewCue] = useState<{asset: string; mode: BrollItem['mode']; sec: number}>({asset: '', mode: 'inset', sec: 3});
@@ -71,8 +72,10 @@ export const Inspector: React.FC<{
   const rampOk = selClip ? (selClip.outSec - selClip.inSec) / rampPieces >= 0.3 : false;
 
   const addPage = () => {
-    const t = window.prompt('Caption text (2 s at the playhead)');
-    if (t?.trim()) addCaption(currentFrame, t.trim());
+    const t = pageText.trim();
+    if (!t) return;
+    addCaption(currentFrame, t);
+    setPageText('');
   };
   const addCue = () => {
     const a = assets.find((x) => x.id === newCue.asset) ?? assets[0];
@@ -202,7 +205,18 @@ export const Inspector: React.FC<{
               {generating ? 'Generating…' : 'Generate AI Captions'}
             </button>
             {generating && <p className="text-[11px] text-on-surface-variant mt-2 truncate">{progressLabel}</p>}
-            <Btn onClick={addPage} disabled={!clips.length} title="A hand-typed page on the clip under the playhead" className="w-full mt-2 mb-3"><span className="material-symbols-outlined text-[16px]">add</span>Add page at playhead</Btn>
+            <div className="flex gap-2 mt-2 mb-3" title="A hand-typed page on the clip under the playhead (2 s)">
+              <input
+                value={pageText}
+                onChange={(e) => setPageText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPage(); } }}
+                disabled={!clips.length}
+                placeholder="Caption text (2 s at the playhead)"
+                aria-label="Caption text for a new page at the playhead"
+                className="flex-1 min-w-0 bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded px-2 py-1 text-[12px] disabled:opacity-40"
+              />
+              <Btn onClick={addPage} disabled={!clips.length || !pageText.trim()}><span className="material-symbols-outlined text-[16px]">add</span>Add</Btn>
+            </div>
             <div className="flex items-center justify-between mb-5" title="set_captions: the pages are kept, none is rendered (a reel without subtitles)">
               <Label>{captionsOff ? 'Captions off — not rendered' : 'Show captions'}</Label>
               <Toggle on={!captionsOff} onChange={(on) => setCaptionsOff(!on)} />

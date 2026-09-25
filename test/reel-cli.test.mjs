@@ -8,8 +8,9 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import {main, checkCaptions, diffCaptions, slug} from '../cli/reel.mjs';
+import {main, autocutPlan, checkCaptions, diffCaptions, projectPatch, slug} from '../cli/reel.mjs';
 import {serveFile} from '../server/http.mjs';
+import {captionsRevision, replaceCaptions} from '../server/captions-revision.mjs';
 
 const TOKEN = 'reel_test-secret-0123456789abcdefghij';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-cli-'));
@@ -31,6 +32,20 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/projects') return send(res, 200, [...S.projects].map(([id, x]) => ({id, name: x.name, clips: x.clips?.length ?? 0, updatedAt: x.updatedAt, thumb: null})));
   if (p === '/api/captions' && req.method === 'POST') { S.captionsBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '17'}); }
   if (p === '/api/captions/17') return send(res, 200, ++S.captionsCalls < 2 ? {status: 'running', progress: 50, label: 'Transcribing'} : {status: 'done', progress: 100, label: 'Ready', result: [{id: 'n0', src: 'clips/take1.mp4', startMs: 1000, endMs: 1600, topPct: 62, words: [{wid: 'take1:5', text: 'nuevo', startMs: 1000, endMs: 1600}]}]});
+  if (p === '/api/trim-silence' && req.method === 'POST') { S.trimBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '23'}); }
+  if (p === '/api/trim-silence/23') return send(res, 200, S.trimFile !== undefined ? {status: 'done', progress: 100, label: 'Ready'} : {status: 'done', progress: 100, label: 'Ready', result: {plan: [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]}});
+  if (p === '/trim-silence.json') { S.trimFileToken = req.headers['x-reel-token'] === TOKEN; return S.trimFile ? send(res, 200, S.trimFile) : send(res, 404, {error: 'not found'}); }
+  if ((m = p.match(/^\/api\/projects\/([\w-]+)\/captions$/))) { // the backend's route, over its revision logic
+    const cur = S.projects.get(m[1]);
+    if (!cur) return send(res, 404, {error: 'not found', code: 'not_found'});
+    if (req.method === 'GET') return send(res, 200, {project: m[1], revision: captionsRevision(cur.captions), captionsOff: !!cur.captionsOff, captionStyle: cur.captionStyle ?? null, captions: cur.captions ?? [], updatedAt: cur.updatedAt});
+    const b = JSON.parse(await readBody(req));
+    S.captionPuts = (S.captionPuts ?? 0) + 1;
+    if (S.editorSavesBeforePut > 0) { S.editorSavesBeforePut--; cur.captions = [...(cur.captions ?? []), {id: `ed${S.editorSavesBeforePut}`, src: 'clips/take1.mp4', startMs: 5000, endMs: 5500, words: []}]; } // someone saved in between
+    const r = replaceCaptions(cur, b, `t${process.hrtime.bigint()}`);
+    if (r.next) S.projects.set(m[1], r.next);
+    return send(res, r.status, r.body);
+  }
   if ((m = p.match(/^\/api\/projects\/([\w-]+)$/))) {
     const cur = S.projects.get(m[1]);
     if (req.method === 'GET') return cur ? send(res, 200, cur) : send(res, 404, {error: 'not found'});
@@ -103,7 +118,7 @@ test('help --json: every command with usage, flags, output, examples; exit codes
   assert.equal(out.schemaVersion, 1);
   for (const k of ['0', '2', '3', '5', '7', '124']) assert.ok(out.exitCodes[k]);
   const names = out.commands.map((c) => c.name);
-  for (const n of ['whoami', 'doctor', 'projects list', 'projects create', 'projects show', 'projects delete', 'clips add', 'captions get', 'captions set', 'captions validate', 'captions diff', 'render start', 'render status', 'render wait', 'render download', 'review-link', 'jobs list', 'token create', 'token revoke']) assert.ok(names.includes(n), n);
+  for (const n of ['whoami', 'doctor', 'projects list', 'projects create', 'projects set', 'projects show', 'projects delete', 'clips add', 'autocut', 'captions get', 'captions set', 'captions validate', 'captions diff', 'render start', 'render status', 'render wait', 'render download', 'review-link', 'jobs list', 'token create', 'token revoke']) assert.ok(names.includes(n), n);
   for (const c of out.commands) { assert.ok(c.usage.startsWith(`reel ${c.name}`) && c.summary && c.flags.json, c.name); assert.ok(c.examples.length, c.name); }
   const one = await reel(['help', 'render', 'start', '--json'], {token: null});
   assert.equal(one.out.name, 'render start');
@@ -190,6 +205,8 @@ test('captions: set checks the pages, the same pages change nothing, diff page b
   assert.deepEqual([bad.code, bad.out.code], [9, 'invalid']);
   const got = await reel(['captions', 'get', 'promo', '--json']);
   assert.deepEqual(got.out.captions, caps);
+  assert.equal(got.out.revision, captionsRevision(caps));
+  assert.equal(set.out.revision, got.out.revision, 'set prints the revision it wrote');
   const gen = await reel(['captions', 'generate', 'promo', '--json']);
   assert.deepEqual([gen.code, gen.out.added, gen.out.captions], [0, 1, 2], 'fresh pages merged next to the hand-set one');
   assert.deepEqual([S.captionsBody.project_id, S.captionsBody.style, S.captionsBody.clips.length], ['promo', 'palabra', 1]);
@@ -216,4 +233,107 @@ test('render: start says the plan, busy is exit 5, wait ends done / failed / tim
   assert.equal(dl.out.file, path.join(tmp, 'edited-job.mp4'), 'named as the export, in the current folder');
   assert.ok(fs.readFileSync(path.join(tmp, 'edited-job.mp4')).equals(fs.readFileSync(exportFile)), 'resumed after the drop, byte for byte');
   assert.equal((await reel(['render', 'download', 'job123456', '--json'])).out.skipped, true);
+});
+
+test('projectPatch: a language code (not a name), a known caption pack, a non-empty name', () => {
+  assert.deepEqual(projectPatch({lang: 'ES', 'caption-style': 'caja', name: 'Promo'}), {lang: 'es', captionStyle: 'caja', name: 'Promo'});
+  assert.deepEqual(projectPatch({}), {});
+  for (const lang of ['Spanish', 'español', 'es-ES', '']) assert.throws(() => projectPatch({lang}), (e) => e.code === 'bad_usage' && /language code/.test(e.message), lang);
+  assert.throws(() => projectPatch({'caption-style': 'nope'}), (e) => e.code === 'bad_usage' && /palabra/.test(e.hint));
+  assert.throws(() => projectPatch({'caption-style': 'toString'}), (e) => e.code === 'bad_usage', 'not a key of every object');
+  assert.throws(() => projectPatch({name: '  '}), (e) => e.code === 'bad_usage');
+});
+
+test('autocutPlan: clips split into their speech segments, the ones not in the plan untouched, the time removed', () => {
+  const clips = [{id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 4, enter: 'whip', lSec: 0.5}, {id: 'b', src: 'clips/b.mp4', inSec: 1, outSec: 3}, {id: 'c', src: 'clips/c.mp4', inSec: 0, outSec: 1}];
+  const r = autocutPlan(clips, [{id: 'a', segments: [{inSec: 0.5, outSec: 1.5}, {inSec: 2, outSec: 3.5}]}, {id: 'c', segments: []}]);
+  assert.deepEqual(r.clips.map((c) => [c.id, c.inSec, c.outSec]), [['a', 0.5, 1.5], ['a-c1', 2, 3.5], ['b', 1, 3]]);
+  assert.deepEqual([r.clips[0].enter, r.clips[0].lSec, r.clips[1].enter, r.clips[1].lSec], ['whip', undefined, undefined, 0.5], 'the entrance stays on the first piece, the L-cut on the last');
+  assert.deepEqual([r.before, r.after, r.removedSec], [{clips: 3, durationSec: 7}, {clips: 3, durationSec: 4.5}, 2.5]);
+  assert.deepEqual(r.remap.map((x) => x.segId), ['a', 'a-c1']);
+});
+
+test('projects set: by id or name, CAS write, retry changes nothing, a new pack re-pages the captions, bad values are exit 2', async () => {
+  const byName = await reel(['projects', 'set', 'Promo Café', '--lang', 'es', '--json']);
+  assert.deepEqual([byName.code, byName.out.project, byName.out.changed, byName.out.set], [0, 'promo', true, {lang: 'es'}]);
+  assert.equal(S.projects.get('promo').lang, 'es');
+  assert.equal((await reel(['projects', 'set', 'promo', '--lang', 'es', '--json'])).out.changed, false, 'safe to retry');
+  S.stalePosts = 1; // the editor saves in between: read again, redo
+  const calls = S.captionsCalls;
+  const style = await reel(['projects', 'set', 'promo', '--caption-style', 'caja', '--json']);
+  assert.equal(style.code, 0, style.stdout);
+  assert.deepEqual([style.out.changed, S.projects.get('promo').captionStyle, S.captionsBody.style, S.captionsBody.lang], [true, 'caja', 'caja', 'es']);
+  assert.ok(S.captionsCalls > calls, 'the pages were made again for the new pack');
+  assert.ok(S.projects.get('promo').captions.some((c) => c.words.some((w) => w.wid === 'take1:5')));
+  const bad = await reel(['projects', 'set', 'promo', '--lang', 'Spanish', '--json']);
+  assert.deepEqual([bad.code, bad.out.code], [2, 'bad_usage']);
+  assert.match(bad.out.hint, /auto, es, en/);
+  const nothing = await reel(['projects', 'set', 'promo', '--json']);
+  assert.deepEqual([nothing.code, nothing.out.code], [2, 'bad_usage']);
+  const missing = await reel(['projects', 'set', 'Nope', '--lang', 'en', '--json']);
+  assert.deepEqual([missing.code, missing.out.code], [4, 'not_found']);
+});
+
+test('autocut: --dry-run prints the plan and saves nothing; then the clips are replaced by their segments; no plan from the backend is an error', async () => {
+  const before = S.projects.get('promo');
+  const dry = await reel(['autocut', 'Promo Café', '--dry-run', '--json']);
+  assert.equal(dry.code, 0, dry.stdout);
+  assert.deepEqual([dry.out.dryRun, dry.out.changed, dry.out.before, dry.out.after, dry.out.removedSec], [true, false, {clips: 1, durationSec: 2}, {clips: 2, durationSec: 1.3}, 0.7]);
+  assert.deepEqual(dry.out.plan, [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]);
+  assert.deepEqual([S.trimBody.project_id, S.trimBody.lang, S.trimBody.clips.map((c) => c.id)], ['promo', 'es', ['take1']]);
+  assert.equal(S.projects.get('promo'), before, 'a dry run writes nothing');
+  const cut = await reel(['autocut', 'promo', '--json']);
+  assert.deepEqual([cut.code, cut.out.changed], [0, true]);
+  assert.deepEqual(S.projects.get('promo').clips.map((c) => [c.id, c.inSec, c.outSec]), [['take1', 0.2, 0.9], ['take1-c1', 1.2, 1.8]]);
+  // a backend whose job status has no result: the plan is read from /trim-silence.json, like the editor does
+  S.trimFile = {plan: [{id: 'take1-c1', segments: [{inSec: 1.3, outSec: 1.7}]}]};
+  const fromFile = await reel(['autocut', 'promo', '--json']);
+  assert.deepEqual([fromFile.code, fromFile.out.changed, S.trimFileToken], [0, true, true], fromFile.stdout);
+  assert.deepEqual(S.projects.get('promo').clips.map((c) => [c.id, c.inSec, c.outSec]), [['take1', 0.2, 0.9], ['take1-c1', 1.3, 1.7]]);
+  S.trimFile = {plan: [{id: 'other-project-clip', segments: []}]};
+  const other = await reel(['autocut', 'promo', '--json']);
+  assert.deepEqual([other.code, other.out.code], [5, 'conflict'], 'a plan for clips of another project is never applied');
+  S.trimFile = null;
+  const none = await reel(['autocut', 'promo', '--json']);
+  assert.deepEqual([none.code, none.out.code], [1, 'job_failed']);
+  S.trimFile = undefined;
+});
+
+test('captions revision: get prints it, set --expected-revision is refused with 409 revision_mismatch (exit 5) once the pages moved, and writes nothing', async () => {
+  const page = (id, startMs) => ({id, src: 'clips/take1.mp4', startMs, endMs: startMs + 500, topPct: 62, words: [{text: id, startMs, endMs: startMs + 500}]});
+  S.projects.set('rev', {name: 'rev', clips: [], captions: [page('a', 0)], updatedAt: 't0'});
+  const got = await reel(['captions', 'get', 'rev', '--json']);
+  const rev0 = got.out.revision;
+  assert.match(rev0, /^[0-9a-f]{16}$/);
+  assert.match((await reel(['captions', 'get', 'rev'])).stdout, new RegExp(`^revision ${rev0}\n`));
+  fs.writeFileSync(path.join(tmp, 'rev1.json'), JSON.stringify({...got.out, captions: [page('a', 0), page('b', 1000)]}));
+  const ok = await reel(['captions', 'set', 'rev', 'rev1.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([ok.code, ok.out.changed, ok.out.diff.added], [0, true, ['b']]);
+  assert.notEqual(ok.out.revision, rev0);
+  // a second writer that still holds rev0: refused, nothing written
+  fs.writeFileSync(path.join(tmp, 'rev2.json'), JSON.stringify([page('z', 0)]));
+  const before = JSON.stringify(S.projects.get('rev'));
+  const stale = await reel(['captions', 'set', 'rev', 'rev2.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([stale.code, stale.out.code], [5, 'revision_mismatch']);
+  assert.equal(stale.out.revision, ok.out.revision, 'the error names the current revision');
+  assert.ok(stale.out.hint);
+  assert.equal(JSON.stringify(S.projects.get('rev')), before, 'a refused set changes nothing');
+  assert.equal((await reel(['captions', 'set', 'rev', 'rev2.json', '--expected-revision', 'no spaces', '--json'])).code, 2);
+  // retrying the set that went through (its answer lost): the same pages, not a conflict
+  const retry = await reel(['captions', 'set', 'rev', 'rev1.json', '--expected-revision', rev0, '--json']);
+  assert.deepEqual([retry.code, retry.out.changed, retry.out.revision], [0, false, ok.out.revision]);
+  // without the flag a writer that got in between is read again, not overwritten blindly nor refused
+  S.editorSavesBeforePut = 1;
+  const puts = S.captionPuts;
+  const redo = await reel(['captions', 'set', 'rev', 'rev2.json', '--json']);
+  assert.deepEqual([redo.code, redo.out.changed, S.captionPuts - puts], [0, true, 2]);
+  assert.deepEqual(S.projects.get('rev').captions, [page('z', 0)]);
+  // the pure rule
+  const prev = {captions: [page('a', 0)], updatedAt: 't1'};
+  assert.equal(replaceCaptions(prev, {captions: 'x'}).status, 400);
+  assert.equal(replaceCaptions(prev, {captions: [], expectedRevision: 5}).status, 400);
+  assert.deepEqual(replaceCaptions(prev, {captions: prev.captions, expectedRevision: captionsRevision(prev.captions)}), {status: 200, body: {changed: false, revision: captionsRevision(prev.captions), updatedAt: 't1'}});
+  const mismatch = replaceCaptions(prev, {captions: [], expectedRevision: 'deadbeefdeadbeef'});
+  assert.deepEqual([mismatch.status, mismatch.body.code, mismatch.next], [409, 'revision_mismatch', undefined]);
+  assert.equal(captionsRevision(undefined), captionsRevision([]), 'no captions = an empty list');
 });

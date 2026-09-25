@@ -81,8 +81,6 @@ test('rendered reel, one word changed → the re-render redoes the caption layer
   R.done();
 });
 
-// The music ducks under the caption pages (src/layers.ts), so with ducked music a moved break or a
-// nudged page changes the master: the tests that keep the master use music that does not duck.
 test('rendered reel, a page break moved → both pages land, each word once, on its own time; the master is kept', async () => {
   const R = renderer();
   await withProject(async (call, read) => {
@@ -101,19 +99,9 @@ test('rendered reel, a page break moved → both pages land, each word once, on 
     assert.deepEqual(read().captions.slice(1, 3).map(textOf), ['hoy te enseño la casa', 'en Playa del Carmen']);
     assert.match((await call('edit_caption', {caption_id: 'c2', starts_at_wid: 't:0'})).text, /not in c2 or the page before it/);
     await call('edit_caption', {caption_id: 'c2', starts_at_wid: 't:9'});
+    // ducked music: the speech it ducks under is the words, not how they are paged
     assert.equal((await R.render(read())).master, 'cached');
     assert.equal(R.calls.master, 1);
-  }, reel({duck: false}));
-  R.done();
-});
-
-test('with ducked music a moved break re-renders the master: the dip follows the pages', async () => {
-  const R = renderer();
-  await withProject(async (call, read) => {
-    await R.render(read());
-    assert.ok(!(await call('edit_caption', {caption_id: 'c2', starts_at_wid: 't:9'})).err);
-    const again = await R.render(read());
-    assert.deepEqual([again.mode, again.master, R.calls.master], ['layers', 'rendered', 2]);
   });
   R.done();
 });
@@ -132,7 +120,7 @@ test('a page nudged in time keeps the master; a timing the tool does not take is
     await R.render(read());
     const shown = (p) => projectCaptions(p.captions, p.clips, 30).find((c) => c.id === 'c4');
     const [said, was] = [read().captions[4].words, shown(read())];
-    // the last page: the nudge moves the text, not the voice
+    // the last page: where the voice (and the music's dip) ends — the nudge moves the text, not the voice
     assert.ok(!(await call('edit_caption', {caption_id: 'c4', shift_ms: -150})).err);
     const now = shown(read());
     assert.deepEqual([now.startMs, now.endMs, now.words[0].startMs], [was.startMs - 150, was.endMs - 150, was.words[0].startMs - 150]);
@@ -140,7 +128,7 @@ test('a page nudged in time keeps the master; a timing the tool does not take is
     assert.equal((await R.render(read())).master, 'cached');
     const bad = await call('edit_caption', {caption_id: 'c1', start_sec: 2.4});
     assert.ok(bad.err && /start_sec/.test(bad.text), bad.text);
-  }, reel({duck: false}));
+  });
   R.done();
 });
 

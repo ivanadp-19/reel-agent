@@ -165,7 +165,8 @@ export function setPageStart(captions: Caption[], id: string, wid: string, clips
   return captions.map((c) => (c === prev ? handPage(prev, a, b) : c === cap ? handPage(cap, b, a) : c));
 }
 
-// Nudge when a page is shown (ms): its words keep the time they are said; only the page moves on screen.
+// Nudge when a page is shown (ms): its words keep the time they are said — the speech the music
+// ducks under, and with it the master of a layered render, stay as they were.
 export const shiftPage = (cap: Caption, ms: number): Caption => ({...handPage(cap, cap.words), shiftMs: (cap.shiftMs ?? 0) + ms});
 
 // Focus pull (Prism): while a tier-2 word is on screen the footage blurs. Spans

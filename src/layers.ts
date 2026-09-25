@@ -13,6 +13,8 @@ import {avoidGraphics} from './validate.ts';
 
 type Span = {startMs: number; endMs: number};
 export type LayerProps = {clips?: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean};
+// two ducking ramps (MultiClipVideo's MusicTrack eases 250 ms each way): in a shorter gap the music never gets fully back up
+const SPEECH_GAP_MS = 500;
 
 export function captionLayout({clips = [], captions = [], graphics = [], captionStyle, captionsOff = false}: LayerProps, fps: number) {
   const projectedGraphics = projectGraphics(graphics, clips, fps);
@@ -22,8 +24,16 @@ export function captionLayout({clips = [], captions = [], graphics = [], caption
   const focus: Span[] = preset.focusPull ? focusSpans(shownCaptions, preset.holdMs) : [];
   const punch = preset.heroPunch ? {spans: tierSpans(shownCaptions, 2, preset.holdMs), scale: preset.heroPunch} : undefined;
   const pulses: Span[] = preset.glitchPulse ? tierSpans(shownCaptions, 1, preset.holdMs, 250) : [];
-  // the music ducks under every spoken page, drawn or not (the captions switch keeps the speech)
-  const speech: Array<[number, number]> = projectCaptions(captions, clips, fps).map((c) => [c.startMs, c.endMs]);
+  // the music ducks under the spoken words, drawn or not (the captions switch keeps the speech), runs
+  // closer than SPEECH_GAP_MS joined. How the words are paged is not in it: a moved page break keeps
+  // the master of a layered render (scripts/layers.mjs keys the master on these spans)
+  const speech: Array<[number, number]> = [];
+  const said = captions.map((c) => (c.shiftMs ? {...c, shiftMs: 0} : c)); // where the words are said, not where a nudged page shows them
+  for (const w of projectCaptions(said, clips, fps).flatMap((c) => c.words).sort((a, b) => a.startMs - b.startMs)) {
+    const last = speech.at(-1);
+    if (last && w.startMs - last[1] <= SPEECH_GAP_MS) last[1] = Math.max(last[1], w.endMs);
+    else speech.push([w.startMs, w.endMs]);
+  }
   return {preset, projectedGraphics, shownCaptions, focus, punch, pulses, speech};
 }
 
