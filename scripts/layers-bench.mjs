@@ -209,7 +209,7 @@ if (process.argv.includes('--alpha-compare') && fs.existsSync(master)) {
   const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-bench-alpha`));
   const propsFile = path.join(ROOT, `.props-bench-alpha.json`);
   fs.writeFileSync(propsFile, JSON.stringify({...edited, layer: 'captions'}));
-  const frames = path.join(ROOT, '.captions-tmp', 'bench-captions');
+  const frames = path.join(os.tmpdir(), 'reel-bench-captions'); // no dot in the path: Remotion would read it as an extension
   fs.rmSync(frames, {recursive: true, force: true});
   let t = Date.now();
   const r = spawnSync('npx', captionArgs({outFile: frames, propsFile, publicDir: links, draft: DRAFT, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes}), {cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 28});

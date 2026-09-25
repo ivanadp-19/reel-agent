@@ -11,6 +11,7 @@ import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import {totalDurationFrames} from '../src/timeline.ts';
@@ -314,7 +315,8 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested, proje
       }
       if (choice.captions) {
         renders[id] = {status: 'running', progress: split, label: 'Rendering captions layer', ...info};
-        const frames = path.join(ROOT, '.captions-tmp', `captions-${id}`);
+        // Remotion reads any dot in a sequence folder's path as an extension and refuses it (.captions-tmp would): the OS temp dir
+        const frames = path.join(os.tmpdir(), `reel-captions-${id}`);
         tmp.push(frames);
         const r = await stage('captions', () => remotion(captionArgs({...opts, outFile: frames, propsFile: propsFile('-captions', {...props, layer: 'captions'})}), id, {from: split, to: 92}));
         if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
