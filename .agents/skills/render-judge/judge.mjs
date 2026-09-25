@@ -73,6 +73,7 @@ export const T = {
   phoneDb: 8, // band-limited speech: ≥ this many dB more loss under 300 Hz (and half of it over 3.4 kHz) than the reel's full-band sentences
   parityCutSec: 0.07, parityLU: 1.5, // clean master vs captioned version
   blackLongSec: 0.5, // black runs from this long on are the QC gate's `black` stretches; shorter ones are flashes
+  frame0Flat: 2, frame0Dark: 30, // frame 0 black: luma flat (YMAX − YMIN < 2) and dark (YAVG < 30), 8-bit
   srcCutScore: 10, // scdet score (0–100) of one frame: a hard cut inside a source clip
   whipScore: 1.5, whipRatio: 20, whipFrames: 3, whipMaxSec: 1.5, // a whip / snap pan: 3+ frames far above the clip's own median, but short (a long move is a camera move)
   srcEdgeSec: 0.15, // the first / last frames of a used range are the edit's own cut
@@ -680,6 +681,26 @@ export function blackFlashFindings(runs, {fps = FPS, duration, fades = {}, place
   return out;
 }
 
+// ---------- frame 0 black ----------
+// Seen in production: 14 of 18 real masters open on ONE solid black frame (t = 0: YMIN ≈ YMAX, U = V
+// flat at 127/128; frame 1 normal). It is the thumbnail and the first thing the viewer sees, and a
+// 0.4 s blackdetect never sees a single frame. Measured directly: signalstats of frames 0 and 1
+// (a two-frame decode). Flat and dark luma on frame 0 = blocker, with the numbers as evidence. A fade
+// from black the client profile allows (blackFades.startSec) makes it a nit. The root cause is in
+// the renderer (investigated apart); this is the safety net.
+export function frameZeroFindings(frames, {fades = {}, video = null} = {}) {
+  const f0 = frames.find((f) => f.n === 0) ?? frames[0], f1 = frames.find((f) => f.n === 1);
+  if (!f0 || f0.YMAX == null) return [];
+  const flat = f0.YMAX - f0.YMIN < T.frame0Flat, dark = f0.YAVG < T.frame0Dark;
+  if (!flat || !dark) return [];
+  const ev = {frame0: {YAVG: f0.YAVG, YMIN: f0.YMIN, YMAX: f0.YMAX, UMIN: f0.UMIN, UMAX: f0.UMAX, VMIN: f0.VMIN, VMAX: f0.VMAX}, ...(f1 ? {frame1: {YAVG: f1.YAVG, YMIN: f1.YMIN, YMAX: f1.YMAX}} : {}), lookAt: [0, f1?.t ?? 0.04]};
+  const nums = `YAVG ${f0.YAVG}, YMIN ${f0.YMIN}, YMAX ${f0.YMAX}, U ${f0.UMIN}–${f0.UMAX}, V ${f0.VMIN}–${f0.VMAX}${f1 ? `; frame 1: YAVG ${f1.YAVG}, YMIN ${f1.YMIN}, YMAX ${f1.YMAX}` : ''}`;
+  if (fades.startSec > 0) return [F('frame0-black', 'nit', 'rule', 0, null, `frame 0 negro (${nums}) — el perfil permite un fundido desde negro al inicio`, ev, [])];
+  const opens = f1 && !(f1.YMAX - f1.YMIN < T.frame0Flat && f1.YAVG < T.frame0Dark) ? ' y el frame 1 ya es imagen normal' : '';
+  return [F('frame0-black', 'blocker', 'rule', 0, null, `el frame 0 (t = 0, la miniatura) es negro sólido: luma plana y oscura (${nums})${opens}`, ev,
+    [{tool: 'frame_at', note: 'look at t = 0 and the next frame; the fix is in the renderer (a separate PR) — until then re-render or trim the first frame by hand, never automatically', args: {at_sec: 0, ...(video ? {video} : {})}}])];
+}
+
 // ---------- a cut or a whip INSIDE a source clip ----------
 // Every used range of every source (clips: inSec→outSec; B-roll video cues: the first seconds
 // of their file, which is where the render plays them from) is scanned for scene changes
@@ -846,6 +867,14 @@ export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, bla
     const hs = [];
     if (hashes) for (let i = 0, k = 0; i + 72 <= buf.length; i += 72, k++) hs.push({t: frames[k]?.t ?? k / rate, h: dhash(buf.subarray(i, i + 72))});
     return {stats: frames, hashes: hs, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : [], black: blackFps ? blackRuns(readMeta(black, /lavfi\.(black_start|black_end)=([\d.]+)/)) : []};
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+}
+// signalstats of the first `n` frames (frame 0 is the thumbnail): a decode of n frames, nothing more
+export function firstFrames(file, n = 2) {
+  const dir = tmpDir(), meta = path.join(dir, 'f0.txt');
+  try {
+    spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-vf', `select='lt(n\\,${n})',signalstats,metadata=print:file=${fesc(meta)}`, '-frames:v', String(n), '-f', 'null', '-']);
+    return readMeta(meta, /lavfi\.signalstats\.(YAVG|YMIN|YMAX|UMIN|UMAX|VMIN|VMAX)=([\d.]+)/).map((f, i) => ({...f, n: i}));
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
 // audio, one decode: momentary loudness (EBU R128, per 100 ms) of the full band and — for the
@@ -1137,7 +1166,11 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? FPS}));
   const hashes = video.hashes;
   // black flashes from one frame, in this file's own frame rate (César: 3–5-frame blacks slipped through)
-  findings.push(...blackFlashFindings(video.black, {fps: fps ?? FPS, duration: +info?.format?.duration || total, fades: profile?.blackFades ?? {}, placed, brolls, video: file}));
+  // frame 0 (the thumbnail) black: measured on its own, so a one-frame black at t = 0 is named for what it is
+  const f0 = frameZeroFindings(firstFrames(file), {fades: profile?.blackFades ?? {}, video: file});
+  findings.push(...f0);
+  findings.push(...blackFlashFindings(video.black, {fps: fps ?? FPS, duration: +info?.format?.duration || total, fades: profile?.blackFades ?? {}, placed, brolls, video: file})
+    .filter((f) => !(f0.length && f.at === 0 && f.evidence.frames === 1)));
   // a cut or a whip inside a source clip (candidates): scdet over the used ranges, cached per file
   if (sourceScan) {
     const ranges = usedRanges(p.clips, brolls);

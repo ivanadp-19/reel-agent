@@ -447,3 +447,36 @@ test('VO promises: evidence for the judge\'s eyes, proof cues first, the inserts
   assert.equal(ev.length, 1); // "La cochera es amplia." has no proof cue and no insert on screen: nothing to verify
   assert.ok(claimEvidence(s, [], [], ['amplia'])[0].cues.includes('amplia')); // a client's own proof cues (profile proofCues)
 });
+
+// ---- frame 0 black (14 of 18 real masters): a single solid black frame at t = 0 ----
+import {firstFrames, frameZeroFindings} from '../.agents/skills/render-judge/judge.mjs';
+
+const synth = (vf) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'f0-'));
+  const f = path.join(dir, 'm.mp4');
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x568:r=30:d=1', ...(vf ? ['-vf', vf] : []), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', f]);
+  return r.status === 0 ? {f, dir} : null;
+};
+
+test('frame 0 black: a synthetic master whose first frame is solid black is a blocker; a normal one is not', () => {
+  const black = synth("drawbox=c=black:t=fill:enable='eq(n,0)'");
+  const normal = synth(null);
+  if (!black || !normal) return; // no ffmpeg with libx264 here
+  const fb = frameZeroFindings(firstFrames(black.f));
+  const fn = frameZeroFindings(firstFrames(normal.f));
+  for (const x of [black, normal]) fs.rmSync(x.dir, {recursive: true, force: true});
+  assert.deepEqual(fb.map((x) => [x.check, x.severity, x.kind, x.at]), [['frame0-black', 'blocker', 'rule', 0]]);
+  assert.equal(fb[0].evidence.frame0.YMAX - fb[0].evidence.frame0.YMIN, 0); // flat
+  assert.ok(fb[0].evidence.frame1.YAVG > 60); // and frame 1 is a normal picture
+  assert.match(fb[0].msg, /frame 1 ya es imagen normal/);
+  assert.deepEqual(fn, []);
+});
+
+test('frame 0 black: flat AND dark — a dark but textured frame (night) is not; a fade the profile allows is a nit', () => {
+  const production = [{n: 0, t: 0, YAVG: 16, YMIN: 16, YMAX: 16, UMIN: 127, UMAX: 127, VMIN: 127, VMAX: 127}, {n: 1, t: 0.033, YAVG: 110, YMIN: 12, YMAX: 235}];
+  assert.equal(frameZeroFindings(production)[0].severity, 'blocker');
+  assert.deepEqual(frameZeroFindings([{n: 0, YAVG: 22, YMIN: 16, YMAX: 64, UMIN: 120, UMAX: 135, VMIN: 121, VMAX: 133}]), []); // night shot: dark, not flat
+  assert.deepEqual(frameZeroFindings([{n: 0, YAVG: 200, YMIN: 200, YMAX: 201}]), []); // flat but white: not black
+  assert.equal(frameZeroFindings(production, {fades: {startSec: 0.5}})[0].severity, 'nit');
+  assert.equal(verdictOf(frameZeroFindings(production)).verdict, 'FAIL');
+});

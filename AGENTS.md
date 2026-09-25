@@ -88,7 +88,7 @@ severities and thresholds (`checks.md`) plus per-client profiles
 by rule what rules can decide (pauses, names split across pages, overflow,
 caption↔audio sync, repeated footage, script inserts, glossary, loudness,
 music under voice, grade vs the approved references, clean-master parity,
-black flashes from one frame, cuts / whips inside a source clip) and leaves the
+black flashes from one frame, a black frame 0, cuts / whips inside a source clip) and leaves the
 rest to the judge's eyes on contact sheets of the whole reel — including whether
 the inserts show what the voice-over promises (`claim-image`, heuristic). Known
 noise (long takes, bright skies, dramatic pauses, capitalized "names") only

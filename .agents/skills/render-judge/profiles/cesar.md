@@ -75,6 +75,9 @@ truth. A scene the script names that neither list has is a blocker you add
   frame, in the master's own fps, and it is a blocker. `blackFades` in
   `cesar.json` is 0 at both ends. If a reel does fade to or from black, set the
   seconds there, not in the judge.
+- **Frame 0 black.** 14 of 18 real masters opened on one solid black frame
+  (the thumbnail). `frame0-black` measures frame 0 with `signalstats`, and a flat,
+  dark frame is a blocker. The renderer fix is in another PR; this is the net.
 - **A cut inside a B-roll** (the garage with a fast pan): `source-cut` is a
   candidate. It goes to him with the timestamp and the source time; it never
   fails the QC.

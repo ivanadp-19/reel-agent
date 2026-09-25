@@ -104,7 +104,7 @@ Then judge, with a timestamp for everything:
     instead, and the frame time as evidence.
   - No fix: say what a human could do (re-cut the insert, request the shot, reword
     the line), never an edit. A promise the picture keeps is not listed.
-- **Black flashes and cuts inside a source.** `black-flash` is a rule: look at the
+- **Black flashes and cuts inside a source.** `frame0-black` and `black-flash` are rules: look at the
   frames on both sides only to say whether the black is in the footage or a gap
   in the edit, never to dismiss it. `source-cut` is a candidate: confirm it on the
   `motion_proof` only if it really reads as a cut the plan does not have.
