@@ -12,11 +12,13 @@ export type CaptionWord = {
   startMs: number;
   endMs: number;
   tier?: number; // 0 plain · 1 accent color · 2 big emphasis (see captionPresets)
+  br?: boolean; // hard line break before this word (two-line phrase pages)
   emoji?: string; // one emoji that pops in right after the word
   speaker?: string; // spk1, spk2… who says it (diarization); presets may color or place pages per speaker later
 };
 export type Caption = {
   id: string;
+  keyIn?: import('./motion.ts').ArriveKind; // per-page entry-animation override for tier words (demos, special moments)
   src: string; // staticFile-relative source path, e.g. "clips/IMG_0227.mp4"
   words: CaptionWord[]; // source-relative ms
   startMs: number;

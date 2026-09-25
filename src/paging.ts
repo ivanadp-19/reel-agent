@@ -15,6 +15,7 @@ export type TimelineWord = {
   endMs: number;
   srcStartMs: number; // source-relative — what gets stored
   srcEndMs: number;
+  tier?: number; // 1 = classifier highlight (keyword/question/CTA)
   speaker?: string; // spk1, spk2… from diarization (who is talking)
 };
 
@@ -62,7 +63,7 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     if (cur.length && w.clipId !== curClip) flush(); // never span two clips
     curSrc = w.src;
     curClip = w.clipId;
-    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: 0, ...(w.speaker ? {speaker: w.speaker} : {})});
+    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: w.tier ?? 0, ...(w.speaker ? {speaker: w.speaker} : {})});
     if (maxWords <= 1) { flush(); return; } // word-at-a-time preset
 
     const next = words[i + 1];

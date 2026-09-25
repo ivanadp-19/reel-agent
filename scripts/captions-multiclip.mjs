@@ -11,7 +11,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
 import {assembleWords, sourceKey} from './lib-transcribe.mjs';
+import {applyHighlights, heuristicClassify, CLASSIFY_PROMPT} from '../src/highlights.ts';
 import {pageWords, DEFAULT_TOP} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
@@ -93,6 +95,48 @@ progress(2, 'Starting');
 const words = await assembleWords(clips, (idx, total, clip) =>
   progress(5 + Math.round((idx / total) * 80), clip.batch ? clip.label : `Transcribing ${clip.label ?? clip.id} (${idx + 1}/${total})`), lang, offMic,
 );
+// César 9:27: classification pass — keywords / questions / CTAs become yellow highlight
+// captions. LLM pass when OPENAI_API_KEY is set (cached per transcript hash); deterministic
+// heuristic otherwise. The agent can still adjust tiers via MCP afterwards. REEL_GUION (or
+// public/guion.txt) supplies the script so the pass can fix spelling/accents to match it.
+async function classifyHighlights(words) {
+  const key = crypto.createHash('sha1').update(words.map((w) => `${w.wid}:${w.word}`).join('|')).digest('hex');
+  const cache = path.join(TMP, 'highlights.json');
+  if (fs.existsSync(cache)) {
+    try { const j = JSON.parse(fs.readFileSync(cache, 'utf8')); if (j.key === key) return j.res; } catch {}
+  }
+  const guionPath = process.env.REEL_GUION ?? (fs.existsSync(path.join(PUBLIC, 'guion.txt')) ? path.join(PUBLIC, 'guion.txt') : null);
+  const guion = guionPath ? fs.readFileSync(guionPath, 'utf8') : null;
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const body = {
+        model: process.env.REEL_LLM_MODEL ?? 'gpt-4o-mini',
+        response_format: {type: 'json_object'},
+        messages: [
+          {role: 'system', content: CLASSIFY_PROMPT},
+          {role: 'user', content: words.map((w, i) => `${i}:${w.word}`).join(' ') + (guion ? `\n\nGUION:\n${guion}` : '')},
+        ],
+      };
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {method: 'POST', headers: {authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json'}, body: JSON.stringify(body)});
+      if (r.ok) {
+        const j = await r.json();
+        const parsed = JSON.parse(j.choices[0].message.content);
+        const res = {spans: parsed.spans ?? [], fixes: parsed.fixes ?? []};
+        fs.writeFileSync(cache, JSON.stringify({key, res}));
+        return res;
+      }
+      console.error(`highlight classifier HTTP ${r.status} — heuristic fallback`);
+    } catch (e) {
+      console.error('highlight classifier failed, heuristic fallback:', String(e?.message ?? e).slice(0, 160));
+    }
+  }
+  return {spans: heuristicClassify(words), fixes: []};
+}
+
+progress(84, 'Classifying highlights');
+const highlights = await classifyHighlights(words);
+const nHl = applyHighlights(words, highlights);
+if (nHl) progress(85, `${nHl} highlight words`);
 progress(88, 'Finding faces');
 const faces = detectFaces(clips);
 const topBySrc = Object.fromEntries(clips.map((c) => [c.src, faceToTop(faces[sourceKey(c)])]));

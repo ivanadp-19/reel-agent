@@ -5,6 +5,7 @@ import {TEXT_REVEALS, arrive, layoutIn, layoutOut, leave, lifeFx, ms, revealText
 import {seedOf} from './transitions';
 import {fontFamily, heaviest, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
+import {ensureProjectFont} from './projectFont';
 import {fitSize, textWidthEm} from './textFit';
 
 // named faces the templates pick from (all in src/fonts.ts); a brand kit's
@@ -68,8 +69,17 @@ const Letters: React.FC<{text: string; style?: React.CSSProperties}> = ({text, s
         const glyph = r?.scramble && i >= head ? scrambleChar(g.seed, i, frame) : ch;
         const opacity = gone ? 0 : later && !r?.scramble ? 0 : leading ? (r?.scramble ? 1 : Math.max(0.15, frac)) : r?.scramble && i >= head ? 0.7 : 1;
         const blur = leading && r ? r.blur * (1 - frac) : 0;
+        // continuous per-character reveals (.aegraphic bounceChars / riseChars) drive their own transform
+        const fx = r?.charFx && !gone ? r.charFx(i) : null;
+        const charOpacity = fx ? fx.opacity : opacity;
+        const charBlur = fx ? fx.blur : blur;
+        const charTransform = fx
+          ? `translateY(${fx.dy.toFixed(1)}px) scale(${fx.scale.toFixed(3)}) rotate(${fx.rotate.toFixed(1)}deg)`
+          : gone
+            ? 'scale(0)'
+            : undefined;
         return (
-          <span key={i} style={{display: 'inline-block', whiteSpace: 'pre', opacity, filter: blur > 0.2 ? `blur(${blur.toFixed(1)}px)` : undefined, transform: gone ? 'scale(0)' : undefined, letterSpacing: r?.tracking ? `${r.tracking}em` : undefined}}>{glyph}</span>
+          <span key={i} style={{display: 'inline-block', whiteSpace: 'pre', opacity: charOpacity, filter: charBlur > 0.2 ? `blur(${charBlur.toFixed(1)}px)` : undefined, transform: charTransform, letterSpacing: r?.tracking ? `${r.tracking}em` : undefined}}>{glyph}</span>
         );
       })}
     </span>
@@ -502,7 +512,23 @@ const FrameLight: React.FC<{props: any; accent: string}> = ({props}) => {
   );
 };
 
-const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {ornament: Ornament, rules: Rules, 'person-outline': PersonOutlineStub, 'band-title': BandTitle, 'neon-frame': NeonFrame, scribble: Scribble, 'outline-rect': OutlineRect, 'frame-light': FrameLight, 'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
+
+// César's CLEAN BLUE: Helvetica Bold (project font), white sentence-case line over a huge accent
+// ALL-CAPS line. César 9:21: text effects carry NO drop shadow and solid #FFE500 (no gradient).
+const CleanBlueTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
+  const fam = ensureProjectFont({family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700});
+  const shadow = 'none';
+  const stroke = {} as React.CSSProperties;
+  const l2 = props.upper2 === false ? String(props.line2) : String(props.line2).toUpperCase();
+  return (
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', lineHeight: 1.04, fontFamily: fam, fontWeight: 700}}>
+      <div style={{fontSize: fitSize(String(props.line1), 56, 'Inter', 900), color: '#fff', whiteSpace: 'nowrap', textShadow: shadow, letterSpacing: -0.5, ...stroke}}><Letters text={String(props.line1)} /></div>
+      <div style={{fontSize: fitSize(l2, 150, 'Inter', 1030), color: accent, whiteSpace: 'nowrap', textShadow: shadow, letterSpacing: -1.5, ...stroke}}><Letters text={l2} /></div>
+    </div>
+  );
+};
+
+const COMPONENTS: Record<string, React.FC<{props: any; accent: string}>> = {ornament: Ornament, rules: Rules, 'person-outline': PersonOutlineStub, 'band-title': BandTitle, 'neon-frame': NeonFrame, scribble: Scribble, 'outline-rect': OutlineRect, 'frame-light': FrameLight, 'hook-stack': HookStack, 'label-2tone': Label2Tone, stat: Stat, chapter: Chapter, 'big-word': BigWord, 'clean-blue': CleanBlueTitle, 'kinetic-card': KineticCard, 'fill-title': FillTitle, 'script-title': ScriptTitle, oversized: Oversized, 'chapter-caps': ChapterCaps, starburst: Starburst, 'location-tag': LocationTag, price: Price, 'end-card': EndCard, sticker: Sticker};
 
 export type Titles = {reveal: Reveal; out: Out}; // the caption pack's defaults for graphics that set neither
 
