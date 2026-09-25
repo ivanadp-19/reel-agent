@@ -109,7 +109,16 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       }
     }
   }
-  return pages.map((p, i) => ({id: `c${i}`, src: p.src, words: p.words, startMs: p.start, endMs: p.end, topPct: topBySrc[p.src] ?? DEFAULT_TOP}));
+  return pages.map((p, i) => ({
+    id: `c${i}`,
+    src: p.src,
+    // popMs: when the word visually pops in a fastBuild cascade (page start + idx*45) — the SFX pass
+    // pairs clicks/typing against these, not the spoken startMs. Matches CaptionTrack's fastBuildMs.
+    words: p.words.map((w, k) => ({...w, popMs: p.start + k * 45})),
+    startMs: p.start,
+    endMs: p.end,
+    topPct: topBySrc[p.src] ?? DEFAULT_TOP,
+  }));
 }
 
 // carry annotations from old pages onto freshly paged ones, by word id: word

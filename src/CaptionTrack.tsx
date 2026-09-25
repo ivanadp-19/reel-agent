@@ -159,7 +159,10 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
     if (next !== rects) setRects(next);
   });
   const boxes: number[][] = rects ? JSON.parse(rects) : [];
-  const onset = (i: number) => Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
+  const onset = (i: number) =>
+    preset.fastBuildMs != null
+      ? Math.round(((i * preset.fastBuildMs) / 1000) * fps)
+      : Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
   let spokenIdx = -1;
   caption.words.forEach((w, i) => { if (frame >= onset(i)) spokenIdx = i; });
   const lastEndMs = spokenIdx >= 0 ? caption.words[spokenIdx].endMs : 0;
