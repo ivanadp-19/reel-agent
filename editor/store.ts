@@ -16,7 +16,7 @@ import type {AudioOptions} from '../src/audio';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -50,6 +50,7 @@ type EditorState = {
   audio: AudioOptions; // voice cleanup + sfx (set_audio / Settings tab)
   plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
+  guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -123,6 +124,7 @@ type EditorState = {
   setAudio: (audio: AudioOptions) => void;
   setCaptionsOff: (captionsOff: boolean) => void;
   setPlan: (plan: string) => void;
+  setGuion: (guion: string) => void;
   addMattes: (mattes: Matte[]) => void;
 
   pushHistory: () => void;
@@ -172,6 +174,7 @@ export const useEditor = create<EditorState>((set) => ({
   audio: null,
   plan: '',
   captionsOff: false,
+  guion: '',
   past: [],
   future: [],
 
@@ -199,6 +202,7 @@ export const useEditor = create<EditorState>((set) => ({
         audio: p.audio ?? null,
         plan: p.plan ?? '',
         captionsOff: p.captionsOff ?? false,
+        guion: p.guion ?? '',
         past: [],
         future: [],
       };
@@ -509,6 +513,7 @@ export const useEditor = create<EditorState>((set) => ({
   setAudio: (audio) => set({audio}),
   setCaptionsOff: (captionsOff) => set({captionsOff}),
   setPlan: (plan) => set({plan}),
+  setGuion: (guion) => set({guion}),
   addMattes: (mattes) => set((s) => ({mattes: [...s.mattes, ...mattes]})),
 
   // snapshot the full editable state before a logical edit
