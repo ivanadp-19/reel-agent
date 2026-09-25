@@ -9,8 +9,13 @@
 //                cancellable (/api/render, /api/render-jobs; scripts/render-jobs.mjs); a final that
 //                passes QC becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
 //   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
-//   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys)
+//   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys) + free memory / disk
+//   the reel CLI (cli/reel.mjs) — per-user tokens (/api/tokens, /api/whoami; server/tokens.mjs),
+//                resumable uploads (/api/uploads; server/uploads.mjs), validate (/api/validate/<id>),
+//                render by project id with its plan, one render per user and resource floors,
+//                the finished file (/api/render-jobs/<id>/file)
 import {createServer} from 'node:http';
+import os from 'node:os';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,8 +28,9 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
-import {aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
-import {createRenderRunner} from '../scripts/render-runner.mjs';
+import {admitRender, aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
+import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
+import {projectRenderProps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
@@ -32,6 +38,9 @@ import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
 import {handleReview} from './review.mjs';
+import {createTokenStore, openForUser} from './tokens.mjs';
+import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
+import {projectIssues, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
@@ -100,7 +109,7 @@ const json = (res, code, obj) => {
 
 const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
-  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
+  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs, result: 'captions.multi.json'},
   '/api/trim-silence': {route: '/api/trim-silence', stage: 'autocut', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
   '/api/transcribe': {route: '/api/transcribe', stage: 'transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
   '/api/matte': {route: '/api/matte', stage: 'matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
@@ -154,7 +163,17 @@ async function health() {
     {id: 'pexels', ok: !!env.PEXELS_API_KEY, label: 'Pexels API key', hint: 'Add PEXELS_API_KEY to .env (free: pexels.com/api) — optional, stock B-roll fallback', optional: true},
     {id: 'openai', ok: !!env.OPENAI_API_KEY, label: 'OpenAI API key', hint: 'Add OPENAI_API_KEY to .env — optional, lets the agent generate stickers/textures (generate_asset)', optional: true},
   ];
-  return {ok: checks.every((c) => c.ok || c.optional), checks};
+  return {ok: checks.every((c) => c.ok || c.optional), checks, resources: resources()};
+}
+// Free memory and disk, and the floors under which a render is refused (scripts/render-jobs.mjs
+// admitRender). os.freemem() is MemAvailable on Linux; macOS counts only never-used pages, so
+// memory is not measured there. REEL_RENDER_MIN_FREE_MEM_MB / _DISK_MB = 0 turns a floor off.
+const MIN_MEM_MB = +(process.env.REEL_RENDER_MIN_FREE_MEM_MB ?? 1024);
+const MIN_DISK_MB = +(process.env.REEL_RENDER_MIN_FREE_DISK_MB ?? 3072);
+function resources() {
+  let freeDiskMb = null;
+  try { const st = fs.statfsSync(PUBLIC); freeDiskMb = Math.round((st.bavail * st.bsize) / 2 ** 20); } catch {}
+  return {freeMemMb: process.platform === 'linux' ? Math.round(os.freemem() / 2 ** 20) : null, freeDiskMb, minMemMb: MIN_MEM_MB, minDiskMb: MIN_DISK_MB};
 }
 
 // remote (Pexels) B-roll is downloaded into public/broll/ before a render (scripts/remote-broll.mjs:
@@ -227,6 +246,12 @@ const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').
 const SESSION_SECRET = process.env.REEL_SESSION_SECRET || TOKEN;
 const LOGIN_LIMITER = createLoginLimiter({max: 5, windowMs: 60e3});
 const TRUST_HOPS = trustedHops();
+// per-user tokens (server/tokens.mjs): the reel CLI's users, revocable one by one; REEL_REQUIRE_TOKEN=1
+// makes loopback /api/* calls carry a token too (a box shared over SSH)
+const USERS = createTokenStore(process.env.REEL_TOKENS_FILE || path.join(ROOT, '.reel-tokens.json'));
+const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
+const UPLOADS = path.join(ROOT, '.uploads');
+const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
 const DIST = path.join(ROOT, 'editor', 'dist');
 function serveStatic(req, res, pathname) {
   const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
@@ -259,7 +284,7 @@ const mcpHttp = () => mcpHttpP ??= (async () => {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS});
+  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
   if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
@@ -271,6 +296,53 @@ const server = createServer(async (req, res) => {
   if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
+
+  // ---- who is calling, and the per-user tokens (admins: the backend token or an admin user token) ----
+  //   GET    /api/whoami                     → {user, admin, via}
+  //   GET    /api/tokens                     → {tokens} (never the secrets)
+  //   POST   /api/tokens {user, admin?, uid?} → {id, user, admin, uid, token} (the only time the token is sent)
+  //   DELETE /api/tokens/<id | user>         → {revoked: [ids]}
+  if (req.method === 'GET' && url.pathname === '/api/whoami') return json(res, 200, {user: g.user ?? null, admin: !!g.admin, via: g.via});
+  const tk = url.pathname.match(/^\/api\/tokens(?:\/([\w.-]{1,64}))?$/);
+  if (tk) {
+    if (!g.admin) return json(res, 403, {error: 'admins only', code: 'forbidden', hint: 'an admin token (or the backend token) manages tokens'});
+    if (req.method === 'GET' && !tk[1]) return json(res, 200, {tokens: USERS.list()});
+    if (req.method === 'POST' && !tk[1]) {
+      let b; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
+      try { return json(res, 200, USERS.create({user: b.user, admin: !!b.admin, uid: b.uid})); } catch (e) { return json(res, 400, {error: e.message, code: 'bad_request'}); }
+    }
+    if (req.method === 'DELETE' && tk[1]) return json(res, 200, {revoked: USERS.revoke(tk[1])});
+    return json(res, 405, {error: 'method not allowed'});
+  }
+
+  // ---- the checks before a render, by project id (the MCP validate tool runs the same mcp/checks.mjs) ----
+  if (req.method === 'GET' && url.pathname.startsWith('/api/validate/')) {
+    const id = url.pathname.split('/').pop();
+    if (!/^[\w-]+$/.test(id)) return json(res, 400, {error: 'bad id'});
+    const file = path.join(PROJECTS_DIR, `${id}.json`);
+    if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
+    try {
+      const issues = projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC);
+      return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
+    } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
+  }
+
+  // ---- resumable uploads (server/uploads.mjs): a part per token user, ingested by /api/add-clip?upload= ----
+  const up = url.pathname.match(/^\/api\/uploads\/([^/]+)$/);
+  if (up) {
+    if (!UPLOAD_ID.test(up[1])) return json(res, 400, {error: 'upload id: 16–64 hex characters', code: 'bad_request'});
+    const file = partFile(UPLOADS, g.user, up[1]);
+    if (req.method === 'GET') return json(res, 200, {size: partSize(file)});
+    if (req.method === 'PUT') {
+      const offset = +url.searchParams.get('offset');
+      if (!Number.isInteger(offset) || offset < 0) return json(res, 400, {error: 'offset required', code: 'bad_request'});
+      sweepParts(UPLOADS);
+      const {freeDiskMb} = resources();
+      const [status, out] = await appendChunk(req, file, offset, {maxBytes: UPLOAD_MAX, freeBytes: freeDiskMb == null ? Infinity : freeDiskMb * 2 ** 20, minFreeBytes: MIN_DISK_MB * 2 ** 20});
+      return json(res, status, out);
+    }
+    return json(res, 405, {error: 'method not allowed'});
+  }
 
   // ---- multi-project library ----
   if (req.method === 'GET' && url.pathname === '/api/projects') {
@@ -597,14 +669,31 @@ const server = createServer(async (req, res) => {
     while (fs.existsSync(path.join(clipsDir, `${id}.mp4`))) id = `${base}-${n++}`;
 
     // a local file path (same machine, from the MCP server) skips the upload —
-    // only with the run token, and only video files
+    // only with the run token, and only video files. A user token (the reel CLI) may
+    // name a path too, but only one of its own files or one anyone can read
+    // (server/tokens.mjs openForUser): the backend never reads other users' files for it.
+    // ?upload=<id>: a part the CLI uploaded in chunks (server/uploads.mjs), taken whole.
     const local = url.searchParams.get('path');
+    const upload = url.searchParams.get('upload');
+    let opened = null, uploaded = null;
     if (local) {
-      if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
-      if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
+      if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local)) return json(res, 400, {error: 'path must be a video file', code: 'bad_path'});
+      if (g.via === 'user-token') {
+        opened = openForUser(local, g.uid);
+        if (!opened) return json(res, 403, {error: 'the backend may not read this file for you: it is not yours and not readable by everyone', code: 'path_not_allowed', hint: 'upload it instead (reel clips add does when this happens)'});
+      } else {
+        if (!tokenOk([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
+        if (!fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
+      }
+    } else if (upload) {
+      if (!UPLOAD_ID.test(upload)) return json(res, 400, {error: 'bad upload id', code: 'bad_request'});
+      uploaded = partFile(UPLOADS, g.user, upload);
+      const have = partSize(uploaded), want = +(url.searchParams.get('size') ?? have);
+      if (!have) return json(res, 404, {error: `no upload ${upload}`, code: 'not_found'});
+      if (have !== want) return json(res, 409, {error: `upload ${upload} has ${have} of ${want} bytes`, code: 'upload_incomplete', size: have});
     }
-    const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);
-    const cleanup = () => { if (tmp !== local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
+    const tmp = opened?.path ?? local ?? uploaded ?? path.join(ROOT, `.upload-${id}.bin`);
+    const cleanup = () => { opened?.close(); if (!local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
     const ingest = async () => {
       try {
         const out = path.join(clipsDir, `${id}.mp4`);
@@ -661,7 +750,7 @@ const server = createServer(async (req, res) => {
         return json(res, 500, {error: String(e).slice(0, 200)});
       }
     };
-    if (tmp === local) { ingest(); return; }
+    if (local || uploaded) { ingest(); return; }
     const ws = fs.createWriteStream(tmp);
     req.pipe(ws);
     req.on('error', () => { cleanup(); json(res, 500, {error: 'upload failed'}); });
@@ -706,8 +795,14 @@ const server = createServer(async (req, res) => {
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
       const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
       logStage(project, job.stage, ms, {job: id, ...(code === 0 ? {} : {ok: false})});
+      // a job with a result file hands it back in its status (the reel CLI cannot read public/)
+      let result;
+      if (code === 0 && job.result) {
+        try { result = JSON.parse(fs.readFileSync(path.join(PUBLIC, job.result), 'utf8')); } catch {}
+        for (const k of Object.keys(job.store).slice(0, -20)) delete job.store[k].result; // the pages of the latest jobs only (read once, right away)
+      }
       job.store[id] = code === 0
-        ? {status: 'done', progress: 100, label: 'Ready'}
+        ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {})}
         : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
     });
     return json(res, 200, {jobId: id});
@@ -760,11 +855,17 @@ const server = createServer(async (req, res) => {
   //   POST   /api/render-jobs/<id>/cancel    → cancelled (queued: at once; running: its process is killed)
   //   POST   /api/render-jobs/prune {days?}  → {removed}: state of finished jobs older than days (never the mp4s)
   if (req.method === 'POST' && url.pathname === '/api/render') {
-    let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?}
+    let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?} — or {project_id, draft?, mode?} alone
     let draft = false;
     let expectSec, clean = 'off', projectId = null, mode = DEFAULT_MODE;
     try {
-      const props = JSON.parse(raw);
+      let props = JSON.parse(raw);
+      // a project id without props (the reel CLI): the saved project's props, built as the MCP and the render CLI build them
+      if (!Array.isArray(props.clips) && typeof props.project_id === 'string' && /^[\w-]+$/.test(props.project_id)) {
+        const f = path.join(PROJECTS_DIR, `${props.project_id}.json`);
+        if (!fs.existsSync(f)) throw new Error(`project ${props.project_id} not found`);
+        props = {...projectRenderProps(JSON.parse(fs.readFileSync(f, 'utf8'))), draft: props.draft, mode: props.mode, project_id: props.project_id};
+      }
       draft = !!props.draft;
       if (props.mode === 'full' || props.mode === 'layers') mode = props.mode;
       // project_id (editor, MCP render): a final that passes QC is recorded as a review version of that project
@@ -780,10 +881,19 @@ const server = createServer(async (req, res) => {
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
+    // what it will do — layers over a cached master, or a complete render and why (scripts/render-runner.mjs)
+    let plan = null;
+    try { plan = planRender(JSON.parse(raw), {requested: mode, draft, root: ROOT, publicDir: PUBLIC, masterCache}); } catch (e) { console.error('render plan:', e.message); }
+    if (url.searchParams.get('plan') === '1') return json(res, 200, {plan});
+    // one render at a time per token user (a retry with the same props gets that job back), none under the resource floors
+    const tokenUser = g.via === 'user-token' ? g.user : null;
+    const admit = admitRender(renderJobs.list(), {user: tokenUser, props: raw, mode}, resources());
+    if (admit?.reuse) return json(res, 200, {jobId: admit.reuse.id, status: admit.reuse.status, ahead: renderJobs.ahead(admit.reuse.id), reused: true, plan});
+    if (admit) return json(res, admit.status, admit);
     // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
-    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode});
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null});
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
-    return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {})});
+    return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {}), plan});
   }
   if (req.method === 'GET' && url.pathname.startsWith('/api/render/')) {
     const id = url.pathname.split('/').pop();
@@ -795,6 +905,15 @@ const server = createServer(async (req, res) => {
     const days = b.days == null ? undefined : Math.max(0, +b.days);
     if (days != null && !Number.isFinite(days)) return json(res, 400, {error: 'days must be a number'});
     return json(res, 200, {removed: renderJobs.prune(days != null ? {days} : {})});
+  }
+  // the finished mp4 of a job, with byte ranges (a download resumes where it stopped)
+  const rf = url.pathname.match(/^\/api\/render-jobs\/([\w-]{6,64})\/file$/);
+  if (rf && (req.method === 'GET' || req.method === 'HEAD')) {
+    const j = renderJobs.get(rf[1]);
+    if (!j) return json(res, 404, {error: `no render job ${rf[1]}`, code: 'not_found'});
+    const file = j.result?.path && path.resolve(j.result.path);
+    if (j.status !== 'done' || !file || !file.startsWith(EXPORTS + path.sep) || !fs.existsSync(file)) return json(res, 409, {error: `render ${j.id} has no file to download (${j.status})`, code: 'not_ready'});
+    return serveFile(req, res, file, {'Content-Disposition': `attachment; filename="${path.basename(file)}"`});
   }
   const rj = url.pathname.match(/^\/api\/render-jobs(?:\/([\w-]{6,64}))?(\/cancel)?$/);
   if (rj) {

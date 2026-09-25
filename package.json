@@ -54,5 +54,8 @@
     "typescript": "5.8.2",
     "vite": "^5.4.21"
   },
+  "bin": {
+    "reel": "cli/reel.mjs"
+  },
   "type": "module"
 }

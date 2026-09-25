@@ -22,7 +22,7 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
 import {applyAutocut, cutRange, locateSec, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, normalizeCaption, projectCaptions} from '../src/captions.ts';
+import {mergeCaptions, projectCaptions} from '../src/captions.ts';
 import {isGlue, projectTiers, reapplyTiers} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
@@ -30,7 +30,8 @@ import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, proj
 import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
 import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
-import {transcriptIssues, validateProject} from '../src/validate.ts';
+import {validateProject} from '../src/validate.ts';
+import {facesOf, newProject, projectIssues, withDefaults} from './checks.mjs';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qcText} from '../scripts/qc.mjs';
 import {runCmd} from '../scripts/remote-broll.mjs';
@@ -85,9 +86,7 @@ const projFile = (id) => {
 function load(id) {
   const f = projFile(id);
   if (!fs.existsSync(f)) throw new Error(`project ${id} not found (use list_projects)`);
-  const p = JSON.parse(fs.readFileSync(f, 'utf8'));
-  p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.planApproved ??= false; p.planReviews ??= []; p.planMode ??= null; p.planModeLog ??= []; p.captionsOff ??= false;
-  return p;
+  return withDefaults(JSON.parse(fs.readFileSync(f, 'utf8')));
 }
 // one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit.
 // Over HTTP every session is its own agent (they share the backend's pid): the lock
@@ -464,7 +463,7 @@ server.registerTool('style_kits', {description: 'The saved brand / style kits (p
 server.registerTool('add_clips', {description: 'Add video files to a project (absolute paths on this machine). Uploads through the backend (remux + thumbnail). New project if project_id is omitted.', inputSchema: {project_id: pid.optional(), files: z.array(z.string()).min(1), name: z.string().optional()}}, async ({project_id, files, name}) => {
   await needBackend();
   const id = project_id || `p-${Date.now()}`;
-  const p = project_id ? load(project_id) : {name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'};
+  const p = project_id ? load(project_id) : newProject(name);
   const added = [];
   for (const f of files) {
     hostFile(f);
@@ -799,11 +798,6 @@ async function wordAt(p, wid, tr) {
   const k = t.words.findIndex((w) => String(w.i) === i);
   return {clip: p.clips.find((c) => c.id === t.clipId), entry: t, word: t.words[k], k, prev: t.words[k - 1], next: t.words[k + 1]};
 }
-// off-mic words left in the cut + clip edges inside a word (src/validate.ts), from the last transcript run
-function transcriptIssuesOf(p) {
-  let tr; try { tr = readPublic('transcript.json'); } catch { return []; }
-  return transcriptIssues(p, tr);
-}
 
 server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
@@ -867,7 +861,7 @@ server.registerTool('add_graphic', {description: `Add a motion-graphics overlay 
   if (reveal) g.reveal = reveal; if (out) g.out = out; if (life) g.life = life; if (camera) g.camera = camera;
   if (behind) g.behind = true;
   p.graphics.push(g); await save(project_id, p);
-  const warn = validateProject(p, FPS, facesOf(p)).filter((i) => i.ref === g.id);
+  const warn = validateProject(p, FPS, facesOf(p, PUBLIC)).filter((i) => i.ref === g.id);
   const wantsMatte = behind || MATTE_TEMPLATES.has(template) || (template === 'layout' && clean.cutout);
   return text(`Added ${g.id} ${template}${wantsMatte ? ' (needs the person matte — run prepare_mattes before rendering)' : ''}${warn.length ? '\n' + issuesText(warn) : ''}\n\n${summary(project_id, p)}`);
 });
@@ -1053,9 +1047,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 // ---------- verification ----------
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
-// face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
-const facesOf = (p) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
-const allIssues = (p) => [...validateProject(p, FPS, facesOf(p)), ...transcriptIssuesOf(p)];
+const allIssues = (p) => projectIssues(p, PUBLIC, FPS); // mcp/checks.mjs, also GET /api/validate/<id>
 const projectProps = projectRenderProps; // src/renderProps.ts: the same props the render CLI sends
 
 server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {

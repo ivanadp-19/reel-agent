@@ -49,6 +49,8 @@ import {renderArgs} from './render-queue.mjs';
 import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, probeColor} from './layers.mjs';
 import {blankLead, openingReport, parseStats, repairArgs, statsArgs} from './first-frame.mjs';
 import {chooseRenderMode} from '../src/layers.ts';
+import {lutBakes} from '../src/grade.ts';
+import {localBrollName} from './remote-broll.mjs';
 import {linkPublic} from './public-links.mjs';
 import {recordFinal, removeVersion} from './reviews.mjs';
 import {killTree} from './render-jobs.mjs';
@@ -152,6 +154,33 @@ export const defaultCommands = {
   frameStats: ({file}) => ['ffmpeg', statsArgs(file)],
   fixFirstFrame: ({file, outFile, draft}) => ['ffmpeg', repairArgs({file, outFile, fps: FPS, color: probeColor(file), draft})],
 };
+
+// What a render will do, said before it is queued (POST /api/render answers with it,
+// `reel render start` prints it): full or layers, and whether it is a complete render —
+// one pass, or the master rendered again — and why. The job's own decisions:
+// chooseRenderMode, then the master key of the props as prepare() will leave them
+// (remote B-roll under its local name; a download or a LUT bake still to do changes
+// them, so the master is rendered again), then the master cache.
+export function planRender(props, {requested = 'full', draft = false, root, publicDir, masterCache = null, keyOf = (p, o) => masterKey(p, {code: codeVersion(root), fps: FPS, draft: o.draft, publicDir})} = {}) {
+  if (requested !== 'layers') return {mode: 'full', full: true, reasons: ['mode full: one pass over everything (mode layers reuses the cached master when only the captions change)']};
+  const choice = chooseRenderMode('layers', props, FPS);
+  if (choice.mode === 'full') return {mode: 'full', full: true, reasons: choice.reasons};
+  if (!masterCache) return {mode: 'full', full: true, reasons: ['no master cache on this backend']};
+  let downloads = 0;
+  const brolls = (props.brolls ?? []).map((b) => {
+    if (!/^https?:\/\//.test(b.src ?? '')) return b;
+    const name = localBrollName(b);
+    if (!fs.existsSync(path.join(publicDir, 'broll', name))) downloads++;
+    return {...b, src: `broll/${name}`};
+  });
+  const g = props.grade;
+  const bakes = lutBakes(g, props.clips ?? [], props.mattes ?? []).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(publicDir, g.baked[b.key]))).length;
+  const reasons = [];
+  if (downloads) reasons.push(`${downloads} remote B-roll to download first: the master is rendered again`);
+  if (bakes) reasons.push(`${bakes} LUT bake${bakes === 1 ? '' : 's'} missing: the master is rendered again`);
+  if (!reasons.length && !fs.existsSync(masterCache.file(keyOf({...props, brolls}, {draft})))) reasons.push('no cached master for this cut: its first layered render, or something besides the captions changed (clips, trims, B-roll, graphics, music, grade…)');
+  return {mode: 'layers', full: reasons.length > 0, master: reasons.length ? 'render' : 'cached', captions: choice.captions, reasons};
+}
 
 export function createRenderRunner({
   root,
