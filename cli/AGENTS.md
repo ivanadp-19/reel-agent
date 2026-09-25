@@ -23,9 +23,9 @@ reel clips add promo-cafe ~/shoot/ --json            # a folder or files, append
 reel autocut promo-cafe --dry-run --json             # what the silence cut would keep; nothing saved
 reel autocut promo-cafe --json                       # clips → their speech segments
 reel captions generate promo-cafe --json             # transcribe + page the speech
-reel captions get promo-cafe --json > caps.json      # edit the pages (text, tiers, timing)
+reel captions get promo-cafe --json > caps.json      # edit the pages (text, tiers, timing); carries `revision`
 reel captions diff promo-cafe caps.json --json       # what would change
-reel captions set promo-cafe caps.json --json
+reel captions set promo-cafe caps.json --expected-revision "$(jq -r .revision caps.json)" --json
 reel captions validate promo-cafe --json             # exit 9 when there are errors
 reel render start promo-cafe --json                  # → {jobId, plan}; returns at once
 reel render wait <jobId> --timeout 1200 --json       # exit 0 done, 8 failed, 124 timeout
@@ -51,6 +51,18 @@ a review link needs a final that passed QC.
   `render wait --timeout`. A timeout leaves the render running.
 - Project writes go through the backend's compare-and-swap: when the editor or
   another agent saved in between, `reel` reads again and redoes its change.
+- Caption revisions: `captions get` prints `revision`, a hash of the caption pages
+  (any writer that changes the pages — the editor, an agent, another `reel` — moves
+  it; saving anything else does not). `captions set --expected-revision <rev>`
+  replaces the pages only if they are still at `<rev>`, else nothing is written and
+  it exits 5 with `{code: "revision_mismatch", revision: <current>}`: read them again,
+  redo your edit on the new pages, set with the new revision (setting the pages
+  that are already there is `changed: false`, never a conflict). Without the flag,
+  `captions set` still refuses to clobber a write that lands between its read and
+  its write (it reads again and re-diffs), but it does not protect edits you made
+  to an older `captions get`. The backend route: `GET` / `PUT
+  /api/projects/<id>/captions` (`{captions, expectedRevision?}` → 409
+  `revision_mismatch`).
 
 ## Project settings and autocut
 
