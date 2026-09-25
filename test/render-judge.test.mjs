@@ -37,10 +37,15 @@ test('a compound name or name + number split across pages is flagged, unrelated 
     page('c3', 'a', [CW('a:5', '326.', 1420, 1800)]),
     page('c4', 'a', [CW('a:9', 'Juan', 2000, 2300)]), // not the word after 326 → a new sentence, not a split
   ];
-  const f = splitNameFindings(pages);
+  const f = splitNameFindings(pages, [], 'vibem');
   assert.deepEqual(f.map((x) => x.evidence.pages), [['c0', 'c1'], ['c2', 'c3']]);
   assert.match(f[1].msg, /nombre \+ número/);
-  assert.equal(f[1].fix[1].tool, 'delete_captions'); // the one-word page goes away
+  // never delete / retype pages: highlight both words (a span the pager never splits), then re-page
+  assert.deepEqual(f[1].fix.map((x) => x.tool), ['annotate_captions', 'set_caption_style']);
+  assert.deepEqual(f[1].fix[0].args.items.map((x) => x.wid), ['a:4', 'a:5']);
+  assert.equal(f[1].fix[1].args.style, 'vibem');
+  assert.equal(f[1].fix[1].changesIds, true);
+  assert.equal(splitNameFindings(pages, [], 'prism')[1].fix[0].tool, 'escalate'); // a pack that does not bond names
 });
 
 test('caption sync is one finding per page, with the worst word', () => {
@@ -165,11 +170,15 @@ test('crew talk and a camera read are not off-mic', () => {
 });
 
 test('one page per sentence; accent at the plain size; the glossary wins', () => {
-  const f = paginationFindings([page('c0', 'a', [CW('a:0', 'Tiene', 0, 300), CW('a:1', 'alberca.', 350, 800), CW('a:2', 'Y', 900, 1000), CW('a:3', 'gym', 1050, 1400)])]);
+  const f = paginationFindings([page('c0', 'a', [CW('a:0', 'Tiene', 0, 300), CW('a:1', 'alberca.', 350, 800), CW('a:2', 'Y', 900, 1000), CW('a:3', 'gym', 1050, 1400)])], 'vibem');
   assert.equal(f.length, 1);
-  assert.deepEqual(f[0].fix.map((x) => x.tool), ['delete_captions', 'add_caption', 'add_caption']);
-  assert.equal(f[0].fix[2].args.text, 'Y gym');
-  assert.equal(accentSizeFindings('vibem').length, 1); // vibem ships tier 1/2 at 1.15× today
+  // a generated page is re-paged by the shared pager (keeps word ids, accents, timing) — never deleted and retyped
+  assert.deepEqual(f[0].fix.map((x) => [x.tool, x.args.style, x.changesIds]), [['set_caption_style', 'vibem', true]]);
+  const hand = paginationFindings([{...page('c1', 'a', [CW(undefined, 'Tiene', 0, 300), CW(undefined, 'alberca.', 350, 800), CW(undefined, 'Y', 900, 1000)]), covers: ['a:0']}], 'vibem');
+  assert.deepEqual(hand[0].fix.map((x) => [x.tool, x.args.text]), [['edit_caption', 'Tiene alberca.']]);
+  assert.ok(!f.concat(hand).some((x) => x.fix.some((y) => y.tool === 'delete_captions' || y.tool === 'add_caption')));
+  assert.deepEqual(accentSizeFindings('vibem'), []); // César: yellow at the same size as white — decided in the preset
+  assert.equal(accentSizeFindings('prism').length, 1); // a pack with bigger key words is flagged
   const g = glossaryFindings([{text: 'con sky pool privado', ref: 'c4', at: 3}, {text: 'SKYPOOL', ref: 'g1', at: 0}], [{term: 'skypool', variants: ['sky pool', 'skypul']}]);
   assert.equal(g.length, 1); // "SKYPOOL" is the term (case is the style's)
   assert.equal(g[0].fix[0].args.text, 'con skypool privado');
@@ -223,4 +232,75 @@ test('the César profile is picked by caption style or brand, and knows G1 / G7'
   assert.ok(reelOf(cesar, 'Depto G1 v2')?.inserts?.length >= 4);
   assert.equal(reelOf(cesar, 'Torre G12'), null);
   assert.ok(reelOf(cesar, 'G7 entrevista')?.phone);
+});
+
+// ---- review of PR #15: J/L-cuts, spelling homographs, shared caption layout, inserts by token ----
+import {consistencyFindings as consistency2, hasKeyword, textValues, DIACRITIC} from '../.agents/skills/render-judge/judge.mjs';
+import {fitPage, pageUnits, captionPreset} from '../src/captionLayout.ts';
+import {presetOf} from '../src/captionPresets.ts';
+import {textWidthEm} from '../src/textFit.ts';
+
+test('J/L-cuts: words are placed where the render plays their audio', () => {
+  const clips = [clip('a', 'a', 0, 3), {...clip('b', 'b', 0, 3), jSec: 1}, {...clip('c', 'c', 0, 2), lSec: 1}, clip('d', 'd', 0, 2)];
+  const tr = [
+    {clipId: 'a', source: 'a', words: [TW(0, 'uno', 2000, 2400)]},
+    {clipId: 'b', source: 'b', words: [TW(0, 'hola', 200, 500), TW(1, 'mundo.', 1200, 1600)]},
+    {clipId: 'c', source: 'c', words: [TW(0, 'dos', 500, 800), TW(1, 'fin', 2200, 2500)]}, // "fin" is past outSec: heard in the L-cut
+    {clipId: 'd', source: 'd', words: []},
+  ];
+  const w = words(clips, tr);
+  const at = (wid) => +w.find((x) => x.wid === wid).t0.toFixed(2);
+  assert.equal(at('b:0'), 2.2); // the J lead: 1 s before b starts at 3 s
+  assert.equal(w.find((x) => x.wid === 'b:0').jl, 'lead');
+  assert.equal(at('b:1'), 4.2); // after the lead, the clip's own audio
+  assert.equal(at('c:1'), 8.2); // c ends at 8 s; its L-cut carries "fin" under d
+  assert.equal(w.find((x) => x.wid === 'c:1').jl, 'trail');
+  const f = pauseFindings(w, clips);
+  assert.deepEqual(f.filter((x) => x.evidence.from === 'b:0').map((x) => x.check), ['jcut-gap']); // the render mutes b's first second after the cut (a named check, not a "pausa rara")
+  assert.equal(f[0].fix[0].args.j_sec, 0);
+  // no "cut-tight" for the J overlap, and a muted clip is not heard at all
+  assert.ok(!f.some((x) => x.check === 'cut-tight'));
+  assert.ok(!words([{...clips[0], muted: true}], tr).length);
+});
+
+test('spelling: diacritic pairs are different words; only names are a rule', () => {
+  assert.ok(DIACRITIC.has('esta') && DIACRITIC.has('que') && DIACRITIC.has('como'));
+  assert.deepEqual(consistency2([{text: 'Esta casa tiene alberca', ref: 'c0', at: 0}, {text: 'Aquí está la alberca', ref: 'c1', at: 2}, {text: 'qué vista y que bien', ref: 'c2', at: 3}]), []);
+  const f = consistency2([{text: 'Vive en Montealbán', ref: 'c0', at: 0}, {text: 'en Montealban 326', ref: 'c1', at: 2}, {text: 'un balcon', ref: 'c2', at: 3}, {text: 'el balcón', ref: 'c3', at: 4}]);
+  assert.deepEqual(f.map((x) => [x.kind, x.severity]), [['rule', 'major'], ['candidate', 'minor']]);
+  assert.equal(f[0].fix[0].args.text, 'en Montealbán 326'); // the fix keeps the capital
+  // the per-word accent check against the transcript: "Esta" for "Está" is only a candidate
+  const clips = [clip('a', 'a', 0, 10)];
+  const g = captionTextFindings([page('c0', 'a', [CW('a:0', 'Esta', 0, 300), CW('a:1', 'aquí', 350, 600)])], words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Está', 0, 300), TW(1, 'aquí', 350, 600)]}]));
+  assert.deepEqual(g.map((x) => x.kind), ['candidate']);
+});
+
+test('inserts match whole tokens of text values only', () => {
+  assert.equal(hasKeyword('llave maestra', 'av'), false);
+  assert.equal(hasKeyword('Av. Reforma 222', 'av'), true);
+  assert.equal(hasKeyword('hospital-angeles', 'hospitales'), true); // singular / plural
+  assert.equal(hasKeyword('comercial centro', 'centro comercial'), false);
+  assert.deepEqual(textValues({place: 'Calle 5', lines: [{text: 'x'}]}), ['Calle 5', 'x']);
+  const ins = parseInserts('INSERTS:\n- super de calle → super: av, calle');
+  const clips = [clip('a', 'a', 0, 10)];
+  const w = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'hola', 0, 300)]}]);
+  const keyOnly = [{id: 'g0', template: 'label-2tone', props: {top: 'la llave', bottom: 'de la casa'}, startMs: 0, endMs: 2000}];
+  assert.equal(insertFindings(ins, w, [], keyOnly).length, 1); // "llave" is not "av"; the key "place" is not a value
+  assert.equal(insertFindings(ins, w, [], [{id: 'g1', template: 'location-tag', props: {place: 'Av. Reforma'}, startMs: 0, endMs: 2000}]).length, 0);
+});
+
+test('caption layout is one function: measured as rendered (case, tier scale), shared with the renderer', () => {
+  const vibem = presetOf('vibem');
+  const word = {text: 'departamentales', tier: 1}; // 15 caps at 100 px: ~1080 px measured as rendered, ~840 px in lowercase
+  const [u] = pageUnits([word], vibem);
+  const lowercase = textWidthEm('departamentales', vibem.font.custom.family); // what the old shrink measured
+  assert.ok(u.em > lowercase * 1.2); // vibem renders caps: far wider
+  const [big] = pageUnits([word], presetOf('prism'));
+  assert.ok(big.em > pageUnits([{text: 'universidades'}], presetOf('prism'))[0].em * 1.4); // and a tier's scale counts
+  const fit = fitPage({words: [word]}, vibem);
+  assert.ok(fit.fontSize < fit.baseSize); // so the page shrinks to keep it inside the frame
+  assert.ok(!fit.overflows);
+  // a brand body font replaces only a sans pack's face
+  assert.equal(captionPreset('prism', 'Poppins').font.family, 'Poppins');
+  assert.equal(captionPreset('vibem', 'Poppins').font.family, presetOf('vibem').font.family);
 });

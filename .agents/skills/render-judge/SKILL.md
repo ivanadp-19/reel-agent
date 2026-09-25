@@ -76,11 +76,28 @@ render vN ──► DELIVER vN now, labeled "QC técnico en curso"
 3. **Report with the delivery.** When the judge returns, attach its label and
    its prioritized findings to vN, as it wrote them. Never hide findings or
    soften them, and never hold vN back because of them.
-4. **Iterate on FAIL.** Apply the fixes in the order the judge gave: blockers,
-   then majors, then the minors that ride along in the same tool call. Use the
-   exact tool calls the report names. Ids and seconds come from the script;
-   never recompute them. Re-read `get_transcript` after cuts before the next
-   id-based fix. Fix only what a finding names. Then render vN+1 and go to 1.
+4. **Iterate on FAIL.** Fix only what a finding names, with the exact tool calls
+   the report gives. Ids and seconds come from the script, so never recompute them.
+   Order matters, because some fixes change ids:
+   - **First, every fix without ⟲.** These keep ids: `edit_caption` with the same
+     word count, `annotate_captions`, `set_clip`, `set_grade`, `set_music`,
+     `edit_broll`, `edit_graphic`, `trim_clip`, `add_broll`, `add_graphic`…
+     Go blockers, then majors, then the minors that ride along.
+   - **Then the ⟲ fixes, ONE AT A TIME.** `set_caption_style`, `run_ai_step`,
+     `add_caption`, `delete_captions`, `cut_words`, `split_clip`, `delete_clips`…
+     renumber caption pages or change clip ids, so every other id in the report
+     is stale after one of them. After each ⟲ fix, run `judge.mjs` again (it
+     takes seconds; `--fresh` is not needed) and continue from its new report,
+     which carries fresh ids.
+   - **Never reshape caption pages by deleting or typing them.** `delete_captions`
+     hides those words for good: they are never captioned again, not even after
+     re-paging. A page from `add_caption`, or retyped with another word count,
+     loses its word ids, its accents and its real timing (its words are spread
+     evenly). The report re-pages instead: `set_caption_style` with the same pack
+     runs the shared pager, which ends a page at every sentence and keeps word
+     ids, tiers, emoji, real timing and hand-made pages. To keep a name together
+     in a pack that bonds names, `annotate_captions` both words, then re-page.
+   Then render vN+1 and go to 1.
    `judge.mjs` diffs against the previous report of the same role by itself and
    marks each finding fixed / still open / regression. A new blocker or major
    after a fix is a **regression**: undo that fix's effect first.

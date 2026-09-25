@@ -136,7 +136,7 @@ PRIORIDAD
 2. [0:02.5–0:03.4] pause (rule) — pausa rara de 0.85 s a mitad de frase entre "tiene" y "noventa"
    fix: split_clip {"before_wid":"take1:7"} → trim_clip {"clip_id":"take1","out_sec":3.45} → trim_clip {"clip_id":"<new piece>","in_sec":4.07}
 3. [0:05.4–0:06.8] split-name (candidate, CONFIRMADO en frame 6.2 s) — "Montealbán" | "326" en páginas distintas
-   fix: edit_caption {"caption_id":"c2","text":"Está en Montealbán 326"} → delete_captions {"caption_ids":["c3"]}
+   fix: annotate_captions {"items":[{"wid":"take1:11","tier":1},{"wid":"take1:12","tier":1}]} → ⟲ set_caption_style {"style":"vibem"}
 4. [0:09.0–0:10.2] broll-fit (judgment) — alberca sobre "el precio es de dos millones": no muestra nada del precio
    fix: suggest_broll → add_broll asset_id=<fachada> at_wid=take2:1
 MENORES / NITS
@@ -144,12 +144,19 @@ MENORES / NITS
 DESCARTADOS / NO CONFIRMADOS
 - overflow@4.2 (heuristic) — frame 4.2 s: "Montealbán 326" cabe con margen
 - color-burnt@8.2 (candidate) — es el cielo, la piel está bien
+ORDEN DE APLICACIÓN: 1, 2, 4 (ids estables) → 3 (⟲ re-pagina: correr judge.mjs otra vez antes de seguir)
 ESCALAR (no lo arregla el agente)
-- accent-size — preset vibem: amarillo 1.15× (cambio de código en src/captionPresets.ts)
+- jcut-gap@14.2 — el J-cut de take4 deja 0.8 s de silencio tras el corte (renderer)
 SKIPPED
 - none
 Revisado y bien: hook, música bajo la voz, color entre tomas.
 ```
+
+Fixes marked ⟲ renumber caption pages or change clip ids. Put them last, and
+tell the editor to re-run `judge.mjs` after each one. Never propose
+`delete_captions` or `add_caption` to reshape pages: the first hides words for
+good, the second loses word ids, accents and timing. Re-page with the pack
+instead.
 
 Be terse and concrete: what the viewer sees or hears, where, and the call
 that fixes it. No praise. Only the one "Revisado y bien" line, so the editor

@@ -30,6 +30,7 @@
 // (src/validate.ts), QC gate (scripts/qc.mjs), text widths (src/textFit.ts).
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import {spawnSync} from 'node:child_process';
 
 const SKILL = import.meta.dirname;
@@ -38,12 +39,12 @@ const src = (f) => path.join(ROOT, 'src', f);
 const {placeClips} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions} = await import(src('captions.ts'));
 const {validateProject, transcriptIssues, SAFE} = await import(src('validate.ts'));
-const {presetOf, pageScale} = await import(src('captionPresets.ts'));
-const {textWidthEm} = await import(src('textFit.ts'));
+const {presetOf} = await import(src('captionPresets.ts'));
+const {captionPreset, fitPage, wrapUnits, MIN_FONT_PX} = await import(src('captionLayout.ts'));
 const {projectBrolls} = await import(src('brollModel.ts'));
 const {projectGraphics} = await import(src('graphicTemplates.ts'));
 const {contentWords} = await import(src('brollMatch.ts'));
-const {toDisplay} = await import(src('paging.ts'));
+const {toDisplay, endsSentence} = await import(src('paging.ts'));
 const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 
 const FPS = 30;
@@ -60,7 +61,6 @@ export const T = {
   syncMajorMs: 250, syncBlockerMs: 500,
   cps: 22, // caption reading speed (characters per second)
   maxLines: 3,
-  minFontPx: 40, // CaptionTrack never shrinks below this: a wider unit overflows
   flashMs: 500,
   staticSec: 7,
   voiceJumpLU: 4, // take-to-take voice level jump
@@ -101,18 +101,32 @@ const sourceOf = (s) => path.basename(s).replace(/\.[^.]+$/, '');
 const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 28});
 
 // ---------- evidence: timeline speech ----------
-// transcript words of every placed clip on the timeline (seconds), in order
+// transcript words of every placed clip at the time the viewer HEARS them (seconds), in order.
+// Audio follows MultiClipVideo: a J-cut plays the clip's first j seconds of source under the
+// previous clip's tail (and mutes them after the cut), an L-cut plays the source past outSec
+// under the next clip's head; the frames come from placeClips, like the render's. A muted clip
+// is not heard at all. Words in a lead / trail carry `jl` ('lead' | 'trail').
 export function timelineSpeech(clips, tr, fps = FPS) {
   const out = [];
   const missing = [];
   for (const [k, pc] of placeClips(clips, fps).entries()) {
     const t = tr.find((x) => x.clipId === pc.clip.id);
     if (!t) { missing.push(pc.clip.id); continue; }
-    const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000, sp = pc.clip.speed ?? 1;
-    const abs = (ms) => (pc.startMs + (ms - inMs) / sp) / 1000;
+    if (pc.clip.muted || pc.clip.volume === 0) continue;
+    const sp = pc.clip.speed ?? 1;
+    const inMs = pc.clip.inSec * 1000, outMs = pc.clip.outSec * 1000;
+    const jMs = (pc.jFrames / fps) * 1000, lMs = (pc.lFrames / fps) * 1000; // timeline ms
+    const leadEnd = inMs + jMs * sp, trailEnd = outMs + lMs * sp; // source ms
+    const part = (ms) => (ms < leadEnd ? 'lead' : ms < outMs ? 'main' : 'trail');
+    const heard = (ms) => {
+      const w = part(ms);
+      return (w === 'lead' ? pc.startMs - jMs + (ms - inMs) / sp : w === 'main' ? pc.startMs + (ms - inMs) / sp : pc.endMs + (ms - outMs) / sp) / 1000;
+    };
     for (const w of t.words) {
-      if (w.endMs <= inMs || w.startMs >= outMs) continue;
-      out.push({wid: `${t.source}:${w.i}`, word: w.word, t0: abs(Math.max(w.startMs, inMs)), t1: abs(Math.min(w.endMs, outMs)), srcStartMs: w.startMs, srcEndMs: w.endMs, clipId: pc.clip.id, clipIndex: k, off: !!w.off, ...(w.speaker ? {speaker: w.speaker} : {})});
+      if (w.endMs <= inMs || w.startMs >= trailEnd) continue;
+      const s0 = Math.max(w.startMs, inMs), s1 = Math.min(w.endMs, trailEnd);
+      const where = part(s0);
+      out.push({wid: `${t.source}:${w.i}`, word: w.word, t0: heard(s0), t1: Math.max(heard(s0), heard(Math.max(s0, s1 - 1))), srcStartMs: w.startMs, srcEndMs: w.endMs, clipId: pc.clip.id, clipIndex: k, off: !!w.off, ...(where !== 'main' ? {jl: where} : {}), ...(w.speaker ? {speaker: w.speaker} : {})});
     }
   }
   return {words: out.sort((a, b) => a.t0 - b.t0), missing};
@@ -127,9 +141,18 @@ const DRAMATIC_BEFORE = /[,;:…—–-]["')\]]*$/;
 export function pauseFindings(words, clips, emphasized = new Set()) {
   const out = [];
   const byId = new Map(clips.map((c) => [c.id, c]));
+  const jSec = new Map(placeClips(clips, FPS).map((pc) => [pc.clip.id, pc.jFrames / FPS]));
   for (let k = 1; k < words.length; k++) {
     const a = words[k - 1], b = words[k];
     if (a.off || b.off) continue; // off-mic / crew talk is its own check
+    // the renderer plays a J-cut's lead before the cut and then MUTES the clip's first j seconds
+    // (MultiClipVideo + ClipMedia): speech that runs through the lead has a j-second hole after
+    // the cut. Verified on a real render (1 s J-cut → 1 s of silence). A product bug, named here.
+    if (a.clipId === b.clipId && a.jl === 'lead' && !b.jl && b.t0 - a.t1 > 0.25) {
+      out.push(F('jcut-gap', 'major', 'rule', a.t1, b.t0, `el J-cut de ${a.clipId} deja ${(b.t0 - a.t1).toFixed(2)} s de silencio tras el corte, entre "${a.word}" y "${b.word}": el render silencia los primeros ${jSec.get(a.clipId).toFixed(1)} s del clip y no los retoma`, {clip: a.clipId, from: a.wid, to: b.wid},
+        [{tool: 'set_audio_cut', note: 'clear the J-cut until the renderer plays the lead through the cut', args: {clip_id: a.clipId, j_sec: 0}}, {tool: 'escalate', note: 'renderer: MultiClipVideo J-cut lead + ClipMedia jMuteFrames leave a hole', args: {}}]));
+      continue;
+    }
     const gap = (b.t0 - a.t1) * 1000;
     const across = a.clipId !== b.clipId;
     const ended = SENT_END.test(a.word);
@@ -141,7 +164,7 @@ export function pauseFindings(words, clips, emphasized = new Set()) {
     else if (!dramatic && gap >= T.pauseMidMs) out.push(F('pause', 'major', 'rule', a.t1, b.t0, `pausa rara de ${s1} s a mitad de frase entre "${a.word}" y "${b.word}"${across ? ' (en un corte)' : ''}`, ev, fix));
     else if (dramatic && gap >= (ended ? T.pauseAfterMs : T.pauseMidMs)) out.push(F('pause', 'minor', 'candidate', a.t1, b.t0, `pausa de ${s1} s entre "${a.word}" y "${b.word}" — ¿dramática? ${ended ? '(tras punto)' : emphasized.has(b.wid) ? '(antes de la palabra resaltada)' : '(tras coma / puntos suspensivos)'}; cuenta solo si suena a error`, ev, fix));
     else if (!ended && gap >= T.pauseMinorMs) out.push(F('pause', 'minor', 'candidate', a.t1, b.t0, `pausa de ${s1} s a mitad de frase entre "${a.word}" y "${b.word}"`, ev, fix));
-    if (across && gap < T.tightMs) out.push(F('cut-tight', 'minor', 'heuristic', a.t1, b.t0, `corte pegado: "${a.word}" → "${b.word}" con ${Math.max(0, Math.round(gap))} ms — respiración/consonante comida`, {gapMs: Math.round(gap)}, [{tool: 'trim_clip', args: {clip_id: b.clipId, in_sec: r2(Math.max(0, b.srcStartMs / 1000 - 0.1))}}]));
+    if (across && !a.jl && !b.jl && gap < T.tightMs) out.push(F('cut-tight', 'minor', 'heuristic', a.t1, b.t0, `corte pegado: "${a.word}" → "${b.word}" con ${Math.max(0, Math.round(gap))} ms — respiración/consonante comida`, {gapMs: Math.round(gap)}, [{tool: 'trim_clip', args: {clip_id: b.clipId, in_sec: r2(Math.max(0, b.srcStartMs / 1000 - 0.1))}}]));
   }
   return out;
 }
@@ -166,8 +189,9 @@ function pauseFix(a, b, byId) {
 // is a rule; a capitalized pair is only a candidate — capitals are a poor signal for
 // compounds (sentence starts, "pet park" in lowercase), so the judge confirms on the frame.
 const phraseKey = (s) => String(s).split(/\s+/).map(fold).filter(Boolean).join(' ');
-export function splitNameFindings(pages, glossary = []) {
+export function splitNameFindings(pages, glossary = [], style) {
   const out = [];
+  const preset = presetOf(style);
   const terms = new Set(glossary.flatMap((g) => [g.term, ...(g.variants ?? [])]).map(phraseKey).filter((k) => k.includes(' ')));
   for (let k = 1; k < pages.length; k++) {
     const A = pages[k - 1], B = pages[k];
@@ -183,64 +207,51 @@ export function splitNameFindings(pages, glossary = []) {
     else if (CAP.test(at) && /^\d/.test(bt)) { why = 'nombre + número partido'; kind = 'candidate'; }
     else if (CAP.test(at) && CAP.test(bt)) { why = 'posible nombre compuesto partido'; kind = 'candidate'; }
     if (!why) continue;
-    out.push(F('split-name', 'major', kind, A.startMs / 1000, B.endMs / 1000, `${why} entre páginas: "${A.words.map((w) => w.text).join(' ')}" | "${B.words.map((w) => w.text).join(' ')}"${kind === 'candidate' ? ' — confirmar en el frame del corte de página' : ''}`, {pages: [A.id, B.id], words: [a.wid, b.wid], lookAt: [r2(A.endMs / 1000 - 0.1), r2(B.startMs / 1000 + 0.1)]},
-      [{tool: 'edit_caption', note: `move "${b.text}" into ${A.id} (same word count per page keeps word timing; otherwise words are re-timed evenly — re-judge sync)`, args: {caption_id: A.id, text: `${A.words.map((w) => w.text).join(' ')} ${b.text}`}},
-       B.words.length > 1 ? {tool: 'edit_caption', args: {caption_id: B.id, text: B.words.slice(1).map((w) => w.text).join(' ')}} : {tool: 'delete_captions', args: {caption_ids: [B.id]}}]));
+    // Never delete_captions / add_caption to reshape pages: a deleted page hides its words for
+    // good and a typed page loses word ids, accents and real timing. In an unbreakable pack a
+    // highlighted span never splits, so: highlight both words, then re-page with the same pack.
+    const fix = preset.layout.unbreakable
+      ? [{tool: 'annotate_captions', note: 'a highlighted span is one unit for the pager (and names are key words anyway)', args: {items: [{wid: a.wid, tier: Math.max(1, a.tier ?? 0)}, {wid: b.wid, tier: Math.max(1, b.tier ?? 0)}]}},
+         {tool: 'set_caption_style', note: 're-pages generated pages with the shared pager; keeps word ids, tiers, emoji, real timing and hand-made pages', args: {style: preset.id}}]
+      : [{tool: 'escalate', note: `pack "${preset.id}" does not bond names across pages and no tool moves a word between pages without re-timing; last resort: edit_caption both pages (re-times them evenly, drops their word ids — re-judge sync)`, args: {}}];
+    out.push(F('split-name', 'major', kind, A.startMs / 1000, B.endMs / 1000, `${why} entre páginas: "${A.words.map((w) => w.text).join(' ')}" | "${B.words.map((w) => w.text).join(' ')}"${kind === 'candidate' ? ' — confirmar en el frame del cambio de página' : ''}`, {pages: [A.id, B.id], words: [a.wid, b.wid], lookAt: [r2(A.endMs / 1000 - 0.1), r2(B.startMs / 1000 + 0.1)]}, fix));
   }
   return out;
 }
 
-// caption text that runs off the frame / pages too tall. Mirrors the
-// unit bonding + shrink of CaptionTrack.tsx with the shared width table; an
-// ESTIMATE (heuristic) — confirm the flagged pages with frame_at on the render.
-// (overflow = César's failure #3)
+// caption text that runs off the frame / pages too tall (a failure César reported). The page
+// layout is src/captionLayout.ts — the SAME function CaptionTrack renders with (bonded pairs,
+// widths as rendered, the shrink to fit, the wrap) — so this only adds the verdict. Widths
+// are still a table estimate (heuristic): confirm flagged pages with frame_at on the render.
 export function overflowFindings(pages, style, brandFont) {
-  const preset = presetOf(style);
-  const family = brandFont ?? preset.font.custom?.family ?? preset.font.family;
-  const upper = preset.font.case === 'upper';
+  const preset = captionPreset(style, brandFont);
+  const gapEm = preset.font.wordGapEm ?? 0.26;
   const out = [];
   pages.forEach((c) => {
-    const n = c.words.length;
-    if (!n) return;
-    const base = Math.round(preset.font.sizePx * (c.scale ?? 1) * pageScale(preset, n));
-    const avail = preset.position === 'float' && !c.pin ? 1080 * 0.68 : 1080 - 140;
-    const txt = (w) => (upper ? w.text.toUpperCase() : w.text);
-    const tier = (w) => preset.tiers[w.tier ?? 0]?.scale ?? 1;
-    const unbreak = !!preset.layout.unbreakable;
-    const paired = new Set();
-    if (unbreak) for (const bond of [(a, b) => CAP.test(a) && /^\d/.test(b), (a, b) => CAP.test(a) && CAP.test(b)])
-      for (let i = 0; i < n - 1; i++) if (!paired.has(i) && !paired.has(i + 1) && !c.words[i + 1].br && bond(c.words[i].text, c.words[i + 1].text)) paired.add(i);
-    const units = [];
-    for (let i = 0; i < n; i++) {
-      const ws = paired.has(i) ? [c.words[i], c.words[++i]] : [c.words[i]];
-      units.push({ws, em: ws.reduce((s, w, j) => s + textWidthEm(txt(w), family) * tier(w) + (j ? 0.3 : 0), 0), br: !!ws[0].br});
-    }
-    const widest = Math.max(...units.map((u) => u.em)) * base;
-    const font = widest > avail ? Math.max(T.minFontPx, Math.floor((base * avail) / widest)) : base;
+    if (!c.words.length) return;
+    const fit = fitPage(c, preset, {float: preset.position === 'float' && !c.pin});
     const at = (c.startMs + (c.endMs - c.startMs) / 2) / 1000;
     const text = c.words.map((w) => w.text).join(' ');
-    const fitScale = r2(Math.max(0.5, ((c.scale ?? 1) * avail) / widest - 0.02));
-    if (Math.max(...units.map((u) => u.em)) * font > avail + 1) {
-      out.push(F('overflow', 'blocker', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) se sale del cuadro: la palabra/unidad más ancha no cabe ni a ${T.minFontPx}px`, {page: c.id, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, text: '<shorter wording>'}}]));
+    const widestEm = Math.max(...fit.units.map((u) => u.em));
+    const fitScale = r2(Math.max(0.5, ((c.scale ?? 1) * fit.wrapPx) / (widestEm * fit.baseSize) - 0.02));
+    if (fit.overflows) {
+      const blocker = fit.widestPx > fit.availPx + 1; // wider than the frame even at the floor size
+      out.push(F('overflow', blocker ? 'blocker' : 'major', 'heuristic', c.startMs / 1000, c.endMs / 1000, blocker ? `"${text}" (${c.id}) se sale del cuadro: la palabra/unidad más ancha no cabe ni a ${MIN_FONT_PX}px` : `"${text}" (${c.id}) — una palabra/unidad es más ancha que la caja flotante`, {page: c.id, lookAt: r2(at)}, blocker ? [{tool: 'edit_caption', args: {caption_id: c.id, text: '<shorter wording>'}}] : [{tool: 'edit_caption', args: {caption_id: c.id, scale: fitScale}}]));
       return;
     }
-    // greedy wrap, like flex-wrap
-    const gap = (preset.font.wordGapEm ?? 0.3) * font;
-    let lines = 1, x = 0, nameBreak = null;
-    units.forEach((u, i) => {
-      const w = u.em * font;
-      if (i && (u.br || x + gap + w > avail)) {
-        lines++;
-        const prev = units[i - 1].ws.at(-1).text, cur = u.ws[0].text;
-        if (!unbreak && CAP.test(prev) && (CAP.test(cur) || /^\d/.test(cur)) && !SENT_END.test(prev)) nameBreak ??= `${prev} / ${cur}`;
-        x = w;
-      } else x += (i ? gap : 0) + w;
-    });
-    if (lines > T.maxLines) out.push(F('overflow', 'major', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) ocupa ~${lines} líneas — bloque demasiado alto`, {page: c.id, lines, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, scale: fitScale}}]));
-    else if (font < base * 0.75) out.push(F('overflow', 'minor', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) se encoge a ${Math.round((font / base) * 100)}% para caber`, {page: c.id, lookAt: r2(at)}, []));
-    if (nameBreak) out.push(F('split-name', 'minor', 'candidate', c.startMs / 1000, c.endMs / 1000, `nombre que puede partirse en dos líneas: "${nameBreak}" (${c.id})`, {page: c.id, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, text: '<break the page before the name>'}}]));
-    const chars = text.length, dur = (c.endMs - c.startMs) / 1000;
-    if (dur > 0 && chars / dur > T.cps) out.push(F('reading-speed', 'minor', 'rule', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) — ${Math.round(chars / dur)} caracteres/s, ilegible (≤ ${T.cps})`, {page: c.id}, []));
+    const starts = wrapUnits(fit.units, fit.fontSize, fit.wrapPx, gapEm);
+    if (starts.length > T.maxLines) out.push(F('overflow', 'major', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) ocupa ~${starts.length} líneas — bloque demasiado alto`, {page: c.id, lines: starts.length, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, scale: r2(Math.max(0.5, (c.scale ?? 1) * 0.85))}}]));
+    else if (fit.fontSize < fit.baseSize * 0.75) out.push(F('overflow', 'minor', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) se encoge a ${Math.round((fit.fontSize / fit.baseSize) * 100)}% para caber`, {page: c.id, lookAt: r2(at)}, []));
+    // a capitalized pair the wrap breaks across lines (packs without bonding)
+    for (const k of starts.slice(1)) {
+      const prev = c.words[fit.units[k - 1].to].text, cur = c.words[fit.units[k].from].text;
+      if (!fit.paired.size && CAP.test(prev) && (CAP.test(cur) || /^\d/.test(cur)) && !SENT_END.test(prev)) {
+        out.push(F('split-name', 'minor', 'candidate', c.startMs / 1000, c.endMs / 1000, `nombre que puede partirse en dos líneas: "${prev} / ${cur}" (${c.id})`, {page: c.id, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, text: '<break the page before the name>'}}]));
+        break;
+      }
+    }
+    const dur = (c.endMs - c.startMs) / 1000;
+    if (dur > 0 && text.length / dur > T.cps) out.push(F('reading-speed', 'minor', 'rule', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) — ${Math.round(text.length / dur)} caracteres/s, ilegible (≤ ${T.cps})`, {page: c.id}, []));
   });
   return out;
 }
@@ -261,12 +272,16 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
       const d = w.startMs - s.t0 * 1000;
       if (Math.abs(d) >= T.syncMajorMs && (!worst || Math.abs(d) > Math.abs(worst.d))) worst = {w, s, d};
       const said = toDisplay(s.word);
+      // a diacritic pair (esta/está) is grammar the ASR also gets wrong: the judge reads it in context
       if (fold(said) === fold(w.text) && said.toLowerCase() !== w.text.toLowerCase() && /[áéíóúñü]/i.test(said) && !/[áéíóúñü]/i.test(w.text))
-        out.push(F('spelling', 'major', 'rule', s.t0, s.t1, `"${w.text}" (${c.id}) sin tilde — el transcript dice "${said}"`, {page: c.id, wid: w.wid}, [{tool: 'edit_caption', args: {caption_id: c.id, text: c.words.map((x) => (x === w ? said : x.text)).join(' ')}}]));
+        out.push(F('spelling', DIACRITIC.has(fold(said)) ? 'minor' : 'major', DIACRITIC.has(fold(said)) ? 'candidate' : 'rule', s.t0, s.t1, `"${w.text}" (${c.id}) sin tilde — el transcript dice "${said}"`, {page: c.id, wid: w.wid}, [{tool: 'edit_caption', args: {caption_id: c.id, text: c.words.map((x) => (x === w ? said : x.text)).join(' ')}}]));
     }
     if (worst) {
-      const {w, d} = worst;
-      out.push(F('sync', Math.abs(d) >= T.syncBlockerMs ? 'blocker' : 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} "${c.words.map((x) => x.text).join(' ')}": los subtítulos van hasta ${Math.round(Math.abs(d))} ms ${d > 0 ? 'tarde' : 'adelantados'} respecto a la voz (peor: "${w.text}")`, {page: c.id, wid: w.wid, deltaMs: Math.round(d)}, [{tool: 'run_ai_step', note: 'the page was timed on another transcript run: regenerate (hand-made pages are kept)', args: {step: 'captions'}}]));
+      const {w, s: sw, d} = worst;
+      // captions follow the picture; a J/L-cut moves the voice: regenerating would not help
+      const jl = sw.jl ? ` — la voz va ${sw.jl === 'lead' ? 'adelantada por el J-cut' : 'extendida por el L-cut'} de ${sw.clipId}; los subtítulos siguen al video` : '';
+      out.push(F('sync', Math.abs(d) >= T.syncBlockerMs ? 'blocker' : 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} "${c.words.map((x) => x.text).join(' ')}": los subtítulos van hasta ${Math.round(Math.abs(d))} ms ${d > 0 ? 'tarde' : 'adelantados'} respecto a la voz (peor: "${w.text}")${jl}`, {page: c.id, wid: w.wid, deltaMs: Math.round(d)},
+        sw.jl ? [{tool: 'set_audio_cut', note: 'shorten or clear the J/L-cut over speech', args: {clip_id: sw.clipId, [sw.jl === 'lead' ? 'j_sec' : 'l_sec']: 0}}] : [{tool: 'run_ai_step', note: 'the page was timed on another transcript run: regenerate (hand-made pages are kept)', args: {step: 'captions'}}]));
     }
     for (const wid of c.covers ?? []) covered.add(wid);
     if (hand.length > 2 && c.words.length === hand.length) {
@@ -279,7 +294,9 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
   const inPage = (w) => pages.some((c) => c.clipId === w.clipId && w.t0 * 1000 >= c.startMs - 30 && w.t0 * 1000 < c.endMs + 30);
   let run = [];
   const flush = () => {
-    if (run.length >= 3) out.push(F('coverage', 'major', 'rule', run[0].t0, run.at(-1).t1, `${run.length} palabras habladas sin subtítulo: "${run.map((w) => w.word).join(' ').slice(0, 60)}"`, {from: run[0].wid, to: run.at(-1).wid}, [{tool: 'run_ai_step', note: 'adds pages only where there are none', args: {step: 'captions'}}]));
+    const jl = run.find((w) => w.jl);
+    if (run.length >= 3) out.push(F('coverage', 'major', 'rule', run[0].t0, run.at(-1).t1, `${run.length} palabras habladas sin subtítulo: "${run.map((w) => w.word).join(' ').slice(0, 60)}"${jl ? ` (voz del ${jl.jl === 'trail' ? 'L' : 'J'}-cut de ${jl.clipId}: los subtítulos solo cubren el tramo con imagen)` : ''}`, {from: run[0].wid, to: run.at(-1).wid},
+      jl ? [{tool: 'set_audio_cut', args: {clip_id: jl.clipId, [jl.jl === 'trail' ? 'l_sec' : 'j_sec']: 0}}] : [{tool: 'run_ai_step', note: 'adds pages only where there are none', args: {step: 'captions'}}]));
     run = [];
   };
   for (const w of words) {
@@ -289,30 +306,43 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
   return out;
 }
 
-// the same word spelled two ways across captions and graphics ("Montealban" / "Montealbán")
-export function consistencyFindings(items) {
+// Spanish words told apart only by the diacritic accent: two different words, never a misspelling
+// of each other ("esta casa" / "está aquí"), so accent checks never compare them
+export const DIACRITIC = new Set(['esta', 'este', 'eso', 'que', 'como', 'cuando', 'donde', 'adonde', 'quien', 'quienes', 'cual', 'cuales', 'cuanto', 'cuanta', 'cuantos', 'cuantas', 'mas', 'si', 'se', 'te', 'de', 'el', 'tu', 'mi', 'solo', 'aun', 'porque', 'esto', 'estas', 'estos', 'ese', 'esa', 'esos', 'esas', 'aquel', 'aquella', 'hacia', 'sabana', 'publico', 'practico', 'termino', 'ultimo', 'callo', 'hablo', 'llego', 'paso', 'tomo', 'dejo', 'quedo', 'entro', 'mando', 'amo'].map((x) => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+// the same word spelled two ways across captions and graphics ("Montealban" / "Montealbán"). Only a
+// proper name (capitalized mid-sentence in text that is not all caps) or a glossary term is a rule:
+// accents on common words are grammar, not spelling ("esta" and "está" are both right) — those
+// are candidates for the judge to read in context, and diacritic pairs are never compared.
+export function consistencyFindings(items, glossary = []) {
+  const terms = new Set(glossary.map((g) => fold(g.term)));
   const seen = new Map();
-  for (const it of items) for (const raw of String(it.text).split(/\s+/)) {
-    const w = clean(raw);
-    if (w.length < 3 || /^\d+$/.test(w)) continue;
-    const k = fold(w);
-    const m = seen.get(k) ?? new Map();
-    const surf = w.toLowerCase();
-    if (!m.has(surf)) m.set(surf, it);
-    seen.set(k, m);
+  for (const it of items) {
+    const toks = String(it.text).split(/\s+/).filter(Boolean);
+    const shouting = toks.every((t) => t === t.toUpperCase());
+    toks.forEach((raw, i) => {
+      const w = clean(raw);
+      if (w.length < 3 || /^\d+$/.test(w)) return;
+      const k = fold(w);
+      if (DIACRITIC.has(k)) return;
+      const g = seen.get(k) ?? {forms: new Map(), name: terms.has(k)};
+      if (!shouting && CAP.test(w) && i > 0 && !SENT_END.test(toks[i - 1])) g.name = true; // capitalized mid-sentence
+      const surf = w.toLowerCase();
+      if (!g.forms.has(surf)) g.forms.set(surf, it);
+      seen.set(k, g);
+    });
   }
   const out = [];
-  for (const m of seen.values()) {
+  for (const {forms: m, name} of seen.values()) {
     if (m.size < 2) continue;
     const forms = [...m.entries()];
-    const marks = (s) => (s.normalize('NFD').match(/[̀-ͯ]/g) ?? []).length;
+    const marks = (s) => (s.normalize('NFD').match(/[\u0300-\u036f]/g) ?? []).length;
     const [good] = [...forms].sort((x, y) => marks(y[0]) - marks(x[0]))[0];
     const at = Math.min(...forms.map(([, it]) => it.at));
     const fix = forms.filter(([s]) => s !== good).map(([s, it]) => {
-      const text = it.text.replace(new RegExp(`(^|\\s)${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s.,;:!?])`, 'i'), (m0, pre) => pre + good);
+      const text = it.text.replace(new RegExp(`(^|\\s)${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[\\s.,;:!?])`, 'i'), (m0, pre) => pre + (CAP.test(m0.trim()) ? good[0].toUpperCase() + good.slice(1) : good));
       return /^g/.test(it.ref) ? {tool: 'edit_graphic', note: `"${s}" → "${good}" in its props`, args: {graphic_id: it.ref}} : {tool: 'edit_caption', args: {caption_id: it.ref, text}};
     });
-    out.push(F('spelling', 'major', 'rule', at, null, `misma palabra escrita de ${forms.length} formas: ${forms.map(([s, it]) => `"${s}" (${it.ref} @${tc(it.at)})`).join(', ')} — la buena es "${good}"`, {forms: forms.map(([s, it]) => ({text: s, ref: it.ref}))}, fix));
+    out.push(F('spelling', name ? 'major' : 'minor', name ? 'rule' : 'candidate', at, null, `${name ? 'nombre escrito' : 'palabra escrita'} de ${forms.length} formas: ${forms.map(([s, it]) => `"${s}" (${it.ref} @${tc(it.at)})`).join(', ')}${name ? ` — la buena es "${good}"` : ' — leer en contexto: ¿es la misma palabra?'}`, {forms: forms.map(([s, it]) => ({text: s, ref: it.ref}))}, fix));
   }
   return out;
 }
@@ -402,16 +432,20 @@ export function offMicFindings(words, crewWords = CREW_WORDS) {
 }
 
 // ---------- client caption rules (profile) ----------
-// one page = one sentence at most: a page that ends a sentence before its last word mixes two
-export function paginationFindings(pages) {
+// one page = one sentence at most: a page that ends a sentence before its last word mixes two.
+// The shared pager (src/paging.ts) ends a page at every sentence, so re-paging fixes a generated
+// page without losing anything; a hand-typed page is rewritten by hand.
+export function paginationFindings(pages, style) {
   const out = [];
   for (const c of pages) {
-    const k = c.words.findIndex((w, i) => i < c.words.length - 1 && SENT_END.test(w.text));
+    const k = c.words.findIndex((w, i) => i < c.words.length - 1 && endsSentence(w.text));
     if (k < 0) continue;
     const A = c.words.slice(0, k + 1), B = c.words.slice(k + 1);
-    const part = (ws) => ({tool: 'add_caption', args: {at_sec: r2(ws[0].startMs / 1000), duration_sec: r2(Math.max(0.3, (ws.at(-1).endMs - ws[0].startMs) / 1000)), text: ws.map((w) => w.text).join(' ')}});
+    const generated = c.words.every((w) => w.wid) && !c.covers;
     out.push(F('pagination', 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} junta dos oraciones: "${A.map((w) => w.text).join(' ')}" + "${B.map((w) => w.text).join(' ')}" — una página por oración`, {page: c.id, lookAt: r2(B[0].startMs / 1000 + 0.05)},
-      [{tool: 'delete_captions', args: {caption_ids: [c.id]}}, {...part(A), note: 'typed pages are timed evenly — re-judge sync'}, part(B)]));
+      generated
+        ? [{tool: 'set_caption_style', note: 'the shared pager ends a page at every sentence; re-paging keeps word ids, tiers, emoji, real timing and hand-made pages', args: {style: presetOf(style).id}}]
+        : [{tool: 'edit_caption', note: 'a hand-typed page: keep one sentence on it (never delete_captions: it hides the words for good; never add_caption: it renumbers every page)', args: {caption_id: c.id, text: A.map((w) => w.text).join(' ')}}]));
   }
   return out;
 }
@@ -462,11 +496,23 @@ export function parseInserts(plan = '') {
   }
   return out;
 }
+// the words of a text as folded tokens ("Av. Reforma" → av, reforma)
+const tokensOf = (s) => String(s).split(/[^\p{L}\p{N}]+/u).map(fold).filter(Boolean);
+// the text VALUES of graphic props (never the key names: "place", "size"…), recursively
+export const textValues = (x) => (typeof x === 'string' ? [x] : Array.isArray(x) ? x.flatMap(textValues) : x && typeof x === 'object' ? Object.values(x).flatMap(textValues) : []);
+// a keyword (one or more words) found as whole tokens in a text; singular / plural count as the same
+const sameTok = (a, b) => a === b || a === `${b}s` || b === `${a}s` || a === `${b}es` || b === `${a}es`;
+export function hasKeyword(text, keyword) {
+  const hay = tokensOf(text), k = tokensOf(keyword);
+  if (!k.length) return false;
+  for (let i = 0; i + k.length <= hay.length; i++) if (k.every((t, j) => sameTok(hay[i + j], t))) return true;
+  return false;
+}
 export function insertFindings(inserts, words, brolls, gfx, lib = []) {
   const out = [];
-  const has = (hay, kws) => { const h = ` ${phraseKey(hay)} `; return kws.some((k) => h.includes(` ${phraseKey(k)} `) || h.includes(phraseKey(k))); };
-  const cueText = (b) => { const e = lib.find((x) => sourceOf(x.src ?? '') === sourceOf(b.src)); return [e?.tags?.join(' '), e?.desc, e?.label, b.query, sourceOf(b.src).replace(/[-_]/g, ' ')].filter(Boolean).join(' '); };
-  const gText = (g) => JSON.stringify(g.props ?? {});
+  const has = (hay, kws) => kws.some((k) => hasKeyword(hay, k));
+  const cueText = (b) => { const e = lib.find((x) => sourceOf(x.src ?? '') === sourceOf(b.src)); return [...(e?.tags ?? []), e?.desc, e?.label, b.query, sourceOf(b.src)].filter(Boolean).join(' '); };
+  const gText = (g) => textValues(g.props ?? {}).join(' ');
   for (const ins of inserts) {
     // the mention: the anchor id, else the first spoken word that shares a stem with a keyword or the insert's name (plaza ~ plazas)
     const stems = [...ins.keywords, ...ins.what.split(/\s+/)].filter((k) => !k.includes(' ')).map(fold).filter((k) => k.length >= 4);
@@ -610,9 +656,12 @@ export function diffWithPrev(findings, prev) {
   return {fixed: fixed.map((f) => `${f.check} @${tc(f.at)}: ${f.msg}`), regressions: regressions.map((f) => f.id), stuck: findings.filter((f) => f.seen >= 3).map((f) => f.id)};
 }
 
+// tools that renumber caption pages or change clip ids: every other id in the same report is
+// stale after one of them — apply them last, one at a time, and run the judge again in between
+export const ID_CHANGERS = new Set(['add_caption', 'delete_captions', 'set_caption_style', 'run_ai_step', 'cut_words', 'split_clip', 'delete_clips', 'set_speed_ramp', 'reorder_clips', 'duplicate_project']);
 function F(check, severity, kind, at, end, msg, evidence = {}, fix = []) {
   const ref = evidence.page ?? evidence.broll ?? evidence.clip ?? evidence.wid ?? evidence.from ?? null;
-  return {id: `${check}@${at == null ? '-' : at.toFixed(1)}`, check, severity, kind, at: at == null ? null : r2(at), end: end == null ? null : r2(end), msg, ref, evidence, fix};
+  return {id: `${check}@${at == null ? '-' : at.toFixed(1)}`, check, severity, kind, at: at == null ? null : r2(at), end: end == null ? null : r2(end), msg, ref, evidence, fix: fix.map((x) => (ID_CHANGERS.has(x.tool) ? {...x, changesIds: true} : x))};
 }
 
 // ---------- evidence from the mp4 ----------
@@ -620,40 +669,68 @@ function probe(file) {
   const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
   return r.status === 0 ? JSON.parse(r.stdout) : null;
 }
-function momentary(file, pre = '') {
-  const out = [];
-  for (const m of ff(['-i', file, '-vn', '-af', `${pre}ebur128`, '-f', 'null', '-']).stderr.matchAll(/t:\s*([\d.]+)\s+TARGET:\S+ LUFS\s+M:\s*(-?[\d.]+|-inf)/g)) out.push({t: +m[1], M: m[2] === '-inf' ? -Infinity : +m[2]});
-  return out;
-}
-function peaks(file) {
-  const s = ff(['-i', file, '-vn', '-af', 'astats=metadata=0', '-f', 'null', '-']).stderr;
-  const o = s.slice(s.lastIndexOf('Overall'));
-  const num = (re) => { const m = o.match(re); return m ? +m[1] : NaN; };
-  return {peakDb: num(/Peak level dB:\s*(-?[\d.]+|-inf)/), peakCount: num(/Peak count:\s*([\d.]+)/), flat: num(/Flat factor:\s*([\d.]+)/)};
-}
-function lumaStats(file, rate = 2) {
-  const r = ff(['-v', 'error', '-i', file, '-an', '-vf', `fps=${rate},scale=270:-2,signalstats,metadata=print:file=-`, '-f', 'null', '-']);
+// One decode per file, not one per measurement (the VM has 2 vCPU): every video number comes
+// from a single ffmpeg graph, every audio number from another; each meter writes its own
+// metadata file (one graph with several loggers on stderr interleaves their lines).
+// JUDGE_TIMING=1 prints how long each stage took (stderr)
+const timed = (label, fn) => { if (!process.env.JUDGE_TIMING) return fn(); const t0 = performance.now(); try { return fn(); } finally { console.error(`[judge] ${label} ${((performance.now() - t0) / 1000).toFixed(2)} s`); } };
+const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'judge-'));
+const fesc = (f) => f.replace(/[\\':]/g, '\\$&'); // a path inside a filtergraph argument
+// metadata=print output → [{t, key: value…}]
+function readMeta(file, re) {
   const out = [];
   let cur = null;
-  for (const line of r.stdout.split('\n')) {
+  let txt = '';
+  try { txt = fs.readFileSync(file, 'utf8'); } catch { return out; }
+  for (const line of txt.split('\n')) {
     const f = line.match(/pts_time:([\d.]+)/);
     if (f) { cur = {t: +f[1]}; out.push(cur); continue; }
-    const m = line.match(/lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);
-    if (m && cur) cur[m[1]] = +m[2];
+    const m = line.match(re);
+    if (m && cur) cur[m[1]] = m[2] === '-inf' ? -Infinity : +m[2];
   }
   return out;
 }
-// momentary loudness of the full band, under 300 Hz and over 3.4 kHz — three passes, joined by
-// time (one graph with three meters interleaves their log lines and loses samples)
-function phoneBands(file, full = null) {
-  const byT = (xs) => new Map(xs.map((x) => [Math.round(x.t * 10), x.M]));
-  const low = byT(momentary(file, 'lowpass=f=300,lowpass=f=300,'));
-  const high = byT(momentary(file, 'highpass=f=3400,highpass=f=3400,'));
-  return (full ?? momentary(file)).map((x) => ({t: x.t, full: x.M, low: low.get(Math.round(x.t * 10)) ?? -Infinity, high: high.get(Math.round(x.t * 10)) ?? -Infinity}));
+// video, one decode: per-frame luma/chroma at `rate` fps (signalstats), a 9×8 dHash of the same
+// frames, and — when asked — the scene cuts at full frame rate
+function analyzeVideo(file, {rate = 2, hashes = true, scenes = false} = {}) {
+  const dir = tmpDir();
+  const stats = path.join(dir, 'stats.txt'), cuts = path.join(dir, 'scene.txt');
+  try {
+    // scene cuts need every frame; the stats and hashes only `rate` per second — thin out first
+    const g = (scenes
+      ? [`[0:v]scale=160:-2,split=2[sc][v0]`, `[sc]select='gt(scene,0.35)',metadata=print:file=${fesc(cuts)},nullsink`, `[v0]fps=${rate},split=2[st][h]`]
+      : [`[0:v]fps=${rate},scale=270:-2,split=2[st][h]`])
+      .concat([`[st]signalstats,metadata=print:file=${fesc(stats)},nullsink`, '[h]scale=9:8:flags=area,format=gray[out]']).join(';');
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 28});
+    const frames = readMeta(stats, /lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);
+    const buf = r.stdout ?? Buffer.alloc(0);
+    const hs = [];
+    if (hashes) for (let i = 0, k = 0; i + 72 <= buf.length; i += 72, k++) hs.push({t: frames[k]?.t ?? k / rate, h: dhash(buf.subarray(i, i + 72))});
+    return {stats: frames, hashes: hs, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : []};
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
-function sceneCuts(file) {
-  const r = ff(['-v', 'error', '-i', file, '-an', '-vf', "scale=270:-2,select='gt(scene,0.35)',metadata=print:file=-", '-f', 'null', '-']);
-  return [...r.stdout.matchAll(/pts_time:([\d.]+)/g)].map((m) => +m[1]);
+// audio, one decode: momentary loudness (EBU R128, per 100 ms) of the full band and — for the
+// phone-filter check — under 300 Hz and over 3.4 kHz, plus the peak statistics (astats)
+function analyzeAudio(file, {bands = true} = {}) {
+  const dir = tmpDir();
+  const meter = (name, pre) => `${pre}asetnsamples=n=4800:p=0,ebur128=metadata=1:framelog=quiet,ametadata=print:key=lavfi.r128.M:file=${fesc(path.join(dir, `${name}.txt`))},anullsink`;
+  try {
+    const legs = bands ? 4 : 2;
+    const g = [`[0:a]aresample=48000,asplit=${legs}${['[full]', '[pk]', '[low]', '[high]'].slice(0, legs).join('')}`, `[full]${meter('full', '')}`, '[pk]astats=metadata=0[out]',
+      ...(bands ? [`[low]${meter('low', 'lowpass=f=300,lowpass=f=300,')}`, `[high]${meter('high', 'highpass=f=3400,highpass=f=3400,')}`] : [])].join(';');
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-filter_complex', g, '-map', '[out]', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 1 << 28});
+    const o = r.stderr.slice(r.stderr.lastIndexOf('Overall'));
+    const num = (re) => { const m = o.match(re); return m ? (m[1] === '-inf' ? -Infinity : +m[1]) : NaN; };
+    const series = (name) => readMeta(path.join(dir, `${name}.txt`), /(lavfi\.r128\.M)=(-?[\d.]+|-inf)/).map((x) => ({t: r2(x.t + 0.1), M: x['lavfi.r128.M'] ?? -Infinity}));
+    const M = series('full');
+    let phone = [];
+    if (bands) {
+      const byT = (xs) => new Map(xs.map((x) => [Math.round(x.t * 10), x.M]));
+      const low = byT(series('low')), high = byT(series('high'));
+      phone = M.map((x) => ({t: x.t, full: x.M, low: low.get(Math.round(x.t * 10)) ?? -Infinity, high: high.get(Math.round(x.t * 10)) ?? -Infinity}));
+    }
+    return {M, bands: phone, peaks: {peakDb: num(/Peak level dB:\s*(-?[\d.]+|-inf)/), peakCount: num(/Peak count:\s*([\d.]+)/), flat: num(/Flat factor:\s*([\d.]+)/)}};
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
 const MEDIA = /\.(mp4|mov|m4v|mkv|webm|jpe?g|png|webp|tiff?)$/i;
 function refFiles(paths) {
@@ -666,12 +743,41 @@ function refFiles(paths) {
   }
   return {files: out, missing};
 }
-function frameHashes(file) {
-  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-an', '-vf', 'fps=2,scale=9:8:flags=area,format=gray', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 26});
-  const buf = r.stdout ?? Buffer.alloc(0);
-  const out = [];
-  for (let i = 0; i + 72 <= buf.length; i += 72) out.push({t: out.length / 2 + 0.25, h: dhash(buf.subarray(i, i + 72))});
+// the approved references do not change between runs: their frame statistics are cached per
+// file (path + size + mtime) so a folder of reels is decoded once, not on every judge run
+const REF_CACHE = path.join(ROOT, '.captions-tmp', 'judge', 'refs-cache.json');
+function refStats(files) {
+  let cache = {};
+  try { cache = JSON.parse(fs.readFileSync(REF_CACHE, 'utf8')); } catch {}
+  let dirty = false;
+  const out = files.flatMap((f) => {
+    const st = fs.statSync(f);
+    const key = `${f}|${st.size}|${Math.round(st.mtimeMs)}`;
+    if (!cache[key]) { cache[key] = analyzeVideo(f, {rate: 1, hashes: false}).stats; dirty = true; }
+    return cache[key];
+  });
+  if (dirty) try { fs.mkdirSync(path.dirname(REF_CACHE), {recursive: true}); fs.writeFileSync(REF_CACHE, JSON.stringify(cache)); } catch {} // read-only sandbox: no cache, still correct
   return out;
+}
+// Several contact sheets of ONE file from one decode: `select` picks the exact frames of each
+// sheet, `tile` lays them out, drawtext labels each with its own timestamp (unlabeled when
+// ffmpeg has no drawtext). groups: [{times, cols, out}]. Returns the sheets written.
+function sheetsOf(file, groups, fps = FPS, width = 270) {
+  groups = groups.filter((g) => g.times.length);
+  if (!groups.length) return [];
+  const h = Math.round((width * 16) / 9);
+  const chain = (g, label) => {
+    const sel = [...new Set(g.times.map((t) => Math.max(0, Math.round(t * fps))))].map((n) => `eq(n\\,${n})`).join('+');
+    const lab = label ? `,pad=iw:ih+26:0:0:color=0xFFE500,drawtext=text='%{pts\\:hms}':fontcolor=black:fontsize=18:x=6:y=h-22` : '';
+    return `select='${sel}',scale=${width}:${h}:force_original_aspect_ratio=decrease,pad=${width}:${h}:(ow-iw)/2:(oh-ih)/2${lab},tile=${g.cols}x${Math.ceil(g.times.length / g.cols)}:padding=4:color=0x303030`;
+  };
+  for (const label of [true, false]) {
+    const graph = [`[0:v]split=${groups.length}${groups.map((_, i) => `[s${i}]`).join('')}`, ...groups.map((g, i) => `[s${i}]${chain(g, label)}[o${i}]`)].join(';');
+    const outs = groups.flatMap((g, i) => ['-map', `[o${i}]`, '-fps_mode', 'vfr', '-frames:v', '1', '-q:v', '4', g.out]);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-an', '-filter_complex', graph, ...outs]);
+    if (r.status === 0 && groups.every((g) => fs.existsSync(g.out))) return groups.map((g) => g.out);
+  }
+  return groups.map((g) => sheet(file, g.times, g.cols, g.out, width)); // the slow path: one seek per frame
 }
 // labeled frames tiled into one sheet (drawtext needs freetype: unlabeled otherwise).
 // times: seconds of `file`, or [{file, t, label}] to mix files (references, the paired version)
@@ -728,7 +834,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const info = probe(file);
   const v = info?.streams.find((s) => s.codec_type === 'video');
   const a = info?.streams.find((s) => s.codec_type === 'audio');
-  const q = qc(file, {expectSec: total, draft});
+  const q = timed('qc gate', () => qc(file, {expectSec: total, draft}));
   for (const c of q.checks) {
     if (c.ok) continue;
     if (c.name === 'silence') { findings.push(F('audio-silence', 'major', 'rule', null, null, `silencio en el render: ${c.value}`, {qc: c.value}, [{tool: 'run_ai_step', args: {step: 'autocut'}}])); continue; }
@@ -742,10 +848,13 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- audio ---
   let audio = null;
   let M = [];
+  let audioBands = [];
   if (a) {
-    const pk = peaks(file);
+    const au = timed('audio', () => analyzeAudio(file, {bands: haveTr && (!!(parsePhone(p.plan) ?? reel?.phone) || profile?.detectPhone !== false)}));
+    const pk = au.peaks;
     if (pk.peakDb >= -0.1 && (pk.flat > 0 || pk.peakCount > 8)) findings.push(F('clipping', 'major', 'rule', null, null, `clipping: pico ${pk.peakDb.toFixed(2)} dBFS, ${pk.peakCount} muestras en el pico`, pk, [{tool: 'set_clip', note: 'lower the hot clip (volume 0.8) or the music (set_music volume)', args: {}}]));
-    M = momentary(file);
+    M = au.M;
+    audioBands = au.bands;
     const Ms = M.filter((m) => Number.isFinite(m.M) && m.M > -70);
     const inWord = (t) => words.some((w) => !w.off && t >= w.t0 && t <= w.t1);
     const speechM = Ms.filter((m) => inWord(m.t - 0.2));
@@ -795,7 +904,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     if (p.offMic !== 'off') findings.push(...offMicFindings(words, [...CREW_WORDS, ...(profile?.crewWords ?? [])]));
     const expect = parsePhone(p.plan) ?? (reel?.phone ? parsePhone(`PHONE: ${reel.phone}`) : null);
     if (a && (expect || profile?.detectPhone !== false)) {
-      const bands = phoneBands(file, M);
+      const bands = audioBands;
       if (bands.length) findings.push(...phoneFindings(sentencesOf(words), bands, expect));
       else skipped.push('phone filter: could not measure the voice bands');
     }
@@ -807,16 +916,16 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const glossary = profile?.glossary ?? [];
   if (p.captionsOff) skipped.push(role === 'master' ? 'captions (clean master: none on screen by design)' : 'captions (switched off with set_captions — check the brief wants that)');
   else {
-    findings.push(...splitNameFindings(pages, glossary), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body));
+    findings.push(...splitNameFindings(pages, glossary, p.captionStyle), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body));
     if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? [])));
-    if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages));
+    if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle));
     if (profile?.captions?.accentSameSize) findings.push(...accentSizeFindings(p.captionStyle));
   }
   const texts = [
     ...pages.map((c) => ({text: c.words.map((w) => w.text).join(' '), ref: c.id, at: c.startMs / 1000})),
     ...gfx.map((g) => ({text: Object.values(g.props ?? {}).flatMap((x) => (typeof x === 'string' ? [x] : Array.isArray(x) ? x.map((l) => l?.text ?? '').filter(Boolean) : [])).join(' '), ref: g.id, at: g.startMs / 1000})),
   ];
-  findings.push(...consistencyFindings(texts), ...glossaryFindings(texts, glossary));
+  findings.push(...consistencyFindings(texts, glossary), ...glossaryFindings(texts, glossary));
 
   // --- hook: something written in the first second (a clean master has no captions by design) ---
   const firstText = Math.min(...pages.map((c) => c.startMs), ...gfx.filter((g) => g.template !== 'layout').map((g) => g.startMs), Infinity) / 1000;
@@ -846,7 +955,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   for (let k = 1; k < changes.length; k++) if (changes[k] - changes[k - 1] > T.staticSec) findings.push(F('static', 'nit', 'candidate', changes[k - 1], changes[k], `toma continua de ${(changes[k] - changes[k - 1]).toFixed(1)} s sin cambio de plano, B-roll ni gráfico — solo si se siente lenta`, {lookAt: r2((changes[k - 1] + changes[k]) / 2)}, [{tool: 'set_transitions', note: 'a punch inside the take, or suggest_broll for a cue', args: {pattern: 'punch-alternate'}}]));
 
   // --- B-roll: repeats, length, what is said under it, the script's inserts ---
-  const hashes = frameHashes(file);
+  const video = timed('video', () => analyzeVideo(file, {scenes: !!pair}));
+  const hashes = video.hashes;
   findings.push(...repeatedFootageFindings(p.clips, brolls, hashes));
   let lib = [];
   try { lib = JSON.parse(fs.readFileSync(path.join(publicDir, 'broll-assets', 'library.json'), 'utf8')); } catch {}
@@ -869,7 +979,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   else if (profile?.requireInserts) findings.push(F('insert-missing', 'major', 'rule', null, null, 'el plan no lista los INSERTS del guion: no se puede verificar que cada escena/inserto esté cubierto', {}, [{tool: 'set_plan', note: 'add an INSERTS: block (reel-plan template) with every scene / insert the script names', args: {}}]));
 
   // --- color: per A-roll clip (B-roll spans left out), rendered frames ---
-  const stats = lumaStats(file);
+  const stats = video.stats;
   const isBroll = (t) => brolls.some((b) => b.mode !== 'inset' && t >= b.startMs / 1000 && t < b.endMs / 1000);
   const aroll = stats.filter((x) => !isBroll(x.t));
   const clipLooks = placed.map((pc) => {
@@ -904,7 +1014,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     const {files, missing: gone} = refFiles(g.paths ?? []);
     if (gone.length) skipped.push(`color vs "${g.label}": no encuentro ${gone.join(', ')} — ${g.hint ?? 'put the approved references there'}`);
     if (!files.length) continue;
-    const samples = files.flatMap((f) => lumaStats(f, 1));
+    const samples = timed(`refs ${g.label}`, () => refStats(files));
     findings.push(...colorRefFindings(renderLook, lookOf(samples), g.label));
     refSheets.push({label: g.label, items: files.slice(0, 4).map((f) => ({file: f, t: 1, label: `${g.label.slice(0, 18)}: ${path.basename(f).slice(0, 14)}`}))});
   }
@@ -915,8 +1025,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     pairFile = resolve(pair);
     if (!fs.existsSync(pairFile)) skipped.push(`parity: ${pairFile} not found`);
     else {
-      const side = (f) => ({duration: +probe(f)?.format?.duration || 0, cuts: sceneCuts(f), M: momentary(f).filter((m) => Number.isFinite(m.M))});
-      findings.push(...parityFindings({...side(file), M: M.filter((m) => Number.isFinite(m.M))}, side(pairFile)));
+      const other = {duration: +probe(pairFile)?.format?.duration || 0, cuts: analyzeVideo(pairFile, {hashes: false, scenes: true}).cuts, M: analyzeAudio(pairFile, {bands: false}).M.filter((m) => Number.isFinite(m.M))};
+      findings.push(...parityFindings({duration: +info?.format?.duration || 0, cuts: video.cuts, M: M.filter((m) => Number.isFinite(m.M))}, other));
     }
   }
 
@@ -926,10 +1036,14 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     try {
       fs.mkdirSync(outDir, {recursive: true});
       const dur = +info?.format?.duration || total;
-      evidence.sheets.overview = sheet(file, Array.from({length: 16}, (_, k) => r2(((k + 0.5) * dur) / 16)), 4, path.join(outDir, 'overview.jpg'));
-      evidence.sheets.hook = sheet(file, Array.from({length: 9}, (_, k) => r2(Math.min(dur - 0.05, k * 0.25))), 3, path.join(outDir, 'hook.jpg'));
+      timed('sheets', () => {
       const cutTimes = placed.slice(1).map((x) => r2(x.startMs / 1000 + 0.1)).slice(0, 16);
-      if (cutTimes.length) evidence.sheets.cuts = sheet(file, cutTimes, 4, path.join(outDir, 'cuts.jpg'));
+      const [overview, hook, cuts] = sheetsOf(file, [
+        {times: Array.from({length: 16}, (_, k) => r2(((k + 0.5) * dur) / 16)), cols: 4, out: path.join(outDir, 'overview.jpg')},
+        {times: Array.from({length: 9}, (_, k) => r2(Math.min(dur - 0.05, k * 0.25))), cols: 3, out: path.join(outDir, 'hook.jpg')},
+        {times: cutTimes, cols: 4, out: path.join(outDir, 'cuts.jpg')},
+      ], fps ?? FPS);
+      Object.assign(evidence.sheets, {overview, hook, ...(cuts ? {cuts} : {})});
       for (const [k, g] of refSheets.entries()) {
         const mine = Array.from({length: g.items.length}, (_, i) => {
           const t = r2(((i + 0.5) * dur) / g.items.length);
@@ -941,6 +1055,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
         const ts = Array.from({length: 4}, (_, i) => r2(((i + 0.5) * dur) / 4));
         evidence.sheets.parity = sheet(file, [...ts.map((t) => ({file, t, label: `${role ?? 'this'} ${tc(t)}`})), ...ts.map((t) => ({file: pairFile, t, label: `${role === 'captioned' ? 'master limpio' : 'pair'} ${tc(t)}`}))], 4, path.join(outDir, 'parity.jpg'));
       }
+      });
     } catch (e) { skipped.push(`contact sheets (${String(e.message ?? e).slice(0, 80)}) — use frame_at video=<render> at the times below`); }
   }
   evidence.lookAt = [...new Set(findings.flatMap((f) => [].concat(f.evidence?.lookAt ?? (f.at != null ? r2(f.at + 0.1) : []))))].sort((x, y) => x - y).slice(0, 24);
@@ -975,14 +1090,18 @@ export function reportText(r) {
   const top = live.filter((f) => f.severity === 'blocker' || f.severity === 'major');
   if (top.length) L.push('', 'PRIORIDAD (lo que corrige la siguiente iteración, en orden):', ...top.slice(0, 8).map((f, i) => `  ${i + 1}. ${f.check} @${tc(f.at)} — ${f.msg.slice(0, 110)}`));
   L.push('');
+  const fixLine = (x, pre = 'fix') => `    ${pre}: ${x.changesIds ? '⟲ ' : ''}${x.tool} ${JSON.stringify(x.args)}${x.note ? `  // ${x.note}` : ''}`;
   for (const f of live) {
     L.push(line(f));
-    for (const x of f.fix) L.push(`    fix: ${x.tool} ${JSON.stringify(x.args)}${x.note ? `  // ${x.note}` : ''}`);
+    for (const x of f.fix) L.push(fixLine(x));
   }
+  const counted = top.concat(live.filter((f) => !top.includes(f)));
+  const safe = counted.filter((f) => f.fix.length && !f.fix.some((x) => x.changesIds)), moving = counted.filter((f) => f.fix.some((x) => x.changesIds));
+  if (moving.length) L.push('', 'ORDEN DE APLICACIÓN: primero los fixes sin ⟲ (ids estables): ' + (safe.map((f) => f.id).join(', ') || '—') + '. Después los ⟲ UNO POR VEZ, volviendo a correr judge.mjs entre cada uno (renumeran páginas o cambian ids de clip): ' + moving.map((f) => f.id).join(', ') + '.');
   if (!live.length) L.push('no rule findings that count');
   if (cand.length) {
     L.push('', 'POR CONFIRMAR EN EL FRAME (no cuentan hasta que el juez las confirme; ruido conocido):');
-    for (const f of cand) { L.push(`  ${line(f)}`); for (const x of f.fix) L.push(`      fix if confirmed: ${x.tool} ${JSON.stringify(x.args)}${x.note ? `  // ${x.note}` : ''}`); }
+    for (const f of cand) { L.push(`  ${line(f)}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'fix if confirmed')}`); }
   }
   if (r.skipped.length) L.push('', 'SKIPPED (no evidence — not checked, so not passed):', ...r.skipped.map((s) => `  - ${s}`));
   L.push('', 'EVIDENCE FOR THE JUDGE (snapshot of the project when the render was judged' + (r.projectUpdatedAt ? `, updatedAt ${r.projectUpdatedAt}` : '') + ')');

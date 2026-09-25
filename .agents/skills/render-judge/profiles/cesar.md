@@ -28,9 +28,9 @@ what the judge checks **with its eyes** for him, on top of `judge.md` and
 
 | Rule | How the judge checks it |
 |---|---|
-| One page = one sentence at most | rule `pagination` (a page that closes a sentence before its last word mixes two) |
+| One page = one sentence at most | The shared pager ends every page at a sentence end (it used to keep "Carmen. Está" together in `vibem`). The rule `pagination` catches old or hand-made pages; the fix re-pages with `set_caption_style vibem` |
 | Words enter in a **45 ms cascade** | judgment: `motion_proof` at the start of 2–3 pages. At 30 fps, 45 ms is 1–2 frames between one word's arrival and the next. Words that appear together, or at the pace of speech with no cascade, are a major. No preset parameter declares this, so no rule can measure it |
-| Yellow (#FFE500) at the **same size** as white | rule `accent-size` on the preset data. **Known conflict:** `vibem` has `tiers.1/2.scale = 1.15`, so this fires until the preset changes. Changing it is code (`src/captionPresets.ts`), not an agent edit: escalate it, don't loop on it |
+| Yellow (#FFE500) at the **same size** as white | Decided in the preset: `vibem` tiers are at scale 1.0, no longer 1.15. The rule `accent-size` only guards against a regression |
 | Helvetica Bold, caps, white at 85 %, soft halo, no stroke | judgment on the overview sheet. The preset uses the file `public/fonts/Helvetica-Bold.ttf`; a Liberation Sans stand-in is not his font. Say so if the face on screen is not Helvetica |
 | No captions over silence (a page ends ~250 ms after its last word) | judgment: frames inside pauses show no page |
 | Glossary wins over the transcript: **skypool**, **solarium** | rule `glossary` on captions and graphics ("sky pool", "skypul" → "skypool"), and `split-name` when a term is split across pages |

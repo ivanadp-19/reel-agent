@@ -22,6 +22,9 @@ export type TimelineWord = {
 const GAP_MS = 450; // break on natural pauses (sentence rhythm)
 const PUNCT_ONLY = /^[.,!?;:()\-—¿¡]+$/;
 const SENT_END = /[.!?]$/;
+// abbreviations end in a period without ending the sentence ("Sr. Pérez", "Av. Reforma")
+const ABBR = /^(sr|sra|srta|dr|dra|lic|ing|arq|av|avda|blvd|col|no|núm|num|mr|mrs|ms|st)\.$/i;
+export const endsSentence = (word: string) => SENT_END.test(word) && !ABBR.test(word);
 const CLAUSE_END = /[,;:]$/; // soft break after a clause
 export const toDisplay = (w: string) => w.replace(/[.,;:]+$/g, '').replace(/^[.,;:¿¡]+/g, '');
 
@@ -78,7 +81,9 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     const sameClipNext = !!next && next.clipId === w.clipId;
     const gapAfter = sameClipNext && next.startMs - w.endMs > GAP_MS;
     const full = cur.length >= maxWords || chars() >= maxCharsLine;
-    if (SENT_END.test(w.word) && !bonded(cur[cur.length - 1], next)) flush();
+    // a sentence end always ends the page, bond or not: a bonded pair is two capitalized words, and
+    // every sentence starts with one ('…del Carmen. Está cerca' was one page); César: one page per sentence
+    if (endsSentence(w.word)) flush();
     else if (next && !sameClipNext) flush(); // clip boundary
     else if (!isGlue(display) && !bonded(cur[cur.length - 1], next) && (full || gapAfter || CLAUSE_END.test(w.word))) flush();
     else if (full && isGlue(display)) {
