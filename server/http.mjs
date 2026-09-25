@@ -1,5 +1,6 @@
 // HTTP pieces of the backend that are tested on their own (test/reviews.test.mjs):
 // the access gate and the file server with byte ranges.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
@@ -52,17 +53,28 @@ export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
 export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
+// Is `token` one of `tokens`? In constant time: both sides hashed to equal-length
+// digests and compared with timingSafeEqual, every entry checked (no early exit),
+// so the answer's timing tells nothing about how much of a token matched.
+const digest = (t) => crypto.createHash('sha256').update(String(t)).digest();
+export function tokenIn(tokens, token) {
+  if (typeof token !== 'string' || !token) return false;
+  const d = digest(token);
+  let hit = false;
+  for (const t of tokens) if (t && crypto.timingSafeEqual(d, digest(t))) hit = true;
+  return hit;
+}
 export function gate(req, url, {publicMode, auth = {}, tokens = []}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
   const mcp = isMcpPath(url.pathname);
-  if (mcp && !tokens.includes(req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
+  if (mcp && !tokenIn(tokens, req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};
   if (mcp && publicMode) return {kind: 'mcp'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
   if (publicMode) {
     const h = req.headers.authorization || '';
     const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
     const i = b.indexOf(':');
-    const tokOK = tokens.includes(req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
+    const tokOK = tokenIn(tokens, req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
     const ok = tokOK || (i > 0 && auth[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), auth[b.slice(0, i)]));
     if (!ok) return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
     return {kind: 'ok'};

@@ -29,7 +29,7 @@ import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, serveFile} from './http.mjs';
+import {gate, serveFile, tokenIn} from './http.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
@@ -528,7 +528,7 @@ const server = createServer(async (req, res) => {
     // a local path (same machine, from the MCP server) skips the upload — token-gated, like add-clip
     const local = url.searchParams.get('path');
     if (local) {
-      if (!TOKENS.includes(req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!tokenIn([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp|heic)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video or image file'});
     }
     const tmp = local ?? path.join(ROOT, `.upload-broll-${id}.bin`);
@@ -589,7 +589,7 @@ const server = createServer(async (req, res) => {
     // only with the run token, and only video files
     const local = url.searchParams.get('path');
     if (local) {
-      if (!TOKENS.includes(req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'});
+      if (!tokenIn([TOKEN], req.headers['x-reel-token'])) return json(res, 403, {error: 'path ingest needs the backend token'}); // the primary only: the MCP this backend runs, never a client's
       if (!/\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(local) || !fs.existsSync(local)) return json(res, 400, {error: 'path must be an existing video file'});
     }
     const tmp = local ? local : path.join(ROOT, `.upload-${id}.bin`);

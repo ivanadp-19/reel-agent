@@ -9,7 +9,7 @@ import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/st
 import {isInitializeRequest} from '@modelcontextprotocol/sdk/types.js';
 
 const MAX_BODY = 4 * 1024 * 1024; // JSON-RPC only: files never travel through /mcp
-const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
 const rpcError = (res, status, code, message) => {
   res.writeHead(status, {'Content-Type': 'application/json'});
   res.end(JSON.stringify({jsonrpc: '2.0', error: {code, message}, id: null}));
@@ -50,7 +50,7 @@ export function createMcpHttp({createServer, onSessionClosed = () => {}, idleMs 
     if (sid) {
       const s = sessions.get(sid);
       // unknown, expired, or opened with another client's token: the client must initialize again
-      if (!s || s.owner !== owner) return rpcError(res, 404, -32001, 'Session not found');
+      if (!s || !crypto.timingSafeEqual(s.owner, owner)) return rpcError(res, 404, -32001, 'Session not found');
       s.seen = Date.now();
       return s.transport.handleRequest(req, res, body);
     }
