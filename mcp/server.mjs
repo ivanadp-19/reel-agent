@@ -7,6 +7,9 @@
 //
 //   claude mcp add reel -- node /path/to/reel-agent/mcp/server.mjs
 //
+// Same tools over HTTP: the backend mounts them at /mcp (server/mcp-http.mjs),
+// one McpServer per session from createReelServer(), behind the x-reel-token gate.
+//
 // Project model (see src/timeline.ts, src/captions.ts, src/Broll.tsx):
 //   clips[]    ordered, back-to-back on the timeline; inSec/outSec trim the source
 //   captions[] anchored to a clip, times are SOURCE-relative ms
@@ -14,6 +17,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
@@ -52,7 +57,8 @@ const PROJECTS = path.join(PUBLIC, 'projects');
 const API = process.env.REEL_API || 'http://127.0.0.1:3333';
 // Railway public mode (REEL_API pointing at the hosted backend): the server
 // accepts the shared backend token instead of basic auth - send it on every call.
-const TOK = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
+// REEL_BACKEND_TOKEN may list several (one per client): the first is the primary, the one this process uses.
+const TOK = process.env.REEL_BACKEND_TOKEN?.split(',')[0].trim() || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
 const _fetch = globalThis.fetch;
 globalThis.fetch = (u, o = {}) => {
   if (TOK && String(u).startsWith(API)) o = {...o, headers: {'x-reel-token': TOK, ...(o.headers || {})}};
@@ -81,14 +87,26 @@ function load(id) {
   p.clips ??= []; p.captions ??= []; p.brolls ??= []; p.brollAssets ??= []; p.music ??= null; p.accentColor ??= '#FFB020'; p.lang ??= 'auto'; p.captionStyle ??= 'palabra'; p.captions = p.captions.map(normalizeCaption); p.graphics ??= []; p.mattes ??= []; p.offMic ??= 'mark'; p.hiddenWids ??= []; p.brand ??= null; p.grade ??= null; p.audio ??= {clean: 'off'}; p.plan ??= ''; p.planApproved ??= false; p.planReviews ??= []; p.planMode ??= null; p.planModeLog ??= []; p.captionsOff ??= false;
   return p;
 }
-// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit
-const held = new Set();
+// one agent per project (scripts/project-lock.mjs): taken on the first write, freed on exit.
+// Over HTTP every session is its own agent (they share the backend's pid): the lock
+// names the session by a hash of its id, and closing the session frees its locks.
+const held = new Map(); // session tag ('' = stdio) → project ids
 const OWNER = process.env.REEL_AGENT || `mcp pid ${process.pid}`;
-process.once('exit', () => { for (const id of held) releaseLock(PROJECTS, id); });
+const sessionTag = (sessionId) => sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex').slice(0, 12) : '';
+process.once('exit', () => { for (const [tag, ids] of held) for (const id of ids) releaseLock(PROJECTS, id, process.pid, tag || undefined); });
 function lock(id) {
-  const r = acquireLock(PROJECTS, id, {owner: OWNER});
+  const tag = callCtx.getStore()?.tag || '';
+  const r = acquireLock(PROJECTS, id, tag ? {owner: `mcp http session ${tag}`, session: tag} : {owner: OWNER});
   if (!r.ok) throw new Error(lockMessage(id, r.holder));
-  held.add(id);
+  if (!held.has(tag)) held.set(tag, new Set());
+  held.get(tag).add(id);
+}
+// an HTTP session ended (closed by the client or expired): free its locks and its timing state
+export function releaseSession(sessionId) {
+  const tag = sessionTag(sessionId);
+  if (!tag) return;
+  for (const id of held.get(tag) ?? []) releaseLock(PROJECTS, id, process.pid, tag);
+  held.delete(tag); clocks.delete(tag); lastProject.delete(tag);
 }
 async function save(id, p) {
   lock(id);
@@ -215,26 +233,33 @@ const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 const pexels = (query, kind, count) => searchStock(query, kind, count, ENV.PEXELS_API_KEY || process.env.PEXELS_API_KEY);
 
 // ---------- server ----------
-const server = new McpServer({name: 'reel', version: '0.1.0'});
+// Tools are registered once, here, on a registry; createReelServer() (end of file)
+// builds an McpServer holding all of them — one for stdio, one per HTTP session.
+const TOOLS = [];
+const server = {registerTool: (name, config, cb) => { TOOLS.push([name, config, cb]); }};
 // Timing (scripts/timing.mjs): every tool call is logged to its project's
 // public/projects/<id>.timing.jsonl with its duration, the part spent waiting on
 // backend jobs, and the gap since the previous call = the agent's own turn. A tool
-// without project_id counts for the last project this session touched.
+// without project_id counts for the last project this session touched. Kept per
+// session: stdio has one (tag ''), HTTP one per MCP session.
 const SESSION = `${process.env.REEL_AGENT || 'mcp'}-${process.pid}-${Date.now().toString(36)}`;
-const clock = createToolClock();
-const callCtx = new AsyncLocalStorage(); // {project, jobMs} of the call in flight
-let lastProject = null;
+const clocks = new Map(); // session tag → createToolClock()
+const callCtx = new AsyncLocalStorage(); // {project, jobMs, tag} of the call in flight
+const lastProject = new Map(); // session tag → project id
 const registerTool = server.registerTool.bind(server);
 server.registerTool = (name, def, handler) => registerTool(name, def, async (args, extra) => {
+  const tag = sessionTag(extra?.sessionId);
+  if (!clocks.has(tag)) clocks.set(tag, createToolClock());
+  const clock = clocks.get(tag);
   const started = clock.start();
-  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject, jobMs: 0};
-  if (ctx.project) lastProject = ctx.project;
+  const ctx = {project: typeof args?.project_id === 'string' ? args.project_id : lastProject.get(tag) ?? null, jobMs: 0, tag};
+  if (ctx.project) lastProject.set(tag, ctx.project);
   let ok = true;
   try { return await callCtx.run(ctx, () => handler(args, extra)); }
   catch (e) { ok = false; throw e; }
   finally {
     const ms = clock.end(started);
-    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
+    if (ctx.project) logTiming(PROJECTS, ctx.project, {kind: 'tool', session: tag ? `mcp-http-${tag}` : SESSION, tool: name, ms, gapMs: started.gapMs, ...(ctx.jobMs ? {jobMs: ctx.jobMs} : {}), ...(ok ? {} : {ok: false})});
   }
 });
 const text = (s) => ({content: [{type: 'text', text: s}]});
@@ -429,8 +454,7 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
     // same machine: hand the backend the path instead of streaming the file through memory
-    const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
-    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...clip} = r;
     p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
@@ -601,12 +625,11 @@ const assetLine = (a) => `${a.id}  ${a.kind}${a.durationSec ? ` ${f1(a.durationS
 
 server.registerTool('add_broll_assets', {description: "Bring the client's own footage / photos into the B-roll library (absolute paths on this machine; normalized to 1080p, thumbnails made). Returns a contact sheet of each so you can tag it right away with tag_broll_asset — untagged assets are never suggested. Needs the backend.", inputSchema: {files: z.array(z.string()).min(1).max(20)}}, async ({files}) => {
   await needBackend();
-  const token = process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(ROOT, '.backend-token'), 'utf8').trim(); } catch { return ''; } })();
   const content = [];
   for (const f of files) {
     if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`);
     const kind = /\.(jpe?g|png|webp|heic)$/i.test(f) ? 'image' : 'video';
-    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': token}}).then((x) => x.json());
+    const r = await fetch(`${API}/api/add-broll-asset?name=${encodeURIComponent(path.basename(f))}&kind=${kind}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`ingest failed for ${f}: ${r.error ?? ''}`);
     const a = upsertAsset({id: r.id, src: r.src, kind: r.kind, label: r.label, durationSec: r.durationSec ?? null});
     content.push({type: 'text', text: `${assetLine(a)}\ncontact sheet (6 frames, left→right, top→bottom):`}, sheetContent(a));
@@ -1189,4 +1212,13 @@ server.registerTool('health', {description: 'Check the reel-agent environment (b
   return text(h.checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.label}${c.ok ? '' : ' — ' + c.hint}`).join('\n'));
 });
 
-await server.connect(new StdioServerTransport());
+// One McpServer with every tool above: stdio below, one per HTTP session in the backend.
+export function createReelServer() {
+  const s = new McpServer({name: 'reel', version: '0.1.0'});
+  for (const [name, config, cb] of TOOLS) s.registerTool(name, config, cb);
+  return s;
+}
+
+// run as a program (`node mcp/server.mjs`, .mcp.json): stdio; imported (server/mcp-http.mjs): nothing starts
+const main = (() => { try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+if (main) await createReelServer().connect(new StdioServerTransport());
