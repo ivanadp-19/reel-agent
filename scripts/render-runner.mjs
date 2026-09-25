@@ -9,6 +9,11 @@
 //   review      final that passed QC for a project: 720p proxy + poster, recorded as the
 //               next review version (scripts/reviews.mjs recordFinal)
 //
+// Every render that settles leaves a record next to its mp4 (<file>.mp4.json,
+// scripts/render-records.mjs): the project (job.projectId) and what it is — final,
+// draft or qcfail. scripts/cleanup-exports.mjs reads it to keep each project's latest
+// good final and to purge drafts and QC failures after their TTL.
+//
 // Progress is one 0–100 number over the whole job (STAGES below: the share of each
 // stage), plus the stage, a label, frames {done, total} and etaSec.
 //
@@ -32,7 +37,7 @@
 // CANCEL (or the stall control) aborts ctx.signal. Every stage follows it: prepare gets
 // the signal (and is raced against it, so a step that ignores it still frees the queue
 // slot), the child processes are killed, and on the way out the job's files are removed
-// (every exports/edited-<id>*: the render, finalize's .loudnorm.mp4; the master's .part,
+// (every exports/edited-<id>*: the render, finalize's .loudnorm.mp4, the render record; the master's .part,
 // the caption frames) — and a review
 // version recorded while the cancel came in is taken back (unrecord): a cancelled job
 // leaves no file and no version.
@@ -47,6 +52,7 @@ import {chooseRenderMode} from '../src/layers.ts';
 import {linkPublic} from './public-links.mjs';
 import {recordFinal, removeVersion} from './reviews.mjs';
 import {killTree} from './render-jobs.mjs';
+import {writeRenderRecord} from './render-records.mjs';
 
 // [from, to] of the overall percentage per stage; a draft has no finalizing / review
 export const STAGES = {
@@ -163,6 +169,7 @@ export function createRenderRunner({
   commands = defaultCommands,
   record = recordFinal,
   unrecord = ({projectId, v}) => removeVersion(reviewsDir, projectId, v, publicDir), // a version recorded by a job cancelled meanwhile
+  writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,
 } = {}) {
@@ -195,8 +202,12 @@ export function createRenderRunner({
     const cleanUp = () => {
       let names = [];
       try { names = fs.readdirSync(exportsDir); } catch {}
-      for (const f of names) if (f.startsWith(`edited-${id}`) && /\.mp4$/.test(f)) fs.rmSync(path.join(exportsDir, f), {force: true});
+      for (const f of names) if (f.startsWith(`edited-${id}`) && /\.mp4(\.json)?$/.test(f)) fs.rmSync(path.join(exportsDir, f), {force: true});
       if (recorded) { try { unrecord(recorded); } catch (e) { log(`render ${id}: could not take back review version v${recorded.v}: ${e.message}`); } }
+    };
+    // which project an export belongs to and what it is (final | draft | qcfail); a missing record only costs the cleanup's help
+    const recordAs = (file, kind) => {
+      try { writeRecord(file, {projectId: job.projectId ?? null, kind, renderSec: result.renderSec}); } catch (e) { log(`render ${id}: no render record: ${e.message}`); }
     };
     try {
       return await work();
@@ -350,7 +361,7 @@ export function createRenderRunner({
       result.stages = stages;
       result.renderSec = Math.round((now() - t0) / 1000);
       stop();
-      if (draft) { log(`render ${id} draft [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`); return result; }
+      if (draft) { recordAs(outFile, 'draft'); log(`render ${id} draft [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`); return result; }
 
       // ---- final: loudness + QC, in a child process (a few seconds of ffmpeg must not block the backend) ----
       set('finalizing', 0, {frames: undefined, etaSec: Math.round(8 + expectSec * 0.35)});
@@ -366,7 +377,7 @@ export function createRenderRunner({
       if (!qc.ok) {
         // kept as *-qcfail.mp4 for inspection, reported as a failure
         const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-        try { fs.renameSync(outFile, path.join(exportsDir, failed)); } catch {}
+        try { fs.renameSync(outFile, path.join(exportsDir, failed)); recordAs(path.join(exportsDir, failed), 'qcfail'); } catch {}
         const why = [qc.error, ...(qc.checks ?? []).filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ');
         throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed), mode: result.mode, stages});
       }
@@ -383,6 +394,7 @@ export function createRenderRunner({
         }
         stop(); // the cancel came in while it was being recorded: cleanUp takes the version back
       }
+      recordAs(outFile, 'final');
       log(`render ${id} [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`);
       return result;
     }

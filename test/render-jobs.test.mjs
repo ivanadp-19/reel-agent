@@ -581,3 +581,39 @@ test('cancel while the review version is being recorded: the version is taken ba
   assert.deepEqual(s.calls.unrecord, [{projectId: 'p1', v: 4}]);
   assert.deepEqual(exportsOf(s).filter((f) => f.includes(job.id)), []);
 });
+
+test('render records: every settled job leaves <mp4>.json with its project and kind (final, draft, qcfail); a cancel leaves none', async () => {
+  const s = setup();
+  const ex = path.join(s.pub, 'exports');
+  const rec = (name) => JSON.parse(fs.readFileSync(path.join(ex, `${name}.json`), 'utf8'));
+  const fin = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1'}).job;
+  const dr = s.jobs.submit({props: props({frames: 2}), draft: true, projectId: 'p1'}).job;
+  const loose = s.jobs.submit({props: props({frames: 2}), draft: false, projectId: null}).job;
+  await s.jobs.idle();
+  assert.deepEqual([rec(`edited-${fin.id}.mp4`).projectId, rec(`edited-${fin.id}.mp4`).kind], ['p1', 'final']);
+  assert.equal(typeof rec(`edited-${fin.id}.mp4`).renderSec, 'number');
+  assert.deepEqual([rec(`edited-${dr.id}-draft.mp4`).projectId, rec(`edited-${dr.id}-draft.mp4`).kind], ['p1', 'draft']);
+  assert.deepEqual([rec(`edited-${loose.id}.mp4`).projectId, rec(`edited-${loose.id}.mp4`).kind], [null, 'final']);
+  // QC failure: the record follows the renamed file
+  const s2 = setup();
+  const failing = createRenderRunner({
+    root: s2.root, publicDir: s2.pub, log: quiet,
+    commands: {
+      render: ({outFile, propsFile}) => [process.execPath, [path.join(s2.root, 'fake-render.mjs'), outFile, propsFile]],
+      finalize: ({outFile}) => [process.execPath, [path.join(s2.root, 'fake-finalize.cjs'), outFile + '.qcfail-me']],
+    },
+  });
+  const j2 = createRenderJobs({dir: path.join(s2.pub, 'render-jobs'), log: quiet, run: failing});
+  const q = j2.submit({props: props({frames: 2}), draft: false, projectId: 'p2'}).job;
+  await j2.idle();
+  const qr = JSON.parse(fs.readFileSync(path.join(s2.pub, 'exports', `edited-${q.id}-qcfail.mp4.json`), 'utf8'));
+  assert.deepEqual([qr.projectId, qr.kind], ['p2', 'qcfail']);
+  assert.ok(!fs.existsSync(path.join(s2.pub, 'exports', `edited-${q.id}.mp4.json`)));
+  // a cancelled job: no record either
+  const s3 = setup();
+  const c = s3.jobs.submit({props: props({mode: 'gate', frames: 6, delayMs: 2}), draft: true, projectId: 'p1'}).job;
+  await until(() => readJob(s3.dir, c.id).frames?.done >= 4);
+  s3.jobs.cancel(c.id);
+  await s3.jobs.idle();
+  assert.deepEqual(exportsOf(s3).filter((f) => f.includes(c.id)), []);
+});
