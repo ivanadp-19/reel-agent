@@ -171,7 +171,7 @@ export const MultiClipVideo: React.FC<{
         const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
         return (
           <Sequence key={`${clip.id}-pre`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (under the reveal)`}>
-            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src, clip.id)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
           </Sequence>
         );
       })}
@@ -185,7 +185,7 @@ export const MultiClipVideo: React.FC<{
           premountFor={Math.round(fps)}
           name={clip.label ?? clip.id}
         >
-          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} jMuteFrames={jFrames} />
+          <ClipMedia clip={clip} durFrames={durFrames} Comp={Clip} grade={gradeFor(grade, clip.src, clip.id)} accent={accentColor} transition={{clip, next: placed[i + 1]?.clip, offset: 0, durFrames}} jMuteFrames={jFrames} />
         </Sequence>
       ))}
       {/* J-cuts / L-cuts (audio only): a J-cut leads the clip's first j seconds
@@ -224,7 +224,7 @@ export const MultiClipVideo: React.FC<{
         const pre: Clip = {...clip, inSec: clip.inSec - (early / fps) * (clip.speed ?? 1), muted: true};
         return (
           <Sequence key={`${clip.id}-over`} from={fromFrame - early} durationInFrames={early} layout="none" name={`${clip.id} (landing)`}>
-            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
+            <ClipMedia clip={pre} durFrames={early} Comp={Clip} grade={gradeFor(grade, clip.src, clip.id)} accent={accentColor} transition={{clip: pre, offset: -early, durFrames: early + 1e6}} />
           </Sequence>
         );
       })}

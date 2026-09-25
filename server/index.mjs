@@ -14,6 +14,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {totalDurationFrames} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
+import {lutBakes} from '../src/grade.ts';
 import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
@@ -87,6 +88,7 @@ const JOBS = {
   '/api/transcribe': {route: '/api/transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
   '/api/matte': {route: '/api/matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
   '/api/grade': {route: '/api/grade', name: 'Color analysis', prefix: 'grade', script: 'scripts/grade.mjs', store: {}},
+  '/api/lut': {route: '/api/lut', name: 'LUT', prefix: 'lut', script: 'scripts/lut.mjs', store: {}},
 };
 
 // Turn a stderr tail into one line a user can act on.
@@ -193,7 +195,28 @@ async function localizeRemoteBrolls(props) {
 const PLAN = renderPlan();
 console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concurrency}`);
 // one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
-function renderJob({raw, draft, expectSec, clean}, id) {
+// LUT-graded copies the grade needs and does not have yet (a clip added after set_grade…):
+// baked here, before the render, so no clip silently plays ungraded
+async function bakeMissing(raw, id) {
+  const props = JSON.parse(raw);
+  const g = props.grade;
+  const missing = lutBakes(g, props.clips ?? [], props.mattes ?? []).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
+  if (!missing.length) return raw;
+  const inFile = path.join(ROOT, `.lut-${id}.json`), outFile = path.join(ROOT, '.captions-tmp', `lut-${id}.json`);
+  fs.mkdirSync(path.dirname(outFile), {recursive: true});
+  fs.writeFileSync(inFile, JSON.stringify({bake: missing}));
+  const r = await run('node', ['scripts/lut.mjs', inFile, outFile]);
+  fs.rmSync(inFile, {force: true});
+  if (r.code !== 0) throw new Error(explainFailure(r.stderr, 'LUT bake failed'));
+  g.baked = {...g.baked, ...JSON.parse(fs.readFileSync(outFile, 'utf8')).baked};
+  fs.rmSync(outFile, {force: true});
+  return JSON.stringify(props);
+}
+function renderJob(job, id) {
+  renders[id] = {status: 'running', progress: 0, label: 'Preparing'}; // out of the queue: the LUT bake counts as render time
+  return bakeMissing(job.raw, id).then((raw) => renderProps({...job, raw}, id), (e) => { renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300)}; });
+}
+function renderProps({raw, draft, expectSec, clean}, id) {
   return new Promise((settle) => {
     const propsFile = path.join(ROOT, `.props-${id}.json`);
     // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
@@ -428,6 +451,25 @@ const server = createServer(async (req, res) => {
     const ws = fs.createWriteStream(path.join(dir, safe));
     req.pipe(ws);
     ws.on('finish', () => json(res, 200, clientFont(`fonts/${safe}`))); // same guess as set_brand font_files
+    ws.on('error', () => json(res, 500, {error: 'write failed'}));
+    return;
+  }
+
+  // ---- LUTs (set_grade lut / create_lut, the Styles tab): public/luts/*.cube, reference photos under public/luts/refs/<name>/ ----
+  if (req.method === 'GET' && url.pathname === '/api/luts') {
+    let files = []; try { files = fs.readdirSync(path.join(PUBLIC, 'luts')).filter((f) => f.endsWith('.cube')); } catch {}
+    return json(res, 200, files.map((f) => ({name: f.slice(0, -5), file: `luts/${f}`})));
+  }
+  if (req.method === 'POST' && (url.pathname === '/api/upload-lut' || url.pathname === '/api/upload-ref')) {
+    const safe = (url.searchParams.get('name') || '').replace(/[^\w.\-]/g, '_');
+    const lut = (url.searchParams.get('lut') || '').replace(/[^\w-]/g, '').slice(0, 40);
+    const ref = url.pathname === '/api/upload-ref';
+    if (ref ? !lut || !/\.(png|jpe?g|webp|heic|tiff?)$/i.test(safe) : !/\.cube$/i.test(safe)) return json(res, 400, {error: ref ? 'an image, with ?lut=<name>' : 'a .cube file'});
+    const dir = ref ? path.join(PUBLIC, 'luts', 'refs', lut) : path.join(PUBLIC, 'luts');
+    fs.mkdirSync(dir, {recursive: true});
+    const ws = fs.createWriteStream(path.join(dir, safe));
+    req.pipe(ws);
+    ws.on('finish', () => json(res, 200, {file: path.relative(PUBLIC, path.join(dir, safe)).split(path.sep).join('/')}));
     ws.on('error', () => json(res, 500, {error: 'write failed'}));
     return;
   }

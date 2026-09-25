@@ -29,7 +29,7 @@ import {renderProof, renderStrip} from './proof.mjs';
 import {transcriptIssues, validateProject} from '../src/validate.ts';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qc, qcText} from '../scripts/qc.mjs';
-import {LOOKS, DEFAULT_LOOK} from '../src/grade.ts';
+import {LOOKS, DEFAULTS, autoSources, lutBakes, paramsFor} from '../src/grade.ts';
 import {ENTERS, punchAlternate, speedRamp} from '../src/transitions.ts';
 import {blackSpans, brollKind, brollSrc, loadLibrary, searchLibrary, sheetFor, upsertAsset} from './broll.mjs';
 import {suggestBroll} from '../src/brollMatch.ts';
@@ -124,7 +124,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${p.grade.look} ${p.grade.intensity}${p.grade.auto ? ' + auto correction' : ''}` : 'ungraded'}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p.clips))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? path.basename(p.music.src) + ` vol ${p.music.volume}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
   if (p.plan) out.push('', 'PLAN (set_plan):', ...p.plan.split('\n').map((l) => `  ${l}`));
   out.push('', 'CLIPS (timeline order):');
   place(p.clips).forEach((pc, i) => {
@@ -689,21 +689,89 @@ server.registerTool('generate_asset', {description: 'LAST RESORT: generate an im
   return text(`${g.cached ? `Reused ${g.src} (already generated${g.reusedPrompt ? ` for "${g.reusedPrompt}"` : ''})` : `Generated ${g.src} (${g.model}${g.usage?.output_tokens ? `, ${g.usage.output_tokens} output tokens` : ''})`}`);
 });
 
-server.registerTool('set_grade', {description: `Color for the whole reel: a bounded automatic correction per source (measured on its lit frames: stretches flat footage, nudges exposure and color cast, lifts dull saturation — never restyles) plus one look. Looks: ${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}. intensity 0–1 (0.8 default). Look at the result with caption_proof (frame_at shows the raw source). Needs the backend the first time a source is analyzed.`, inputSchema: {project_id: pid, look: z.enum(Object.keys(LOOKS)).default(DEFAULT_LOOK), intensity: z.number().min(0).max(1).default(0.8), auto: z.boolean().default(true).describe('the per-source correction; false = look only')}}, async ({project_id, look, intensity, auto}) => {
-  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  let bySrc = {}, notes = [];
-  if (auto) {
-    await runJob('/api/grade', {clips: p.clips});
-    const r = readPublic('grade.json');
-    bySrc = r.bySrc ?? {};
-    for (const [src, g] of Object.entries(bySrc)) {
-      const s = r.stats[src];
-      notes.push(`${path.basename(src)}: tones ${Math.round(s.yLow)}–${Math.round(s.yHigh)} → contrast ×${g.slope[0]}, saturation ×${g.saturation}${g.intercept.some((i, c) => Math.abs(i - g.intercept[1]) > 0.004) ? ', color cast corrected' : ''}`);
-    }
+// ---------- color (src/grade.ts, src/lut.ts, scripts/lut.mjs) ----------
+const LUTS = path.join(PUBLIC, 'luts');
+const savedLuts = () => { try { return fs.readdirSync(LUTS).filter((f) => f.endsWith('.cube')).map((f) => f.slice(0, -5)); } catch { return []; } };
+// a LUT given as a saved name, a path under public/ or an absolute .cube (copied into public/luts/)
+function lutPath(lut) {
+  if (path.isAbsolute(lut)) {
+    if (!/\.cube$/i.test(lut) || !fs.existsSync(lut)) throw new Error(`not an existing .cube file: ${lut}`);
+    fs.mkdirSync(LUTS, {recursive: true});
+    const dest = path.join(LUTS, path.basename(lut).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(lut, dest);
+    return path.relative(PUBLIC, dest);
   }
-  p.grade = {look, intensity, auto, bySrc};
+  const rel = /\.cube$/i.test(lut) ? lut : `luts/${lut}.cube`;
+  const abs = path.resolve(PUBLIC, rel);
+  if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`no LUT ${lut}${savedLuts().length ? ` — saved: ${savedLuts().join(', ')}` : ' (none saved yet: create_lut, or pass an absolute .cube path)'}`);
+  return path.relative(PUBLIC, abs);
+}
+// a clip id or a source (full "clips/x.mp4" or its file name) → the override key
+function gradeTarget(p, target) {
+  if (p.clips.some((c) => c.id === target)) return target;
+  const src = p.clips.find((c) => c.src === target || path.basename(c.src) === target || path.basename(c.src, path.extname(c.src)) === target)?.src;
+  if (!src) throw new Error(`no clip or source "${target}" (get_project lists clip ids and sources)`);
+  return src;
+}
+// measure what the auto correction needs and bake the LUTs the grade asks for (backend jobs)
+async function settleGrade(p) {
+  const g = p.grade;
+  const need = autoSources(g, p.clips).filter((s) => !g.bySrc?.[s]);
+  if (need.length) {
+    await runJob('/api/grade', {clips: need.map((src) => ({src}))});
+    g.bySrc = {...g.bySrc, ...(readPublic('grade.json').bySrc ?? {})};
+  }
+  const bakes = lutBakes(g, p.clips, p.mattes).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
+  if (bakes.length) {
+    await runJob('/api/lut', {bake: bakes});
+    g.baked = {...g.baked, ...(readPublic('lut.json').baked ?? {})};
+  }
+}
+const f2s = (v) => (v > 0 ? `+${f2(v)}` : f2(v));
+function gradeLine(p, src, clipId) {
+  const x = paramsFor(p.grade, src, clipId);
+  const a = x.adjust ?? {};
+  return [`look ${x.look ?? 'none'}${x.look && x.look !== 'none' ? ` ${x.intensity ?? 0.8}` : ''}`, x.auto ? 'auto correction' : '', a.exposure ? `exposure ${f2s(a.exposure)} st` : '', a.contrast != null && a.contrast !== 1 ? `contrast ×${a.contrast}` : '', a.saturation != null && a.saturation !== 1 ? `saturation ×${a.saturation}` : '', a.temperature ? `temperature ${f2s(a.temperature)}` : '', a.tint ? `tint ${f2s(a.tint)}` : '', `highlights ${x.highlights ?? DEFAULTS.highlights}`, `skin ${x.skin ?? DEFAULTS.skin}`, x.lut ? `LUT ${x.lut}${(x.lutMix ?? 1) < 1 ? ` at ${Math.round(x.lutMix * 100)}%` : ''}` : ''].filter(Boolean).join(', ');
+}
+
+server.registerTool('set_grade', {description: `Color, opt-in and adjustable: nothing is graded until you ask. Set it for the whole reel, or for one source or clip with target (a clip id or a source file name) — an override on top of the whole-reel values. Change only what you pass. Map the brief onto the knobs: "más cálido" → temperature +0.3; "menos naranja la piel" → skin 0.8 and/or temperature −0.2; "quemado / blown out" → highlights 0.8 and exposure −0.3; "más vivo" → saturation 1.15; "cielo más azul" → temperature −0.2 or the cool look. Knobs: look (${Object.values(LOOKS).map((l) => `${l.id} = ${l.desc}`).join('; ')}) at intensity 0–1; auto = the bounded per-source correction measured on its lit frames (flat, dim or tinted footage only; opt-in per source); exposure (stops −2…2), contrast (0.5…1.5), saturation (0…2), temperature (−1 cool…1 warm), tint (−1 green…1 magenta); highlights 0…1 = a soft shoulder that rolls bright values into white instead of clipping them (0.5 default; 0.8+ also recovers hot footage); skin 0…1 = skin tones keep their natural warmth and saturation when the rest is pushed (0.5 default); lut = a .cube (saved name, path under public/, or an absolute .cube file — copied in; create_lut makes one from reference photos) applied first, at lut_mix 0–1; null removes it. reset = drop the target's override (or the whole grade without a target). Look at the result with caption_proof (frame_at shows the raw source).${savedLuts().length ? ` Saved LUTs: ${savedLuts().join(', ')}.` : ''}`, inputSchema: {project_id: pid, target: z.string().optional().describe('clip id or source file: override only there'), look: z.enum(Object.keys(LOOKS)).optional(), intensity: z.number().min(0).max(1).optional(), auto: z.boolean().optional(), exposure: z.number().min(-2).max(2).optional(), contrast: z.number().min(0.5).max(1.5).optional(), saturation: z.number().min(0).max(2).optional(), temperature: z.number().min(-1).max(1).optional(), tint: z.number().min(-1).max(1).optional(), highlights: z.number().min(0).max(1).optional(), skin: z.number().min(0).max(1).optional(), lut: z.string().nullable().optional(), lut_mix: z.number().min(0).max(1).optional(), reset: z.boolean().default(false)}}, async ({project_id, target, look, intensity, auto, exposure, contrast, saturation, temperature, tint, highlights, skin, lut, lut_mix, reset}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
+  const key = target ? gradeTarget(p, target) : null;
+  if (reset && !key) { p.grade = null; await save(project_id, p); return text('Color removed: the footage plays as shot'); }
+  p.grade ??= {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  const g = p.grade;
+  if (reset) { if (g.overrides) delete g.overrides[key]; }
+  else {
+    const layer = key ? ((g.overrides ??= {})[key] ??= {}) : g;
+    const adj = Object.fromEntries(Object.entries({exposure, contrast, saturation, temperature, tint}).filter(([, v]) => v != null));
+    if (Object.keys(adj).length) layer.adjust = {...layer.adjust, ...adj};
+    if (look != null) layer.look = look; if (intensity != null) layer.intensity = intensity; if (auto != null) layer.auto = auto;
+    if (highlights != null) layer.highlights = highlights; if (skin != null) layer.skin = skin; if (lut_mix != null) layer.lutMix = lut_mix;
+    if (lut !== undefined) layer.lut = lut === null || lut === 'none' ? null : lutPath(lut);
+  }
+  await settleGrade(p);
   await save(project_id, p);
-  return text(`Color: look ${look} at ${intensity}${auto ? `, automatic correction per source:\n  ${notes.join('\n  ') || 'nothing measurable'}` : ' (no automatic correction)'}`);
+  const srcs = [...new Set(p.clips.map((c) => c.src))];
+  const lines = [`whole reel: ${gradeLine(p, '')}`, ...Object.keys(g.overrides ?? {}).map((k) => { const c = p.clips.find((x) => x.id === k); return `${c ? `clip ${k}` : path.basename(k)}: ${gradeLine(p, c?.src ?? k, c?.id)}`; })];
+  const measured = srcs.filter((s) => g.bySrc?.[s] && autoSources(g, p.clips).includes(s)).map((s) => { const a = g.bySrc[s]; return `${path.basename(s)} auto: contrast ×${a.slope[0]}, saturation ×${a.saturation}`; });
+  return text(`Color:\n  ${[...lines, ...measured].join('\n  ')}`);
+});
+
+server.registerTool('create_lut', {description: 'Make a .cube LUT from reference photos of the look the client wants (their stills, their past reels\' frames): the footage\'s color statistics — from frames of this project\'s clips — are matched to the references\' (tone curve by quantiles, palette by mean and spread, in Oklab; deterministic, bounded). Saved as public/luts/<name>.cube for any project; apply = also set it on the whole reel (set_grade lut). strength 0–1 (0.7 default) = how far toward the references; set_grade lut_mix fine-tunes later. Needs the backend.', inputSchema: {project_id: pid, name: z.string().regex(/^[\w-]{1,40}$/), reference_images: z.array(z.string()).min(1).max(20).describe('absolute paths (copied in) or paths under public/'), strength: z.number().min(0).max(1).default(0.7), apply: z.boolean().default(true)}}, async ({project_id, name, reference_images, strength, apply}) => {
+  const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips to measure the footage from');
+  const dir = path.join(LUTS, 'refs', name); fs.mkdirSync(dir, {recursive: true});
+  const refs = reference_images.map((f) => {
+    if (!IMAGE.test(f) && !/\.(heic|tiff?)$/i.test(f)) throw new Error(`${f}: a reference must be an image`);
+    if (path.isAbsolute(f)) { if (!fs.existsSync(f)) throw new Error(`file not found: ${f}`); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
+    const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
+  });
+  await runJob('/api/lut', {make: {name, refs, clips: p.clips.map((c) => ({src: c.src})), strength}});
+  const lut = readPublic('lut.json').lut;
+  if (!apply) return text(`LUT ${lut} made from ${refs.length} reference(s). Apply it with set_grade lut: "${name}".`);
+  p.grade ??= {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  p.grade.lut = lut;
+  await settleGrade(p);
+  await save(project_id, p);
+  return text(`LUT ${lut} made from ${refs.length} reference(s) at strength ${strength} and set on the whole reel — look at it with caption_proof; soften with set_grade lut_mix, or override per source with target.`);
 });
 
 server.registerTool('prepare_mattes', {description: 'Cut the presenter out of the footage (MediaPipe, local, ~30 fps) for every span that has a graphic or caption page marked behind=true, so they render behind the person. Idempotent; only new spans are computed. Needs the backend.', inputSchema: {project_id: pid}}, async ({project_id}) => {
