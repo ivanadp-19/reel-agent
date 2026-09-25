@@ -14,7 +14,7 @@
 // It goes through the running backend (the same queue, modes and QC the editor
 // and the MCP use): start it first (npm start, or node server/index.mjs).
 //
-//   node scripts/layers-bench.mjs [--api http://127.0.0.1:3333] [--draft] [--pack palabra] [--alpha-compare]
+//   node scripts/layers-bench.mjs [--api http://127.0.0.1:3333] [--draft] [--pack palabra] [--alpha-compare] [--dump props.json]
 //                                 [--font-files fonts/A-700.woff2,fonts/A-800.woff2]
 // --font-files: a brand kit with the client's own font (files under public/fonts/, as
 // set_brand font_files leaves them) for captions and titles instead of the catalog.
@@ -27,7 +27,7 @@ import {spawnSync} from 'node:child_process';
 import {pageWords} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
 import {placeClips} from '../src/timeline.ts';
-import {ALPHA, captionArgs, compositeArgs} from './layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterKey} from './layers.mjs';
 import {linkPublic} from './public-links.mjs';
 import {renderPlan} from './render-queue.mjs';
 
@@ -152,13 +152,15 @@ function compare(a, b) {
   if (r.status !== 0) throw new Error(r.stderr);
   const rows = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => ({n: +l.match(/n:(\d+)/)[1], ssim: +l.match(/All:([\d.]+)/)[1]}));
   fs.rmSync(log, {force: true});
-  const frames = (f) => +spawnSync('ffprobe', ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', f], {encoding: 'utf8'}).stdout.trim();
+  const frames = (f) => parseInt(spawnSync('ffprobe', ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', f], {encoding: 'utf8'}).stdout, 10);
   const worst = [...rows].sort((x, y) => x.ssim - y.ssim).slice(0, 5).map((x) => [x.n, +x.ssim.toFixed(4)]);
   return {framesA: frames(a), framesB: frames(b), ssimMin: +Math.min(...rows.map((x) => x.ssim)).toFixed(4), ssimMean: +(rows.reduce((s, x) => s + x.ssim, 0) / rows.length).toFixed(4), worst};
 }
 
 const props = project();
 const edited = captionEdit(props);
+// --dump <file>: write the edited reel's props and stop (to reproduce a stage by hand)
+if (arg('dump', null)) { fs.writeFileSync(String(arg('dump')), JSON.stringify(edited)); process.exit(0); }
 const sec = placeClips(props.clips, FPS).reduce((s, c) => s + c.durFrames, 0) / FPS;
 console.log(`reel: ${sec.toFixed(1)} s, ${props.clips.length} takes from ${new Set(props.clips.map((c) => c.src)).size} sources, ${props.captions.length} caption pages, pack ${PACK}, ${DRAFT ? 'draft' : 'final'}, ${os.cpus().length} vCPU`);
 
@@ -172,30 +174,65 @@ const layB = keep('layers, after a caption edit (master cached)', await render(e
 out.quality = {first: compare(fullA.path, layA.path), edit: compare(fullB.path, layB.path)};
 console.log('layered vs one-pass, per frame:', JSON.stringify(out.quality));
 
-// VP9 alpha vs ProRes 4444 for the caption layer: render + composite, same master
-if (process.argv.includes('--alpha-compare')) {
+// Frame-exact? Where the caption pixels are: |one-pass − master| and |layered − master|
+// thresholded, and the share of the frame where the two masks disagree. A layer one
+// frame early or late shows up as a spike at every page change.
+function syncCheck(full, layered, master, threshold = 56) {
+  const log = path.join(ROOT, '.captions-tmp', `sync-${process.pid}.log`);
+  const mask = (a) => `[${a}][m${a}]blend=all_mode=difference,format=gray,lut=y='if(gt(val,${threshold}),255,0)'[k${a}]`;
+  const fc = [`[2:v]setpts=N,format=yuv420p,split[m0][m1]`, `[0:v]setpts=N,format=yuv420p[0]`, `[1:v]setpts=N,format=yuv420p[1]`, mask(0), mask(1),
+    `[k0][k1]blend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=${log}`].join(';');
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', full, '-i', layered, '-i', master, '-filter_complex', fc, '-f', 'null', '-'], {encoding: 'utf8'});
+  if (r.status !== 0) throw new Error(r.stderr.slice(-600));
+  const ys = [...fs.readFileSync(log, 'utf8').matchAll(/YAVG=([\d.]+)/g)].map((m) => +m[1] / 255);
+  fs.rmSync(log, {force: true});
+  const pct = (v) => +(v * 100).toFixed(3);
+  const worst = ys.map((v, n) => [n, v]).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, v]) => [n, pct(v)]);
+  return {frames: ys.length, maxPct: pct(Math.max(...ys)), meanPct: pct(ys.reduce((a, b) => a + b, 0) / ys.length), worst};
+}
+const master = path.join(ROOT, '.render-cache', 'masters', `${masterKey(edited, {code: codeVersion(ROOT), fps: FPS, draft: DRAFT, publicDir: PUBLIC})}.mp4`);
+if (fs.existsSync(master)) {
+  out.sync = syncCheck(fullB.path, layB.path, master);
+  // the same measure against a deliberately shifted layer: what a one-frame error would look like
+  const shifted = path.join(ROOT, '.captions-tmp', 'bench-shifted.mp4');
+  ff(['-i', layB.path, '-vf', 'setpts=N/(30*TB),trim=start_frame=1,setpts=N/(30*TB)', '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12', shifted]);
+  out.syncShiftedByOne = syncCheck(fullB.path, shifted, master);
+  fs.rmSync(shifted, {force: true});
+  console.log('caption sync (mask disagreement, % of frame):', JSON.stringify({aligned: out.sync, shiftedByOneFrame: out.syncShiftedByOne}));
+} else console.log('master not found in the cache (another code version?) — sync check skipped');
+
+// The caption layer's formats: Chrome's PNG frames once, then each alpha format's
+// encode (none for png) and composite over the same master
+if (process.argv.includes('--alpha-compare') && fs.existsSync(master)) {
   const plan = renderPlan();
-  const master = path.join(ROOT, '.captions-tmp', 'bench-master.mp4');
-  fs.copyFileSync(layB.path, master); // stands in for the master: same size and codec
   out.alpha = {};
+  const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-bench-alpha`));
+  const propsFile = path.join(ROOT, `.props-bench-alpha.json`);
+  fs.writeFileSync(propsFile, JSON.stringify({...edited, layer: 'captions'}));
+  const frames = path.join(ROOT, '.captions-tmp', 'bench-captions');
+  fs.rmSync(frames, {recursive: true, force: true});
+  let t = Date.now();
+  const r = spawnSync('npx', captionArgs({outFile: frames, propsFile, publicDir: links, draft: DRAFT, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes}), {cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 28});
+  if (r.status !== 0) throw new Error(r.stderr.slice(-800));
+  out.alpha.framesSec = +((Date.now() - t) / 1000).toFixed(1);
+  out.alpha.framesMB = +(fs.readdirSync(frames).reduce((n, f) => n + fs.statSync(path.join(frames, f)).size, 0) / 1e6).toFixed(1);
   for (const alpha of Object.keys(ALPHA)) {
-    const links = linkPublic(PUBLIC, path.join(ROOT, '.captions-tmp', `render-public-bench-alpha`));
-    const propsFile = path.join(ROOT, `.props-bench-alpha.json`);
-    fs.writeFileSync(propsFile, JSON.stringify({...edited, layer: 'captions'}));
-    const layer = path.join(ROOT, '.captions-tmp', `bench-captions.${ALPHA[alpha].ext}`);
-    let t = Date.now();
-    const r = spawnSync('npx', captionArgs({outFile: layer, propsFile, publicDir: links, draft: DRAFT, concurrency: plan.concurrency, cacheBytes: plan.cacheBytes, alpha}), {cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 28});
-    if (r.status !== 0) throw new Error(r.stderr.slice(-800));
-    const renderSec = (Date.now() - t) / 1000;
+    const layer = ALPHA[alpha].ext ? `${frames}.${ALPHA[alpha].ext}` : frames;
+    t = Date.now();
+    const enc = alphaEncodeArgs({frames, outFile: layer, alpha, fps: FPS});
+    if (enc) { const e = spawnSync('ffmpeg', enc, {encoding: 'utf8'}); if (e.status !== 0) throw new Error(e.stderr.slice(-800)); }
+    const encodeSec = (Date.now() - t) / 1000;
     t = Date.now();
     const comp = path.join(ROOT, '.captions-tmp', `bench-comp-${alpha}.mp4`);
     const c = spawnSync('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile: comp, fps: FPS, draft: DRAFT}), {encoding: 'utf8'});
     if (c.status !== 0) throw new Error(c.stderr.slice(-800));
-    out.alpha[alpha] = {renderSec: +renderSec.toFixed(1), compositeSec: +((Date.now() - t) / 1000).toFixed(1), layerMB: +(fs.statSync(layer).size / 1e6).toFixed(1)};
+    out.alpha[alpha] = {encodeSec: +encodeSec.toFixed(1), compositeSec: +((Date.now() - t) / 1000).toFixed(1), ...(enc ? {layerMB: +(fs.statSync(layer).size / 1e6).toFixed(1)} : {}), sync: syncCheck(fullB.path, comp, master)};
     console.log(`${alpha}: ${JSON.stringify(out.alpha[alpha])}`);
-    for (const f of [layer, comp, propsFile]) fs.rmSync(f, {force: true});
-    fs.rmSync(links, {recursive: true, force: true});
+    fs.rmSync(comp, {force: true});
+    if (enc) fs.rmSync(layer, {force: true});
   }
-  fs.rmSync(master, {force: true});
+  fs.rmSync(frames, {recursive: true, force: true});
+  fs.rmSync(propsFile, {force: true});
+  fs.rmSync(links, {recursive: true, force: true});
 }
 console.log(JSON.stringify(out));

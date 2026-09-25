@@ -21,7 +21,7 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {linkPublic} from '../scripts/public-links.mjs';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {createQueue, renderArgs, renderPlan} from '../scripts/render-queue.mjs';
-import {ALPHA, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey} from '../scripts/layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterKey} from '../scripts/layers.mjs';
 import {chooseRenderMode} from '../src/layers.ts';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
@@ -202,7 +202,7 @@ console.log(`render queue: ${PLAN.workers} worker(s) × concurrency ${PLAN.concu
 const FPS = 30;
 // layered renders (scripts/layers.mjs): masters cached outside public/ (never bundled, never committed)
 const masterCache = createMasterCache(path.join(ROOT, '.render-cache', 'masters'));
-const CAPTION_ALPHA = process.env.REEL_CAPTION_ALPHA in ALPHA ? process.env.REEL_CAPTION_ALPHA : 'vp9';
+const CAPTION_ALPHA = process.env.REEL_CAPTION_ALPHA in ALPHA ? process.env.REEL_CAPTION_ALPHA : 'png';
 // the mode a render runs in when the request names none (full = the one-pass render)
 const DEFAULT_MODE = process.env.REEL_RENDER_MODE === 'layers' ? 'layers' : 'full';
 // one export: remotion render, then (final only) loudness + QC in a child process; resolves when the job is settled
@@ -302,12 +302,20 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested}, id) 
       }
       if (choice.captions) {
         renders[id] = {status: 'running', progress: split, label: 'Rendering captions layer', ...info};
-        const layerFile = path.join(ROOT, '.captions-tmp', `captions-${id}.${ALPHA[CAPTION_ALPHA].ext}`);
-        tmp.push(layerFile);
-        const r = await stage('captions', () => remotion(captionArgs({...opts, outFile: layerFile, propsFile: propsFile('-captions', {...props, layer: 'captions'}), alpha: CAPTION_ALPHA}), id, {from: split, to: 95}));
+        const frames = path.join(ROOT, '.captions-tmp', `captions-${id}`);
+        tmp.push(frames);
+        const r = await stage('captions', () => remotion(captionArgs({...opts, outFile: frames, propsFile: propsFile('-captions', {...props, layer: 'captions'})}), id, {from: split, to: 92}));
         if (r.code !== 0) { renders[id] = {status: 'error', error: renderError(r), ...info}; return; }
+        let layer = frames;
+        const enc = ALPHA[CAPTION_ALPHA].ext && alphaEncodeArgs({frames, outFile: (layer = `${frames}.${ALPHA[CAPTION_ALPHA].ext}`), alpha: CAPTION_ALPHA, fps: FPS});
+        if (enc) {
+          tmp.push(layer);
+          renders[id] = {status: 'running', progress: 92, label: `Encoding captions layer (${CAPTION_ALPHA})`, ...info};
+          const e = await stage('encode', () => run('ffmpeg', enc));
+          if (e.code !== 0) { renders[id] = {status: 'error', error: `captions layer encode failed: ${e.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
+        }
         renders[id] = {status: 'running', progress: 95, label: 'Compositing', ...info};
-        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layerFile, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft})));
+        const c = await stage('composite', () => run('ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha: CAPTION_ALPHA}], outFile, fps: FPS, draft})));
         if (c.code !== 0) { renders[id] = {status: 'error', error: `composite failed: ${c.stderr.trim().split('\n').pop()}`.slice(0, 300), ...info}; return; }
       } else fs.copyFileSync(master, outFile); // nothing to lay over it: the master is the reel
     }
@@ -326,7 +334,7 @@ async function renderProps({raw, draft, expectSec, clean, mode: requested}, id) 
   } catch (e) {
     renders[id] = {status: 'error', error: String(e?.message ?? e).slice(0, 300), ...info};
   } finally {
-    for (const f of tmp) fs.rmSync(f, {force: true});
+    for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
     fs.rmSync(links, {recursive: true, force: true});
   }
 }

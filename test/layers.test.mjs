@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {chooseRenderMode, layerBlockers} from '../src/layers.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {canonical, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterInputs, masterKey, mediaStamps} from '../scripts/layers.mjs';
+import {alphaEncodeArgs, canonical, captionArgs, codeVersion, compositeArgs, createMasterCache, masterArgs, masterInputs, masterKey, mediaStamps} from '../scripts/layers.mjs';
 
 const FPS = 30;
 const clips = [
@@ -137,23 +137,28 @@ test('master cache: hit, miss, least recently used dropped past the budget', () 
   fs.rmSync(dir, {recursive: true, force: true});
 });
 
-test('layer args: master = h264 without captions at a lower crf; captions = PNG frames into an alpha codec, muted', () => {
+test('layer args: master = h264 without captions at a lower crf; captions = PNG frames, muted, encoded by ffmpeg when asked', () => {
   const o = {outFile: 'o', propsFile: 'p', publicDir: 'pub', concurrency: 2, cacheBytes: 1, draft: false};
   const m = masterArgs(o);
   assert.ok(m.includes('--crf=16') && m.includes('--x264-preset=veryfast') && !m.includes('--scale=0.5'));
   const c = captionArgs(o);
-  assert.ok(['--image-format=png', '--codec=vp9', '--pixel-format=yuva420p', '--muted'].every((a) => c.includes(a)));
-  assert.ok(captionArgs({...o, alpha: 'prores'}).includes('--prores-profile=4444'));
+  assert.ok(['--sequence', '--image-format=png', '--muted'].every((a) => c.includes(a)));
   assert.ok(captionArgs({...o, draft: true}).includes('--scale=0.5'));
+  assert.equal(alphaEncodeArgs({frames: 'f', outFile: 'x', alpha: 'png', fps: 30}), null, 'png: the frames are the layer');
+  const vp9 = alphaEncodeArgs({frames: 'f', outFile: 'c.webm', alpha: 'vp9', fps: 30});
+  assert.ok(['libvpx-vp9', 'yuva420p', 'realtime'].every((a) => vp9.includes(a)) && vp9.includes(path.join('f', '*.png')));
+  assert.ok(alphaEncodeArgs({frames: 'f', outFile: 'c.mov', alpha: 'prores', fps: 30}).includes('yuva444p10le'));
 });
 
 test('composite: frame-exact (renumbered by frame index), libvpx decodes the alpha, audio copied, layers stack', () => {
-  const a = compositeArgs({master: 'm.mp4', overlays: [{file: 'c.webm'}], outFile: 'o.mp4', fps: 30});
+  const png = compositeArgs({master: 'm.mp4', overlays: [{file: 'frames'}], outFile: 'o.mp4', fps: 30});
+  assert.ok(png.includes(path.join('frames', '*.png')) && png.includes('glob'), 'the PNG frames by default');
+  const a = compositeArgs({master: 'm.mp4', overlays: [{file: 'c.webm', alpha: 'vp9'}], outFile: 'o.mp4', fps: 30});
   const fc = a[a.indexOf('-filter_complex') + 1];
   assert.match(fc, /\[0:v\]setpts=N\/\(30\*TB\)/);
   assert.match(fc, /\[1:v\]setpts=N\/\(30\*TB\)/);
   assert.ok(a.indexOf('libvpx-vp9') < a.indexOf('c.webm'), 'the decoder is named before its input');
   assert.deepEqual(a.slice(a.indexOf('-c:a'), a.indexOf('-c:a') + 2), ['-c:a', 'copy']);
-  const two = compositeArgs({master: 'm.mp4', overlays: [{file: 'c.webm'}, {file: 'x.mov', alpha: 'prores'}], outFile: 'o.mp4', fps: 30});
+  const two = compositeArgs({master: 'm.mp4', overlays: [{file: 'frames'}, {file: 'x.mov', alpha: 'prores'}], outFile: 'o.mp4', fps: 30});
   assert.match(two[two.indexOf('-filter_complex') + 1], /\[l1\]\[o1\]overlay/);
 });

@@ -33,11 +33,18 @@ const CODE_PATHS = ['src', 'remotion.config.ts', 'package-lock.json', 'scripts/l
 // master encode: a touch above Remotion's default (crf 18) — the composite encodes it once more
 export const MASTER_CRF = 16;
 export const COMPOSITE_CRF = 18;
-// the caption layer's alpha codec: VP9 (yuva420p, small, needs libvpx to decode the alpha) or ProRes 4444
+// The caption layer: Chrome draws PNG frames (they keep the alpha); what the composite
+// reads them as is `alpha` (REEL_CAPTION_ALPHA): the PNG sequence itself (lossless and
+// the fastest — no intermediate encode), or a VP9 yuva420p / ProRes 4444 file encoded
+// by ffmpeg from those frames (a single file, for a layer that has to travel).
+// Measured in research/layers-benchmark.md: Remotion's own VP9 encode was the slowest
+// step of the whole layer, hence the frames-first path.
 export const ALPHA = {
-  vp9: {ext: 'webm', args: ['--codec=vp9', '--pixel-format=yuva420p', '--crf=18'], decode: ['-c:v', 'libvpx-vp9']},
-  prores: {ext: 'mov', args: ['--codec=prores', '--prores-profile=4444', '--pixel-format=yuva444p10le'], decode: []},
+  png: {ext: null},
+  vp9: {ext: 'webm', encode: ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0', '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1', '-crf', '18', '-b:v', '0'], decode: ['-c:v', 'libvpx-vp9']},
+  prores: {ext: 'mov', encode: ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le'], decode: []},
 };
+const framesInput = (dir, fps) => ['-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(dir, '*.png')];
 
 function walk(dir, out) {
   for (const e of fs.readdirSync(dir, {withFileTypes: true}).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -142,20 +149,27 @@ const common = ({outFile, propsFile, publicDir, concurrency, cacheBytes, draft})
 ];
 // the master: the usual h264 export (its props carry captionsOff: true), a lower crf
 export const masterArgs = (o) => [...common(o), `--x264-preset=${o.draft ? 'ultrafast' : 'veryfast'}`, `--crf=${MASTER_CRF}`];
-// the caption layer: PNG frames (they keep the alpha) into VP9 or ProRes 4444, no audio (its props carry layer: 'captions')
-export const captionArgs = (o) => [...common(o), '--image-format=png', ...ALPHA[o.alpha ?? 'vp9'].args, '--muted'];
+// the caption layer: PNG frames into a folder (its props carry layer: 'captions'), no audio
+export const captionArgs = (o) => [...common(o), '--sequence', '--image-format=png', '--muted'];
+// the frames → one VP9 / ProRes file (null for png: the composite reads the frames)
+export function alphaEncodeArgs({frames, outFile, alpha, fps}) {
+  const a = ALPHA[alpha];
+  if (!a?.encode) return null;
+  return ['-hide_banner', '-nostats', '-y', ...framesInput(frames, fps), ...a.encode, outFile];
+}
 
 // ffmpeg: the layers over the master, frame by frame. Both streams are renumbered
 // by frame index (setpts=N) before the overlay: WebM stores ms timestamps, and
 // frame 2 at 66.667 ms stored as 67 ms would otherwise meet master frame 3. The
 // master's audio is copied (loudness runs on the result). `overlays` is a list so
-// more layers can stack later; each is {file, alpha}.
+// more layers can stack later; each is {file, alpha} (png: `file` is the frames folder).
 export function compositeArgs({master, overlays, outFile, fps, draft = false}) {
   const inputs = ['-i', master];
   const chains = [`[0:v]setpts=N/(${fps}*TB)[l0]`];
   let last = 'l0';
   overlays.forEach((o, i) => {
-    inputs.push(...ALPHA[o.alpha ?? 'vp9'].decode, '-i', o.file);
+    const alpha = o.alpha ?? 'png';
+    inputs.push(...(alpha === 'png' ? framesInput(o.file, fps) : [...ALPHA[alpha].decode, '-i', o.file]));
     chains.push(`[${i + 1}:v]setpts=N/(${fps}*TB)[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto[l${i + 1}]`);
     last = `l${i + 1}`;
   });
