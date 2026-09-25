@@ -12,6 +12,7 @@ export const TARGET = {I: -14, tolerance: 1, TP: -1, tpAim: -1.5, LRA: 11};
 
 // optional voice cleanup before loudness (final render only): src/audio.ts
 import {CLEAN} from '../src/audio.ts';
+import {blankLead, frameStats} from './first-frame.mjs';
 export {CLEAN};
 
 const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 26});
@@ -85,6 +86,9 @@ export function qc(file, {expectSec, draft = false} = {}) {
     add('silence', !silent.length, silent.length ? silent.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 2 s', 'no silent stretch ≥ 2 s', false);
   }
   const black = stretches(['-i', file, '-an', '-vf', 'blackdetect=d=0.5:pix_th=0.08', '-f', 'null', '-'], /black_start:([\d.]+) black_end:([\d.]+)/g);
+  // frame 0 a flat field while frame 1 is footage (scripts/first-frame.mjs; the render runner repairs it, this is the gate)
+  const lead = frameStats(file);
+  add('first frame', !blankLead(lead), lead[0] ? `Y ${lead[0].ymin}–${lead[0].ymax}, U ${lead[0].uavg}, V ${lead[0].vavg}` : 'unreadable', 'footage (not a flat field before the first real frame)', !draft);
   add('black', !black.length, black.length ? black.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 0.5 s', 'no black stretch ≥ 0.5 s (fine when intended)', false);
   return {ok: checks.every((c) => c.ok || !c.blocking), checks};
 }

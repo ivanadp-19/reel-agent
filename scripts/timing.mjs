@@ -84,7 +84,7 @@ export function summarize(events) {
     } else if (e.kind === 'stage') {
       if (e.stage === 'qc') b.qc += e.ms;
       else if (e.stage === 'queue') b.queue += e.ms;
-      else if (['render', 'master', 'captions', 'encode', 'composite', 'prepare'].includes(e.stage)) {
+      else if (['render', 'master', 'captions', 'encode', 'composite', 'prepare', 'first-frame'].includes(e.stage)) {
         b.render += e.ms;
         renderStages[e.stage] = (renderStages[e.stage] ?? 0) + e.ms;
         if (e.stage !== 'prepare') renderJobs.add(e.job ?? e.t); // one render = one backend job, whatever its stages
