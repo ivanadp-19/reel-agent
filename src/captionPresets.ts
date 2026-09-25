@@ -10,6 +10,7 @@
 // key words 1.5–1.9× bigger; a page of one or two words renders larger still.
 
 import type {FontFamily} from './fonts.ts';
+import type {CustomFont} from './projectFont.ts';
 import type {ArriveKind, LeaveKind} from './motion.ts';
 
 export type AnimIn = 'fade' | 'slideUp' | 'pop' | 'blur' | 'none';
@@ -34,7 +35,7 @@ export type Preset = {
   id: string;
   label: string;
   desc: string; // one line for the UI and the agent
-  font: {family: FontFamily; weight: number; sizePx: number; case: 'upper' | 'none'; trackingPx: number; lineHeight: number; italic?: boolean};
+  font: {family: FontFamily | (string & {}); custom?: CustomFont; weight: number; sizePx: number; case: 'upper' | 'none'; trackingPx: number; wordGapEm?: number; lineHeight: number; italic?: boolean; fauxStrokePx?: number}; // fauxStrokePx: same-color outline to thicken glyphs (paint-order: stroke)
   colors: {
     text: string;
     dim: string; // not-yet-spoken (karaoke) or not-active words
@@ -136,6 +137,32 @@ export const PRESETS: Record<string, Preset> = {
     font: {family: 'Montserrat', weight: 600, sizePx: 42, case: 'upper', trackingPx: 6, lineHeight: 1.35},
     pageIn: {type: 'blur', ms: 220},
     layout: {maxWords: 4, maxCharsLine: 22},
+  },
+  // César's own WithSubtitles look (measured on his Morantes reels):
+  // Helvetica Bold caps, white, no box, words pop in one by one as they are
+  // spoken, key words flat yellow #FFE500. The font is a per-project FILE
+  // (public/fonts/Helvetica-Bold.ttf — currently a Liberation Sans Bold
+  // stand-in until César's file lands; src/projectFont.ts).
+  vibem: {
+    ...base,
+    id: 'vibem',
+    label: 'VIBEM (César)',
+    desc: "César published-reel captions (frames 9:20): Helvetica-Bold caps, whole phrase on 2 balanced lines, sized to span most of the frame, tight tracking, white, soft diffuse gray shadow (no offset), no stroke, keyword words #FFE500 at the SAME size. Entry = his CC slide up; hard-cut exit",
+    font: {family: 'Helvetica', custom: {family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700}, weight: 700, sizePx: 100, case: 'upper', trackingPx: -2, lineHeight: 1.05, wordGapEm: 0.22},
+    colors: {text: 'rgba(255,255,255,0.85)', dim: 'rgba(255,255,255,0.55)', accent: '#FFE500'}, // César 9:37: letters at 85% opacity (rgba so the shadow keeps full strength)
+    // his Premiere caption shadow (9:21 screenshot): opacity 75, angle 135, distance 0, size 7.8, blur 40
+    // -> centered soft halo: tight 8px core at 0.75 + wide 40px diffusion; NO offset (he rejected the hard look)
+    shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
+    reveal: 'build',
+    upcoming: 'hidden',
+    pageIn: {type: 'none', ms: 0},
+    pageOut: 'cut',
+    wordIn: 'ccSlideUp',
+    keyIn: 'highlightRise', // classifier highlights (keywords/questions/CTAs): per-char rise + white->yellow sweep (César 9:27)
+    holdMs: 250, // César 9:47: NO captions during silence — page ends ~250ms after its last word; never hold through pauses
+    tiers: {1: {weight: 700, color: 'accent', scale: 1.15}, 2: {weight: 700, color: 'accent', scale: 1.15}}, // highlights: solid #FFE500, slightly bigger, dynamic entry
+    layout: {maxWords: 8, maxCharsLine: 18}, // whole phrase per page (up to 2 lines, br-flagged); proper-name/number pairs never split
+    titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
   },
   // ---- Captions.ai-like packs ----
   prism: {
