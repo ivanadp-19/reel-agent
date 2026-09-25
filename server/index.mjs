@@ -10,7 +10,8 @@
 //                passes QC becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
 //   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
 //   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys) + free memory / disk
-//   the reel CLI (cli/reel.mjs) — per-user tokens (/api/tokens, /api/whoami; server/tokens.mjs),
+//   the reel CLI (cli/reel.mjs) — per-user tokens (/api/tokens, /api/whoami; server/tokens.mjs; a signed-in
+//                user's own at /cli-token + /api/cli-tokens, server/cli-tokens.mjs),
 //                resumable uploads (/api/uploads; server/uploads.mjs), validate (/api/validate/<id>),
 //                render by project id with its plan, one render per user and resource floors,
 //                the finished file (/api/render-jobs/<id>/file)
@@ -39,6 +40,7 @@ import {gate, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
 import {handleReview} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
+import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {projectIssues, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
@@ -302,6 +304,8 @@ async function handle(req, res) {
     try { return await (await mcpHttp()).handle(req, res); }
     catch (e) { console.error('mcp:', e); if (!res.headersSent) return json(res, 500, {error: 'mcp failed'}); return res.end(); }
   }
+  // self-service CLI tokens for a user signed in with the browser (session cookie or basic auth)
+  if (isCliTokenPath(url.pathname)) return handleCliTokens(req, res, url, g, {users: USERS, base: publicBase(req), hops: TRUST_HOPS, publicUrl: process.env.REEL_PUBLIC_URL});
   if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
