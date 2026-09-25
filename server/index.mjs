@@ -30,6 +30,7 @@ import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mj
 import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, serveFile} from './http.mjs';
+import {createLoginLimiter, handleLogin} from './session.mjs';
 import {handleReview} from './review.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
@@ -215,8 +216,13 @@ console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concu
 // the bcrypt hashes from REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same
 // hashes Caddy uses on the VM, so existing passwords keep working and no secret
 // crosses a chat. The review pages /r/<token> are the one public exception.
+// Browsers that cannot answer the basic-auth dialog use the form at /login instead
+// (server/session.mjs): same users, a signed session cookie keyed by
+// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN; ≤ 5 failed logins per IP per minute.
 const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
 const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').filter(Boolean).map((pair) => { const i = pair.indexOf(':'); return [pair.slice(0, i), pair.slice(i + 1)]; }));
+const SESSION_SECRET = process.env.REEL_SESSION_SECRET || TOKEN;
+const LOGIN_LIMITER = createLoginLimiter({max: 5, windowMs: 60e3});
 const DIST = path.join(ROOT, 'editor', 'dist');
 function serveStatic(req, res, pathname) {
   const clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, '');
@@ -239,8 +245,9 @@ function publicBase(req) {
 }
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const g = gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS});
+  const g = gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
+  if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
   if (PUBLIC_MODE && req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);

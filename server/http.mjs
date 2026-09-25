@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
+import {sessionUser} from './session.mjs';
 
 export const MIME = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.cube': 'text/plain', '.vtt': 'text/vtt', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon'};
 
@@ -42,23 +43,30 @@ export function serveFile(req, res, file, headers = {}) {
 
 // Who may reach a path. The review pages (/r/...) are public in both modes — the
 // token in the URL is the credential — and read-only; everything else keeps the
-// gate it had: basic auth or the backend token in public mode (Railway), loopback
-// Host + localhost Origin otherwise. public/exports/* is never reachable without it.
-// → {kind: 'review' | 'ping' | 'ok'} or {kind: 'deny', status, headers, body}
+// gate it had: in public mode (Railway) the backend token (x-reel-token), the signed
+// session cookie of the form login (/login, server/session.mjs) or basic auth; a
+// browser page load without any is sent to /login, other requests get the 401
+// basic-auth challenge. Loopback Host + localhost Origin otherwise.
+// public/exports/* is never reachable without it.
+// → {kind: 'review' | 'ping' | 'login' | 'ok'} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
-export function gate(req, url, {publicMode, auth = {}, tokens = []}) {
+export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
+export function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret} = {}) {
   if (isReviewPath(url.pathname)) return {kind: 'review'};
   if (publicMode && url.pathname === '/api/ping') return {kind: 'ping'}; // Railway healthcheck: no auth, no info
+  if (publicMode && isLoginPath(url.pathname)) return {kind: 'login'};
   if (publicMode) {
     const h = req.headers.authorization || '';
     const b = h.startsWith('Basic ') ? Buffer.from(h.slice(6), 'base64').toString() : '';
     const i = b.indexOf(':');
     const tokOK = tokens.includes(req.headers['x-reel-token']); // MCP/backend clients authenticate with the shared backend token instead of basic auth
-    const ok = tokOK || (i > 0 && auth[b.slice(0, i)] && bcrypt.compareSync(b.slice(i + 1), auth[b.slice(0, i)]));
-    if (!ok) return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
-    return {kind: 'ok'};
+    const ok = tokOK || Boolean(sessionUser(req, sessionSecret, auth)) || (i > 0 && Object.hasOwn(auth, b.slice(0, i)) && bcrypt.compareSync(b.slice(i + 1), auth[b.slice(0, i)]));
+    if (ok) return {kind: 'ok'};
+    const pageLoad = (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/') && !h && /text\/html/.test(req.headers.accept || '');
+    if (pageLoad) return {kind: 'deny', status: 303, headers: {Location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`, 'Cache-Control': 'no-store'}, body: ''};
+    return {kind: 'deny', status: 401, headers: {'WWW-Authenticate': 'Basic realm="reel-agent"'}, body: 'auth required'};
   }
   const host = (req.headers.host || '').replace(/:\d+$/, '');
   if (!LOCAL_HOSTS.has(host)) return {kind: 'deny', status: 403, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'local access only'})};
