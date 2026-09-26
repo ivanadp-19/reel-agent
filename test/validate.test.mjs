@@ -73,3 +73,26 @@ test('captions switched off (set_captions): their pages are not checked', () => 
   const off = codes(validateProject({...p, captionsOff: true}));
   assert.ok(!off.includes('glue') && !off.includes('safe-top'), String(off));
 });
+
+test('word times squeezed by the ASR are flagged with their ids (16 syllables/s); normal speech and prices in digits are not', async () => {
+  const {syllables} = await import('../src/validate.ts');
+  const g1 = {id: 'g', src: 'clips/a.mp4', inSec: 0, outSec: 40, sourceDurationSec: 40};
+  const cap = (words) => [{id: 'c0', src: g1.src, words, startMs: words[0].startMs, endMs: words.at(-1).endMs, topPct: 53}];
+  // a made-up sentence with the syllables and the squeezed times WhisperX once gave a real one: 30 syllables in 1.84 s
+  const squeezed = [['412', 29539, 29739], ['37', 29759, 29799], ['habitaciones', 29839, 30339], ['que', 30359, 30419], ['se', 30439, 30499], ['terminan', 30539, 30899], ['en', 30919, 30959], ['octubre', 30979, 31239], ['2031', 31259, 31379], ['Visita', 34861, 35124]]
+    .map(([text, s, e], k) => ({wid: `a:${86 + k}`, text, startMs: s, endMs: e}));
+  const fast = validateProject({clips: [g1], captions: cap(squeezed)}).filter((i) => i.code === 'fast-words');
+  assert.equal(fast.length, 1);
+  assert.match(fast[0].msg, /a:86…a:94 .* 16 syllables\/s .*re-transcribe with Deepgram or fix the times/);
+  // cut out of the reel: not on screen, not flagged
+  assert.deepEqual(validateProject({clips: [{...g1, inSec: 32}], captions: cap(squeezed)}).filter((i) => i.code === 'fast-words'), []);
+  // the same kind of sentence said at ~6 syllables/s
+  let t = 0;
+  const normal = 'Hola te estoy enseñando 37 habitaciones que se terminan en octubre 2031 frente al parque'.split(' ')
+    .map((text, k) => { const w = {wid: `a:${k}`, text, startMs: t, endMs: t + syllables(text) * 160}; t = w.endMs + 60; return w; });
+  assert.deepEqual(validateProject({clips: [g1], captions: cap(normal)}).filter((i) => i.code === 'fast-words'), []);
+  assert.deepEqual([syllables('habitaciones'), syllables('que'), syllables('2031.')], [5, 1, 6]);
+  // a price in digits at an ordinary pace ('un millón quinientos mil': the zeros are next to nothing said)
+  const price = [['Departamentos', 0, 850], ['desde', 850, 1180], ['1,500,000', 1180, 2350], ['pesos.', 2350, 2700]].map(([text, s, e], k) => ({wid: `a:${k}`, text, startMs: s, endMs: e}));
+  assert.deepEqual(validateProject({clips: [g1], captions: cap(price)}).filter((i) => i.code === 'fast-words'), []);
+});

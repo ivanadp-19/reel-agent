@@ -1,11 +1,11 @@
 import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
-import type {Caption, CaptionWord} from './captions';
+import {shownUntilMs, type Caption, type CaptionWord} from './captions';
 import {FLOAT_SLOTS as FLOAT, type Preset, type TierStyle} from './captionPresets';
-import {captionPreset, fitPage} from './captionLayout';
+import {captionPreset, fitPage, PAGE_PAD_PX} from './captionLayout';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily, type FontFamily} from './fonts';
-import {ensureProjectFont} from './projectFont';
+import {useProjectFont} from './projectFont';
 import {legible, useBrand} from './brand';
 
 export type {Caption} from './captions';
@@ -42,11 +42,10 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
         : preset.colors.text;
   // not spoken yet: hidden (space reserved) or dimmed (karaoke) — plain text either way
   const dimmed = build && !spoken && preset.upcoming === 'dim';
-  const hidden = build && !spoken && (preset.upcoming === 'hidden' || preset.upcoming === 'collapse');
-  const collapsed = build && !spoken && preset.upcoming === 'collapse'; // no space: the spoken group recenters live
+  const hidden = build && !spoken && preset.upcoming === 'hidden';
   const opacity = hidden ? 0 : dimmed ? 1 : m.opacity;
   const styled = !dimmed && !hidden;
-  // César 9:27: classifier highlights (keywords / questions / CTAs) get a more dynamic entry —
+  // César 9:27: key words (keywords / CTAs) get a more dynamic entry —
   // per-char rise (Remocn PerCharacterRise) + inline color sweep white -> #FFE500 (InlineHighlight)
   const hlRise = kind === 'highlightRise' && !dimmed && !hidden;
   // Apple-keynote kinetic type: word rises out of an overflow mask, soft blur settle, long ease-out
@@ -58,9 +57,10 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
   const trackSpring = trackIn ? spring({frame: local, fps, config: {damping: 14, stiffness: 180, mass: 0.7}}) : 1;
   const trackOp = trackIn ? interpolate(local, [0, ms(fps, 90)], [0, 1], CLAMP) : 1;
   // César 9:57: the sweep must FULLY finish before the page changes — complete by the word's own end
-  // (min 120ms so ultra-short words still read as a sweep, capped at 240ms so it never lags)
+  // (min 160ms so short words still read as a sweep — v11: EL / DEL turn fully yellow on their 4th
+  // frame; capped at 240ms so it never lags)
   const wordDurF = Math.max(1, ((w.endMs - w.startMs) / 1000) * fps);
-  const hlSweepEnd = Math.min(ms(fps, 240), Math.max(ms(fps, 120), wordDurF));
+  const hlSweepEnd = Math.min(ms(fps, 240), Math.max(ms(fps, 160), wordDurF));
   const hlColorT = hlRise ? interpolate(local, [ms(fps, 60), hlSweepEnd], [0, 1], CLAMP) : 0;
   const hlAccent = 'rgba(255,229,0,0.85)'; // #FFE500 at the 85% letter opacity (César 9:37)
   const hlColor = hlRise ? (hlColorT >= 1 ? hlAccent : `color-mix(in srgb, ${hlAccent} ${Math.round(hlColorT * 100)}%, ${preset.colors.text})`) : undefined;
@@ -80,7 +80,7 @@ const Word: React.FC<{w: CaptionWord; index: number; preset: Preset; accent: str
       <span
         data-w={index}
         style={{
-          display: collapsed ? 'none' : 'inline-block',
+          display: 'inline-block',
           position: 'relative',
           zIndex: 1,
           fontWeight: t.weight ?? preset.font.weight,
@@ -132,10 +132,11 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   const absMs = caption.startMs + (frame / fps) * 1000;
   // Bonded pairs (layout.unbreakable) render inside a nowrap span so flex-wrap can never
   // split a name ('MONTEALBÁN 326'); the page shrinks so the widest unbreakable unit fits
-  // the frame (César 10:35: "3 lines or a smaller size beat splitting a name"). Both come
+  // the frame ("3 lines or a smaller size beat splitting a name"; no pack bonds since César's v11). Both come
   // from src/captionLayout.ts, measured as rendered (case, tier scale) — the render judge
   // reads the same function.
   const {width: compWidth} = useVideoConfig();
+  const custom = useProjectFont(preset.font.custom); // the pack's file: fitPage then sizes by its real widths
   const float0 = preset.position === 'float' && !caption.pin;
   const {paired, fontSize} = fitPage(caption, preset, {compWidth, float: float0});
 
@@ -166,10 +167,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
     if (next !== rects) setRects(next);
   });
   const boxes: number[][] = rects ? JSON.parse(rects) : [];
-  const onset = (i: number) =>
-    preset.fastBuildMs != null
-      ? Math.round(((i * preset.fastBuildMs) / 1000) * fps)
-      : Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
+  const onset = (i: number) => Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
   let spokenIdx = -1;
   caption.words.forEach((w, i) => { if (frame >= onset(i)) spokenIdx = i; });
   const lastEndMs = spokenIdx >= 0 ? caption.words[spokenIdx].endMs : 0;
@@ -214,7 +212,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         right: 0,
         display: 'flex',
         justifyContent: float ? float.align : 'center',
-        padding: '0 70px',
+        padding: `0 ${preset.layout.padPx ?? PAGE_PAD_PX}px`,
         opacity: a * ex.opacity,
         transform: [transform, ex.dy ? `translateY(${ex.dy.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
         filter: [(preset.pageIn.type === 'blur' || preset.pageIn.type === 'slideUp') && a < 1 ? `blur(${((1 - a) * (preset.pageIn.type === 'blur' ? 10 : 6)).toFixed(1)}px)` : '', ex.blur > 0.2 ? `blur(${ex.blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ') || undefined,
@@ -231,7 +229,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
           alignItems: 'baseline',
           gap: `0 ${Math.round(fontSize * (preset.font.wordGapEm ?? 0.26))}px`,
           maxWidth: float ? '68%' : undefined,
-          fontFamily: preset.font.custom ? ensureProjectFont(preset.font.custom) : fontFamily(preset.font.family as FontFamily),
+          fontFamily: custom ?? fontFamily(preset.font.family as FontFamily),
           fontSize,
           lineHeight: preset.font.lineHeight,
           letterSpacing: preset.font.trackingPx,
@@ -243,7 +241,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
       >
         {box ? <div style={box} /> : null}
   {(() => {
-        // César 10:35: a development name like 'Montealbán 326' must never split across lines.
+        // layout.unbreakable: a development name like 'Montealbán 326' never splits across lines.
         // v10.2 exact-pair nowrap: bonded pairs (Capitalized + Capitalized/digit, name+number
         // first, never chained — bondedPairs in src/captionLayout.ts) render inside a nowrap
         // group so flex-wrap can never separate them, whatever the measured widths say.
@@ -302,10 +300,9 @@ export const CaptionTrack: React.FC<{captions: Caption[]; captionStyle?: string;
     <>
       {captions.map((c, i) => {
         if (!!c.behind !== behind) return null;
-        const nextStart = captions[i + 1]?.startMs ?? Infinity;
-        const visEnd = Math.min(nextStart, c.endMs + preset.holdMs, c.holdMaxMs ?? Infinity);
+        const visEnd = shownUntilMs(captions, i, preset.holdMs);
         const from = Math.round((c.startMs / 1000) * fps);
-        const dur = Math.max(1, Math.round(((visEnd - c.startMs) / 1000) * fps));
+        const dur = Math.max(1, Math.round((visEnd / 1000) * fps) - from); // ends where the next page starts: two pages never share a frame
         return (
           <Sequence key={`${c.id}@${from}`} from={from} durationInFrames={dur} layout="none" name={c.words.map((w) => w.text).join(' ')}>
             <CaptionPage caption={c} index={i} preset={preset} accent={accent} durationInFrames={dur} />

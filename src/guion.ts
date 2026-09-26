@@ -3,8 +3,9 @@
 // align() pairs ASR words with guion tokens by sequence alignment over normalized text
 // (lowercase, no accents, ñ → n, no punctuation; digits and Spanish number words compare
 // by value). reconcileWords() then, in the captions pipeline:
-//   - a word the guion spells differently (accents, case, number style) takes the guion's
-//     spelling, keeping its ASR time;
+//   - a word the guion spells differently (accents, case, the digits of a figure the ASR spelled
+//     out) takes the guion's spelling, keeping its ASR time; with keepDigits (vibem) digits the ASR
+//     wrote stay digits (v11 shows 54 where the guion says 'cincuenta y cuatro');
 //   - one ASR word that swallowed several guion tokens ("acomodan" = "acomoda" + "a") is split
 //     into them, proportional timing inside its span; several ASR words that are one guion
 //     token ("sky pool" → "skypool") become one word;
@@ -55,6 +56,25 @@ export function numberOf(keys: string[]): number | undefined {
     cur += NUM[k]; any = true;
   }
   return any ? total + cur : undefined;
+}
+// a run of keys that is ONE figure as Spanish says it ('trescientos veintiséis', 'dos mil veintisiete',
+// 'cincuenta y cuatro', 'un millón quinientos mil'), else undefined: 'tres cuatro' is two numbers,
+// 'cinco y seis' a list
+const MILLION = new Set(['millon', 'millones']);
+export function spokenNumber(keys: string[]): number | undefined {
+  let mill = 0, total = 0, cur = 0, room = 1000; // room: this group's next piece is below it
+  for (let k = 0; k < keys.length; k++) {
+    const key = keys[k];
+    if (MILLION.has(key)) { if (mill || total) return undefined; mill = (cur || 1) * 1e6; cur = 0; room = 1000; continue; }
+    if (key === 'mil') { if (total) return undefined; total = (cur || 1) * 1000; cur = 0; room = 1000; continue; }
+    const num = (x: string) => (Object.hasOwn(NUM, x) ? NUM[x] : 0); // transcript text: 'constructor' is not a number
+    if (key === 'y') { const u = num(keys[k + 1] ?? ''); if (room !== 10 || !(u >= 1 && u <= 9)) return undefined; continue; }
+    const v = num(key);
+    if (!v || v >= room || (room === 10 && keys[k - 1] !== 'y')) return undefined;
+    cur += v;
+    room = v >= 100 ? 100 : v >= 30 && v % 10 === 0 ? 10 : 1; // after 30…90 only 'y' + a unit
+  }
+  return keys.length ? mill + total + cur : undefined;
 }
 const isArticle = (keys: string[]) => keys.length === 1 && ARTICLE.has(keys[0]);
 const isDigits = (keys: string[]) => keys.length === 1 && /^\d+$/.test(keys[0]);
@@ -227,7 +247,9 @@ function surface(g: GuionToken, asrCore: string, asrStartsSentence: boolean): st
   return (up ? g.core[0].toUpperCase() : g.core[0].toLowerCase()) + g.core.slice(1);
 }
 
-export function reconcileWords<T extends ReconcilableWord>(words: T[], guionText: string): {words: T[]; report: Reconciliation} {
+// keepDigits (a pack's layout.keepDigits, v11): a figure the ASR wrote in digits stays digits against the
+// guion's words; otherwise the guion's number style wins
+export function reconcileWords<T extends ReconcilableWord>(words: T[], guionText: string, {keepDigits = false} = {}): {words: T[]; report: Reconciliation} {
   const report: Reconciliation = {adopted: [], conflicts: [], ambiguous: [], missing: [], extra: [], aligned: 0};
   const guion = tokenizeGuion(guionText ?? '');
   if (!guion.length || !words.length) return {words, report};
@@ -260,37 +282,91 @@ export function reconcileWords<T extends ReconcilableWord>(words: T[], guionText
     if (op.class === 'exact') report.aligned += gs.length;
     if (op.class === 'conflict') return void report.conflicts.push({wid: first.wid, asr: asrText, guion: guionText, what: op.conflict!});
     if (op.class === 'ambiguous' || (op.class === 'fix' && !anchored(ops, k))) return void report.ambiguous.push({wid: first.wid, asr: asrText, guion: guionText});
+    // keepDigits: '54' against the guion's 'cincuenta y cuatro' is the same figure, and v11 shows 54 (a split
+    // would give 'cincuenta' 23 ms and 'y' 2 ms); an article ('1' for the guion's 'una') is wording, not a figure
+    if (keepDigits && op.class === 'exact' && ws.some((i) => /\d/.test(words[i].word)) && !(gs.length === 1 && ARTICLE.has(gs[0].key))) return;
     const cores = gs.map((t, n) => surface(t, n === 0 ? coreOf(first.word) : '', n === 0 && startsSentence(ws[0])));
-    const pre = lead(first.word), post = trail(last.word);
-    if (ws.length === 1 && gs.length === 1) {
-      const text = pre + cores[0] + post;
-      if (text === first.word) return;
-      replace.set(ws[0], [{...first, word: text, asr: first.asr ?? first.word}]);
-      report.adopted.push({wid: first.wid, asr: first.word, text, how: 'spelling'});
-    } else if (ws.length === 1) {
-      // one ASR word, several guion tokens: pieces share its id and split its span by length
-      const weights = gs.map((t) => Math.max(1, t.key.length));
-      const total = weights.reduce((s, x) => s + x, 0);
-      const cut = (a: number, b: number) => { let acc = 0; return [a, ...weights.map((x) => a + Math.round(((b - a) * (acc += x)) / total))]; };
-      const t = cut(first.startMs, first.endMs);
-      const st = first.srcStartMs != null && first.srcEndMs != null ? cut(first.srcStartMs, first.srcEndMs) : null;
-      replace.set(ws[0], gs.map((_, n) => ({
-        ...first,
-        word: (n === 0 ? pre : '') + cores[n] + (n === gs.length - 1 ? post : ''),
-        startMs: t[n], endMs: t[n + 1],
-        ...(st ? {srcStartMs: st[n], srcEndMs: st[n + 1]} : {}),
-        asr: first.asr ?? first.word,
-      })));
-      report.adopted.push({wid: first.wid, asr: first.word, text: cores.join(' '), how: 'split'});
-    } else {
-      // several ASR words, one guion token: one word over their span, the first one's id
-      const text = pre + cores[0] + post;
-      replace.set(ws[0], [{...first, word: text, endMs: last.endMs, ...(last.srcEndMs != null ? {srcEndMs: last.srcEndMs} : {}), asr: asrText}]);
-      for (const i of ws.slice(1)) replace.set(i, []);
-      report.adopted.push({wid: first.wid, asr: asrText, text, how: 'join'});
-    }
+    const out = respell(ws.map((i) => words[i]), cores);
+    if (out[0] === first) return; // already spelled so
+    ws.forEach((i, n) => replace.set(i, n ? [] : out));
+    const how = ws.length > 1 ? 'join' : gs.length > 1 ? 'split' : 'spelling';
+    report.adopted.push({wid: first.wid, asr: asrText, text: how === 'split' ? cores.join(' ') : out[0].word, how});
   });
   return {words: words.flatMap((w, i) => replace.get(i) ?? [w]), report};
+}
+
+// consecutive words (one, or several) → new texts (several, or one), keeping the edge punctuation:
+// 1:1 keeps the word's time; one word split into several shares its id and cuts its span by length;
+// several joined into one take the first one's id over their span. `asr` keeps what the ASR heard.
+function respell<T extends ReconcilableWord>(ws: T[], cores: string[]): T[] {
+  const first = ws[0], last = ws[ws.length - 1];
+  const pre = lead(first.word), post = trail(last.word);
+  const asr = ws.map((w) => w.asr ?? w.word).join(' ');
+  if (cores.length === 1) {
+    const word = pre + cores[0] + post;
+    if (ws.length === 1 && word === first.word) return [first];
+    return [{...first, word, endMs: last.endMs, ...(last.srcEndMs != null ? {srcEndMs: last.srcEndMs} : {}), asr}];
+  }
+  const weights = cores.map((c) => Math.max(1, normKey(c).length));
+  const total = weights.reduce((s, x) => s + x, 0);
+  const cut = (a: number, b: number) => { let acc = 0; return [a, ...weights.map((x) => a + Math.round(((b - a) * (acc += x)) / total))]; };
+  const t = cut(first.startMs, first.endMs);
+  const st = first.srcStartMs != null && first.srcEndMs != null ? cut(first.srcStartMs, first.srcEndMs) : null;
+  return cores.map((c, n) => ({
+    ...first,
+    word: (n === 0 ? pre : '') + c + (n === cores.length - 1 ? post : ''),
+    startMs: t[n], endMs: t[n + 1],
+    ...(st ? {srcStartMs: st[n], srcEndMs: st[n + 1]} : {}),
+    asr,
+  }));
+}
+
+// ---------- figures (captions pipeline) ----------
+// A figure the ASR spelled out (Deepgram writes 'cincuenta y cuatro' where WhisperX writes 54) becomes digits,
+// one word: the longest run inside one clip, with no punctuation inside, that is one figure worth 10 or more
+// or of several words ('cinco' stays a word). The first word's id, the whole span; `asr` keeps the words.
+export function joinFigures<T extends ReconcilableWord>(words: T[]): T[] {
+  const out: T[] = [];
+  for (let i = 0; i < words.length;) {
+    let end = -1, value = 0;
+    for (let j = i; j < words.length && (NUMERIC(normKey(words[j].word)) || MILLION.has(normKey(words[j].word))) && (j === i || (!/[^\p{L}\p{N}]$/u.test(words[j - 1].word) && (words[j].clipId ?? words[j].src) === (words[i].clipId ?? words[i].src))); j++) {
+      const v = spokenNumber(words.slice(i, j + 1).map((w) => normKey(w.word)));
+      if (v != null && (v >= 10 || j > i)) { end = j; value = v; }
+    }
+    if (end < 0) { out.push(words[i++]); continue; }
+    out.push(...respell(words.slice(i, end + 1), [value >= 10000 ? value.toLocaleString('en-US') : String(value)])); // 2027, 120,000
+    i = end + 1;
+  }
+  return out;
+}
+
+// ---------- glossary (the brand kit's; the render judge checks the same list) ----------
+export type GlossaryEntry = {term: string; variants?: string[]; note?: string};
+// The client's spellings over the word stream: a run of words that reads as a term or one of its variants
+// (accents, case and punctuation aside, inside one clip) takes the term's spelling. Words pair up 1:1 from
+// the start; the rest of the run joins into the term's last word ('Alta Brisa' → 'Altabrisa'), or the run's
+// last word splits into the rest of the term, with ids and times kept as respell keeps them.
+export function applyGlossary<T extends ReconcilableWord>(words: T[], glossary: GlossaryEntry[] = []): {words: T[]; fixed: {wid?: string; asr: string; text: string}[]} {
+  const forms = glossary
+    .flatMap((g) => [g.term, ...(g.variants ?? [])].map((f) => ({keys: f.split(/\s+/).map(normKey).filter(Boolean), term: g.term.trim().split(/\s+/)})))
+    .filter((f) => f.keys.length && f.term[0])
+    .sort((a, b) => b.keys.length - a.keys.length); // the longest reading first
+  const unit = (w: T) => w.clipId ?? w.src;
+  const out: T[] = [];
+  const fixed: {wid?: string; asr: string; text: string}[] = [];
+  for (let i = 0; i < words.length;) {
+    const f = forms.find((f) => f.keys.every((k, n) => words[i + n] && normKey(words[i + n].word) === k && unit(words[i + n]) === unit(words[i])));
+    if (!f) { out.push(words[i++]); continue; }
+    const ws = words.slice(i, i + f.keys.length);
+    i += ws.length;
+    // the term's case, but a capital the ASR gave a lowercase term stays (a sentence start: 'Súper, el banco')
+    const cores = f.term.map((t, n) => (n === 0 && /^\p{Lu}/u.test(coreOf(ws[0].word)) && /^\p{Ll}/u.test(t) ? t[0].toUpperCase() + t.slice(1) : t));
+    const k = Math.min(ws.length, cores.length) - 1;
+    const next = [...ws.slice(0, k).map((w, n) => respell([w], [cores[n]])[0]), ...respell(ws.slice(k), cores.slice(k))];
+    if (next.some((w, n) => w !== ws[n])) fixed.push({wid: ws[0].wid, asr: ws.map((w) => w.word).join(' '), text: next.map((w) => w.word).join(' ')});
+    out.push(...next);
+  }
+  return {words: out, fixed};
 }
 
 export const reconciliationLine = (r: Reconciliation) =>

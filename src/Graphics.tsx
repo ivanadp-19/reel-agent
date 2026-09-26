@@ -6,6 +6,7 @@ import {seedOf} from './transitions';
 import {fontFamily, heaviest, type FontFamily} from './fonts';
 import {ink, legible, useBrand} from './brand';
 import {ensureProjectFont} from './projectFont';
+import {PRESETS} from './captionPresets';
 import {fitSize, textWidthEm} from './textFit';
 
 // named faces the templates pick from (all in src/fonts.ts); a brand kit's
@@ -516,7 +517,7 @@ const FrameLight: React.FC<{props: any; accent: string}> = ({props}) => {
 // César's CLEAN BLUE: Helvetica Bold (project font), white sentence-case line over a huge accent
 // ALL-CAPS line. César 9:21: text effects carry NO drop shadow and solid #FFE500 (no gradient).
 const CleanBlueTitle: React.FC<{props: any; accent: string}> = ({props, accent}) => {
-  const fam = ensureProjectFont({family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700});
+  const fam = ensureProjectFont(PRESETS.vibem.font.custom!); // the same face and pins as vibem's captions: whichever loads it first
   const shadow = 'none';
   const stroke = {} as React.CSSProperties;
   const l2 = props.upper2 === false ? String(props.line2) : String(props.line2).toUpperCase();

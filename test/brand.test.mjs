@@ -87,3 +87,29 @@ test('style kits: a flexible spec from the client\'s words — known keys typed,
   assert.deepEqual(styleEffects(st), {captionsOff: true, grade: {look: 'natural', skin: 0.8, highlights: 0.7}});
   assert.ok(brandSchema.safeParse({colors: {accent: '#FFE500'}, style: st}).success);
 });
+
+// set_brand from a kit that names a pack applies it, through the function set_caption_style uses
+// (no captions yet here, so no re-paging job); an unknown pack name is reported, never applied
+test('a kit that names a pack applies it (set_brand from); an unknown pack is not applied', async (t) => {
+  const {styleEffects} = await import('../src/brand.ts');
+  assert.deepEqual(styleEffects({pack: 'vibem'}), {pack: 'vibem'});
+  assert.deepEqual(styleEffects({pack: 'palabra o caja'}), {}, 'only a real pack id');
+  const {Client} = await import('@modelcontextprotocol/sdk/client/index.js');
+  const {StdioClientTransport} = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const fs = await import('node:fs');
+  const tag = `kit-test-${process.pid}`;
+  const files = {kit: `public/brands/${tag}.json`, bad: `public/brands/${tag}-bad.json`, project: `public/projects/p-${tag}.json`};
+  fs.mkdirSync('public/brands', {recursive: true}); fs.mkdirSync('public/projects', {recursive: true});
+  fs.writeFileSync(files.kit, JSON.stringify({name: 'Kit test', colors: {accent: '#FFE500'}, style: {pack: 'vibem'}}));
+  fs.writeFileSync(files.bad, JSON.stringify({name: 'Kit test', colors: {accent: '#FFE500'}, style: {pack: 'nopack'}}));
+  fs.writeFileSync(files.project, JSON.stringify({name: 'kit test', clips: [], captions: [], brolls: [], graphics: [], captionStyle: 'palabra'}));
+  const client = new Client({name: 'test', version: '0'});
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'kit-test'}, stderr: 'ignore'}));
+  t.after(async () => { await client.close(); for (const f of [...Object.values(files), files.project.replace('.json', '.lock'), files.project.replace('.json', '.timing.jsonl')]) fs.rmSync(f, {force: true}); });
+  const call = async (from) => (await client.callTool({name: 'set_brand', arguments: {project_id: `p-${tag}`, from}})).content.map((c) => c.text).join('\n');
+  const read = () => JSON.parse(fs.readFileSync(files.project, 'utf8'));
+  assert.match(await call(`${tag}-bad`), /pack "nopack" is not a caption pack — not applied/);
+  assert.equal(read().captionStyle, 'palabra');
+  assert.match(await call(tag), /Style applied: pack vibem/);
+  assert.equal(read().captionStyle, 'vibem');
+});

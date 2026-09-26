@@ -15,9 +15,10 @@ export type CaptionWord = {
   br?: boolean; // hard line break before this word (two-line phrase pages)
   emoji?: string; // one emoji that pops in right after the word
   speaker?: string; // spk1, spk2… who says it (diarization); presets may color or place pages per speaker later
-  popMs?: number; // visual pop time in a fastBuild cascade (page start + idx*45) — SFX pairs clicks/typing here, not startMs
   sentenceStart?: boolean; // a guion sentence begins on this word — never orphan-merge it back
   asr?: string; // what the ASR heard, when the guion's wording replaced it (src/guion.ts); split pieces share it and the id
+  proposed?: boolean; // its tier is the pack's proposal, not yet set by hand: a new pack proposes it again
+  was?: string; // fresh pages only: its id in the source's other transcript (src/paging.ts repage)
 };
 export type Caption = {
   id: string;
@@ -176,13 +177,16 @@ export function setPageStart(captions: Caption[], id: string, wid: string, clips
 // ducks under, and with it the master of a layered render, stay as they were.
 export const shiftPage = (cap: Caption, ms: number): Caption => ({...handPage(cap, cap.words), shiftMs: (cap.shiftMs ?? 0) + ms});
 
+// when page i leaves the screen: at the next page, at most holdMs after its last word, never past its clip
+export const shownUntilMs = (pages: Caption[], i: number, holdMs: number) => Math.min(pages[i + 1]?.startMs ?? Infinity, pages[i].endMs + holdMs, pages[i].holdMaxMs ?? Infinity);
+
 // Focus pull (Prism): while a tier-2 word is on screen the footage blurs. Spans
 // in the pages' own time base, from just before the word's onset to the end of
 // its page (the page holds until the next one, at most holdMs after its last word).
 export function focusSpans(pages: Caption[], holdMs: number, leadMs = 120): {startMs: number; endMs: number}[] {
   const out: {startMs: number; endMs: number}[] = [];
   pages.forEach((c, i) => {
-    const visEnd = Math.min(pages[i + 1]?.startMs ?? Infinity, c.endMs + holdMs, c.holdMaxMs ?? Infinity);
+    const visEnd = shownUntilMs(pages, i, holdMs);
     for (const w of c.words) if (w.tier === 2) out.push({startMs: w.startMs - leadMs, endMs: visEnd});
   });
   return out;
@@ -192,7 +196,7 @@ export function focusSpans(pages: Caption[], holdMs: number, leadMs = 120): {sta
 export function tierSpans(pages: Caption[], tier: number, holdMs: number, maxMs = Infinity): {startMs: number; endMs: number}[] {
   const out: {startMs: number; endMs: number}[] = [];
   pages.forEach((c, i) => {
-    const visEnd = Math.min(pages[i + 1]?.startMs ?? Infinity, c.endMs + holdMs, c.holdMaxMs ?? Infinity);
+    const visEnd = shownUntilMs(pages, i, holdMs);
     for (const w of c.words) if (w.tier === tier) out.push({startMs: w.startMs, endMs: Math.min(visEnd, w.startMs + maxMs)});
   });
   return out;

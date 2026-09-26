@@ -2,8 +2,9 @@
 // dump the words of each clip's trim window for the agent (get_transcript).
 //
 // Input : JSON (argv[2]) = {clips:[...], lang:'auto'|'es'|'en'}
-// Output: public/transcript.json = [{clipId, source, words:[{i, word, startMs, endMs, off?, speaker?}]}]
-//         off = a quieter second voice away from the mic; speaker = spk1, spk2… from diarization (see src/speech.ts)
+// Output: public/transcript.json = [{clipId, source, words:[{i, word, startMs, endMs, off?, speaker?, was?}]}]
+//         off = a quieter second voice away from the mic; speaker = spk1, spk2… from diarization (see src/speech.ts);
+//         was = its index in the source's other engine's transcript, when both are cached (lib-transcribe)
 //         (times are SOURCE-relative ms; i = index into the source's transcript,
 //          so `${source}:${i}` is a stable word id across splits and autocuts)
 import fs from 'node:fs';

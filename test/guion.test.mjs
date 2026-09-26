@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {reconcileWords, guionIssues, tokenizeGuion, normKey, numberOf, align} from '../src/guion.ts';
+import {reconcileWords, guionIssues, tokenizeGuion, normKey, numberOf, align, joinFigures} from '../src/guion.ts';
 import {validateProject} from '../src/validate.ts';
 import {pageWords} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
@@ -109,6 +109,13 @@ test('accents, ñ and Spanish number words normalize for matching; surface forms
   assert.equal(texts(words), 'Son treinta y dos lotes.');
   assert.equal(words[1].startMs, 220);
   assert.equal(words[3].endMs, 820);
+  // keepDigits (vibem): the same figure stays digits (v11 shows 54, not 'cincuenta y cuatro'); an article is wording
+  const kept = reconcileWords(W([['Son', 0, 200], ['32', 220, 820], ['lotes', 840, 1100], ['con', 1120, 1300], ['1', 1320, 1500], ['baño.', 1520, 1900]]), 'Son treinta y dos lotes con un baño.', {keepDigits: true});
+  assert.equal(texts(kept.words), 'Son 32 lotes con un baño.');
+  assert.equal(kept.report.aligned, 8);
+  assert.equal(kept.words[1].asr, undefined);
+  // spelled out in the audio, digits in the guion: the guion's digits
+  assert.equal(texts(reconcileWords(W([['Son', 0, 200], ['treinta', 220, 500], ['y', 500, 560], ['dos', 560, 820], ['lotes.', 840, 1200]]), 'Son 32 lotes.').words), 'Son 32 lotes.');
   // "un"/"una" is wording, not a number, unless the other side is digits
   assert.notEqual(align([{text: 'un'}], tokenizeGuion('una'))[0].class, 'exact');
   assert.equal(align([{text: '1'}], tokenizeGuion('una'))[0].class, 'exact');
@@ -156,4 +163,12 @@ test('the pager keeps the ASR text of reconciled words, and the judge does not r
   const said = ACOMODAN.map((w) => ({wid: w.wid, clipId: 'k1', word: w.word, t0: w.startMs / 1000, t1: w.endMs / 1000}));
   const shown = pages.map((c) => ({...c, clipId: 'k1'}));
   assert.deepEqual(captionTextFindings(shown, said).filter((f) => f.check === 'sync'), []);
+});
+
+test('figures the ASR spelled out become digits (Deepgram writes words); a lone small number and a list stay words', () => {
+  const ws = W([['Son', 0, 200], ['cincuenta', 220, 500], ['y', 500, 560], ['cuatro', 560, 820], ['departamentos,', 840, 1400], ['a', 1420, 1480], ['cinco', 1500, 1800], ['minutos', 1820, 2200], ['desde', 2220, 2500], ['un', 2520, 2600], ['millón', 2600, 2900], ['quinientos', 2900, 3300], ['mil.', 3300, 3500], ['Tres', 3600, 3800], ['cuatro', 3820, 4000], ['cinco', 4020, 4200], ['y', 4220, 4300], ['seis.', 4320, 4600]]);
+  const out = joinFigures(ws);
+  assert.equal(texts(out), 'Son 54 departamentos, a cinco minutos desde 1,500,000. Tres cuatro cinco y seis.');
+  const n54 = out[1];
+  assert.deepEqual([n54.wid, n54.startMs, n54.endMs, n54.asr], ['v:1', 220, 820, 'cincuenta y cuatro']); // first id, whole span, the words kept
 });

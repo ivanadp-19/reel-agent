@@ -16,9 +16,8 @@ import crypto from 'node:crypto';
 import {pipeline} from 'node:stream/promises';
 import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
-import {mergeCaptions} from '../src/captions.ts';
 import {PRESETS} from '../src/captionPresets.ts';
-import {projectTiers, reapplyTiers} from '../src/paging.ts';
+import {projectTiers, repage} from '../src/paging.ts';
 import {applyAutocut, reanchor, totalDurationFrames} from '../src/timeline.ts';
 import {newProject} from '../mcp/checks.mjs';
 
@@ -379,17 +378,16 @@ export const COMMANDS = [
       // a new pack re-pages the generated captions, as the MCP's set_caption_style does
       let fresh = null;
       if (patch.captionStyle && patch.captionStyle !== p.captionStyle && p.clips?.length && p.captions?.length) {
-        const s = await runJob(ctx, '/api/captions', {clips: p.clips, lang: patch.lang ?? p.lang ?? 'auto', style: patch.captionStyle, offMic: p.offMic ?? 'mark', tiers: projectTiers(p.captions), project_id: id}, {timeout: o.timeout, what: 'captions', retry: `reel projects set ${id} --caption-style ${patch.captionStyle}`});
+        const s = await runJob(ctx, '/api/captions', {clips: p.clips, lang: patch.lang ?? p.lang ?? 'auto', style: patch.captionStyle, offMic: p.offMic ?? 'mark', tiers: projectTiers(p.captions, true), project_id: id}, {timeout: o.timeout, what: 'captions', retry: `reel projects set ${id} --caption-style ${patch.captionStyle}`});
         if (!Array.isArray(s.result)) throw new CliError('job_failed', 'the captions job returned no pages', 'is the backend up to date?');
         fresh = s.result;
       }
       const {project, changed} = await updateProject(ctx, id, (cur) => {
         const next = {...patch};
         if (fresh) {
-          // a project from before word ids cannot tell generated pages from hand-made ones: all are re-paged
-          const legacy = !(cur.captions ?? []).some((c) => c.words.some((w) => w.wid));
-          const merged = mergeCaptions(legacy ? [] : cur.captions ?? [], fresh, cur.clips ?? [], {hidden: cur.hiddenWids ?? [], replace: true});
-          next.captions = reapplyTiers(cur.captions ?? [], merged.captions);
+          // a new pack: re-paged as the MCP's set_caption_style does (src/paging.ts repage)
+          const r = repage(cur.captions ?? [], fresh, cur.clips ?? [], {hidden: cur.hiddenWids ?? [], replace: true, repropose: true});
+          next.captions = r.captions; next.hiddenWids = r.hidden;
         }
         return Object.entries(next).every(([k, v]) => JSON.stringify(cur[k]) === JSON.stringify(v)) ? null : next;
       });
@@ -474,9 +472,9 @@ export const COMMANDS = [
       if (!Array.isArray(s.result)) throw new CliError('job_failed', 'the captions job returned no pages', 'is the backend up to date?');
       let added = 0;
       const {project} = await updateProject(ctx, id, (cur) => {
-        const r = mergeCaptions(cur.captions ?? [], s.result, cur.clips ?? [], {hidden: cur.hiddenWids ?? []});
+        const r = repage(cur.captions ?? [], s.result, cur.clips ?? [], {hidden: cur.hiddenWids ?? []});
         added = r.added;
-        return {captions: r.captions};
+        return {captions: r.captions, hiddenWids: r.hidden};
       });
       return [{project: id, added, captions: project.captions.length}, `${id}: +${added} caption pages (${project.captions.length} total)`];
     }},

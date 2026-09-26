@@ -4,14 +4,15 @@
 // AS RENDERED (the pack's case, each word at its tier's scale), the font size the
 // page shrinks to so the widest unit fits, and how the units wrap. Pure: no DOM.
 // Widths come from the average-advance table in textFit.ts (an estimate, a little
-// generous); tracking is not counted (the packs track tight, so it only helps).
+// generous; tracking is not counted, the packs track tight so it only helps) — or, for a
+// pack's own font file once read (realAdvances), its real advances plus the tracking.
 
 import {pageScale, presetOf, type Preset} from './captionPresets.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
 
 export const SANS = new Set<string>(['Inter', 'Montserrat', 'Poppins']);
-export const PAGE_PAD_PX = 70; // side padding of every page (CaptionTrack's outer box)
+export const PAGE_PAD_PX = 70; // side padding of a page (CaptionTrack's outer box) unless the pack sets layout.padPx
 export const FLOAT_MAX = 0.68; // floating pages wrap inside 68 % of the padded width
 export const MIN_FONT_PX = 40; // a page never shrinks below this; a wider unit overflows
 
@@ -22,6 +23,12 @@ export function captionPreset(style?: string, kitBody?: string): Preset {
   return kitBody && SANS.has(base.font.family) ? {...base, font: {...base.font, family: kitBody as FontFamily}} : base;
 }
 export const familyOf = (preset: Preset) => (preset.font.custom ? preset.font.custom.family : preset.font.family);
+
+// A pack's font file read (src/sfnt.ts): its real advance widths replace the average table for its
+// family — the renderer registers them as the file loads (src/projectFont.ts), the render judge and
+// the golden check from public/. ~7 % narrower than the Inter stand-in for Helvetica Bold.
+const REAL = new Map<string, (text: string) => number>();
+export const realAdvances = (family: string, advance: (text: string) => number) => void REAL.set(family, advance);
 
 type W = {text: string; tier?: number; br?: boolean};
 const CAP = /^[A-ZÁÉÍÓÚÑÜ]/;
@@ -47,7 +54,11 @@ export function pageUnits(words: W[], preset: Preset, paired = bondedPairs(words
   const family = familyOf(preset);
   const upper = preset.font.case === 'upper';
   const gapEm = preset.font.wordGapEm ?? 0.26;
-  const em = (w: W) => textWidthEm(upper ? w.text.toUpperCase() : w.text, family) * (preset.tiers[(w.tier ?? 0) as 0 | 1 | 2]?.scale ?? 1);
+  const real = REAL.get(family);
+  const em = (w: W) => {
+    const t = upper ? w.text.toUpperCase() : w.text, scale = preset.tiers[(w.tier ?? 0) as 0 | 1 | 2]?.scale ?? 1;
+    return real ? real(t) * scale + (preset.font.trackingPx * [...t].length) / preset.font.sizePx : textWidthEm(t, family) * scale;
+  };
   const units: Unit[] = [];
   for (let i = 0; i < words.length; i++) {
     if (paired.has(i)) { units.push({from: i, to: i + 1, em: em(words[i]) + gapEm + em(words[i + 1]), br: !!words[i].br}); i++; }
@@ -58,16 +69,19 @@ export function pageUnits(words: W[], preset: Preset, paired = bondedPairs(words
 
 export type PageFit = {paired: Set<number>; units: Unit[]; baseSize: number; fontSize: number; availPx: number; wrapPx: number; widestPx: number; overflows: boolean};
 // the page's font size: the pack's size (× page scale, × short-page autoscale),
-// shrunk so the widest unbreakable unit fits the padded width — never below MIN_FONT_PX
+// shrunk so the widest unbreakable unit fits availPx — the padded width, or the whole
+// frame in a pack whose words may run into the padding (layout.overflowPad, v11) —
+// never below MIN_FONT_PX. Lines wrap at wrapPx, the padded width (× FLOAT_MAX afloat).
 export function fitPage(page: {words: W[]; scale?: number}, preset: Preset, {compWidth = 1080, float = false}: {compWidth?: number; float?: boolean} = {}): PageFit {
   const paired = bondedPairs(page.words, preset);
   const units = pageUnits(page.words, preset, paired);
   const baseSize = Math.round(preset.font.sizePx * (page.scale ?? 1) * pageScale(preset, page.words.length));
-  const availPx = compWidth - 2 * PAGE_PAD_PX;
-  const wrapPx = float ? availPx * FLOAT_MAX : availPx;
+  const padded = compWidth - 2 * (preset.layout.padPx ?? PAGE_PAD_PX);
+  const availPx = preset.layout.overflowPad ? compWidth : padded;
+  const wrapPx = float ? padded * FLOAT_MAX : padded;
   const widestEm = units.length ? Math.max(...units.map((u) => u.em)) : 0;
   const fontSize = widestEm * baseSize > availPx ? Math.max(MIN_FONT_PX, Math.floor((baseSize * availPx) / (widestEm * baseSize))) : baseSize;
-  return {paired, units, baseSize, fontSize, availPx, wrapPx, widestPx: widestEm * fontSize, overflows: widestEm * fontSize > wrapPx + 1};
+  return {paired, units, baseSize, fontSize, availPx, wrapPx, widestPx: widestEm * fontSize, overflows: widestEm * fontSize > (float ? wrapPx : availPx) + 1};
 }
 
 // how the units wrap at a font size (flex-wrap: a unit goes to the next line when

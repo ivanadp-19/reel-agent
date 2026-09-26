@@ -22,8 +22,8 @@ import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
 import {applyAutocut, clipDurationSec, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
-import {mergeCaptions, projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
-import {isGlue, projectTiers, reapplyTiers} from '../src/paging.ts';
+import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
+import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
@@ -385,7 +385,7 @@ const savedBrands = () => { try { return fs.readdirSync(BRANDS).filter((f) => f.
 const IMAGE = /\.(png|jpe?g|webp|svg)$/i;
 const AUDIO = /\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i;
 const FONTS_DIR = path.join(PUBLIC, 'fonts'); // client font files: gitignored with the rest of public/, never in the repo
-server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo. Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio to this project (apply_style false = only store it) and tells you the pack to set; reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, apply_style, name, from, save_as, clear}) => {
+server.registerTool('set_brand', {description: `Brand kit of the project (a client's look): accent / dark / light colors, headline font (graphics templates) and caption font, logo, glossary (the client's spellings). Captions, templates and layout canvases all read it; the brand accent overrides a caption pack's own color. Fonts: the OFL catalog (${FONT_FAMILIES.join(', ')}) or the client's own font files — font_files takes .ttf/.otf/.woff/.woff2 (absolute path, copied into public/fonts/, or a path under public/), family and weight guessed from the file name ("Helvetica-Bold.ttf" → Helvetica 700) unless given; then name that family in caption_font / display_font. style = how this client edits, written from their words — a flexible JSON: notes (free text), captions on|off, pack, grade {look, intensity, auto, adjust {exposure, contrast, saturation, temperature, tint}, highlights, skin, lut, lutMix}, pace, transitions, music, broll, audio {clean, sfx}, plus any other named preference (string / number / boolean); merged key by key, null removes a key. Loading a kit (from) or passing style applies its captions / grade / audio and its pack to this project (the pack as set_caption_style does: generated captions are re-paged; apply_style false = only store it); reel-plan reads it (get_project shows it, style_kits lists the saved ones). Change only what you pass. from = start from a saved kit; save_as = save this kit for other projects; clear = remove the kit.${savedBrands().length ? ` Saved kits: ${savedBrands().join(', ')}.` : ''}`, inputSchema: {project_id: pid, accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), dark: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), light: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(), display_font: z.string().optional().describe('catalog family or a client font family from font_files'), caption_font: z.string().optional().describe('catalog family or a client font family from font_files (applies to sans caption packs)'), font_files: z.array(z.object({path: z.string(), family: z.string().max(40).optional(), weight: z.number().int().min(100).max(900).optional(), italic: z.boolean().optional()})).max(8).optional().describe('the client\'s own font files'), drop_fonts: z.array(z.string()).optional().describe('client font families to remove from the kit'), logo: z.string().optional().describe('image path under public/ or an absolute file path (copied in)'), style: z.record(z.string(), z.any()).optional().describe('partial style spec, merged into the kit\'s (null removes a key)'), glossary: z.array(z.object({term: z.string(), variants: z.array(z.string()).optional(), note: z.string().optional()})).optional().describe('the client\'s spellings, replacing the kit\'s list ([] clears it): the captions pipeline respells every variant as its term ("Alta Brisa" → "Altabrisa", "Esther Médica" → "Star Médica"); re-page (set_caption_style) to apply it to existing captions'), apply_style: z.boolean().default(true), name: z.string().max(40).optional(), from: z.string().optional(), save_as: z.string().optional(), clear: z.boolean().default(false)}}, async ({project_id, accent, dark, light, display_font, caption_font, font_files, drop_fonts, logo, style, glossary, apply_style, name, from, save_as, clear}) => {
   const p = load(project_id);
   if (clear) { p.brand = null; await save(project_id, p); return text('Brand kit removed (caption packs use their own palette again)'); }
   let b;
@@ -435,10 +435,12 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
   if (style) {
     try { b.style = mergeStyle(b.style, style); } catch (e) { throw new Error(`style: ${e.issues?.map((i) => `${i.path.join('.')} ${i.message}`).join('; ') ?? e.message}`); }
   }
+  if (glossary) b.glossary = glossary.length ? glossary : undefined;
   const r = brandSchema.safeParse(b);
   if (!r.success) throw new Error(`brand: ${r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; ')}`);
+  const glossaryChanged = JSON.stringify(p.brand?.glossary ?? []) !== JSON.stringify(r.data.glossary ?? []);
   p.brand = r.data; p.accentColor = r.data.colors.accent;
-  // the kit's style on this project: captions, color and audio now; the pack is a job — say it
+  // the kit's style on this project: captions, color, audio and its pack (re-paged as set_caption_style does)
   const applied = [];
   if (apply_style && (from || style) && r.data.style) {
     const fx = styleEffects(r.data.style);
@@ -451,7 +453,9 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
       if (p.clips.length) await settleGrade(p);
       applied.push('color');
     }
-    if (fx.pack && fx.pack !== p.captionStyle) applied.push(`pack ${fx.pack} → call set_caption_style ${fx.pack}`);
+    // the same pack re-pages too when the kit brings another glossary (its spellings reach the captions)
+    if (fx.pack && (fx.pack !== p.captionStyle || glossaryChanged)) { await applyPack(p, fx.pack); applied.push(`pack ${fx.pack}${p.captions.length ? ' (captions re-paged)' : ''}`); }
+    else if (r.data.style.pack && !fx.pack) applied.push(`pack "${r.data.style.pack}" is not a caption pack — not applied`);
   }
   let saved = '';
   if (save_as) { fs.mkdirSync(BRANDS, {recursive: true}); fs.writeFileSync(path.join(BRANDS, `${slug(save_as)}.json`), JSON.stringify({...r.data, name: r.data.name ?? save_as}, null, 2)); saved = ` — saved as "${slug(save_as)}"`; }
@@ -823,6 +827,9 @@ async function wordAt(p, wid, tr) {
 server.registerTool('get_transcript', {description: 'Word-level transcript of every clip, in timeline order. Each word is `i:word` where i indexes the clip\'s SOURCE transcript; refer to words as "<source>:<i>" in other tools — never by seconds. `[pause 0.8s]` marks gaps; `[spk1]` / `[spk2]` mark a change of speaker when the clip has more than one voice (diarization); `[off-mic: …]` wraps words of a quieter second voice away from the mic (someone behind the camera feeding lines — not the presenter). Transcribes on first call (cached per source; needs the backend).', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const tr = await transcript(p);
+  // a source transcribed again (Deepgram after WhisperX): the project moves to the ids printed here (src/paging.ts moveIds)
+  const m = moveIds(p.captions, tr.flatMap((t) => t.words.map((w) => ({wid: `${t.source}:${w.i}`, word: w.word, ...(w.was != null ? {was: `${t.source}:${w.was}`} : {})}))), p.hiddenWids);
+  if (m.captions !== p.captions) { p.captions = m.captions; p.hiddenWids = m.hidden; await save(project_id, p); }
   const out = [];
   let offCount = 0;
   for (const pc of place(p.clips)) {
@@ -1016,22 +1023,25 @@ server.registerTool('delete_graphics', {description: 'Delete graphics by id.', i
   const p = load(project_id); const gone = new Set(graphic_ids); p.graphics = p.graphics.filter((g) => !gone.has(g.id)); await save(project_id, p); return text(`Deleted ${graphic_ids.join(', ')}`);
 });
 
+// the pack on a project (set_caption_style, and a brand kit that names one: set_brand): the style,
+// then the generated pages re-paged for it — tiers, hand-made pages and deleted words survive; a new
+// pack proposes its own key words where the old one's were only proposed (src/paging.ts repage)
+async function applyPack(p, style) {
+  const repropose = style !== p.captionStyle;
+  p.captionStyle = style;
+  if (!p.clips.length || !p.captions.length) return;
+  await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions, repropose), guion: p.guion, glossary: p.brand?.glossary ?? []}); // the pager sees the project's emphasis (a highlighted name stays one unit)
+  const fresh = readPublic('captions.multi.json');
+  const r = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true, repropose});
+  p.captions = r.captions; p.hiddenWids = r.hidden;
+}
 server.registerTool('set_caption_style', {description: `The STYLE PACK of the reel — one of the 20 Captions.ai looks, or the three real-estate references. A pack sets the caption look, the palette and faces (unless a brand kit or a project accent is set), the family of transitions, how B-roll cues arrive and leave, and the frame the style lives in. Packs: ${Object.values(PACKS).map((x) => `${x.id} = ${x.desc} [cuts: ${x.transition}${x.brollMode ? `, B-roll: ${x.brollMode}` : ''}${x.layout ? `, frame: ${x.layout.shape} on ${x.layout.canvas}` : ''}]`).join('; ')}. References: ${['palabra', 'caja', 'tracked'].map((id) => `${id} = ${PRESETS[id].desc}`).join('; ')}. Re-pages the generated captions for the new pack, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
-  const p = load(project_id); p.captionStyle = style;
-  if (p.clips.length && p.captions.length) {
-    await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion}); // the pager sees the project's emphasis (a highlighted name stays one unit)
-    const fresh = readPublic('captions.multi.json');
-    // generated pages are re-paged; hand-made ones, deleted words and tiers survive
-    // (a project from before word ids has no way to tell: everything is re-paged)
-    const legacy = !p.captions.some((c) => c.words.some((w) => w.wid));
-    const merged = mergeCaptions(legacy ? [] : p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true});
-    p.captions = reapplyTiers(p.captions, merged.captions);
-  }
+  const p = load(project_id); await applyPack(p, style);
   await save(project_id, p);
   return text(`Caption style: ${style} (${p.captions.length} pages)\n\n${summary(project_id, p)}`);
 });
 
-server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = the pack\'s key-word treatment (bigger, bold italic gradient, pill or block, script…) — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); 2 = the pack\'s hero treatment (largest; in prism the footage blurs behind the word) — rare, at most one per 10 s, on the one word the reel is about. Never on function words. emoji = one emoji that pops in after the word (money → 💰; "" removes it) — a few per reel, on concrete nouns and feelings, never on function words. Returns each word it touched (check the text matches what you meant) plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2).optional(), emoji: z.string().max(16).optional()})).min(1)}}, async ({project_id, items}) => {
+server.registerTool('annotate_captions', {description: 'Set per-word emphasis by word id ("<source>:<i>" from get_transcript). tier 0 = plain; 1 = the pack\'s key-word treatment (bigger, bold italic gradient, pill or block, script…) — sparing, 1–2 per sentence, only meaning words (numbers, names, claims, the punchline); in vibem every figure, date, place, name, amenity, property noun and the CTA, as in César\'s v11; 2 = the pack\'s hero treatment (largest; in prism the footage blurs behind the word) — rare, at most one per 10 s, on the one word the reel is about. Never on function words. emoji = one emoji that pops in after the word (money → 💰; "" removes it) — a few per reel, on concrete nouns and feelings, never on function words. Returns each word it touched (check the text matches what you meant) plus warnings.', inputSchema: {project_id: pid, items: z.array(z.object({wid: z.string(), tier: z.number().int().min(0).max(2).optional(), emoji: z.string().max(16).optional()})).min(1)}}, async ({project_id, items}) => {
   const p = load(project_id);
   for (const x of items) if (x.emoji && !oneEmoji(x.emoji)) throw new Error(`${x.wid}: emoji must be exactly one emoji, got "${x.emoji}"`);
   const want = new Map(items.map((x) => [x.wid, x]));
@@ -1039,7 +1049,7 @@ server.registerTool('annotate_captions', {description: 'Set per-word emphasis by
   for (const c of p.captions) for (const w of c.words) if (w.wid && want.has(w.wid)) {
     const {tier, emoji} = want.get(w.wid);
     if ((tier || emoji) && isGlue(w.text)) warn.push(`${w.wid} "${w.text}": ${emoji ? 'emoji' : 'emphasis'} on a function word`);
-    if (tier != null) w.tier = tier;
+    if (tier != null) { w.tier = tier; delete w.proposed; } // set by hand: the project's own from now on
     if (emoji != null) { if (emoji) w.emoji = emoji; else delete w.emoji; }
     applied.push(`${w.wid} "${w.text}"${tier != null ? ` tier ${tier}` : ''}${emoji != null ? ` ${emoji || 'no emoji'}` : ''}`); want.delete(w.wid);
   }
@@ -1051,7 +1061,7 @@ server.registerTool('annotate_captions', {description: 'Set per-word emphasis by
   return text(`Applied ${applied.length}: ${applied.join('; ')}${warn.length ? '\nWARN ' + warn.join('\nWARN ') : ''}\n\n${summary(project_id, p)}`);
 });
 
-server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline step on the project, exactly like the editor buttons, and apply the result. autocut = remove silence/pauses (splits clips into segments); captions = WhisperX words → caption pages + face-aware placement (keeps existing captions on clips that already have them). Ordering takes, emphasis and B-roll are YOUR job: use get_transcript, reorder_clips/delete_clips, edit_caption, search_stock/add_broll. Needs the backend (npm start).', inputSchema: {project_id: pid, step: z.enum(['autocut', 'captions'])}}, async ({project_id, step}) => {
+server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline step on the project, exactly like the editor buttons, and apply the result. autocut = remove silence/pauses (splits clips into segments); captions = WhisperX words → caption pages + face-aware placement (keeps existing captions on clips that already have them), with key words (tier 1) proposed by the pack\'s rules for words the project does not show yet — the project\'s own tiers are never re-derived. Ordering takes, adjusting emphasis and B-roll are YOUR job: use get_transcript, reorder_clips/delete_clips, edit_caption, search_stock/add_broll. Needs the backend (npm start).', inputSchema: {project_id: pid, step: z.enum(['autocut', 'captions'])}}, async ({project_id, step}) => {
   let p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const lang = p.lang ?? 'auto';
   if (step === 'autocut') {
@@ -1060,8 +1070,8 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion}); const fresh = readPublic('captions.multi.json');
-  const {captions, added} = mergeCaptions(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; await save(project_id, p);
+  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion, glossary: p.brand?.glossary ?? []}); const fresh = readPublic('captions.multi.json');
+  const {captions, added, hidden} = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; p.hiddenWids = hidden; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 
