@@ -42,7 +42,7 @@ export function normalizeLoudness(file, clean = 'off') {
     const tmp = file.replace(/\.mp4$/, '.loudnorm.mp4');
     // the cleanup runs once (first pass); later passes only re-normalize
     const af = `${attempt === 0 ? pre : ''}loudnorm=I=${TARGET.I}:TP=${aim.toFixed(1)}:LRA=${TARGET.LRA}:measured_I=${m.I}:measured_TP=${m.TP}:measured_LRA=${m.LRA}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true`;
-    const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp]);
+    const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', tmp]); // the audio ends with the picture (a render's AAC could run ~0.2 s past it and fail the duration gate)
     if (r.status !== 0) { fs.rmSync(tmp, {force: true}); return {ok: false, error: `loudnorm failed: ${r.stderr.trim().split('\n').pop()}`}; }
     fs.renameSync(tmp, file);
     m = measureLoudness(file);
