@@ -208,6 +208,18 @@ export function lutBakes(pg: ProjectGrade | null | undefined, clips: {id: string
   return [...out.values()];
 }
 
+// a LUT create_lut made, on the whole reel or as the override of one clip / source (set_grade's target); like = the
+// clip whose own grade the target takes over, this LUT in front at full mix (create_lut match: the head gets its
+// continuation's grade — its old knobs go, they were compensating for the missing grade)
+// ponytail: the pairs are read from the raw source, so a continuation with its own LUT is not composed in; compose
+// sampleCube(its LUT, match) when one does
+export function withLut(pg: ProjectGrade | null | undefined, lut: string, target?: string, like?: string): ProjectGrade {
+  const g: ProjectGrade = pg ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  if (!target) return {...g, lut};
+  const {lut: _lut, lutMix: _mix, ...own} = (like ? g.overrides?.[like] : undefined) ?? {};
+  return {...g, overrides: {...g.overrides, [target]: like ? {...own, lut, lutMix: 1} : {...g.overrides?.[target], lut}}};
+}
+
 // the sources whose automatic correction is on (to measure)
 export const autoSources = (pg: ProjectGrade | null | undefined, clips: {id: string; src: string}[]) =>
   pg ? [...new Set(clips.filter((c) => paramsFor(pg, c.src, c.id).auto).map((c) => c.src))] : [];

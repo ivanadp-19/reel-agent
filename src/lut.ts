@@ -1,12 +1,14 @@
-// 3D LUTs (.cube): read, sample, mix toward identity, and MAKE one from
-// reference photos. The reference transfer is a deterministic color-statistics
-// match in Oklab (no model): lightness by quantiles (the tone curve of the
-// references), chroma a/b by mean and spread (their palette), eased by a
-// strength and bounded so it cannot wreck footage. The footage side comes from
-// frames of the project's own clips. Pure: pixels in, .cube text out; the ffmpeg
-// decoding lives in scripts/lut.mjs.
+// 3D LUTs (.cube): read, sample, mix toward identity, and MAKE one — from
+// reference photos, or by matching one clip to another. The reference transfer
+// is a deterministic color-statistics match in Oklab (no model): lightness by
+// quantiles (the tone curve of the references), chroma a/b by mean and spread
+// (their palette), eased by a strength and bounded so it cannot wreck footage.
+// The footage side comes from the frames the reel shows of the project's clips
+// (lutSpans). The match (fitCube) fits pixel pairs of the same scene. Pure:
+// pixels in, .cube text out; the ffmpeg decoding lives in scripts/lut.mjs.
 
 import {cube} from './hdr.ts';
+import {continuesPrev, type Clip} from './timeline.ts';
 
 type RGB = [number, number, number];
 export type Cube = {size: number; data: Float32Array; title?: string}; // size³ × 3, red fastest
@@ -131,3 +133,87 @@ export function cubeFromReferences(footage: LabStats, ref: LabStats, name: strin
   return cube(transferFn(footage, ref, opts), size, name);
 }
 
+
+// ---- what a LUT is measured on: the ranges the reel shows (create_lut, the Color section) ----
+export type Span = {id: string; src: string; inSec: number; outSec: number};
+const span = (c: Clip): Span => ({id: c.id, src: c.src, inSec: c.inSec, outSec: c.outSec});
+// every clip, or one clip (or the clips of one source): its range of the source, not the source from t = 0
+export function lutSpans(clips: Clip[], target?: string): Span[] {
+  const out = clips.filter((c) => !target || c.id === target || c.src === target).map(span);
+  if (!out.length) throw new Error(target ? `no clip or source "${target}"` : 'the project has no clips to measure the footage from');
+  return out;
+}
+// create_lut match: the clip to fix and the one it must look like — by default the clip that continues it in the
+// same source (a shot a pre-edit graded only from its second part on, split at the change: the head, then the rest)
+export function matchPair(clips: Clip[], clipId: string, toClipId?: string): {from: Span; to: Span} {
+  const i = clips.findIndex((c) => c.id === clipId);
+  if (i < 0) throw new Error(`no clip ${clipId}`);
+  const to = toClipId ? clips.find((c) => c.id === toClipId && c.id !== clipId) : continuesPrev(clips[i], clips[i + 1]) ? clips[i + 1] : undefined;
+  if (!to) throw new Error(toClipId ? `no other clip ${toClipId}` : `the next clip does not continue ${clipId} in the same source — pass to_clip_id`);
+  return {from: span(clips[i]), to: span(to)};
+}
+
+// ---- match: a LUT fitted on pixel pairs ----
+// x → y (RGB 0–1, interleaved): the same pixels of the same scene without and with the look (the head a pre-edit
+// left ungraded against the graded frames right after it). Least squares per output channel on a second-order
+// polynomial of luma and chroma (BT.709 Y, B − Y, R − Y, standardized): a tone curve (Y, Y²) and a chroma gain that
+// may change with luma (Cb, Cr, Y·Cb, Y·Cr). No Cb², Cr², Cb·Cr: real pairs span a thin range of chroma, and those
+// terms fit its noise — what blew up out of sample. BOUNDED: the polynomial is evaluated only inside the colors the
+// pairs cover (their luma range and, per hue sector, their chroma radius plus one cube cell, so the nodes around the
+// data carry its gain) and carried beyond at slope 1: a color the pairs never showed gets the correction of the
+// nearest one they did, never an extrapolated one (the cyan / magenta blotches in a sky). Then each channel is made
+// monotone along its own axis. Identity pairs give the identity.
+function solve(A: number[][], v: number[]): number[] { // Gaussian elimination, partial pivoting
+  const n = v.length, a = A.map((r, i) => [...r, v[i]]);
+  for (let i = 0; i < n; i++) {
+    let m = i;
+    for (let k = i + 1; k < n; k++) if (Math.abs(a[k][i]) > Math.abs(a[m][i])) m = k;
+    [a[i], a[m]] = [a[m], a[i]];
+    for (let k = i + 1; k < n; k++) { const t = a[k][i] / a[i][i]; for (let j = i; j <= n; j++) a[k][j] -= t * a[i][j]; }
+  }
+  const w = new Array<number>(n);
+  for (let i = n - 1; i >= 0; i--) { let s = a[i][n]; for (let j = i + 1; j < n; j++) s -= a[i][j] * w[j]; w[i] = s / a[i][i]; }
+  return w;
+}
+const KR = 0.2126, KB = 0.0722, KG = 1 - KR - KB;
+const toYC = ([r, g, b]: RGB): RGB => { const y = KR * r + KG * g + KB * b; return [y, b - y, r - y]; };
+const fromYC = ([y, cb, cr]: RGB): RGB => { const r = y + cr, b = y + cb; return [r, (y - KR * r - KB * b) / KG, b]; };
+const SECTORS = 12;
+const hue = (cb: number, cr: number) => ((Math.atan2(cr, cb) + Math.PI) / (2 * Math.PI)) * SECTORS; // 0…SECTORS
+
+export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, title = 'match'} = {}): string {
+  const n = Math.floor(x.length / 3);
+  if (n < 64 || y.length !== x.length) throw new Error('not enough pixel pairs to fit a LUT');
+  const yc = Array.from({length: n}, (_, i) => toYC([x[i * 3], x[i * 3 + 1], x[i * 3 + 2]]));
+  const mean = [0, 1, 2].map((c) => yc.reduce((s, p) => s + p[c], 0) / n);
+  const sd = [0, 1, 2].map((c) => Math.sqrt(yc.reduce((s, p) => s + (p[c] - mean[c]) ** 2, 0) / n) || 1);
+  const feat = (p: RGB) => { const [l, u, v] = p.map((w, c) => (w - mean[c]) / sd[c]); return [1, l, u, v, l * l, l * u, l * v]; };
+  const K = 7, A = Array.from({length: K}, () => new Array<number>(K).fill(0)), B = [0, 1, 2].map(() => new Array<number>(K).fill(0));
+  for (let i = 0; i < n; i++) {
+    const f = feat(yc[i]);
+    for (let a = 0; a < K; a++) { for (let b = 0; b < K; b++) A[a][b] += f[a] * f[b]; for (let c = 0; c < 3; c++) B[c][a] += f[a] * y[i * 3 + c]; }
+  }
+  for (let a = 0; a < K; a++) A[a][a] += 1e-6 * n; // a whisker of ridge: flat footage stays solvable
+  const W = B.map((v) => solve(A, v));
+  if (!W.flat().every(Number.isFinite)) throw new Error('the pixel pairs do not determine a color map');
+  // the colors the pairs cover: luma 1–99 %; per hue sector with data (≥ 0.2 % of the pairs) its 99 % chroma radius
+  const at = (s: ArrayLike<number>, t: number) => s[Math.round(t * (s.length - 1))];
+  const L = Float64Array.from(yc, (p) => p[0]).sort(), rad: number[][] = Array.from({length: SECTORS}, () => []);
+  for (const [, u, v] of yc) rad[Math.floor(hue(u, v)) % SECTORS].push(Math.hypot(u, v));
+  const lo = at(L, 0.01), hi = at(L, 0.99);
+  const lim = rad.map((r) => (r.length < n * 0.002 ? 0 : at(r.sort((a, b) => a - b), 0.99)) + 1 / (size - 1));
+  const fit = (p: RGB): RGB => {
+    const [l, u, v] = toYC(p);
+    const t = hue(u, v) - 0.5, k = Math.floor(t), f = t - k; // between the two nearest sector centers
+    const r = lim[(k + SECTORS) % SECTORS] * (1 - f) + lim[(k + 1) % SECTORS] * f, rho = Math.hypot(u, v);
+    const s = rho > r ? r / rho : 1;
+    const q = [Math.min(hi, Math.max(lo, l)), u * s, v * s] as RGB, o = feat(q), qr = fromYC(q);
+    return [0, 1, 2].map((c) => W[c].reduce((acc, w, j) => acc + w * o[j], 0) + p[c] - qr[c]) as RGB;
+  };
+  const m = size, data = new Float64Array(m ** 3 * 3), step = [1, m, m * m];
+  for (let i = 0; i < m ** 3; i++) data.set(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)]), i * 3);
+  // monotone: a channel never falls while its own input rises (a dip of the fit becomes a flat step)
+  for (let i = 0; i < m ** 3; i++) for (let c = 0; c < 3; c++) if (Math.floor(i / step[c]) % m > 0) data[i * 3 + c] = Math.max(data[i * 3 + c], data[(i - step[c]) * 3 + c]);
+  const node = (v: number) => Math.round(v * (m - 1));
+  return cube(([r, g, b]) => { const i = ((node(b) * m + node(g)) * m + node(r)) * 3; return [data[i], data[i + 1], data[i + 2]]; }, m, title);
+}

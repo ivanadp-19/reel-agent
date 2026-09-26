@@ -1,7 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {cube} from '../src/hdr.ts';
-import {labStats, mixCube, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
+import {fitCube, labStats, lutSpans, matchPair, mixCube, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
+import {withLut} from '../src/grade.ts';
+import {decode} from '../scripts/lut.mjs';
 
 const close = (a, b, e = 2e-3) => a.every((v, i) => Math.abs(v - b[i]) < e);
 
@@ -34,4 +40,95 @@ test('reference transfer: warm, contrasty references pull flat, cool footage tow
   for (let v = 0; v <= 1.0001; v += 0.05) { const L = rgbToOklab(f([v, v, v]))[0]; assert.ok(L >= prev - 1e-6, `L at ${v}`); prev = L; }
   // strength 0 = identity
   assert.ok(close(transferFn(footage, refs, {strength: 0})([0.4, 0.5, 0.6]), [0.4, 0.5, 0.6], 1e-4));
+});
+
+// ---- match (fitCube): pixel pairs → a bounded .cube ----
+const rand = (() => { let a = 7; return () => ((a = (a * 1664525 + 1013904223) >>> 0) / 2 ** 32); })(); // deterministic
+const pairsOf = (n, pick, map) => { const x = new Float32Array(n * 3), y = new Float32Array(n * 3); for (let i = 0; i < n; i++) { const p = pick(); x.set(p, i * 3); y.set(map(p), i * 3); } return {x, y}; };
+const affine = (M, o) => (p) => M.map((row, c) => row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + o[c]);
+
+test('fitCube recovers a known matrix + offset where the pairs are, and identity pairs give the identity', () => {
+  const f = affine([[0.9, 0.12, -0.02], [0.05, 0.85, 0.05], [-0.03, 0.1, 0.8]], [0.04, 0.02, 0.07]);
+  const {x, y} = pairsOf(20000, () => [0.1 + 0.8 * rand(), 0.1 + 0.8 * rand(), 0.1 + 0.8 * rand()], f);
+  const l = parseCube(fitCube(x, y));
+  for (const p of [[0.3, 0.5, 0.7], [0.6, 0.4, 0.2], [0.5, 0.5, 0.5]]) assert.ok(close(sampleCube(l, p), f(p), 3e-3), String(p));
+  const id = parseCube(fitCube(x, x));
+  for (const p of [[0.3, 0.5, 0.7], [0, 0, 0], [1, 1, 1], [1, 0, 0.2], [0.05, 0.95, 0.5]]) assert.ok(close(sampleCube(id, p), p, 3e-3), `identity at ${p}`);
+});
+
+test('fitCube is bounded out of sample: a color the pairs never showed gets the correction of the nearest one they did', () => {
+  // flat, almost gray footage (a camera log profile) → ×5 saturation and a lift: what a pre-edit's grade does to its head
+  const K = [0.2126, 0.7152, 0.0722], grade = (p) => { const Y = K[0] * p[0] + K[1] * p[1] + K[2] * p[2]; return p.map((v) => Y + 5 * (v - Y) + 0.1); };
+  const {x, y} = pairsOf(20000, () => { const t = 0.25 + 0.45 * rand(); return [t + 0.03 * (rand() - 0.5), t + 0.03 * (rand() - 0.5), t + 0.03 * (rand() - 0.5)]; }, grade);
+  let seen = 0; for (let i = 0; i < x.length; i++) seen = Math.max(seen, Math.abs(y[i] - x[i]));
+  const l = parseCube(fitCube(x, y));
+  assert.ok(close(sampleCube(l, [0.45, 0.46, 0.44]), grade([0.45, 0.46, 0.44]), 0.01), 'in sample it is the grade');
+  // over the whole cube (saturated colors the footage never had): the unbounded fit pushes [0.5, 0.9, 0.5] by −0.5
+  // in red; bounded, no correction exceeds what the pairs showed plus the ×5 gain over the one cube cell
+  // the fit reaches past them (so the nodes around the data carry its gain)
+  let worst = 0;
+  for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++) for (let k = 0; k <= 10; k++) {
+    const p = [i / 10, j / 10, k / 10], o = sampleCube(l, p);
+    for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs(o[c] - p[c]));
+  }
+  assert.ok(worst <= seen + 4 / 32 + 0.01, `worst correction ${worst.toFixed(3)} vs ${seen.toFixed(3)} seen in the pairs`);
+  // and monotone: no channel falls while its own input rises
+  for (let n = 0; n < l.size ** 3; n++) for (const [c, step] of [[0, 1], [1, l.size], [2, l.size ** 2]]) {
+    if (Math.floor(n / step) % l.size > 0) assert.ok(l.data[n * 3 + c] >= l.data[(n - step) * 3 + c] - 1e-6, `node ${n} channel ${c}`);
+  }
+});
+
+test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, its grade taken over', () => {
+  const clips = [{id: 'a', src: 'clips/x.mp4', inSec: 0, outSec: 8.87}, {id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}, {id: 'rest', src: 'clips/x.mp4', inSec: 9.204, outSec: 12.47}, {id: 'other', src: 'clips/y.mp4', inSec: 0, outSec: 3}];
+  assert.deepEqual(lutSpans(clips, 'head'), [{id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}]);
+  assert.equal(lutSpans(clips).length, 4);
+  assert.equal(lutSpans(clips, 'clips/x.mp4').length, 3);
+  assert.throws(() => lutSpans(clips, 'nope'), /no clip/);
+  assert.equal(matchPair(clips, 'head').to.id, 'rest');
+  assert.equal(matchPair(clips, 'head', 'a').to.id, 'a');
+  assert.throws(() => matchPair(clips, 'rest'), /to_clip_id/); // the next clip is another source
+  const g = {look: 'none', intensity: 0.8, auto: false, bySrc: {}, lutMix: 0.5, overrides: {head: {adjust: {saturation: 2}, lut: 'luts/old.cube', lutMix: 0.5}, rest: {adjust: {contrast: 1.4}, highlights: 0.4}}};
+  assert.deepEqual(withLut(g, 'luts/m.cube', 'head', 'rest').overrides.head, {adjust: {contrast: 1.4}, highlights: 0.4, lut: 'luts/m.cube', lutMix: 1});
+  assert.deepEqual(withLut(g, 'luts/r.cube', 'rest').overrides.rest, {adjust: {contrast: 1.4}, highlights: 0.4, lut: 'luts/r.cube'});
+  assert.equal(withLut(null, 'luts/r.cube').lut, 'luts/r.cube');
+});
+
+// ---- ffmpeg: decoding the frames the reel shows, and the bake ----
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lut-'));
+const ff = (args) => { const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...args], {encoding: 'utf8'}); assert.equal(r.status, 0, r.stderr); };
+const x264 = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '12', '-pix_fmt', 'yuv420p', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709'];
+
+test('two clips of one source are measured on their own ranges — the frame nearest each time, as the reel shows it', () => {
+  const dir = tmp(), file = path.join(dir, 's.mp4');
+  // 30 fps: frames 0–9 dark gray, from frame 10 (0.333 s) orange — a split 1/3 frame later, at 0.3433 s, like a
+  // shot-change split: the reel shows frame 10 at the split time (nearest), so it belongs to the second clip
+  ff(['-f', 'lavfi', '-i', "color=c=0x303030:s=160x284:r=30:d=1,drawbox=c=0xd08040:t=fill:enable='gte(n\\,10)'", ...x264, file]);
+  const clips = [{id: 'a', src: file, inSec: 0, outSec: 0.3433}, {id: 'b', src: file, inSec: 0.3433, outSec: 1}];
+  const [a] = lutSpans(clips, 'a'), [b] = lutSpans(clips, 'b');
+  const fa = decode(file, {span: a, count: 0}), fb = decode(file, {span: b, count: 0});
+  assert.equal(fa.length, 10);
+  const red = (px) => px[0]; // first pixel's red
+  assert.ok(red(fa.at(-1)) < 0.3 && red(fb[0]) > 0.7, `a ends dark (${red(fa.at(-1))}), b starts orange (${red(fb[0])})`);
+  const sa = labStats(decode(file, {span: a, count: 4}).flatMap((f) => [...f])), sb = labStats(decode(file, {span: b, count: 4}).flatMap((f) => [...f]));
+  assert.ok(sb.q[10] - sa.q[10] > 0.2 && sb.a[0] - sa.a[0] > 0.05, 'different footage stats');
+  fs.rmSync(dir, {recursive: true, force: true});
+});
+
+const yuvAvg = (file) => {
+  const out = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-vf', 'signalstats,metadata=print:file=-', '-f', 'null', '-'], {encoding: 'utf8'}).stdout;
+  return ['YAVG', 'UAVG', 'VAVG'].map((k) => { const v = [...out.matchAll(new RegExp(`${k}=([\\d.]+)`, 'g'))].map((m) => +m[1]); return v.reduce((s, x) => s + x, 0) / v.length; });
+};
+test('an identity .cube bakes without loss (planar float around lut3d, not 8-bit RGB)', () => {
+  const dir = tmp(), pub = path.join(dir, 'public');
+  fs.mkdirSync(path.join(pub, 'clips'), {recursive: true}); fs.mkdirSync(path.join(pub, 'luts'));
+  // footage-like saturation (fully saturated primaries clip at the gamut edge in any RGB round trip)
+  ff(['-f', 'lavfi', '-i', 'testsrc2=s=320x568:r=30:d=1,hue=s=0.5', ...x264, path.join(pub, 'clips', 'a.mp4')]);
+  fs.writeFileSync(path.join(pub, 'luts', 'id.cube'), cube((c) => c, 33, 'id'));
+  fs.writeFileSync(path.join(dir, 'job.json'), JSON.stringify({bake: [{key: 'k', src: 'clips/a.mp4', lut: 'luts/id.cube', mix: 1}]}));
+  const r = spawnSync('node', [path.resolve(import.meta.dirname, '../scripts/lut.mjs'), 'job.json', 'out.json'], {cwd: dir, encoding: 'utf8'});
+  assert.equal(r.status, 0, r.stderr);
+  const baked = JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')).baked.k;
+  const [src, out] = [path.join(pub, 'clips', 'a.mp4'), path.join(pub, baked)].map(yuvAvg);
+  src.forEach((v, c) => assert.ok(Math.abs(out[c] - v) <= 0.3, `${['Y', 'U', 'V'][c]} ${v.toFixed(2)} → ${out[c].toFixed(2)}`));
+  fs.rmSync(dir, {recursive: true, force: true});
 });
