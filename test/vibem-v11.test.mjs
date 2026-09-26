@@ -78,6 +78,10 @@ test('vibem: a highlighted figure is its own page, a plain one still merges; "de
   const said = ['Esto', 'es', 'Montealbán', '326.'];
   assert.deepEqual(texts(pageWords(tw(said, {2: 1, 3: 1}), vibem)), ['Esto es Montealbán', '326']);
   assert.deepEqual(texts(pageWords(tw(said), vibem)), ['Esto es Montealbán 326']);
+  // a yellow figure with a comma after it ends its page; a plain one runs on
+  const list = ['Esto', 'es', 'Montealbán', '326,', '54', 'departamentos.'];
+  assert.deepEqual(texts(pageWords(tw(list, {2: 1, 3: 1, 4: 1, 5: 1}), vibem)), ['Esto es Montealbán', '326', '54 departamentos']);
+  assert.deepEqual(texts(pageWords(tw(list), vibem)), ['Esto es Montealbán', '326, 54 departamentos']);
   assert.deepEqual(texts(pageWords(tw(['a', 'poder', 'ver', 'desde', 'tu', 'departamento.']), vibem)), ['a poder ver desde', 'tu departamento']);
   // only vibem (layout.glueExcept): other packs still carry a dangling 'desde' onto the next page
   const mar = tw('Puedes ver el mar desde tu nuevo departamento en Mérida.'.split(' '));

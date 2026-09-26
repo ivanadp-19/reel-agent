@@ -356,12 +356,14 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const words = read('words.json'), exp = read('expected.json');
   const preset = presetOf(exp.pack);
   const fontFile = preset.font.custom && path.join(ROOT, 'public', preset.font.custom.file);
-  const measure = fontFile && fs.existsSync(fontFile) ? fontAdvances(fontFile) : null;
+  // the verdict needs the pack's real face: the width estimate would fail lines the renderer breaks right
+  if (fontFile && !fs.existsSync(fontFile)) { console.error(`golden: ${path.relative(ROOT, fontFile)} is missing — run \`npm run setup\` (or copy the client's licensed file there), then again`); process.exit(2); }
+  const measure = fontFile ? fontAdvances(fontFile) : null;
   if (measure) realAdvances(preset.font.custom.family, measure); // the page size as the renderer fits it
   let ok = true;
   if (!flags.includes('--b')) {
     const rows = layerA(words, exp, {measure});
-    console.log(table(`Layer A — ${path.basename(dir)}, pack ${exp.pack}${measure ? '' : ' (lines~ = width estimate: the pack\'s font file is missing)'}`, rows));
+    console.log(table(`Layer A — ${path.basename(dir)}, pack ${exp.pack}`, rows));
     ok &&= rows.every((r) => r.ok);
   }
   if (!flags.includes('--a')) {
