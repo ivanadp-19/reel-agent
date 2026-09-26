@@ -28,7 +28,6 @@ type Defaults = {arrive: BrollItem['arrive']; leave: BrollItem['leave']}; // the
 const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null; defaults?: Defaults}> = ({item, panel, defaults}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const fade = interpolate(frame, [0, Math.round(fps * 0.18)], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
   // a split layout owns the B-roll: it fills the panel, whatever the cue's mode
   const box: React.CSSProperties = panel
     ? {top: `${panel.top}%`, left: `${panel.left}%`, width: `${panel.width}%`, height: `${panel.height}%`, borderRadius: 36, overflow: 'hidden'}
@@ -51,7 +50,6 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const arriveK = item.arrive ?? defaults?.arrive ?? 'cut', leaveK = item.leave ?? defaults?.leave ?? 'cut';
   const inFx = brollIn(arriveK, frame, fps);
   const outFx = brollOut(leaveK, dur - 1 - frame, fps);
-  const boxed = arriveK !== 'cut' || leaveK !== 'cut';
   const move = [
     inFx.dx + outFx.dx || inFx.dy + outFx.dy ? `translate(${(inFx.dx + outFx.dx).toFixed(1)}%, ${(inFx.dy + outFx.dy).toFixed(1)}%)` : '',
     scale * inFx.scale * outFx.scale === 1 ? '' : `scale(${(scale * inFx.scale * outFx.scale).toFixed(3)})`,
@@ -81,7 +79,7 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   };
 
   return (
-    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: moving || card || boxed || carousel ? 1 : fade, transform: move || undefined, transformOrigin: origin, filter: boxBlur > 0.2 ? `blur(${boxBlur.toFixed(1)}px)` : undefined}}>
+    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: (inFx.opacity ?? 1) * (outFx.opacity ?? 1), transform: move || undefined, transformOrigin: origin, filter: boxBlur > 0.2 ? `blur(${boxBlur.toFixed(1)}px)` : undefined}}>
       {carousel ? (
         <div style={{position: 'absolute', inset: 0, transform: stepping ? `translateX(${(-104 * (1 - stepT)).toFixed(1)}%)` : undefined}}>{[-1, 0, 1].map((k) => panel3(k as -1 | 0 | 1))}</div>
       ) : (

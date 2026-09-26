@@ -4,7 +4,7 @@
 // splits, autocut segments, reorders, speed changes and duplicated takes all
 // keep the right words on screen — and words inside a removed range disappear.
 
-import {nextId, placeClips, type Clip} from './timeline.ts';
+import {continuesPrev, nextId, placeClips, type Clip, type PlacedClip} from './timeline.ts';
 
 export type CaptionWord = {
   wid?: string; // `${source}:${index}` from the transcript; absent on hand-typed words
@@ -50,29 +50,36 @@ export function normalizeCaption(c: Caption): Caption {
 
 // Source-relative captions → absolute timeline pages. A page whose words span a
 // cut becomes one page per clip; a source placed twice shows its captions twice.
+// Clips that continue each other (continuesPrev) are one stretch: a page across that join stays one page.
 export function projectCaptions(captions: Caption[], clips: Clip[], fps: number): Caption[] {
   const placed = placeClips(clips, fps);
+  const runs: PlacedClip[][] = [];
+  placed.forEach((pc, i) => (i && continuesPrev(placed[i - 1].clip, pc.clip) ? runs[runs.length - 1].push(pc) : runs.push([pc])));
   const out: Caption[] = [];
   for (const cap of captions) {
-    for (const pc of placed) {
-      if (pc.clip.src !== cap.src) continue;
-      const inMs = pc.clip.inSec * 1000;
-      const outMs = pc.clip.outSec * 1000;
-      // honoring playback speed (slow-mo stretches the words with the speech)
-      const speed = pc.clip.speed ?? 1;
+    for (const run of runs) {
+      const first = run[0], last = run[run.length - 1];
+      if (first.clip.src !== cap.src) continue;
+      const inMs = first.clip.inSec * 1000;
+      const outMs = last.clip.outSec * 1000;
       const sh = cap.shiftMs ?? 0; // a nudged page moves on the timeline, never out of its clip
-      const toAbs = (srcMs: number) => { const t = pc.startMs + (srcMs - inMs) / speed; return sh ? Math.min(pc.endMs, Math.max(pc.startMs, t + sh)) : t; };
+      const toAbs = (srcMs: number) => {
+        const pc = run.find((p) => srcMs < p.clip.outSec * 1000) ?? last;
+        // honoring playback speed (slow-mo stretches the words with the speech; a ramp changes it per piece)
+        const t = pc.startMs + (srcMs - pc.clip.inSec * 1000) / (pc.clip.speed ?? 1);
+        return sh ? Math.min(last.endMs, Math.max(first.startMs, t + sh)) : t;
+      };
       const words = cap.words
         .filter((w) => w.endMs > inMs && w.startMs < outMs)
         .map((w) => ({...w, startMs: toAbs(Math.max(w.startMs, inMs)), endMs: toAbs(Math.min(w.endMs, outMs))}));
       if (!words.length) continue;
       out.push({
         ...cap,
-        clipId: pc.clip.id,
+        clipId: first.clip.id, // the take's first piece: pages of one take compare as one (validate, guion)
         words,
         startMs: words[0].startMs,
-        endMs: Math.min(words[words.length - 1].endMs, pc.endMs),
-        holdMaxMs: pc.endMs,
+        endMs: Math.min(words[words.length - 1].endMs, last.endMs),
+        holdMaxMs: last.endMs,
       });
     }
   }

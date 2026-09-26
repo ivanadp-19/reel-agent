@@ -108,7 +108,8 @@ test('B-roll entries: slideUp rises 7–15 f with a strong ease-out, popFrom sca
   const p0 = brollIn('popFrom', 0, 30);
   assert.ok(p0.scale < 0.05 && brollIn('popFrom', 11, 30).scale === 1);
   assert.ok(brollIn('slideRight', 0, 30).dx > 90 && brollIn('slideRight', ms(30, BROLL_IN_MS.slideRight), 30).dx === 0);
-  assert.deepEqual(brollIn('cut', 0, 30), {dx: 0, dy: 0, scale: 1, blur: 0});
+  assert.deepEqual(brollIn('cut', 0, 30), {dx: 0, dy: 0, scale: 1, blur: 0}); // a hard cut: no fade
+  assert.ok(brollIn('fade', 0, 30).opacity === 0 && brollIn('fade', 6, 30).opacity === 1 && brollOut('fade', 0, 30).opacity === 0 && brollOut('fade', 6, 30).opacity === 1); // Linen: 5-frame crossfade in and out
 });
 
 test('B-roll exits: slideDown leaves through the bottom with motion blur in 5 f, shrink goes to 0 in 9 f', () => {
