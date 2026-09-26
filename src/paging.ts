@@ -106,6 +106,9 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     // every sentence starts with one ('…del Carmen. Está cerca' was one page); César: one page per sentence
     if (endsSentence(w.word, next?.word)) flush(true);
     else if (next && !sameClipNext) flush(); // clip boundary
+    // v11 (figurePages): a highlighted figure followed by a comma ends its page — '326,' stands alone,
+    // '54 departamentos' opens the next (Deepgram writes 'tres veintiséis, 54' where WhisperX put a period)
+    else if (figurePages && (w.tier ?? 0) > 0 && /^\d[\d.]*,$/.test(w.word)) flush();
     // v11 (keepCommas): a comma is text, not a page break
     else if (!glue(display) && !bonded(cur[cur.length - 1], next) && (full || gapAfter || (!keepCommas && CLAUSE_END.test(w.word)))) flush();
     else if (full && glue(display)) {
