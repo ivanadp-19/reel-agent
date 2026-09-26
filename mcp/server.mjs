@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, clipDurationSec, cutRange, locateSec, nextId, placeClips, reanchor, splitClip} from '../src/timeline.ts';
+import {applyAutocut, clipDurationSec, cutRange, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -498,9 +498,8 @@ server.registerTool('reorder_clips', {description: 'Set the timeline order. Clip
 });
 
 server.registerTool('trim_clip', {description: 'Change where a clip starts/ends inside its source file (seconds, source time). Captions and B-roll on trimmed-away parts disappear automatically.', inputSchema: {project_id: pid, clip_id: z.string(), in_sec: sec('new start inside the source').optional(), out_sec: sec('new end inside the source').optional()}}, async ({project_id, clip_id, in_sec, out_sec}) => {
-  const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
-  if (in_sec != null) c.inSec = Math.max(0, in_sec); if (out_sec != null) c.outSec = Math.min(c.sourceDurationSec, out_sec);
-  if (c.outSec - c.inSec < 0.2) throw new Error('clip would be shorter than 0.2 s');
+  const p = load(project_id); const r = trimClip(p.clips, clip_id, in_sec, out_sec); if ('error' in r) throw new Error(r.error);
+  p.clips = r.clips; const c = r.clip;
   await save(project_id, p); return text(`${clip_id}: ${f1(c.inSec)}–${f1(c.outSec)}s (${f1(clipDurationSec(c))}s on the timeline)`);
 });
 

@@ -6,7 +6,7 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -355,16 +355,11 @@ export const useEditor = create<EditorState>((set) => ({
       return {...withHistory(s), clips, meta: withMeta(s.meta, clips)};
     }),
 
-  // trim in/out (sec), clamped to [0, sourceDuration] with a 0.2s min length
+  // trim in/out (sec) by the shared rule (src/timeline.ts); a refused trim leaves the handle where it was
   trimClip: (id, inSec, outSec) =>
     set((s) => {
-      const clips = s.clips.map((c) => {
-        if (c.id !== id) return c;
-        const lo = Math.max(0, Math.min(inSec, c.sourceDurationSec - 0.2));
-        const hi = Math.min(c.sourceDurationSec, Math.max(outSec, lo + 0.2));
-        return {...c, inSec: lo, outSec: hi};
-      });
-      return {clips, meta: withMeta(s.meta, clips)};
+      const r = trimClipIn(s.clips, id, inSec, outSec);
+      return 'error' in r ? s : {clips: r.clips, meta: withMeta(s.meta, r.clips)};
     }),
 
   // clip audio: volume (no per-tick history — UI pushes once per gesture), mute toggle

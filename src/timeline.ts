@@ -161,6 +161,19 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
   return {clips: clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c])), newId, remap};
 }
 
+// Trim a clip to [inSec, outSec] inside its source (an omitted end stays put),
+// clamped to the source; a result under 0.2 s is refused, never stretched.
+// The one rule behind the editor's trim handles and the trim_clip tool.
+export function trimClip(clips: Clip[], clipId: string, inSec?: number, outSec?: number): {clips: Clip[]; clip: Clip} | {error: string} {
+  const c = clips.find((x) => x.id === clipId);
+  if (!c) return {error: `no clip ${clipId}`};
+  const lo = Math.max(0, inSec ?? c.inSec);
+  const hi = Math.min(c.sourceDurationSec, outSec ?? c.outSec);
+  if (hi - lo < 0.2 - 1e-9) return {error: `${clipId}: ${lo.toFixed(2)}–${hi.toFixed(2)}s would be shorter than 0.2 s (source is 0–${c.sourceDurationSec.toFixed(2)}s)`};
+  const clip = {...c, inSec: lo, outSec: hi};
+  return {clips: clips.map((x) => (x.id === clipId ? clip : x)), clip};
+}
+
 // short unique ids for pieces: base-s1, base-s2… (never base-s1-s3-s7 after repeated splits)
 export function uniqId(taken: Iterable<string>, base: string, tag: string): string {
   const set = new Set(taken);
