@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import {assembleWords, sourceKey} from './lib-transcribe.mjs';
 import {applyHighlights, heuristicClassify, guardHighlights, CLASSIFY_PROMPT} from '../src/highlights.ts';
 import {pageWords, withTiers, DEFAULT_TOP} from '../src/paging.ts';
+import {applyGuionPunctuation} from '../src/highlights.ts';
 import {reconcileWords, reconciliationLine} from '../src/guion.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
@@ -158,6 +159,14 @@ const highlights = await classifyHighlights(words);
 const nHl = applyHighlights(words, highlights);
 withTiers(words, tiers); // the project's emphasis pages with the words (a highlighted name is one unit)
 if (nHl) progress(85, `${nHl} highlight words`);
+// v11.1: sentence/clause punctuation from the guion onto the word stream, so pageWords
+// breaks at real phrase boundaries (whisper has none). Same source the classifier used.
+const guionPathP = process.env.REEL_GUION ?? (fs.existsSync(path.join(PUBLIC, 'guion.txt')) ? path.join(PUBLIC, 'guion.txt') : null);
+if (guionPathP) {
+  const nP = applyGuionPunctuation(words, fs.readFileSync(guionPathP, 'utf8'));
+  if (nP.marks || nP.starts) progress(86, `guion: ${nP.marks} punctuation marks, ${nP.starts} sentence starts`);
+}
+
 progress(88, 'Finding faces');
 const faces = detectFaces(clips);
 const topBySrc = Object.fromEntries(clips.map((c) => [c.src, faceToTop(faces[sourceKey(c)])]));

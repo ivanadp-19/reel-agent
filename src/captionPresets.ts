@@ -167,6 +167,19 @@ export const PRESETS: Record<string, Preset> = {
     layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true}, // reference-validated v11 values: v9's natural-phrase paging restored (César 11:12: v10.x cut phrases mid-clause). His reels: one line when it fits, 2 balanced lines when not; 3 lines / smaller size beat splitting a name (César 10:35)
     titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
   },
+  vibemReference: {
+    ...base,
+    id: 'vibemReference', label: 'VIBEM reference, progressive',
+    desc: 'White Helvetica Bold capitals, progressive centered words, yellow key phrase',
+    font: {family: 'Helvetica', custom: {family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700}, weight: 700, sizePx: 100, case: 'upper', trackingPx: -2, lineHeight: 1.05, wordGapEm: 0.22},
+    colors: {text: 'rgba(255,255,255,0.85)', dim: 'rgba(255,255,255,0.55)', accent: '#FFE500'},
+    shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
+    reveal: 'build', upcoming: 'collapse', pageIn: {type: 'none', ms: 0}, pageOut: 'cut',
+    wordIn: 'ccSlideUp', keyIn: 'highlightRise', holdMs: 250,
+    tiers: {1: {weight: 700, color: 'accent'}, 2: {weight: 700, color: 'accent'}},
+    layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true},
+    titles: {reveal: 'riseChars', out: 'cut'},
+  },
   // ---- Captions.ai-like packs ----
   prism: {
     ...base,

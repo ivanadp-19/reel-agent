@@ -126,7 +126,8 @@ export const MultiClipVideo: React.FC<{
   // the layered render (scripts/layers.mjs): 'captions' draws only the caption pages on a
   // transparent frame, to be laid over a master rendered with captionsOff
   layer?: 'all' | 'captions';
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false, layer = 'all'}) => {
+  captionsOnly?: boolean; // v11.1 alpha overlay (Root's CaptionOnly composition) = layer 'captions'
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false, layer = 'all', captionsOnly = false}) => {
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
@@ -153,7 +154,8 @@ export const MultiClipVideo: React.FC<{
   const Clip = getRemotionEnvironment().isRendering ? OffthreadVideo : Video;
 
   // the caption layer of a layered render: the same top caption track on a transparent frame, no footage, no audio
-  if (layer === 'captions') {
+  // (also v11.1's alpha overlay: PNG frames packed with prores_ks profile 4444 yuva444p10le)
+  if (layer === 'captions' || captionsOnly) {
     return (
       <BrandContext.Provider value={kit}>
         <AbsoluteFill>

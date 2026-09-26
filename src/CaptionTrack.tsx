@@ -166,7 +166,10 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
     if (next !== rects) setRects(next);
   });
   const boxes: number[][] = rects ? JSON.parse(rects) : [];
-  const onset = (i: number) => Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
+  const onset = (i: number) =>
+    preset.fastBuildMs != null
+      ? Math.round(((i * preset.fastBuildMs) / 1000) * fps)
+      : Math.round(((caption.words[i].startMs - caption.startMs) / 1000) * fps);
   let spokenIdx = -1;
   caption.words.forEach((w, i) => { if (frame >= onset(i)) spokenIdx = i; });
   const lastEndMs = spokenIdx >= 0 ? caption.words[spokenIdx].endMs : 0;
@@ -241,8 +244,9 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
         {box ? <div style={box} /> : null}
   {(() => {
         // César 10:35: a development name like 'Montealbán 326' must never split across lines.
-        // When layout.unbreakable, bonded pairs (Capitalized + Capitalized/digit) render inside a
-        // nowrap group so flex-wrap can never separate them, whatever the measured widths say.
+        // v10.2 exact-pair nowrap: bonded pairs (Capitalized + Capitalized/digit, name+number
+        // first, never chained — bondedPairs in src/captionLayout.ts) render inside a nowrap
+        // group so flex-wrap can never separate them, whatever the measured widths say.
         const gapPx = Math.round(fontSize * (preset.font.wordGapEm ?? 0.26));
         const els: React.ReactNode[] = [];
         const wordEl = (i: number) => {

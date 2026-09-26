@@ -9,9 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {pageWords} from '../src/paging.ts';
+import {toDisplay, DEFAULT_TOP} from '../src/paging.ts';
 import {projectCaptions} from '../src/captions.ts';
-import {PRESETS} from '../src/captionPresets.ts';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {createMasterCache} from '../scripts/layers.mjs';
@@ -19,10 +18,16 @@ import {createMasterCache} from '../scripts/layers.mjs';
 // "Hola soy Ana, | hoy te enseño la casa | en Playa del Carmen. | Tiene tres recámaras | y alberca. | Llámame hoy."
 const SAID = 'Hola soy Ana, hoy te enseño la casa en Playa del Carmen. Tiene tres recámaras y alberca. Llámame hoy.'.split(' ');
 const SRC = 'clips/t.mp4';
+// the pages are explicit (the breaks above), not whatever the vibem preset's paging makes of them
+const BREAKS = [3, 8, 12, 15, 17, 19];
 function reel({duck = true} = {}) {
   let t = 200;
-  const words = SAID.map((w, i) => { const s = t; t += 180 + (w.endsWith('.') ? 400 : 60); return {wid: `t:${i}`, word: w, src: SRC, clipId: 'k0', startMs: s, endMs: s + 170, srcStartMs: s, srcEndMs: s + 170}; });
-  return {name: 'caption correction', clips: [{id: 'k0', src: SRC, inSec: 0, outSec: 6, sourceDurationSec: 6}], captions: pageWords(words, PRESETS.vibem), brolls: [], graphics: [], mattes: [],
+  const words = SAID.map((w, i) => { const s = t; t += 180 + (w.endsWith('.') ? 400 : 60); return {wid: `t:${i}`, text: toDisplay(w), startMs: s, endMs: s + 170, tier: 0}; });
+  const captions = BREAKS.map((end, k) => {
+    const ws = words.slice(k ? BREAKS[k - 1] : 0, end);
+    return {id: `c${k}`, src: SRC, words: ws, startMs: ws[0].startMs, endMs: ws.at(-1).endMs, topPct: DEFAULT_TOP};
+  });
+  return {name: 'caption correction', clips: [{id: 'k0', src: SRC, inSec: 0, outSec: 6, sourceDurationSec: 6}], captions, brolls: [], graphics: [], mattes: [],
     music: {src: 'music/m.mp3', volume: 0.25, startSec: 0, fadeOutSec: 1.5, duck, duckLevel: 0.25}, captionStyle: 'vibem', lang: 'es'};
 }
 const textOf = (c) => c.words.map((w) => w.text).join(' ');
@@ -147,8 +152,8 @@ test('a project read while the agent saves it is never half a file', async () =>
   await withProject(async (call, read) => {
     let reads = 0, torn = 0, saving = true;
     const saves = (async () => {
-      for (let n = 0; n < 12; n++) assert.ok(!(await call('edit_caption', {caption_id: 'c5', text: `Llámame ${n % 2 ? 'hoy' : 'ya'}`})).err);
-      saving = false;
+      // a failed save must end the read loop below, or the test spins forever instead of failing
+      try { for (let n = 0; n < 12; n++) assert.ok(!(await call('edit_caption', {caption_id: 'c5', text: `Llámame ${n % 2 ? 'hoy' : 'ya'}`})).err); } finally { saving = false; }
     })();
     while (saving) {
       try { read(); reads++; } catch { torn++; }

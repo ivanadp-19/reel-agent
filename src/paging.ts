@@ -17,6 +17,7 @@ export type TimelineWord = {
   srcEndMs: number;
   tier?: number; // 1 = classifier highlight (keyword/question/CTA)
   speaker?: string; // spk1, spk2… from diarization (who is talking)
+  sentenceStart?: boolean; // a guion sentence begins on this word (v11.1) — break the page before it
   asr?: string; // the ASR's own text, when guion reconciliation changed it (src/guion.ts)
 };
 
@@ -42,6 +43,10 @@ export const GLUE = new Set([
   'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas', 'de', 'del', 'al', 'y', 'e', 'o', 'u', 'pero',
   'en', 'con', 'por', 'para', 'sin', 'sobre', 'que', 'qué', 'es', 'son', 'está', 'están', 'ser', 'se',
   'mi', 'tu', 'su', 'mis', 'tus', 'sus', 'lo', 'le', 'les', 'me', 'te', 'nos', 'como', 'muy', 'más', 'ya',
+  // v11 (César 11:42): pages must not END on a dangling function word ('Y TU DEPARTAMENTO NO',
+  // 'CON LA CORREA Y HASTA', 'NI BUSCAS ES') — these carry onto the next page instead
+  'no', 'ni', 'hasta', 'si', 'sí', 'cuando', 'donde', 'dónde', 'tan', 'cada', 'también', 'tampoco',
+  'aunque', 'porque', 'pues', 'desde', 'entre', 'hacia', 'tras', 'mientras', 'según',
 ]);
 export const isGlue = (text: string) => GLUE.has(text.toLowerCase());
 
@@ -76,9 +81,10 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     if (!display) return;
 
     if (cur.length && w.clipId !== curClip) flush(); // never span two clips
+    if (cur.length && w.sentenceStart && !bonded(cur[cur.length - 1], w)) flush(); // guion sentence boundary
     curSrc = w.src;
     curClip = w.clipId;
-    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: w.tier ?? 0, ...(w.speaker ? {speaker: w.speaker} : {}), ...(w.asr != null ? {asr: w.asr} : {})});
+    cur.push({wid: w.wid, text: display, startMs: w.srcStartMs, endMs: w.srcEndMs, tier: w.tier ?? 0, ...(w.speaker ? {speaker: w.speaker} : {}), ...(w.sentenceStart ? {sentenceStart: true} : {}), ...(w.asr != null ? {asr: w.asr} : {})});
     if (maxWords <= 1) { flush(); return; } // word-at-a-time preset
 
     const next = words[i + 1];
@@ -111,8 +117,10 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
     for (let k = pages.length - 1; k > 0; k--) {
       const p = pages[k];
       const prev = pages[k - 1];
-      // …but never across a sentence end ("¿Vienes? | Sí." stays two pages: one page per sentence)
-      if (p.words.length === 1 && p.src === prev.src && p.start - prev.end < 350 && prev.words.length <= maxWords && !prev.sent) {
+      // ...unless that word starts a guion sentence: merging it back would glue the
+      // new sentence's head onto the previous sentence's tail (the 'MINUTOS SALÓN' defect),
+      // and never across a sentence end ("¿Vienes? | Sí." stays two pages: one page per sentence)
+      if (p.words.length === 1 && !p.words[0].sentenceStart && p.src === prev.src && p.start - prev.end < 350 && prev.words.length <= maxWords && !prev.sent) {
         prev.words.push(...p.words);
         prev.end = p.end;
         prev.sent = p.sent;
@@ -120,7 +128,16 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       }
     }
   }
-  return pages.map((p, i) => ({id: `c${i}`, src: p.src, words: p.words, startMs: p.start, endMs: p.end, topPct: topBySrc[p.src] ?? DEFAULT_TOP}));
+  return pages.map((p, i) => ({
+    id: `c${i}`,
+    src: p.src,
+    // popMs: when the word visually pops in a fastBuild cascade (page start + idx*45) — the SFX pass
+    // pairs clicks/typing against these, not the spoken startMs. Matches CaptionTrack's fastBuildMs.
+    words: p.words.map((w, k) => ({...w, popMs: p.start + k * 45})),
+    startMs: p.start,
+    endMs: p.end,
+    topPct: topBySrc[p.src] ?? DEFAULT_TOP,
+  }));
 }
 
 // The project's own emphasis (annotate_captions, the editor) as word id → tier, for the pager:

@@ -15,6 +15,61 @@ type AnyWord = {tier?: number; word?: string; text?: string};
 const raw = (w: AnyWord) => w.word ?? w.text ?? '';
 const bare = (w: AnyWord) => raw(w).toLowerCase().replace(/[.,!?;:¿¡"'()-]/g, '');
 
+// v11.1 (César 11:58): whisper words carry no punctuation, so pageWords could not see sentence
+// boundaries and merged phrases ('...minutos' + 'salón para sesenta invitados' on one page).
+// Walk the guion's punctuated script and attach each sentence/clause mark to the matched word —
+// paging tests SENT_END/CLAUSE_END on the raw word, display still strips the marks via toDisplay.
+export function applyGuionPunctuation(words: AnyWord[], guion: string): {marks: number; starts: number} {
+  const bareTok = (s: string) => s.toLowerCase().replace(/[.,!?;:¿¡"'()-]/g, '');
+  const tokens = guion.split(/\s+/).filter((t) => bareTok(t));
+  let wi = 0;
+  let marks = 0;
+  let starts = 0;
+  let prevSentEnd = false;
+  let skips = 0; // guion tokens without a stream match since the last match
+  const WALK_GLUE = new Set(['a', 'de', 'en', 'con', 'por', 'para', 'y', 'o', 'ni', 'al', 'del']);
+  for (const tok of tokens) {
+    const b = bareTok(tok);
+    let j = -1;
+    for (let k = wi; k < Math.min(words.length, wi + 6); k++) {
+      if (bareTok(raw(words[k])) === b) { j = k; break; }
+    }
+    // sentence state comes from the GUION's own sequence, so it advances even on skipped
+    // tokens — drift in the previous sentence's tail can't hide the boundary that follows
+    const endsSent = /[.!?]$/.test(tok);
+    if (j < 0) { skips++; prevSentEnd = prevSentEnd || endsSent; continue; } // ASR drift: skip this guion token
+    wi = j + 1;
+    // a guion sentence's FIRST word marks a break-before in the stream ('…regresas a las
+    // nueve. / Aquí está el salón…' vs recorded '…regresar tan tarde aquí está…': 'Aquí' matches)
+    if (prevSentEnd && skips <= 12) {
+      // …but cap the carry: a whole unsaid sentence (20+ skipped tokens) must not flag
+      // whatever word happens to match next. And when the sentence's recorded head is a
+      // function word the script says differently ('De este lado' → 'en este lado'), walk
+      // the flag back over the glue words so the page never ends on a dangling 'en'
+      let s = j;
+      while (s - 1 >= 0) {
+        const prevRaw = raw(words[s - 1]);
+        if (/[.,!?;:]$/.test(prevRaw) || (words[s - 1] as {sentenceStart?: boolean}).sentenceStart) break;
+        if (!WALK_GLUE.has(bareTok(prevRaw))) break;
+        s--;
+      }
+      (words[s] as {sentenceStart?: boolean}).sentenceStart = true;
+      starts++;
+    }
+    skips = 0;
+    prevSentEnd = endsSent;
+    const m = tok.match(/[.,!?;:]$/);
+    if (m && !/[.,!?;:]$/.test(raw(words[j]))) {
+      const w = words[j] as {word?: string; text?: string};
+      if (typeof w.word === 'string') w.word += m[0];
+      else if (typeof w.text === 'string') w.text += m[0];
+      marks++;
+    }
+  }
+  return {marks, starts};
+}
+
+
 export function applyHighlights(words: AnyWord[], res: HighlightResult): number {
   let n = 0;
   for (const s of res.spans) {
