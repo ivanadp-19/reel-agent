@@ -36,7 +36,7 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const src = resolveSrc(item.src);
   const scale = item.scale ?? 1;
   // entry transition (whip / zoom / punch) on the cue itself, like a clip's
-  const fx = item.enter && item.enter !== 'cut' ? transitionFx({id: item.id, src: item.src, inSec: 0, outSec: 0, sourceDurationSec: 0, enter: item.enter}, frame, 1e6) : null;
+  const fx = item.enter && item.enter !== 'cut' ? transitionFx({id: item.id, src: item.src, inSec: 0, outSec: 0, sourceDurationSec: 0, enter: item.enter}, frame, 1e6, undefined, fps) : null;
   const moving = fx && (fx.scale !== 1 || fx.dx !== 0 || fx.blur > 0);
   // scale around a sensible origin per mode (inset hugs its corner, others center)
   const origin = item.mode === 'inset' ? 'top right' : 'center';

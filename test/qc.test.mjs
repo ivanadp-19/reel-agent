@@ -33,3 +33,19 @@ test('--json: the qc() report of a file, as the MCP qc tool reads it from a chil
   assert.equal(report.checks.find((c) => c.name === 'frame').ok, true, 'the draft size, because --draft was passed');
   fs.rmSync(dir, {recursive: true, force: true});
 });
+
+test('loudness keeps every frame and fits the audio to the picture (longer or shorter audio)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-qc-'));
+  const probeDur = (f, s) => +spawnSync('ffprobe', ['-v', 'error', '-select_streams', s, '-show_entries', 'stream=duration', '-of', 'csv=p=0', f], {encoding: 'utf8'}).stdout.trim();
+  const frames = (f) => +spawnSync('ffprobe', ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', f], {encoding: 'utf8'}).stdout.trim();
+  for (const audioSec of [3.3, 2.9]) { // a render's AAC tail past the picture; an audio track that stops short
+    const f = path.join(dir, `a${audioSec}.mp4`);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=1080x1920:r=30000/1001:d=3', '-f', 'lavfi', '-i', `sine=f=440:d=${audioSec}:sample_rate=48000`, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', f]);
+    assert.equal(r.status, 0, String(r.stderr));
+    const n = frames(f), vdur = probeDur(f, 'v:0');
+    assert.ok(normalizeLoudness(f).ok);
+    assert.equal(frames(f), n, `no frame lost (audio ${audioSec} s)`);
+    assert.ok(Math.abs(probeDur(f, 'a:0') - vdur) < 0.03, `audio ${probeDur(f, 'a:0')} s vs picture ${vdur} s`);
+  }
+  fs.rmSync(dir, {recursive: true, force: true});
+});

@@ -16,12 +16,12 @@
 //                    writes never overwrite it)
 //
 // JOB: {id, seq, status, stage, label, progress, frames?, etaSec?, draft, projectId,
-//       user? (who submitted it with a per-user token), propsHash?, expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
+//       user? (who submitted it with a per-user token), identity? (a final of a project with one: its delivered pair, scripts/render-runner.mjs), propsHash?, expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
 //       owner? (backend pid), pid? (render process pid), attempts, result?, error?}
 //   status   queued → running → done | failed | cancelled
 //   progress 0–100 over the whole job (stage weights in scripts/render-runner.mjs)
 //   mode     full | layers (scripts/render-runner.mjs; a reel layers cannot carry runs full, result.fallback says why)
-//   result   {file (/exports/…), path (absolute), renderSec, mode, fallback?, master? ('cached' | 'rendered'), stages, qc?, version?, versionError?}
+//   result   {file (/exports/…), path (absolute), renderSec, mode, fallback?, master? ('cached' | 'rendered'), stages, qc?, version?, versionError?, deliverables? ({master, captions, captionsPng, supers, masterSupers}, public/-relative)}
 //
 // Queue: serial by default (one render at a time on the whole machine, counted over
 // every backend sharing public/); REEL_RENDER_WORKERS = N allows N at once. FIFO by seq.
@@ -165,16 +165,17 @@ export function legacyView(job, ahead = 0) {
 }
 
 // Before a render is queued (POST /api/render): one active render per user — a retry
-// with the same props gets that job back (reuse), different props are refused until it
-// ends or is cancelled — and none while the disk or the memory is under its floor, so a
+// with the same props (and the same identity: the pair's names, scripts/render-runner.mjs)
+// gets that job back (reuse), different ones are refused until it ends or is cancelled —
+// and none while the disk or the memory is under its floor, so a
 // burst of renders is refused instead of taking the box down. Memory counts only when
 // nothing is rendering: a job queued behind a running one waits for its memory to free.
 // ponytail: the floors are checked at submit, not again when a queued job starts.
 export const propsHash = (props, mode = 'full') => crypto.createHash('sha256').update(`${mode === 'layers' ? 'layers' : 'full'}\n${typeof props === 'string' ? props : JSON.stringify(props)}`).digest('hex').slice(0, 16);
-export function admitRender(jobs, {user = null, props, mode}, {freeMemMb = null, freeDiskMb = null, minMemMb = 0, minDiskMb = 0} = {}) {
+export function admitRender(jobs, {user = null, props, mode, identity = null}, {freeMemMb = null, freeDiskMb = null, minMemMb = 0, minDiskMb = 0} = {}) {
   const mine = user && jobs.find((j) => j.user === user && ACTIVE.has(j.status));
   if (mine) {
-    if (mine.propsHash && mine.propsHash === propsHash(props, mode)) return {reuse: mine};
+    if (mine.propsHash && mine.propsHash === propsHash(props, mode) && JSON.stringify(mine.identity ?? null) === JSON.stringify(identity ?? null)) return {reuse: mine};
     return {status: 409, code: 'render_busy', jobId: mine.id, error: `${user} already has render ${mine.id} ${mine.status} — one render at a time per user`, hint: `reel render wait ${mine.id}, or reel render cancel ${mine.id}`};
   }
   if (minDiskMb > 0 && freeDiskMb != null && freeDiskMb < minDiskMb) return {status: 507, code: 'low_disk', error: `only ${Math.round(freeDiskMb)} MB free on the render disk (floor ${minDiskMb} MB)`, hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'};
@@ -229,6 +230,7 @@ export function createRenderJobs({
   log = (m) => console.log(m),
   memory = availableMemMb, // () → MB a render may use now, or null (not measured: no floor)
   minStartMemMb = startMinMemMb(),
+  abandon = () => {}, // (job) → removes what a run of it left on disk when it ends without its runner (recover(), a cancel while queued): the runner's .abandon
 } = {}) {
   fs.mkdirSync(dir, {recursive: true});
   const active = new Map(); // id → {ac, pid, settled}
@@ -242,6 +244,13 @@ export function createRenderJobs({
   const finish = (id, fields) => {
     const j = patch(id, {...fields, finishedAt: iso(), pid: null});
     for (const e of ['.props.json', '.claim', '.cancel']) fs.rmSync(fileOf(dir, id, e), {force: true});
+    return j;
+  };
+  // a job that ends while no runner of it is running: a crashed backend's run (or its first attempt,
+  // re-queued) never got to its own cleanup — what it left goes with it
+  const end = (id, fields) => {
+    const j = finish(id, fields);
+    try { if (j) abandon(j); } catch (e) { log(`render ${id}: its leftovers not removed: ${e.message}`); }
     return j;
   };
   const claimOwner = (id) => { try { return +fs.readFileSync(fileOf(dir, id, '.claim'), 'utf8'); } catch { return null; } };
@@ -299,14 +308,14 @@ export function createRenderJobs({
     return null;
   }
 
-  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null} = {}) {
+  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null, identity = null} = {}) {
     if (typeof props !== 'string') props = JSON.stringify(props ?? {});
     const t = now();
     const id = newJobId(t);
     // seq orders the queue: time-based so the order holds across backends and restarts
     const seq = Math.max(t * 1000, seqLast + 1); seqLast = seq;
     fs.writeFileSync(fileOf(dir, id, '.props.json'), props);
-    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, ...(user ? {user} : {}), propsHash: propsHash(props, mode), expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
+    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, ...(user ? {user} : {}), ...(identity ? {identity} : {}), propsHash: propsHash(props, mode), expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
     pump();
     const jobs = listJobs(dir);
     return {job: readJob(dir, id) ?? job, ahead: aheadOf(jobs, id)};
@@ -392,12 +401,12 @@ export function createRenderJobs({
       }
       fs.rmSync(fileOf(dir, j.id, '.claim'), {force: true});
       const hasProps = fs.existsSync(fileOf(dir, j.id, '.props.json'));
-      if (cancelRequested(j.id)) { finish(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
+      if (cancelRequested(j.id)) { end(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
       if ((j.attempts ?? 1) < MAX_ATTEMPTS && hasProps) {
         save({...j, status: 'queued', stage: 'queued', label: 'Queued (restarted after the backend stopped)', progress: 0, frames: undefined, etaSec: undefined, pid: null, owner: undefined, requeuedAt: iso()});
         log(`render ${j.id} re-queued: its backend (pid ${holder}) stopped mid-render`);
       } else {
-        finish(j.id, {status: 'failed', stage: 'failed', label: 'Failed', error: `interrupted: the backend (pid ${holder}) stopped during the render${hasProps ? ` — ${j.attempts} attempts` : ''}`});
+        end(j.id, {status: 'failed', stage: 'failed', label: 'Failed', error: `interrupted: the backend (pid ${holder}) stopped during the render${hasProps ? ` — ${j.attempts} attempts` : ''}`});
         log(`render ${j.id} failed: interrupted`);
       }
     }
@@ -418,7 +427,7 @@ export function createRenderJobs({
     const queued = jobs.filter((j) => j.status === 'queued').sort((a, b) => a.seq - b.seq);
     for (const j of queued) {
       if (running >= workers) break;
-      if (cancelRequested(j.id)) { finish(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
+      if (cancelRequested(j.id)) { end(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
       if (!fs.existsSync(fileOf(dir, j.id, '.props.json'))) { finish(j.id, {status: 'failed', stage: 'failed', label: 'Failed', error: 'its props file is gone'}); continue; }
       if (!claim(j.id)) continue; // another backend took it
       const unclaim = () => fs.rmSync(fileOf(dir, j.id, '.claim'), {force: true});
@@ -473,7 +482,7 @@ export function createRenderJobs({
     if (!ACTIVE.has(j.status)) return {ok: false, error: `render ${id} already ${j.status}`, job: j};
     fs.writeFileSync(fileOf(dir, id, '.cancel'), iso());
     if (j.status === 'queued' && claim(id)) {
-      const k = finish(id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'});
+      const k = end(id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'});
       return {ok: true, job: k};
     }
     if (active.has(id)) abort(id, 'CANCELLED', 'cancelled by request');

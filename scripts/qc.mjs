@@ -38,11 +38,15 @@ export function normalizeLoudness(file, clean = 'off') {
   if (!before || !Number.isFinite(before.I)) return {ok: false, error: before ? 'the audio is silent' : 'no audio stream'};
   let m = before, aim = TARGET.tpAim;
   const passes = [];
+  // the audio is cut or padded to the picture's exact length: -shortest cut the copied video at a packet
+  // (G1 lost its last 4 frames) and a render's AAC may run ~0.2 s past the last frame
+  const vdur = +(probe(file)?.streams.find((s) => s.codec_type === 'video')?.duration ?? 0);
+  const fit = vdur > 0 ? `,apad,atrim=end=${vdur}` : '';
   for (let attempt = 0; attempt < 3; attempt++) {
     const tmp = file.replace(/\.mp4$/, '.loudnorm.mp4');
     // the cleanup runs once (first pass); later passes only re-normalize
-    const af = `${attempt === 0 ? pre : ''}loudnorm=I=${TARGET.I}:TP=${aim.toFixed(1)}:LRA=${TARGET.LRA}:measured_I=${m.I}:measured_TP=${m.TP}:measured_LRA=${m.LRA}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true`;
-    const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', tmp]); // the audio ends with the picture (a render's AAC could run ~0.2 s past it and fail the duration gate)
+    const af = `${attempt === 0 ? pre : ''}loudnorm=I=${TARGET.I}:TP=${aim.toFixed(1)}:LRA=${TARGET.LRA}:measured_I=${m.I}:measured_TP=${m.TP}:measured_LRA=${m.LRA}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true${fit}`;
+    const r = ff(['-y', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-af', af, '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp]);
     if (r.status !== 0) { fs.rmSync(tmp, {force: true}); return {ok: false, error: `loudnorm failed: ${r.stderr.trim().split('\n').pop()}`}; }
     fs.renameSync(tmp, file);
     m = measureLoudness(file);
@@ -54,7 +58,7 @@ export function normalizeLoudness(file, clean = 'off') {
 }
 
 function probe(file) {
-  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate:format=duration', '-of', 'json', file], {encoding: 'utf8'});
+  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,duration:format=duration', '-of', 'json', file], {encoding: 'utf8'});
   if (r.status !== 0) return null;
   return JSON.parse(r.stdout);
 }
@@ -72,7 +76,7 @@ export function qc(file, {expectSec, draft = false} = {}) {
   if (!info) return {ok: false, checks: [{name: 'file', ok: false, value: 'unreadable', want: 'an mp4', blocking: true}]};
   const v = info.streams.find((s) => s.codec_type === 'video');
   const a = info.streams.find((s) => s.codec_type === 'audio');
-  const dur = +info.format.duration;
+  const dur = +(v?.duration ?? info.format.duration); // the picture's length: a trimmed picture must not hide behind a longer audio track
   const [W, H] = draft ? [540, 960] : [1080, 1920];
   add('frame', v?.width === W && v?.height === H, v ? `${v.width}x${v.height}` : 'no video', `${W}x${H}`);
   if (expectSec != null) add('duration', Math.abs(dur - expectSec) <= 0.2, `${dur.toFixed(2)} s`, `${expectSec.toFixed(2)} s ±0.2`);

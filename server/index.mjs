@@ -21,7 +21,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {totalDurationFrames} from '../src/timeline.ts';
+import {renderFps, renderSec} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
 import {brandSchema} from '../src/brand.ts';
@@ -32,10 +32,10 @@ import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 import {admitRender, aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
 import {oomReason} from '../scripts/render-memory.mjs';
-import {projectRenderProps} from '../src/renderProps.ts';
+import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
-import {createLink, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {createLink, inReviewsRow, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
@@ -44,7 +44,7 @@ import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
-import {projectIssues, withDefaults} from '../mcp/checks.mjs';
+import {identityWrite, pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -225,11 +225,13 @@ async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
   return bakeMissing(JSON.stringify(props), id, {signal, setPid, progress});
 }
 const RENDER_JOBS = jobsDir(PUBLIC);
+// full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version
+const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage});
 const renderJobs = createRenderJobs({
   dir: RENDER_JOBS,
   workers: PLAN.workers,
-  // full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version
-  run: createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage}),
+  run: runRender,
+  abandon: runRender.abandon, // a job a dead backend left: its pair temps and held master go when it ends
 }).start();
 // stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
 for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
@@ -257,7 +259,8 @@ const USERS = createTokenStore(process.env.REEL_TOKENS_FILE || path.join(ROOT, '
 const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
 const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
-const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure});
+const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure,
+  freeBytes: () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; }, minFreeBytes: MIN_DISK_MB * 2 ** 20});
 // B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
 const brollSheets = createSheetJobs();
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
@@ -330,7 +333,7 @@ async function handle(req, res) {
     const file = path.join(PROJECTS_DIR, `${id}.json`);
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     try {
-      const issues = projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC);
+      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env});
       return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
     } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
   }
@@ -364,6 +367,7 @@ async function handle(req, res) {
             name: p.name || 'Untitled project',
             clips: p.clips?.length || 0,
             updatedAt: p.updatedAt || null,
+            identity: p.identity ?? null, // the editor checks a new identity against the others before saving it
             // thumbs are stored per SOURCE file (segments share their source's thumb)
             thumb: p.clips?.[0]?.src ? '/clips/thumbs/' + path.basename(p.clips[0].src).replace(/\.\w+$/, '.jpg') : null,
           };
@@ -420,6 +424,10 @@ async function handle(req, res) {
       // compare-and-swap: a writer that read an older version (editor vs agent)
       // is rejected instead of silently overwriting the other's work
       if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return json(res, 409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt});
+      // a new or changed identity must be valid and not another project's client + script + variant
+      // (mcp/checks.mjs); checked and written with no await between, so two saves cannot both take one
+      const badIdentity = identityWrite(PROJECTS_DIR, id, prev, incoming);
+      if (badIdentity) return json(res, 400, {error: badIdentity, code: 'bad_identity'});
       const now = new Date().toISOString();
       // merge: a writer that does not know a field (an older editor, a new
       // project setting) must not wipe it; clearing is done with null / []
@@ -770,12 +778,12 @@ async function handle(req, res) {
       let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
       if (!playableVersions(loadReviews(REVIEWS, projectId), PUBLIC).length) return json(res, 400, {error: 'no final render to share yet — export a final (not a draft) first'});
       try {
-        const l = createLink(REVIEWS, projectId, {days: b?.days});
+        const l = await inReviewsRow(REVIEWS, projectId, () => createLink(REVIEWS, projectId, {days: b?.days}));
         return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`});
       } catch (e) { return json(res, 400, {error: String(e?.message ?? e).slice(0, 200)}); }
     }
     if (req.method === 'DELETE' && linkId) {
-      const l = revokeLink(REVIEWS, projectId, linkId);
+      const l = await inReviewsRow(REVIEWS, projectId, () => revokeLink(REVIEWS, projectId, linkId));
       return l ? json(res, 200, l) : json(res, 404, {error: `no link ${linkId}`});
     }
     return json(res, 405, {error: 'method not allowed'});
@@ -797,7 +805,7 @@ async function handle(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/render') {
     let raw = await body(req); // {clips, music, captions, brolls, accentColor, draft?, project_id?} — or {project_id, draft?, mode?} alone
     let draft = false;
-    let expectSec, clean = 'off', projectId = null, mode = DEFAULT_MODE;
+    let expectSec, clean = 'off', projectId = null, mode = DEFAULT_MODE, identity = null;
     try {
       let props = JSON.parse(raw);
       // a project id without props (the reel CLI): the saved project's props, built as the MCP and the render CLI build them
@@ -814,24 +822,32 @@ async function handle(req, res) {
         if (fs.existsSync(path.join(PROJECTS_DIR, `${props.project_id}.json`))) projectId = String(props.project_id);
       }
       delete props.project_id;
+      // the fps is the saved project's — 29.97 for a client's deliverables, drafts included — never the body's (src/renderProps.ts)
+      props = withDeliveryFps(props, projectId ? savedProject(PROJECTS_DIR, projectId) : null);
+      // a final of a project with an identity delivers its deliverables (src/validate.ts DELIVERABLES), always layered;
+      // the identity is the saved project's, never the body's (a bad one → 400)
+      if (!draft && projectId) identity = pairIdentity(PROJECTS_DIR, projectId);
+      if (identity) mode = 'layers';
       if (!Array.isArray(props.clips) || !props.clips.length) throw new Error('no clips on the timeline');
       clean = props.audio?.clean ?? 'off';
-      expectSec = totalDurationFrames(props.clips ?? [], 30) / 30;
+      expectSec = renderSec(props.clips ?? [], renderFps(props)); // QC's expected length, at the rate it renders
       raw = JSON.stringify(props);
     } catch (e) {
       return json(res, 400, {error: `render: ${e?.message ?? e}`.slice(0, 200)});
     }
     // what it will do — layers over a cached master, or a complete render and why (scripts/render-runner.mjs)
     let plan = null;
-    try { plan = planRender(JSON.parse(raw), {requested: mode, draft, root: ROOT, publicDir: PUBLIC, masterCache}); } catch (e) { console.error('render plan:', e.message); }
+    try { plan = planRender(JSON.parse(raw), {requested: mode, draft, root: ROOT, publicDir: PUBLIC, masterCache, pair: !!identity}); } catch (e) { console.error('render plan:', e.message); }
     if (url.searchParams.get('plan') === '1') return json(res, 200, {plan});
+    // the pair cannot run layered here: refused now, not queued to fail (the runner would, with the same reasons)
+    if (plan?.fails) return json(res, 400, {error: `render: deliverables need the layered render: ${plan.reasons.join('; ')}`.slice(0, 300), code: 'pair_needs_layers', plan});
     // one render at a time per token user (a retry with the same props gets that job back), none under the resource floors
     const tokenUser = g.via === 'user-token' ? g.user : null;
-    const admit = admitRender(renderJobs.list(), {user: tokenUser, props: raw, mode}, resources());
+    const admit = admitRender(renderJobs.list(), {user: tokenUser, props: raw, mode, identity}, resources());
     if (admit?.reuse) return json(res, 200, {jobId: admit.reuse.id, status: admit.reuse.status, ahead: renderJobs.ahead(admit.reuse.id), reused: true, plan});
     if (admit) return json(res, admit.status, admit);
     // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
-    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null});
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null, identity});
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {}), plan});
   }

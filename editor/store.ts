@@ -6,17 +6,18 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
 import {DEFAULT_TOP} from '../src/paging';
 import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cuts';
 import type {AudioOptions} from '../src/audio';
+import type {Identity} from '../src/validate';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -51,6 +52,7 @@ type EditorState = {
   plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
+  identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -125,6 +127,7 @@ type EditorState = {
   setCaptionsOff: (captionsOff: boolean) => void;
   setPlan: (plan: string) => void;
   setGuion: (guion: string) => void;
+  setIdentity: (identity?: Identity | null) => void;
   addMattes: (mattes: Matte[]) => void;
 
   pushHistory: () => void;
@@ -182,7 +185,7 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => {
       const clips = p.clips ?? [];
       return {
-        meta: withMeta(meta, clips),
+        meta: withMeta({...meta, fps: deliveryFps(p)}, clips), // the rate it renders at (29.97 for a client's deliverables)
         projectId: null, // caller assigns via setProjectInfo — prevents autosaving a cleared state into the old project
         projectName: 'Untitled project',
         captions: p.captions ?? [],
@@ -203,6 +206,7 @@ export const useEditor = create<EditorState>((set) => ({
         plan: p.plan ?? '',
         captionsOff: p.captionsOff ?? false,
         guion: p.guion ?? '',
+        identity: p.identity,
         past: [],
         future: [],
       };
@@ -513,6 +517,7 @@ export const useEditor = create<EditorState>((set) => ({
   setCaptionsOff: (captionsOff) => set({captionsOff}),
   setPlan: (plan) => set({plan}),
   setGuion: (guion) => set({guion}),
+  setIdentity: (identity) => set((s) => ({identity, meta: withMeta(s.meta && {...s.meta, fps: deliveryFps({identity})}, s.clips)})),
   addMattes: (mattes) => set((s) => ({mattes: [...s.mattes, ...mattes]})),
 
   // snapshot the full editable state before a logical edit

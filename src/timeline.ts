@@ -48,6 +48,7 @@ export type Music = {
   src: string; // staticFile-relative, e.g. "music/track.mp3"
   volume: number; // 0..1
   startSec: number; // offset into the music file to begin from
+  fadeInSec?: number; // fade at the start of the video (absent / 0 = none)
   fadeOutSec: number; // fade at the end of the video (0 = none)
   duck?: boolean; // auto-lower the music while someone is speaking
   duckLevel?: number; // ducked gain as a fraction of volume (default 0.25)
@@ -115,6 +116,17 @@ export function locateSec(clips: Clip[], fps: number, atSec: number): {clip: Cli
 
 export const totalDurationFrames = (clips: Clip[], fps: number): number =>
   Math.max(1, clips.reduce((sum, c) => sum + Math.max(1, Math.round(clipDurationSec(c) * fps)), 0));
+
+// The frame rate a project renders at: a client's deliverables (a project with an identity,
+// src/validate.ts) go out at 29.97 (NTSC, 30000/1001), everything else at 30 as always. Always a
+// Number (ffmpeg reads String(30000/1001) = '29.97002997002997' as 30000/1001; the string
+// '30000/1001' in `settb=1/${fps}` would make a wrong timebase). renderFps reads it back from render
+// props (Root.tsx, the render runner): only these two values, whatever else the props say.
+export const DELIVERY_FPS = 30000 / 1001;
+export const deliveryFps = (p?: {identity?: {client?: string} | null} | null): number => (p?.identity?.client ? DELIVERY_FPS : 30);
+export const renderFps = (props?: {fps?: unknown} | null): number => (props?.fps === DELIVERY_FPS ? DELIVERY_FPS : 30);
+// how long the render lasts at that rate (each clip whole frames): what QC expects (POST /api/render, the CLI)
+export const renderSec = (clips: Clip[], fps: number): number => totalDurationFrames(clips, fps) / fps;
 
 // ---- edits shared by the editor store and the MCP server ----
 

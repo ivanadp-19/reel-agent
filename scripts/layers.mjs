@@ -20,9 +20,15 @@
 //     same name is a new master)
 // Not in it: the caption pages themselves, the captions switch and voice cleanup
 // (applied after the composite).
+// A client's master (a final of a project with an identity) draws no text graphic either: its props carry
+// textOff (masterProps), which stays in the key — a text-free master is never one with text, and a master
+// without identity keeps the key it always had. Nor the solid plates the text graphics sit on (solidPlates):
+// in the key only of a master that draws text. Its text graphics are a third layer, the supers
+// (scripts/render-runner.mjs), laid between the master and the captions as MultiClipVideo stacks them.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import {spawnSync} from 'node:child_process';
 import {captionLayout} from '../src/layers.ts';
 
@@ -44,8 +50,12 @@ export const COMPOSITE_CRF = 18;
 export const ALPHA = {
   png: {ext: null},
   vp9: {ext: 'webm', encode: ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0', '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1', '-crf', '18', '-b:v', '0'], decode: ['-c:v', 'libvpx-vp9']},
-  prores: {ext: 'mov', encode: ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le'], decode: []},
+  // a delivered file (the pair's captions.mov / supers.mov): Rec.709, tagged (setparams: ffmpeg 8 drops the
+  // -colorspace output options here) — an NLE reads untagged HD as 709, and swscale's untagged default (601)
+  // turned the kit's #FFE500 into #FFDA00 there
+  prores: {ext: 'mov', encode: ['-c:v', 'prores_ks', '-profile:v', '4444', '-vf', 'scale=out_color_matrix=bt709:out_range=tv,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709', '-pix_fmt', 'yuva444p10le'], decode: []},
 };
+// fps is a Number (src/timeline.ts renderFps): 30000/1001 → '29.97002997002997', which ffmpeg reads as 30000/1001
 const framesInput = (dir, fps) => ['-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(dir, '*.png')];
 
 function walk(dir, out) {
@@ -75,11 +85,15 @@ export function canonical(v) {
   return JSON.stringify(v ?? null);
 }
 
+// the props of the master pass: no caption page; text: false (a client's deliverables) no text graphic either
+export const masterProps = (props, {text = true} = {}) => ({...props, captionsOff: true, ...(text ? {} : {textOff: true})});
+
 // what the master draws: the props minus the caption pages, the switch, the render options and voice cleanup
 export function masterInputs(props, fps) {
-  const {captions, captionsOff, draft, mode, layer, project_id, audio, ...rest} = props;
+  const {captions, captionsOff, draft, mode, layer, project_id, audio, solidPlates, ...rest} = props;
   const {clean, ...audioRest} = audio ?? {};
-  const out = {...rest, audio: audio ? audioRest : null};
+  // solid plates (src/renderProps.ts) are drawn with the text graphics: a text-free master (textOff) keys without them
+  const out = {...rest, ...(solidPlates && !rest.textOff ? {solidPlates} : {}), audio: audio ? audioRest : null};
   // the music ducks under the speech spans (src/layers.ts), drawn or not
   if (props.music?.duck) out.duckSpeech = captionLayout(props, fps).speech;
   return out;
@@ -151,7 +165,8 @@ const common = ({outFile, propsFile, publicDir, concurrency, cacheBytes, draft})
 ];
 // the master: the usual h264 export (its props carry captionsOff: true), a lower crf
 export const masterArgs = (o) => [...common(o), `--x264-preset=${o.draft ? 'ultrafast' : 'veryfast'}`, `--crf=${MASTER_CRF}`];
-// the caption layer: PNG frames into a folder (its props carry layer: 'captions'), no audio
+// the caption layer: PNG frames into a folder (its props carry layer: 'captions'), no audio — the supers
+// layer of a client's deliverables is rendered the same way (layer: 'supers')
 export const captionArgs = (o) => [...common(o), '--sequence', '--image-format=png', '--muted'];
 // the frames → one VP9 / ProRes file (null for png: the composite reads the frames)
 export function alphaEncodeArgs({frames, outFile, alpha, fps}) {
@@ -169,11 +184,13 @@ export function alphaEncodeArgs({frames, outFile, alpha, fps}) {
 // The result keeps the master's pixel format and color tags (`color`, from
 // probeColor: Remotion writes full-range yuvj420p tagged bt470bg), and each layer is
 // converted into that range before the overlay — a limited-range layer over a
-// full-range master would come out washed out. The master's audio is copied
-// (loudness runs on the result). `overlays` is a list so more layers can stack
+// full-range master would come out washed out — and into the master's matrix, named (601 when the
+// master is untagged, as ffmpeg reads it): unnamed, ffmpeg 5 keeps a tagged layer's own (the ProRes
+// layers are 709). The master's audio is copied (loudness runs on the result). `overlays` is a list so more layers can stack
 // later; each is {file, alpha} (png: `file` is the frames folder).
 export function compositeArgs({master, overlays, outFile, fps, draft = false, color = {}}) {
   const full = color.range === 'pc';
+  const matrix = {bt709: 'bt709', bt2020nc: 'bt2020'}[color.space] ?? 'bt601';
   const inputs = ['-i', master];
   const renumber = `settb=1/${fps},setpts=N`;
   const chains = [`[0:v]${renumber}[l0]`];
@@ -181,7 +198,7 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
   overlays.forEach((o, i) => {
     const alpha = o.alpha ?? 'png';
     inputs.push(...(alpha === 'png' ? framesInput(o.file, fps) : [...ALPHA[alpha].decode, '-i', o.file]));
-    chains.push(`[${i + 1}:v]${renumber},scale=out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
+    chains.push(`[${i + 1}:v]${renumber},scale=out_color_matrix=${matrix}:out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
     last = `l${i + 1}`;
   });
   chains.push(`[${last}]format=${full ? 'yuvj420p' : 'yuv420p'}[v]`);
@@ -193,6 +210,89 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
     '-c:v', 'libx264', '-preset', draft ? 'ultrafast' : 'veryfast', '-crf', String(COMPOSITE_CRF), '-video_track_timescale', '90000', ...tags,
     '-c:a', 'copy', '-movflags', '+faststart', outFile,
   ];
+}
+
+// ---- the delivered pair (a final of a project with an identity: scripts/render-runner.mjs, reviews.mjs) ----
+// the master deliverable: the cached master's picture + the composite's finished audio (loudness + QC
+// done), both copied — no re-encode
+export const remuxArgs = ({video, audio, outFile}) => ['-hide_banner', '-nostats', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-movflags', '+faststart', outFile];
+// frames, rate and length of a file's picture: mp4 and mov carry the frame count in their header (no decode)
+export const parityProbeArgs = (file) => ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=nb_frames,r_frame_rate,duration', '-of', 'json', file];
+export function parseParity(stdout) {
+  const s = JSON.parse(stdout).streams?.[0] ?? {};
+  return {frames: +s.nb_frames, fps: s.r_frame_rate ?? null, sec: +s.duration};
+}
+// the master and another deliverable (`name`: the caption layer, the supers, master_supers) must lay over
+// each other frame for frame, at the delivery fps when given (src/timeline.ts deliveryFps) → [] or what
+// differs. Rates compare as numbers ('60000/2002' is '30000/1001'); the length within half a frame: the
+// containers keep time on different scales
+const rateOf = (r) => { const [n, d = 1] = String(r).split('/').map(Number); return n > 0 && d > 0 ? n / d : NaN; };
+const rateText = (fps) => (Math.abs(fps - 30000 / 1001) < 1e-9 ? '30000/1001' : String(fps));
+export function parityIssues(master, layer, {fps, name = 'captions'} = {}) {
+  const out = [];
+  if (!(master.frames > 0) || master.frames !== layer.frames) out.push(`frames: master ${master.frames}, ${name} ${layer.frames}`);
+  const rate = rateOf(master.fps);
+  if (!(Math.abs(rate - rateOf(layer.fps)) < 1e-6)) out.push(`fps: master ${master.fps}, ${name} ${layer.fps}`);
+  else if (fps && !(Math.abs(rate - fps) < 1e-6)) out.push(`fps: ${master.fps}, want ${rateText(fps)}`);
+  if (!(Math.abs(master.sec - layer.sec) < 0.5 / rate)) out.push(`duration: master ${master.sec}s, ${name} ${layer.sec}s`);
+  return out;
+}
+
+// ---- the caption layer as a PNG sequence (CEO-14): the pass's frames zipped with fps.json, the rate to import
+// them at. Stored, not deflated (a PNG is compressed already); a plain zip, so at most 65 535 frames and 4 GB —
+// past that it fails with the reason. ponytail: ZIP64 when a layer outgrows it (a reel: ~1 800 frames of KBs)
+const PNG = /\.png$/i;
+export async function zipFrames(dir, outFile, {fps}) {
+  const names = fs.readdirSync(dir).filter((n) => PNG.test(n)).sort(); // the order ffmpeg's glob reads them in
+  const entries = [...names.map((n, i) => ({name: `captions_${String(i).padStart(6, '0')}.png`, file: path.join(dir, n)})),
+    {name: 'fps.json', data: Buffer.from(JSON.stringify({fps: rateText(fps), frames: names.length}))}];
+  if (entries.length > 0xffff) throw new Error(`captions PNG zip: ${names.length} frames, a plain zip holds 65 534`);
+  const DATE = 0x21; // 1980-01-01: the zip is the same bytes for the same frames
+  const fh = await fs.promises.open(outFile, 'w');
+  const central = [];
+  let at = 0;
+  try {
+    for (const e of entries) {
+      const data = e.data ?? await fs.promises.readFile(e.file), name = Buffer.from(e.name), crc = zlib.crc32(data);
+      const h = Buffer.alloc(30); // local header: version 2.0, no flags, stored
+      h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(DATE, 12); h.writeUInt32LE(crc, 14);
+      h.writeUInt32LE(data.length, 18); h.writeUInt32LE(data.length, 22); h.writeUInt16LE(name.length, 26);
+      await fh.write(Buffer.concat([h, name, data]));
+      central.push({name, crc, size: data.length, at});
+      at += 30 + name.length + data.length;
+    }
+    const cd = Buffer.concat(central.flatMap(({name, crc, size, at: off}) => {
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(DATE, 14); c.writeUInt32LE(crc, 16);
+      c.writeUInt32LE(size, 20); c.writeUInt32LE(size, 24); c.writeUInt16LE(name.length, 28); c.writeUInt32LE(off, 42);
+      return [c, name];
+    }));
+    if (at + cd.length > 0xffffffff) throw new Error(`captions PNG zip: ${Math.round(at / 2 ** 20)} MB, a plain zip holds 4 GB`);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(central.length, 8); end.writeUInt16LE(central.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(at, 16);
+    await fh.write(Buffer.concat([cd, end]));
+  } finally { await fh.close(); }
+}
+// the zip's side of parityIssues: its PNG frames (central directory) and the rate its fps.json says — no extraction
+export async function zipParity(file) {
+  const fh = await fs.promises.open(file, 'r');
+  try {
+    const {size} = await fh.stat();
+    const read = async (at, n) => { const b = Buffer.alloc(n); await fh.read(b, 0, n, at); return b; };
+    const end = await read(Math.max(0, size - 22), 22);
+    if (end.readUInt32LE(0) !== 0x06054b50) throw new Error(`${path.basename(file)}: no zip directory at its end`);
+    const cd = await read(end.readUInt32LE(16), end.readUInt32LE(12));
+    let frames = 0, sidecar = null;
+    for (let o = 0; o + 46 <= cd.length;) {
+      const n = cd.readUInt16LE(o + 28), name = cd.toString('utf8', o + 46, o + 46 + n);
+      if (PNG.test(name)) frames++;
+      else if (name === 'fps.json') sidecar = {at: cd.readUInt32LE(o + 42), size: cd.readUInt32LE(o + 20)};
+      o += 46 + n + cd.readUInt16LE(o + 30) + cd.readUInt16LE(o + 32);
+    }
+    let fps = null;
+    if (sidecar) { const h = await read(sidecar.at, 30); fps = JSON.parse(await read(sidecar.at + 30 + h.readUInt16LE(26) + h.readUInt16LE(28), sidecar.size)).fps ?? null; }
+    return {frames, fps, sec: frames / rateOf(fps)};
+  } finally { await fh.close(); }
 }
 
 // the master's pixel format and color tags, for compositeArgs' `color` (ffprobe)

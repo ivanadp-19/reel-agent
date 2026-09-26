@@ -41,18 +41,50 @@
 // the caption frames) — and a review
 // version recorded while the cancel came in is taken back (unrecord): a cancelled job
 // leaves no file and no version.
+//
+// THE PAIR: a FINAL of a project with an identity (job.identity, read by the backend from
+// the saved project — src/validate.ts) delivers five files next to its review version
+// (src/validate.ts DELIVERABLES):
+//   master         the cached master's picture + the composite's finished audio, remuxed after QC. A
+//                  client's master draws no text: no caption, no text graphic (textOff, its own master
+//                  key); decor graphics and the camera pushes of titles stay in it
+//   captions       the caption layer as ProRes 4444 (alpha), whatever REEL_CAPTION_ALPHA says, and the
+//                  same frames as a PNG sequence zipped with fps.json (captions.png.zip, CEO-14)
+//   supers         the text graphics (src/graphicTemplates.ts isTextGraphic) as ProRes 4444 (alpha),
+//                  a Remotion pass of their own (layer: 'supers') — transparent when the reel has none
+//   master_supers  the master with the supers burnt in (the composite, audio copied); the master
+//                  itself when the reel has no text graphic
+// The export (and the review proxy) is master + supers + captions, stacked as MultiClipVideo draws
+// them. It always runs layers: a reel the caption or supers layer cannot carry (a text graphic behind
+// the presenter: src/layers.ts supersBlockers) fails with the reasons, never falls back to full. Every
+// file must match the master frame for frame at the delivery fps (ffprobe: frames, fps, length; the zip:
+// its PNG count and fps.json) and they are moved into
+// reviews/<projectId>/v<n>/ under their system names with a snapshot
+// of the rendered props (scripts/reviews.mjs recordVersion). v<n> exists only when all of
+// it passed and the project still has that identity; a failure, a QC failure or a cancel
+// leaves no file of the pair and no version (a backend that died mid-render: its leftovers
+// go when the queue ends the job, runRender.abandon). Drafts and projects without identity
+// render exactly as before.
+//
+// THE FPS: the props carry it (src/renderProps.ts withDeliveryFps, from the saved project) —
+// 30000/1001 for a project with an identity, drafts included; none (30) for the rest. Root.tsx renders
+// at it, and the caption encode, the composite, the first-frame repair and the master key use the same
+// number (src/timeline.ts renderFps); the pair's parity wants the identity's rate (deliveryFps), so a job
+// queued without it fails instead of delivering a client 30 fps files.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {renderArgs} from './render-queue.mjs';
-import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, probeColor} from './layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, masterProps, parityIssues, parityProbeArgs, parseParity, probeColor, remuxArgs, zipFrames, zipParity} from './layers.mjs';
 import {blankLead, openingReport, parseStats, repairArgs, statsArgs} from './first-frame.mjs';
-import {chooseRenderMode} from '../src/layers.ts';
+import {captionLayout, chooseRenderMode} from '../src/layers.ts';
+import {deliveryFps, renderFps} from '../src/timeline.ts';
 import {lutBakes} from '../src/grade.ts';
 import {localBrollName} from './remote-broll.mjs';
 import {linkPublic} from './public-links.mjs';
-import {recordFinal, removeVersion} from './reviews.mjs';
+import {inReviewsRow, recordFinal, removeVersion} from './reviews.mjs';
+import {pairIdentity} from '../mcp/checks.mjs';
 import {killTree} from './render-jobs.mjs';
 import {writeRenderRecord} from './render-records.mjs';
 import {oomKills, oomReason, renderEnv, signalCode} from './render-memory.mjs';
@@ -63,14 +95,15 @@ export const STAGES = {
   draft: {preparing: [0, 4], master: [4, 5], bundling: [5, 10], rendering: [10, 96], encoding: [96, 99.5]},
 };
 export const STAGE_LABEL = {preparing: 'Preparing media', master: 'Master from the cache', bundling: 'Bundling', rendering: 'Rendering', encoding: 'Encoding', compositing: 'Compositing', finalizing: 'Loudness + QC', review: 'Review proxy'};
-export const FPS = 30;
 // where each Remotion pass sits in the overall %, per mode: [from, to] (inside a pass:
-// bundling the first 7 %, frames up to 95 %, the encode the rest); then compositing
-export function passRanges({mode, captions, draft}) {
+// bundling the first 7 %, frames up to 95 %, the encode the rest); then compositing.
+// supers: a client's deliverables render their text graphics as a pass of its own
+export function passRanges({mode, captions, draft, supers = false}) {
   const end = draft ? 99 : STAGES.final.encoding[1];
   const start = STAGES.final.bundling[0];
   if (mode !== 'layers') return {render: [start, end]};
   if (!captions) return {master: [start, end]};
+  if (supers) return {master: [start, 50], supers: [50, 64], captions: [64, end - 5], compositing: [end - 5, end]};
   return {master: [start, 60], captions: [60, end - 5], compositing: [end - 5, end]};
 }
 const inPass = ([a, b], stage, frac) => {
@@ -179,12 +212,18 @@ export const defaultCommands = {
   render: (o) => ['npx', renderArgs(passOpts(o))],
   master: (o) => ['npx', masterArgs(passOpts(o))],
   captions: (o) => ['npx', captionArgs(passOpts(o))],
-  encode: ({frames, outFile, alpha}) => { const a = alphaEncodeArgs({frames, outFile, alpha, fps: FPS}); return a && ['ffmpeg', a]; }, // null: png, nothing to encode
-  composite: ({master, layer, alpha, outFile, draft}) => ['ffmpeg', compositeArgs({master, overlays: [{file: layer, alpha}], outFile, fps: FPS, draft, color: probeColor(master)})],
+  supers: (o) => ['npx', captionArgs(passOpts(o))], // the same transparent PNG frames, its props carry layer: 'supers'
+  // fps: the job's (src/timeline.ts renderFps — 30, or 29.97 for a client's deliverables), a Number
+  encode: ({frames, outFile, alpha, fps}) => { const a = alphaEncodeArgs({frames, outFile, alpha, fps}); return a && ['ffmpeg', a]; }, // null: png, nothing to encode
+  // layers: [{file, alpha}] over the master, bottom to top
+  composite: ({master, layers, outFile, draft, fps}) => ['ffmpeg', compositeArgs({master, overlays: layers, outFile, fps, draft, color: probeColor(master)})],
   finalize: ({outFile, expectSec, clean}) => ['node', ['scripts/qc.mjs', '--finalize', outFile, String(expectSec), String(clean)]],
   // the blank-first-frame guard (scripts/first-frame.mjs): stats of frames 0–2 on stdout, and the repair
   frameStats: ({file}) => ['ffmpeg', statsArgs(file)],
-  fixFirstFrame: ({file, outFile, draft}) => ['ffmpeg', repairArgs({file, outFile, fps: FPS, color: probeColor(file), draft})],
+  fixFirstFrame: ({file, outFile, draft, fps}) => ['ffmpeg', repairArgs({file, outFile, fps, color: probeColor(file), draft})],
+  // the pair: the master deliverable remuxed, and each file's frames / rate / length
+  remux: (o) => ['ffmpeg', remuxArgs(o)],
+  probe: ({file}) => ['ffprobe', parityProbeArgs(file)],
 };
 
 // What a render will do, said before it is queued (POST /api/render answers with it,
@@ -193,11 +232,14 @@ export const defaultCommands = {
 // chooseRenderMode, then the master key of the props as prepare() will leave them
 // (remote B-roll under its local name; a download or a LUT bake still to do changes
 // them, so the master is rendered again), then the master cache.
-export function planRender(props, {requested = 'full', draft = false, root, publicDir, masterCache = null, keyOf = (p, o) => masterKey(p, {code: codeVersion(root), fps: FPS, draft: o.draft, publicDir})} = {}) {
-  if (requested !== 'layers') return {mode: 'full', full: true, reasons: ['mode full: one pass over everything (mode layers reuses the cached master when only the captions change)']};
-  const choice = chooseRenderMode('layers', props, FPS);
-  if (choice.mode === 'full') return {mode: 'full', full: true, reasons: choice.reasons};
-  if (!masterCache) return {mode: 'full', full: true, reasons: ['no master cache on this backend']};
+// pair (a final of a project with an identity): it never falls back to full, so where the
+// layers cannot run the plan says the render fails ({fails: true, reasons}) — the backend refuses it.
+export function planRender(props, {requested = 'full', draft = false, root, publicDir, masterCache = null, pair = false, keyOf = (p, o) => masterKey(p, {code: codeVersion(root), fps: renderFps(p), draft: o.draft, publicDir})} = {}) {
+  if (requested !== 'layers' && !pair) return {mode: 'full', full: true, reasons: ['mode full: one pass over everything (mode layers reuses the cached master when only the captions change)']};
+  const cannot = (reasons) => (pair ? {mode: 'layers', full: true, fails: true, reasons} : {mode: 'full', full: true, reasons});
+  const choice = chooseRenderMode('layers', props, renderFps(props), {supers: pair});
+  if (choice.mode === 'full') return cannot(choice.reasons);
+  if (!masterCache) return cannot(['no master cache on this backend']);
   let downloads = 0;
   const brolls = (props.brolls ?? []).map((b) => {
     if (!/^https?:\/\//.test(b.src ?? '')) return b;
@@ -210,7 +252,7 @@ export function planRender(props, {requested = 'full', draft = false, root, publ
   const reasons = [];
   if (downloads) reasons.push(`${downloads} remote B-roll to download first: the master is rendered again`);
   if (bakes) reasons.push(`${bakes} LUT bake${bakes === 1 ? '' : 's'} missing: the master is rendered again`);
-  if (!reasons.length && !fs.existsSync(masterCache.file(keyOf({...props, brolls}, {draft})))) reasons.push('no cached master for this cut: its first layered render, or something besides the captions changed (clips, trims, B-roll, graphics, music, grade…)');
+  if (!reasons.length && !fs.existsSync(masterCache.file(keyOf(masterProps({...props, brolls}, {text: !pair}), {draft})))) reasons.push('no cached master for this cut: its first layered render, or something besides the captions changed (clips, trims, B-roll, graphics, music, grade…)');
   return {mode: 'layers', full: reasons.length > 0, master: reasons.length ? 'render' : 'cached', captions: choice.captions, reasons};
 }
 
@@ -224,12 +266,13 @@ export function createRenderRunner({
   prepare = async (raw) => raw, // (raw props, jobId, {signal, setPid, progress(frac, label)}) → raw props: localize remote B-roll, bake LUTs
   masterCache = null, // scripts/layers.mjs createMasterCache (get / put / file / dir); no cache → every render is full
   captionAlpha = 'png', // REEL_CAPTION_ALPHA: png | vp9 | prores
-  chooseMode = (requested, props) => chooseRenderMode(requested, props, FPS),
-  keyOf = (props, {draft}) => masterKey(props, {code: codeVersion(root), fps: FPS, draft, publicDir}),
+  chooseMode = (requested, props, opts) => chooseRenderMode(requested, props, renderFps(props), opts), // opts {supers}: a client's deliverables
+  keyOf = (props, {draft}) => masterKey(props, {code: codeVersion(root), fps: renderFps(props), draft, publicDir}),
   logStage = () => {}, // (project, stage, ms, extra) → the project's timing log
   commands = defaultCommands,
   record = recordFinal,
-  unrecord = ({projectId, v}) => removeVersion(reviewsDir, projectId, v, publicDir), // a version recorded by a job cancelled meanwhile
+  unrecord = ({projectId, v}) => inReviewsRow(reviewsDir, projectId, () => removeVersion(reviewsDir, projectId, v, publicDir)), // a version recorded by a job cancelled meanwhile
+  identityNow = (projectId) => pairIdentity(path.join(publicDir, 'projects'), projectId), // the saved project's identity when the pair is recorded
   writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,
@@ -238,7 +281,18 @@ export function createRenderRunner({
   fs.mkdirSync(exportsDir, {recursive: true});
   commands = {...defaultCommands, ...commands};
   const inflight = new Map(); // master key → the promise of the job of this backend rendering it (single flight)
-  return async function runRender(job, ctx) {
+  // what a run of a job leaves when its backend dies before the finally below (the queue calls it when
+  // it ends such a job — scripts/render-jobs.mjs abandon): the pair's temp and the review proxy's under
+  // reviews/<projectId>/, and its `.part-…-<id>.mp4` files next to the cached masters (GBs, never trimmed)
+  runRender.abandon = (job) => {
+    if (job.projectId) for (const f of [`.tmp-pair-${job.id}`, `.tmp-${job.id}.mp4`, `.tmp-${job.id}.jpg`]) fs.rmSync(path.join(reviewsDir, path.basename(job.projectId), f), {recursive: true, force: true});
+    let names = [];
+    try { names = fs.readdirSync(masterCache?.dir); } catch {}
+    for (const n of names) if (n.includes('.part-') && n.endsWith(`-${job.id}.mp4`)) fs.rmSync(path.join(masterCache.dir, n), {force: true});
+    for (const k of ['captions', 'supers']) fs.rmSync(path.join(os.tmpdir(), `reel-${k}-${job.id}`), {recursive: true, force: true}); // the layers' PNG frames
+  };
+  return runRender;
+  async function runRender(job, ctx) {
     const {id, draft} = job;
     const {signal} = ctx;
     const expectSec = job.expectSec ?? 0;
@@ -260,22 +314,38 @@ export function createRenderRunner({
     const outFile = path.join(exportsDir, outName);
     const result = {file: `/exports/${outName}`, path: outFile};
     let recorded = null; // {projectId, v} once a review version exists for this job
+    // the pair (see the top): its identity, and its files until the version takes them — the layers
+    // (captions and its PNG zip, supers), the remuxed master and master_supers in reviews/<projectId>/.tmp-pair-<id>/ (the filesystem of v<n>/), the
+    // master held by a hard link next to the cache's (`.part-` keeps another job's trim off it)
+    const pair = !draft && job.projectId && job.identity?.client ? job.identity : null;
+    const pairTmp = pair ? path.join(reviewsDir, job.projectId, `.tmp-pair-${id}`) : null;
+    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null;
     // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
-    const cleanUp = () => {
+    const cleanUp = async () => {
       let names = [];
       try { names = fs.readdirSync(exportsDir); } catch {}
       for (const f of names) if (f.startsWith(`edited-${id}`) && /\.mp4(\.json)?$/.test(f)) fs.rmSync(path.join(exportsDir, f), {force: true});
-      if (recorded) { try { unrecord(recorded); } catch (e) { log(`render ${id}: could not take back review version v${recorded.v}: ${e.message}`); } }
+      if (recorded) { try { await unrecord(recorded); } catch (e) { log(`render ${id}: could not take back review version v${recorded.v}: ${e.message}`); } }
     };
     // which project an export belongs to and what it is (final | draft | qcfail); a missing record only costs the cleanup's help
     const recordAs = (file, kind) => {
       try { writeRecord(file, {projectId: job.projectId ?? null, kind, renderSec: result.renderSec}); } catch (e) { log(`render ${id}: no render record: ${e.message}`); }
     };
+    // a final that cannot ship: kept as *-qcfail.mp4 for inspection (cleanup-exports purges it after its TTL) → its name
+    const shelve = () => {
+      const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
+      try { fs.renameSync(outFile, path.join(exportsDir, failed)); recordAs(path.join(exportsDir, failed), 'qcfail'); } catch {}
+      return failed;
+    };
     try {
       return await work();
     } catch (e) {
-      if (signal.aborted) cleanUp();
+      if (signal.aborted) await cleanUp();
       throw e;
+    } finally {
+      // moved into reviews/<projectId>/v<n>/ when it became a version; otherwise nothing of the pair stays
+      if (pairTmp) fs.rmSync(pairTmp, {recursive: true, force: true});
+      if (hold) fs.rmSync(hold, {force: true});
     }
 
     async function work() {
@@ -299,17 +369,25 @@ export function createRenderRunner({
       stop();
       if (now() - tPrep > 1000) logStage(project, 'prepare', now() - tPrep, {job: id});
       const props = JSON.parse(raw);
+      const fps = renderFps(props); // every pass, encode and composite at the one rate (Root.tsx reads the same props)
 
-      const choice = chooseMode(job.mode === 'layers' ? 'layers' : 'full', props);
+      const choice = chooseMode(pair || job.mode === 'layers' ? 'layers' : 'full', props, {supers: !!pair});
+      // the pair IS the layers: a reel they cannot carry fails with the reasons, never falls back to full
+      if (pair && (choice.mode !== 'layers' || !masterCache)) throw new RenderError(`deliverables need the layered render: ${(choice.reasons?.length ? choice.reasons : ['no master cache on this backend']).join('; ')}`);
       result.mode = choice.mode;
       if (choice.reasons?.length) { result.fallback = choice.reasons; log(`render ${id}: layers → full (${choice.reasons.join('; ')})`); }
       const layered = choice.mode === 'layers' && masterCache;
       if (choice.mode === 'layers' && !masterCache) { result.mode = 'full'; result.fallback = ['no master cache on this backend']; }
-      const ranges = passRanges({mode: layered ? 'layers' : 'full', captions: choice.captions, draft});
+      // the pair always has its caption layer — a transparent one when no caption is on screen (MultiClipVideo)
+      const captions = choice.captions || !!pair;
+      const ranges = passRanges({mode: layered ? 'layers' : 'full', captions, draft, supers: !!pair});
+      // the pair's master draws no text; its text graphics (the same list the supers layer draws) are the supers
+      const mProps = masterProps(props, {text: !pair});
+      const supersDrawn = !!pair && captionLayout(props, fps).supers.length > 0;
 
       // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
       const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
-      const tmp = [links]; // removed whatever happens: props files, the master's .part, the caption frames
+      const tmp = [links]; // removed whatever happens: props files, the master's .part, the caption (and supers) frames
       const propsFile = (name, p) => { const f = path.join(root, `.props-${id}${name}.json`); fs.writeFileSync(f, JSON.stringify(p)); tmp.push(f); return f; };
       // one Remotion pass: progress mapped into its range, frames and an ETA, the pid watched
       const pass = async (kind, range, outPath, pProps, what) => {
@@ -347,6 +425,13 @@ export function createRenderRunner({
         if (oom) throw Object.assign(new RenderError(`${what}: ${oom}`), {code: 'OOM'});
         if (r.code !== 0) throw new RenderError(`${what} failed: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
       };
+      // the pair's parity: a file's frames, rate and length (ffprobe, header only)
+      const probeOf = async (file) => {
+        const [pcmd, pargs] = commands.probe({file});
+        const r = await runChild(pcmd, pargs, {cwd: root, signal, onPid: ctx.setPid});
+        if (r.code !== 0) throw new RenderError(`cannot probe ${path.basename(file)}: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
+        return parseParity(r.out);
+      };
       // a Remotion pass whose frame 0 is a flat, neutral field while frame 1 is footage
       // (scripts/first-frame.mjs): frame 1 takes its place before anything uses the file
       // (a master before it enters the cache). An unreadable file is left to the pass's
@@ -359,7 +444,7 @@ export function createRenderRunner({
         // `.part-` keeps the master cache's trim off it while it is written next to a cached master
         const fixed = file.replace(/\.mp4$/, '') + `.part-ff-${id}.mp4`;
         tmp.push(fixed);
-        await timed('first-frame', () => ffmpeg(commands.fixFirstFrame({file, outFile: fixed, draft}), 'first-frame repair'));
+        await timed('first-frame', () => ffmpeg(commands.fixFirstFrame({file, outFile: fixed, draft, fps}), 'first-frame repair'));
         fs.renameSync(fixed, file);
         const f0 = stats[0];
         (result.firstFrame ??= []).push({pass: where, repaired: true, frame0: {y: f0.yavg, u: f0.uavg, v: f0.vavg}});
@@ -371,11 +456,11 @@ export function createRenderRunner({
           await guardFirstFrame(outFile, 'render');
         } else {
           // ---- the master: cached, being rendered by another job here (wait for it), or rendered now ----
-          const key = keyOf(props, {draft});
+          const key = keyOf(mProps, {draft});
           const renderMaster = async () => {
             const part = path.join(masterCache.dir, `${key}.part-${id}.mp4`);
             tmp.push(part);
-            await timed('master', () => pass('master', ranges.master, part, {...props, captionsOff: true}, 'master'), {videoSec: expectSec});
+            await timed('master', () => pass('master', ranges.master, part, mProps, 'master'), {videoSec: expectSec});
             stop(); // a cancelled master never enters the cache
             await guardFirstFrame(part, 'master'); // a cached master is always a repaired one
             return masterCache.put(key, part);
@@ -402,24 +487,50 @@ export function createRenderRunner({
             try { master = await mine; result.master = 'rendered'; } finally { inflight.delete(key); }
           }
           if (result.master === 'cached') set('master', 1, {progress: ranges.master[1], label: 'Master reused from the cache'});
-          if (choice.captions) {
+          // the pair's master, held until the remux after QC (a copy where hard links are not possible)
+          if (pair) {
+            hold = path.join(masterCache.dir, `${key}.part-pair-${id}.mp4`); pairKey = key;
+            fs.rmSync(hold, {force: true}); // an earlier attempt's (re-queued after a crash)
+            try { fs.linkSync(master, hold); } catch { await abortable(fs.promises.copyFile(master, hold)); }
+            // its supers: the text graphics on a transparent layer of their own (ProRes 4444), laid under the captions
+            const frames = path.join(os.tmpdir(), `reel-supers-${id}`);
+            tmp.push(frames);
+            await timed('supers', () => pass('supers', ranges.supers, frames, {...props, layer: 'supers'}, 'supers layer'));
+            fs.mkdirSync(pairTmp, {recursive: true});
+            pairSupers = path.join(pairTmp, 'supers.mov');
+            set('compositing', 0, {progress: ranges.supers[1], label: 'Encoding supers layer (prores)'});
+            await timed('supers-encode', () => ffmpeg(commands.encode({frames, outFile: pairSupers, alpha: 'prores', fps}), 'supers layer encode'));
+          }
+          if (captions) {
             // Remotion reads any dot in a sequence folder's path as an extension and refuses it (.captions-tmp would): the OS temp dir
             const frames = path.join(os.tmpdir(), `reel-captions-${id}`);
             tmp.push(frames);
             await timed('captions', () => pass('captions', ranges.captions, frames, {...props, layer: 'captions'}, 'captions layer'));
             let layer = frames;
-            const ext = ALPHA[captionAlpha]?.ext;
-            const enc = ext && commands.encode({frames, outFile: (layer = `${frames}.${ext}`), alpha: captionAlpha});
+            // the pair delivers the layer itself: ProRes 4444 with its alpha, kept past this block
+            const alpha = pair ? 'prores' : captionAlpha;
+            const ext = ALPHA[alpha]?.ext;
+            if (pair) fs.mkdirSync(pairTmp, {recursive: true});
+            const enc = ext && commands.encode({frames, outFile: (layer = pair ? path.join(pairTmp, `captions.${ext}`) : `${frames}.${ext}`), alpha, fps});
+            if (pair) pairLayer = layer;
             if (enc) {
-              tmp.push(layer);
-              set('compositing', 0, {progress: ranges.compositing[0], label: `Encoding captions layer (${captionAlpha})`});
+              if (!pair) tmp.push(layer);
+              set('compositing', 0, {progress: ranges.compositing[0], label: `Encoding captions layer (${alpha})`});
               await timed('encode', () => ffmpeg(enc, 'captions layer encode'));
             }
+            // and the same frames as the PNG sequence (CEO-14), zipped with the rate to import them at
+            if (pair) {
+              pairPng = path.join(pairTmp, 'captions.png.zip');
+              set('compositing', 0, {progress: ranges.compositing[0], label: 'Packing the captions PNG sequence'});
+              await timed('captions-png', () => abortable(zipFrames(frames, pairPng, {fps})));
+            }
             set('compositing', 0.5, {progress: Math.round((ranges.compositing[0] + ranges.compositing[1]) / 2), label: 'Compositing', frames: undefined, etaSec: undefined});
-            await timed('composite', () => ffmpeg(commands.composite({master, layer, alpha: captionAlpha, outFile, draft}), 'composite'));
+            // bottom to top as MultiClipVideo stacks them: the master, the supers (the pair's), the captions
+            const layers = [...(pairSupers ? [{file: pairSupers, alpha: 'prores'}] : []), {file: layer, alpha}];
+            await timed('composite', () => ffmpeg(commands.composite({master, layers, outFile, draft, fps}), 'composite'));
           } else await abortable(fs.promises.copyFile(master, outFile)); // nothing to lay over it: the master is the reel
           // what ships: the composite or the copy (a caption on frame 0 can hide a flat field from this check — hence the master's own)
-          await guardFirstFrame(outFile, choice.captions ? 'composite' : 'export');
+          await guardFirstFrame(outFile, captions ? 'composite' : 'export');
         }
       } finally {
         for (const f of tmp) fs.rmSync(f, {recursive: true, force: true});
@@ -444,21 +555,46 @@ export function createRenderRunner({
       result.renderSec = Math.round((now() - t0) / 1000);
       if (!qc.ok) {
         // kept as *-qcfail.mp4 for inspection, reported as a failure
-        const failed = outName.replace(/\.mp4$/, '-qcfail.mp4');
-        try { fs.renameSync(outFile, path.join(exportsDir, failed)); recordAs(path.join(exportsDir, failed), 'qcfail'); } catch {}
+        const failed = shelve();
         const why = [qc.error, ...(qc.checks ?? []).filter((c) => !c.ok && c.blocking).map((c) => `${c.name} ${c.value}, want ${c.want}`)].filter(Boolean).join('; ');
         throw new RenderError(`QC failed (kept as /exports/${failed}): ${why}`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed), mode: result.mode, stages});
       }
       stop();
       // ---- a final that passed QC for a project becomes its next review version ----
       if (job.projectId) {
-        set('review', 0, {etaSec: 10});
+        set('review', 0, {etaSec: 10, ...(pair ? {label: 'Deliverables: master + final audio, master + supers, parity'} : {})});
         try {
-          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal});
-          if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; }
+          if (pair) await timed('pair', async () => {
+            pairMaster = path.join(pairTmp, 'master.mp4');
+            await ffmpeg(commands.remux({video: hold, audio: outFile, outFile: pairMaster}), 'master remux');
+            // master_supers: the supers burnt into that master (its final audio copied) — the master itself when there is no text graphic
+            pairMasterSupers = path.join(pairTmp, 'master_supers.mp4');
+            if (supersDrawn) await ffmpeg(commands.composite({master: pairMaster, layers: [{file: pairSupers, alpha: 'prores'}], outFile: pairMasterSupers, draft: false, fps}), 'master + supers composite');
+            else try { fs.linkSync(pairMaster, pairMasterSupers); } catch { await abortable(fs.promises.copyFile(pairMaster, pairMasterSupers)); }
+            // every file against the master, at the client's rate whatever the props said
+            const m = await probeOf(pairMaster), bad = new Set();
+            for (const [name, file] of [['captions', pairLayer], ['captions.png.zip', pairPng], ['supers', pairSupers], ['master_supers', pairMasterSupers]]) {
+              for (const x of parityIssues(m, file === pairPng ? await zipParity(file) : await probeOf(file), {name, fps: deliveryFps({identity: pair})})) bad.add(x);
+            }
+            if (bad.size) throw new RenderError(`deliverables parity failed: ${[...bad].join('; ')}`);
+          });
+          // the names are the identity the job was submitted under: still the project's when the version is numbered
+          // (checked in the reviews row), or another project may hold them by now
+          const verify = () => {
+            const cur = identityNow(job.projectId);
+            if (JSON.stringify(cur) !== JSON.stringify(pair)) throw new RenderError(`the project's identity changed during the render (${cur ? JSON.stringify(cur) : 'none now'}): render again`);
+          };
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, verify} : {})});
+          if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; if (v.deliverables) result.deliverables = v.deliverables; }
         } catch (e) {
           stop(); // cancelled while the proxy was made: not a version error, a cancel
-          result.versionError = String(e?.message ?? e).slice(0, 200);
+          const why = String(e?.message ?? e).slice(0, 200);
+          // a pair job without its pair and its version is not done (the render stays as a qcfail, never an unrecorded final)
+          if (pair) {
+            const failed = shelve();
+            throw new RenderError(`no deliverables, no version: ${why} (the render is kept as /exports/${failed})`, {qc: qc.text, file: `/exports/${failed}`, path: path.join(exportsDir, failed), mode: result.mode, stages});
+          }
+          result.versionError = why;
         }
         stop(); // the cancel came in while it was being recorded: cleanUp takes the version back
       }
@@ -466,5 +602,5 @@ export function createRenderRunner({
       log(`render ${id} [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`);
       return result;
     }
-  };
+  }
 }

@@ -48,10 +48,12 @@ class IngestError extends Error {
 // progress bands of one ingest: probe 0–5, remux/transcode 5–95, thumbnail 95–100
 const pctIn = (from, to, frac) => Math.round(from + (to - from) * Math.max(0, Math.min(1, frac)));
 
-// g: the gate's verdict on the request (server/http.mjs gate) — via, uid, user of a reel CLI token
+// g: the gate's verdict on the request (server/http.mjs gate) — via, uid, user of a reel CLI token.
+// freeBytes() / minFreeBytes: the disk the clip lands on and its floor (the backend's REEL_RENDER_MIN_FREE_DISK_MB):
+// a clip that would leave less is refused 507 low_disk before anything is written
 export function createClipIngest({publicDir, root, token, uploadsDir = path.join(root, '.uploads'), openForUser = openForUserDefault,
   partFile = partFileDefault, partSize = partSizeDefault, UPLOAD_ID = UPLOAD_ID_DEFAULT,
-  hdrLut = () => null, explain = (tail, fallback) => fallback, log = console.log}) {
+  hdrLut = () => null, explain = (tail, fallback) => fallback, log = console.log, freeBytes = () => Infinity, minFreeBytes = 0}) {
   const jobs = {}; // jobId -> {status, progress, label, clip?, error?}
   const reserved = new Set(); // clip ids of ingests in flight, so two uploads of one name never share an id
   const clipsDir = path.join(publicDir, 'clips');
@@ -158,6 +160,14 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       const have = partSize(uploaded), want = +(url.searchParams.get('size') ?? have);
       if (!have) return refuse(404, {error: `no upload ${upload}`, code: 'not_found'});
       if (have !== want) return refuse(409, {error: `upload ${upload} has ${have} of ${want} bytes`, code: 'upload_incomplete', size: have});
+    }
+    // the space it takes: the clip made from the source (≈ its size), plus the upload itself for a browser body
+    const need = local || uploaded ? fs.statSync(opened?.path ?? local ?? uploaded).size : 2 * (+req.headers['content-length'] || 0);
+    const free = freeBytes();
+    if (free - need < minFreeBytes) {
+      opened?.close(); req.resume(); // the body is not taken
+      const mb = (n) => Math.round(n / 2 ** 20);
+      return refuse(507, {error: `not enough free disk for this clip: ${mb(free)} MB free, it needs ${mb(need)} MB over the ${mb(minFreeBytes)} MB floor`, code: 'low_disk', hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'});
     }
 
     // unique id (avoid clobbering existing clips and ingests still running)

@@ -15,7 +15,7 @@ function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cleanup-'));
   const pub = path.join(root, 'public');
   const ex = path.join(pub, 'exports');
-  for (const d of ['exports/masters', 'projects', 'reviews/p1', 'cache', 'clips']) fs.mkdirSync(path.join(pub, d), {recursive: true});
+  for (const d of ['exports/masters', 'projects', 'reviews/p1/v1', 'reviews/p1/.tmp-pair-x', 'cache', 'clips']) fs.mkdirSync(path.join(pub, d), {recursive: true});
   fs.mkdirSync(path.join(root, '.captions-tmp'), {recursive: true});
   const put = (p, hoursOld, body = 'x') => {
     fs.writeFileSync(p, body);
@@ -56,6 +56,8 @@ function fixture() {
   f.review = put(path.join(root, 'public/reviews/p1/versions.jsonl'), 1, `{"v":1,"file":"public/exports/edited-${id(17)}.mp4"}\n`);
   fs.symlinkSync(f.linkedFromReview, path.join(root, 'public/reviews/p1/v2.mp4'));
   f.reviewProxy = put(path.join(root, 'public/reviews/p1/v1-720p.mp4'), 100 * 24, 'binary');
+  // a version's delivered pair (scripts/reviews.mjs), its snapshot and a pair temp a crash left: old, never ours
+  f.pair = ['v1/ACME_G2_H1_C1_v1_master.mp4', 'v1/ACME_G2_H1_C1_v1_captions.mov', 'v1/project.json', '.tmp-pair-x/master.mp4'].map((n) => put(path.join(root, 'public/reviews/p1', n), 100 * 24, n.endsWith('.json') ? JSON.stringify({clips: [{id: 'c0'}]}) : 'binary'));
   f.manifest = put(path.join(root, 'public/cache/masters-manifest.json'), 100 * 24, JSON.stringify({abc123: {file: `exports/edited-${id(19)}.mp4`}}));
   // things that are not ours to touch
   f.unknown = put(path.join(ex, 'proxy-720p.mp4'), 100 * 24);
@@ -108,11 +110,11 @@ test('plan: never the latest good final of a project, a referenced export or an 
   assert.match(a[f.dirtyLinks].reason, /real files/);
 });
 
-test('plan: reviews, manifests, unknown names, subfolders and other temp files are never candidates', () => {
+test('plan: reviews (R-5: v<n>/ pairs and snapshots included), manifests, unknown names, subfolders and other temp files are never candidates', () => {
   const f = fixture();
   const plan = planCleanup({root: f.root, now: NOW});
   const paths = new Set(plan.actions.map((a) => a.path));
-  for (const p of [f.review, f.reviewProxy, f.manifest, f.unknown, f.master, f.otherDot, f.proof]) assert.ok(!paths.has(p), path.relative(f.root, p));
+  for (const p of [f.review, f.reviewProxy, ...f.pair, f.manifest, f.unknown, f.master, f.otherDot, f.proof]) assert.ok(!paths.has(p), path.relative(f.root, p));
   assert.ok(plan.actions.every((a) => !a.rel.startsWith('public/reviews') && !a.rel.startsWith('public/cache') && !a.rel.startsWith('public/projects')));
   assert.equal(plan.ignored, 2, 'proxy-720p.mp4 and the masters/ folder');
 });
@@ -140,7 +142,7 @@ test('apply deletes exactly the plan (records with their mp4), never following r
   assert.ok(!fs.existsSync(recordPath(f.oldDraft)), 'its record goes with it');
   assert.ok(readRenderRecord(f.p1Latest), 'kept exports keep their record');
   // the links pointed at public/ itself: everything there is intact
-  for (const p of [f.review, f.reviewProxy, f.manifest, f.unknown, f.master, f.p1Latest, f.inManifest, path.join(f.root, 'public/projects/p1.json')]) assert.ok(fs.existsSync(p), path.relative(f.root, p));
+  for (const p of [f.review, f.reviewProxy, ...f.pair, f.manifest, f.unknown, f.master, f.p1Latest, f.inManifest, path.join(f.root, 'public/projects/p1.json')]) assert.ok(fs.existsSync(p), path.relative(f.root, p));
   assert.ok(fs.existsSync(f.dirtyLinks) && fs.existsSync(f.otherDot) && fs.existsSync(f.proof));
 });
 

@@ -18,7 +18,7 @@ import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
 import {PRESETS} from '../src/captionPresets.ts';
 import {projectTiers, repage} from '../src/paging.ts';
-import {applyAutocut, reanchor, totalDurationFrames} from '../src/timeline.ts';
+import {applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
 import {newProject} from '../mcp/checks.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -157,7 +157,7 @@ export function projectPatch(o) {
 // the autocut plan against the clips it was made for: the clips after it and what it removes
 export function autocutPlan(clips, plan) {
   const {clips: after, remap} = applyAutocut(clips, plan);
-  const sec = (cs) => +(totalDurationFrames(cs, FPS) / FPS).toFixed(2);
+  const sec = (cs) => +renderSec(cs, FPS).toFixed(2);
   return {clips: after, remap, before: {clips: clips.length, durationSec: sec(clips)}, after: {clips: after.length, durationSec: sec(after)}, removedSec: +(sec(clips) - sec(after)).toFixed(2),
     changed: plan.map((x) => ({id: x.id, segments: x.segments.map((g) => ({inSec: +g.inSec.toFixed(3), outSec: +g.outSec.toFixed(3)}))}))};
 }
@@ -176,7 +176,7 @@ async function runJob(ctx, route, body, {timeout, what, retry}) {
     await sleep(ctx.pollMs);
   }
 }
-const durationSec = (p) => +(totalDurationFrames(p.clips ?? [], FPS) / FPS).toFixed(2);
+const durationSec = (p) => +renderSec(p.clips ?? [], deliveryFps(p)).toFixed(2); // at the rate it renders
 const summary = (id, p) => ({id, name: p.name, clips: (p.clips ?? []).map((c) => ({id: c.id, label: c.label, src: c.src, inSec: c.inSec, outSec: c.outSec})), captions: (p.captions ?? []).length, captionsOff: !!p.captionsOff, captionStyle: p.captionStyle ?? null, durationSec: durationSec(p), updatedAt: p.updatedAt ?? null});
 
 // ---- clips: a server path when the backend may read it, else a resumable upload ----
@@ -275,7 +275,9 @@ function jobLine(j) {
   if (j.status === 'done') return `${head} → ${j.result?.file ?? ''}${j.result?.mode ? ` [${j.result.mode}${j.result.master ? `, master ${j.result.master}` : ''}]` : ''}`;
   return `${head}${j.error ? ` — ${j.error}` : ''}`;
 }
-const planLines = (plan) => !plan ? [] : plan.full
+const planLines = (plan) => !plan ? [] : plan.fails
+  ? ['FAILS — the deliverables (set_identity) need the layered render:', ...plan.reasons.map((r) => `  - ${r}`)]
+  : plan.full
   ? [`complete render (${plan.mode}${plan.master ? `, master ${plan.master}` : ''}) because:`, ...plan.reasons.map((r) => `  - ${r}`)]
   : [`layers: master cached — only the caption layer is rendered`];
 async function waitJob(ctx, id, timeoutSec) {

@@ -14,6 +14,7 @@ import {projectCaptions} from '../src/captions.ts';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {createRenderRunner} from '../scripts/render-runner.mjs';
 import {createMasterCache} from '../scripts/layers.mjs';
+import {backendStub} from './backend-stub.mjs';
 
 // "Hola soy Ana, | hoy te enseño la casa | en Playa del Carmen. | Tiene tres recámaras | y alberca. | Llámame hoy."
 const SAID = 'Hola soy Ana, hoy te enseño la casa en Playa del Carmen. Tiene tres recámaras y alberca. Llámame hoy.'.split(' ');
@@ -32,18 +33,19 @@ function reel({duck = true} = {}) {
 }
 const textOf = (c) => c.words.map((w) => w.text).join(' ');
 
-// the project in public/projects/ (where the MCP server reads it), the server on stdio, no backend
+// the project in public/projects/ (where the MCP server reads it), the server on stdio, the backend's project write (test/backend-stub.mjs)
 async function withProject(fn, project = reel()) {
   const id = `p-captest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const file = path.join('public', 'projects', `${id}.json`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, JSON.stringify(project));
+  const backend = await backendStub();
   const client = new Client({name: 'test', version: '0'});
-  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'caption-test'}}));
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: backend.url, REEL_AGENT: 'caption-test'}}));
   const call = async (name, args) => { const r = await client.callTool({name, arguments: {project_id: id, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   try { await fn(call, read); } finally {
-    await client.close();
+    await client.close(); await backend.close();
     for (const ext of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(file.replace(/\.json$/, ext), {force: true});
   }
 }

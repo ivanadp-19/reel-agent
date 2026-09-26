@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
-import {createLink, hashToken, loadReviews, proxyArgs, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
+import {createLink, hashToken, inReviewsRow, keepUnapproved, loadReviews, proxyArgs, pruneVersions, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
 import {handleReview} from '../server/review.mjs';
 
@@ -259,4 +259,169 @@ test('recordFinal of a cancelled render job records nothing', async () => {
   ac.abort(new Error('cancelled by request'));
   await assert.rejects(recordFinal({draft: false, qcOk: true, projectId: 'p-1', outFile: path.join(pub, 'exports/edited-1.mp4'), dir, publicDir: pub, jobId: 'j1', signal: ac.signal}), /cancelled/);
   assert.deepEqual(loadReviews(dir, 'p-1').versions.map((v) => v.v), [1]);
+});
+
+// ---- the delivered pair of a project with an identity (scripts/render-runner.mjs) ----
+const IDENTITY = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1, cta: 1}};
+// a version of p-1 with its pair (fake bytes): the temps where the runner leaves them, then recordVersion
+function withPair(pub, dir, {captions = true, now = T0, master = 'master', masterKey} = {}) {
+  const t = path.join(dir, 'p-1', '.tmp-pair-j9');
+  fs.mkdirSync(t, {recursive: true});
+  fs.writeFileSync(path.join(t, 'master.mp4'), master);
+  if (captions) fs.writeFileSync(path.join(t, 'captions.mov'), 'prores');
+  fs.writeFileSync(path.join(t, 'captions.png.zip'), 'zip');
+  fs.writeFileSync(path.join(t, 'supers.mov'), 'prores supers');
+  fs.writeFileSync(path.join(t, 'master_supers.mp4'), 'master + supers');
+  fs.writeFileSync(path.join(pub, '.proxy-9'), 'proxy'); fs.writeFileSync(path.join(pub, '.poster-9'), 'jpeg');
+  fs.writeFileSync(path.join(pub, 'exports', 'edited-9.mp4'), 'full');
+  return recordVersion(dir, 'p-1', {file: path.join(pub, 'exports', 'edited-9.mp4'), proxyTmp: path.join(pub, '.proxy-9'), posterTmp: path.join(pub, '.poster-9'), durationSec: 2, sizeBytes: 4, publicDir: pub, jobId: 'j9', now,
+    deliverables: {master: path.join(t, 'master.mp4'), captions: path.join(t, 'captions.mov'), captionsPng: path.join(t, 'captions.png.zip'), supers: path.join(t, 'supers.mov'), masterSupers: path.join(t, 'master_supers.mp4')}, identity: IDENTITY, snapshot: {clips: [{id: 'c0'}], captionStyle: 'palabra'}, masterKey});
+}
+
+test('an unchanged master (same masterKey, same bytes) is a hard link to the earlier version\'s (design §5), never a copy', () => {
+  const {pub, dir} = fixture(0);
+  const st = (x) => fs.statSync(path.join(pub, x.deliverables.master));
+  const v1 = withPair(pub, dir, {masterKey: 'k1'}), v2 = withPair(pub, dir, {masterKey: 'k1'});
+  assert.equal(v2.masterKey, 'k1');
+  assert.ok(st(v2).ino === st(v1).ino && st(v2).nlink === 2, 'one file, two names');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1', '.tmp-pair-j9')), [], 'the fresh remux is gone');
+  const v3 = withPair(pub, dir, {masterKey: 'k1', master: 'master, other final audio'}), v4 = withPair(pub, dir, {masterKey: 'k2'});
+  assert.ok(st(v3).ino !== st(v1).ino && st(v4).ino !== st(v1).ino, 'other bytes, or another master: a file of its own');
+  removeVersion(dir, 'p-1', 1, pub);
+  assert.equal(fs.readFileSync(path.join(pub, v2.deliverables.master), 'utf8'), 'master', 'v1 taken back: v2 keeps its master');
+});
+
+test('a version with its pair: reviews/<id>/v<n>/ under the system names + the snapshot, taken back whole, kept while a link lives', () => {
+  const {pub, dir} = fixture(1);
+  const v = withPair(pub, dir);
+  assert.equal(v.v, 2);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1', 'v2')).sort(), ['ACME_G2_H1_C1_v2_captions.mov', 'ACME_G2_H1_C1_v2_captions.png.zip', 'ACME_G2_H1_C1_v2_master.mp4', 'ACME_G2_H1_C1_v2_master_supers.mp4', 'ACME_G2_H1_C1_v2_supers.mov', 'project.json']);
+  assert.deepEqual(v.deliverables, {master: 'reviews/p-1/v2/ACME_G2_H1_C1_v2_master.mp4', captions: 'reviews/p-1/v2/ACME_G2_H1_C1_v2_captions.mov', captionsPng: 'reviews/p-1/v2/ACME_G2_H1_C1_v2_captions.png.zip', supers: 'reviews/p-1/v2/ACME_G2_H1_C1_v2_supers.mov', masterSupers: 'reviews/p-1/v2/ACME_G2_H1_C1_v2_master_supers.mp4'});
+  assert.deepEqual(v.identity, IDENTITY);
+  assert.equal(v.snapshot, 'reviews/p-1/v2/project.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pub, v.snapshot), 'utf8')), {clips: [{id: 'c0'}], captionStyle: 'palabra'});
+  assert.deepEqual(v.generated, ['reviews/p-1/v2.mp4', 'reviews/p-1/v2.jpg', ...Object.values(v.deliverables), v.snapshot]);
+  assert.deepEqual(loadReviews(dir, 'p-1').versions[1], v, 'what the JSON says');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1', '.tmp-pair-j9')), [], 'moved, not copied');
+  createLink(dir, 'p-1', {now: T0});
+  const keep = retainedFiles(dir, pub, {now: T0 + DAY});
+  for (const f of [...Object.values(v.deliverables), v.snapshot]) assert.ok(keep.has(f), f);
+  assert.equal(removeVersion(dir, 'p-1', 2, pub), true);
+  assert.ok(!fs.existsSync(path.join(dir, 'p-1', 'v2')) && !fs.existsSync(path.join(dir, 'p-1', 'v2.mp4')), 'the pair\'s folder goes with it');
+  assert.ok(fs.existsSync(path.join(pub, 'exports', 'edited-9.mp4')), 'the export is not this feature\'s to delete');
+});
+
+test('R-2: a version without a pair has exactly the fields it had; a pair that cannot be moved leaves no version and no file', () => {
+  const {pub, dir} = fixture(1);
+  assert.deepEqual(Object.keys(loadReviews(dir, 'p-1').versions[0]), ['v', 'createdAt', 'durationSec', 'sizeBytes', 'file', 'proxy', 'poster', 'proxyBytes', 'job', 'generated']);
+  assert.throws(() => withPair(pub, dir, {captions: false}), /ENOENT/);
+  assert.deepEqual(loadReviews(dir, 'p-1').versions.map((x) => x.v), [1]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1')).sort(), ['.tmp-pair-j9', 'v1.jpg', 'v1.mp4'], 'no v2.mp4, v2.jpg or v2/');
+  fs.writeFileSync(path.join(pub, '.proxy-bad'), 'proxy');
+  assert.throws(() => recordVersion(dir, 'p-1', {file: path.join(pub, 'exports', 'edited-1.mp4'), proxyTmp: path.join(pub, '.proxy-bad'), durationSec: 1, sizeBytes: 1, publicDir: pub, deliverables: {master: 'x', captions: 'y'}, identity: {client: 'Bad Client', script: 2}}), /identity\.client/);
+  fs.writeFileSync(path.join(pub, '.proxy-bad'), 'proxy');
+  assert.throws(() => recordVersion(dir, 'p-1', {file: path.join(pub, 'exports', 'edited-1.mp4'), proxyTmp: path.join(pub, '.proxy-bad'), durationSec: 1, sizeBytes: 1, publicDir: pub, deliverables: {other: 'x'}, identity: IDENTITY}), /unknown deliverable: other/);
+  assert.equal(loadReviews(dir, 'p-1').versions.length, 1);
+  assert.ok(!fs.existsSync(path.join(dir, 'p-1', 'v2.mp4')) && !fs.existsSync(path.join(dir, 'p-1', 'v2')), 'a bad identity names no file');
+});
+
+test('a reviews JSON that cannot be read (damaged, an IO error) is never written over: the write fails, v1/ and the links stay', () => {
+  const {pub, dir} = fixture(0);
+  const v1 = withPair(pub, dir);
+  const link = createLink(dir, 'p-1', {now: T0});
+  const f = path.join(dir, 'p-1.json');
+  const good = fs.readFileSync(f, 'utf8');
+  const delivered = fs.readdirSync(path.join(dir, 'p-1', 'v1')).sort();
+  fs.writeFileSync(f, good.slice(0, 40)); // half a file (a hand edit, a disk that filled up)
+  assert.throws(() => withPair(pub, dir), /reviews of p-1 unreadable, nothing written/);
+  assert.throws(() => createLink(dir, 'p-1', {now: T0}), /unreadable/);
+  assert.throws(() => revokeLink(dir, 'p-1', link.id), /unreadable/);
+  assert.throws(() => removeVersion(dir, 'p-1', 1, pub), /unreadable/);
+  assert.equal(fs.readFileSync(f, 'utf8'), good.slice(0, 40), 'not rewritten as an empty history');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1', 'v1')).sort(), delivered, 'the delivered pair of v1 is not taken for a crash leftover');
+  assert.ok(fs.existsSync(path.join(pub, v1.proxy)));
+  // an IO error (EISDIR standing in for EACCES / EIO / EMFILE): the same
+  fs.rmSync(f); fs.mkdirSync(f);
+  assert.throws(() => createLink(dir, 'p-1', {now: T0}), /unreadable.*EISDIR/);
+  // readers stay lenient (the /r/ page, retention); a missing file is still an empty history for a write
+  assert.deepEqual(loadReviews(dir, 'p-1').versions, []);
+  fs.rmSync(f, {recursive: true});
+  assert.throws(() => createLink(dir, 'p-1', {now: T0}), /no final render to share yet/);
+});
+
+test('the reviews row: 20 concurrent writes to one project lose none; one writer at a time, in order; a failure does not block the next', async () => {
+  const {pub, dir} = fixture(1);
+  const makeProxy = async (input, proxy, poster) => { await new Promise((r) => setTimeout(r, Math.random() * 10)); fs.writeFileSync(proxy, 'p'); fs.writeFileSync(poster, 'j'); return {durationSec: 1}; };
+  const outFile = path.join(pub, 'exports', 'edited-1.mp4');
+  await Promise.all([
+    ...Array.from({length: 10}, (_, i) => recordFinal({draft: false, qcOk: true, projectId: 'p-1', outFile, dir, publicDir: pub, jobId: `c${i}`, makeProxy})),
+    ...Array.from({length: 10}, () => inReviewsRow(dir, 'p-1', () => createLink(dir, 'p-1'))),
+  ]);
+  const r = loadReviews(dir, 'p-1');
+  assert.deepEqual(r.versions.map((x) => x.v).sort((a, b) => a - b), Array.from({length: 11}, (_, i) => i + 1));
+  assert.equal(r.links.length, 10);
+  // a writer that awaits between its read and its write (what the row is for): none lost, never two at once, FIFO
+  const f = path.join(pub, 'counter');
+  fs.writeFileSync(f, '0');
+  let live = 0, most = 0;
+  const order = [];
+  const runs = Array.from({length: 22}, (_, i) => inReviewsRow(dir, 'p-1', async () => {
+    most = Math.max(most, ++live);
+    const n = +fs.readFileSync(f, 'utf8');
+    await new Promise((res) => setTimeout(res, 1));
+    fs.writeFileSync(f, String(n + 1));
+    order.push(i); live--;
+    if (i === 3) throw new Error('boom');
+  }));
+  const settled = await Promise.allSettled(runs);
+  assert.equal(fs.readFileSync(f, 'utf8'), '22');
+  assert.equal(most, 1);
+  assert.deepEqual(order, Array.from({length: 22}, (_, i) => i));
+  assert.deepEqual(settled.map((x) => x.status).filter((x) => x === 'rejected').length, 1);
+  assert.throws(() => inReviewsRow(dir, '../x', () => {}), /bad project id/);
+});
+
+test('R-1: a pair version plays on /r/ like any other; its pair and snapshot are never served there', async () => {
+  const {pub, dir} = fixture(1);
+  const v = withPair(pub, dir);
+  const l = createLink(dir, 'p-1', {now: Date.now()});
+  const srv = await serve(pub);
+  try {
+    assert.match((await get(srv, `/r/${l.token}`)).body.toString(), /<video src="\/r\/[\w-]+\/v\/2\.mp4"/);
+    assert.equal((await get(srv, `/r/${l.token}/v/2.mp4`)).body.toString(), 'proxy');
+    assert.equal((await get(srv, `/r/${l.token}/v/2/full.mp4`)).body.toString(), 'full');
+    for (const p of [`/r/${l.token}/v/2/ACME_G2_H1_C1_v2_master.mp4`, `/r/${l.token}/v/2/project.json`, `/r/${l.token}/${v.deliverables.captions}`]) assert.equal((await get(srv, p)).status, 404, p);
+    assert.equal((await get(srv, `/${v.deliverables.master}`)).status, 401, 'behind auth like every other file');
+  } finally { srv.close(); }
+});
+
+test('retention (T6): the newest unapproved versions and the approved ones stay whole; older ones lose their pair, and without notes their proxy, poster and snapshot too; off until set', () => {
+  const {pub, dir} = fixture(0);
+  for (let i = 0; i < 4; i++) withPair(pub, dir, {now: T0 + i});
+  const exists = (f) => fs.existsSync(path.join(pub, f));
+  const r = loadReviews(dir, 'p-1');
+  r.versions[0].notes = [{atSec: 1, text: 'n'}]; // v1 has a note (T17), v2 is approved (T10) — the fields as the design names them
+  r.versions[1].approval = {v: 2};
+  fs.writeFileSync(path.join(dir, 'p-1.json'), JSON.stringify(r));
+  const before = loadReviews(dir, 'p-1').versions;
+  assert.equal(keepUnapproved(undefined), Infinity);
+  assert.equal(keepUnapproved('0'), Infinity, 'the version just recorded always stays whole');
+  assert.equal(keepUnapproved('2'), 2);
+  assert.deepEqual(pruneVersions(dir, 'p-1', pub), [], 'REEL_REVIEW_KEEP_UNAPPROVED unset: every version kept');
+  // a live link: every proxy stays playable, only the pairs of the old ones go
+  const l = createLink(dir, 'p-1', {now: T0});
+  pruneVersions(dir, 'p-1', pub, {keep: 1, now: T0 + DAY});
+  for (const v of before) assert.equal(exists(v.proxy), true, `v${v.v} proxy while the link lives`);
+  revokeLink(dir, 'p-1', l.id, {now: T0 + DAY});
+  const gone = pruneVersions(dir, 'p-1', pub, {keep: 1, now: T0 + DAY});
+  const [v1, v2, v3, v4] = loadReviews(dir, 'p-1').versions;
+  for (const x of [v2, v4]) for (const f of [...Object.values(x.deliverables), x.proxy, x.poster, x.snapshot]) assert.ok(exists(f), `v${x.v} ${f}`);
+  assert.ok(Object.values(v1.deliverables).every((f) => !exists(f)), 'v1: its pair goes');
+  assert.ok([v1.proxy, v1.poster, v1.snapshot].every(exists), 'v1 has notes: proxy, poster and snapshot stay for good');
+  assert.ok([...Object.values(v3.deliverables), v3.proxy, v3.poster, v3.snapshot].every((f) => !exists(f)), 'v3: nothing left');
+  assert.ok(!fs.existsSync(path.join(dir, 'p-1', 'v3')), 'its empty folder too');
+  assert.deepEqual(v3.pruned.sort(), [...Object.values(before[2].deliverables), before[2].proxy, before[2].poster, before[2].snapshot].sort());
+  assert.deepEqual(gone.sort(), [before[2].proxy, before[2].poster, before[2].snapshot].sort(), 'the pairs went while the link lived; now the rest of v3');
+  assert.ok(fs.existsSync(path.join(pub, 'exports', 'edited-9.mp4')), 'the export is cleanup-exports\' to purge, never this');
+  assert.deepEqual(pruneVersions(dir, 'p-1', pub, {keep: 1}), [], 'twice: nothing more');
 });
