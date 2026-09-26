@@ -31,6 +31,7 @@ import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 import {admitRender, aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
+import {oomReason} from '../scripts/render-memory.mjs';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
@@ -50,7 +51,7 @@ import {createClipIngest} from './ingest.mjs';
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
 import {findOrGenerate, librarySearch, listLibrary, searchAssets} from '../mcp/assets.mjs';
-import {blackSpans, loadLibrary as loadBrollLibrary, searchLibrary as searchBrollLibrary, sheetFor, upsertAsset} from '../mcp/broll.mjs';
+import {blackSpans, createSheetJobs, loadLibrary as loadBrollLibrary, searchLibrary as searchBrollLibrary, upsertAsset, withSheets} from '../mcp/broll.mjs';
 
 // HDR phone footage (HLG / PQ, BT.2020) is tone-mapped to SDR BT.709 at ingest
 // through a 3D LUT computed in src/hdr.ts (this ffmpeg has no zscale); the
@@ -257,6 +258,8 @@ const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
 const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure});
+// B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
+const brollSheets = createSheetJobs();
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
 const DIST = path.join(ROOT, 'editor', 'dist');
 // Where a review link points: REEL_PUBLIC_URL (https://reels.example.com) when set,
@@ -474,10 +477,8 @@ async function handle(req, res) {
     try { return json(res, 200, await findOrGenerate({prompt: String(b.prompt).slice(0, 400), kind: b.kind, size: b.size, quality: b.quality, force: !!b.force, apiKey: e.OPENAI_API_KEY, model: e.REEL_IMAGE_MODEL || 'gpt-image-1.5'})); } catch (e) { return fail(e); }
   }
   if (req.method === 'GET' && url.pathname === '/api/broll-library') {
-    const rows = searchBrollLibrary(url.searchParams.get('q') || '');
-    const out = [];
-    for (const a of rows) { let sheet = null; try { sheet = '/' + path.relative(PUBLIC, await sheetFor(a)).split(path.sep).join('/'); } catch {} out.push({...a, sheet}); }
-    return json(res, 200, out);
+    // a missing contact sheet is null here and made in the background (brollSheets) — never ffmpeg inside the request
+    return json(res, 200, withSheets(searchBrollLibrary(url.searchParams.get('q') || ''), brollSheets));
   }
   if (req.method === 'POST' && url.pathname.startsWith('/api/broll-library/')) {
     const id = decodeURIComponent(url.pathname.split('/').pop());
@@ -599,7 +600,12 @@ async function handle(req, res) {
     const child = spawn('ffmpeg', ['-v', 'error', '-i', abs, '-ac', '1', '-ar', '8000', '-f', 's16le', '-']);
     const bufs = [];
     child.stdout.on('data', (d) => bufs.push(d));
+    let answered = false;
+    // no ffmpeg (ENOENT): an 'error' event without a listener would be thrown at the backend
+    child.on('error', () => { if (!answered) { answered = true; json(res, 500, {error: 'ffmpeg could not start'}); } });
     child.on('close', (code) => {
+      if (answered) return;
+      answered = true;
       if (code !== 0 || !bufs.length) return json(res, 500, {error: 'ffmpeg failed'});
       const buf = Buffer.concat(bufs);
       const samples = Math.floor(buf.length / 2);
@@ -669,7 +675,9 @@ async function handle(req, res) {
         cleanup();
         const asset = {id, src: `broll-assets/${id}.${ext}`, kind, label: rawName.replace(/\.[^.]+$/, ''), thumb: `/broll-assets/thumbs/${id}.jpg`, ...(durationSec ? {durationSec: +durationSec.toFixed(2)} : {})};
         try { upsertAsset({id, src: asset.src, kind, label: asset.label, durationSec: asset.durationSec ?? null}); } catch {}
-        return json(res, 200, asset);
+        json(res, 200, asset);
+        brollSheets.kick(asset); // the contact sheet after the answer, in the background (never rejects)
+        return;
       } catch (e) {
         cleanup();
         return json(res, 500, {error: String(e).slice(0, 200)});
@@ -703,6 +711,8 @@ async function handle(req, res) {
     const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
     const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
+    // could not start (EAGAIN / ENOMEM under memory pressure): the job fails, the backend stays up
+    child.on('error', (e) => { fs.rmSync(inFile, {force: true}); job.store[id] = {status: 'error', error: `${job.name} could not start: ${e.message}`}; });
     let errTail = '';
     let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
@@ -720,7 +730,7 @@ async function handle(req, res) {
       errTail = (errTail + d).slice(-4000);
       process.stderr.write(d);
     });
-    child.on('close', (code) => {
+    child.on('close', (code, sig) => {
       fs.rmSync(inFile, {force: true});
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
       const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
@@ -733,7 +743,7 @@ async function handle(req, res) {
       }
       job.store[id] = code === 0
         ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {})}
-        : {status: 'error', error: explainFailure(errTail, `${job.name} exited ${code}`)};
+        : {status: 'error', error: oomReason({code, signal: sig, tail: errTail, heap: 0, what: job.name}) ?? explainFailure(errTail, `${job.name} exited ${code ?? sig}`)};
     });
     return json(res, 200, {jobId: id});
   }
