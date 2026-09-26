@@ -9,6 +9,7 @@
 
 import {cube} from './hdr.ts';
 import {continuesPrev, type Clip} from './timeline.ts';
+import {DEFAULTS, paramsFor, type ProjectGrade} from './grade.ts';
 
 type RGB = [number, number, number];
 export type Cube = {size: number; data: Float32Array; title?: string}; // size³ × 3, red fastest
@@ -143,14 +144,20 @@ export function lutSpans(clips: Clip[], target?: string): Span[] {
   if (!out.length) throw new Error(target ? `no clip or source "${target}"` : 'the project has no clips to measure the footage from');
   return out;
 }
-// create_lut match: the clip to fix and the one it must look like — by default the clip that continues it in the
-// same source (a shot a pre-edit graded only from its second part on, split at the change: the head, then the rest)
-export function matchPair(clips: Clip[], clipId: string, toClipId?: string): {from: Span; to: Span} {
-  const i = clips.findIndex((c) => c.id === clipId);
-  if (i < 0) throw new Error(`no clip ${clipId}`);
-  const to = toClipId ? clips.find((c) => c.id === toClipId && c.id !== clipId) : continuesPrev(clips[i], clips[i + 1]) ? clips[i + 1] : undefined;
-  if (!to) throw new Error(toClipId ? `no other clip ${toClipId}` : `the next clip does not continue ${clipId} in the same source — pass to_clip_id`);
-  return {from: span(clips[i]), to: span(to)};
+// create_lut match: the clip to fix and the one it must look like — the clip that continues it in the same source (a
+// shot a pre-edit graded only from its second part on, split at the change: the head, then the rest), wherever it sits
+// on the timeline; toClipId only picks among several. Never another shot: fitted across two, least squares washes the
+// head out. `to` carries the LUT it plays with (whole reel, source or its own): the head's LUT replaces that one, so
+// it is fitted to the continuation as it shows.
+export function matchPair(clips: Clip[], clipId: string, toClipId?: string, grade?: ProjectGrade | null): {from: Span; to: Span & {lut?: string; mix?: number}} {
+  const from = clips.find((c) => c.id === clipId);
+  if (!from) throw new Error(`no clip ${clipId}`);
+  const next = clips.filter((c) => continuesPrev(from, c));
+  const to = toClipId ? next.find((c) => c.id === toClipId) : next[0];
+  if (!to) throw new Error(toClipId ? `${toClipId} does not continue ${clipId} in the same source: a match fits the same shot either side of a split` : `no clip continues ${clipId} in the same source: split_clip where the look changes inside the shot, then match the part before the split`);
+  const p: {lut?: string | null; lutMix?: number} = grade ? paramsFor(grade, to.src, to.id) : {};
+  const mix = p.lutMix ?? DEFAULTS.lutMix;
+  return {from: span(from), to: {...span(to), ...(p.lut && mix > 0 ? {lut: p.lut, mix} : {})}};
 }
 
 // ---- match: a LUT fitted on pixel pairs ----
@@ -212,8 +219,22 @@ export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, 
   };
   const m = size, data = new Float64Array(m ** 3 * 3), step = [1, m, m * m];
   for (let i = 0; i < m ** 3; i++) data.set(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)]), i * 3);
-  // monotone: a channel never falls while its own input rises (a dip of the fit becomes a flat step)
-  for (let i = 0; i < m ** 3; i++) for (let c = 0; c < 3; c++) if (Math.floor(i / step[c]) % m > 0) data[i * 3 + c] = Math.max(data[i * 3 + c], data[(i - step[c]) * 3 + c]);
-  const node = (v: number) => Math.round(v * (m - 1));
+  // monotone: a channel never falls while its own input rises. Per line of the cube, the least-squares monotone
+  // values (pool adjacent violators) weighted by the pairs nearest each node: where the fit dips, the nodes the pairs
+  // cover keep their value and the others follow them. A running max lifted a gray node to its off-axis neighbour
+  // instead — G10 s3's blacks came out green.
+  const node = (v: number) => Math.round(v * (m - 1)), wt = new Float64Array(m ** 3).fill(0.01);
+  for (let i = 0; i < n; i++) wt[(node(x[i * 3 + 2]) * m + node(x[i * 3 + 1])) * m + node(x[i * 3])]++;
+  for (let c = 0; c < 3; c++) for (let i = 0; i < m ** 3; i++) if (Math.floor(i / step[c]) % m === 0) {
+    const pools: {v: number; w: number; k: number}[] = [];
+    for (let k = 0; k < m; k++) {
+      const j = i + k * step[c];
+      let p = {v: data[j * 3 + c], w: wt[j], k: 1};
+      while (pools.length && pools[pools.length - 1].v > p.v) { const q = pools.pop()!; p = {v: (q.v * q.w + p.v * p.w) / (q.w + p.w), w: q.w + p.w, k: q.k + p.k}; }
+      pools.push(p);
+    }
+    let k = 0;
+    for (const p of pools) for (let t = 0; t < p.k; t++) data[(i + k++ * step[c]) * 3 + c] = p.v;
+  }
   return cube(([r, g, b]) => { const i = ((node(b) * m + node(g)) * m + node(r)) * 3; return [data[i], data[i + 1], data[i + 2]]; }, m, title);
 }

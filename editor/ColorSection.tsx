@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, withLut, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
 import {lutSpans, matchPair} from '../src/lut';
+import {continuesPrev} from '../src/timeline';
 import {runJob, readPublic} from './jobs';
 import {Btn, Label, Section, Select, Toggle} from './ui';
 
@@ -103,15 +104,15 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
   // create_lut match: this clip fitted to the one continuing it (or the one picked), then that clip's grade + the LUT
   const onMatch = async () => {
     try {
-      const {from, to} = matchPair(clips, target, matchTo || undefined);
+      const {from, to} = matchPair(clips, target, matchTo || undefined, grade);
       const name = window.prompt('Name of the new LUT (letters, digits, - _)', `${from.id.replace(/[^\w-]/g, '_').slice(0, 34)}-match`)?.trim();
       if (!name || !/^[\w-]{1,40}$/.test(name)) return;
       setBusy('Starting…');
       await runJob('/api/lut', {match: {name, from, to}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const r = await readPublic<{lut?: string; before?: number; after?: number}>('lut.json');
+      const r = await readPublic<{lut?: string; before?: number; after?: number; worst?: {luma: number[]; rgb: number[]}}>('lut.json');
       await loadLuts();
       setBusy(null);
-      if (r.lut) { await settle(withLut(grade, r.lut, from.id, to.id)); notify(`${from.id} matched to ${to.id}: difference ${r.before} → ${r.after} of 255`, 'ok'); }
+      if (r.lut) { await settle(withLut(grade, r.lut, from.id, to.id)); notify(`${from.id} matched to ${to.id}: difference ${r.before} → ${r.after} of 255${r.worst ? `; luma ${r.worst.luma.join('–')} off by R/G/B ${r.worst.rgb.join(' / ')}` : ''}`, 'ok'); }
     } catch (err) { setBusy(null); notify('Match: ' + (err as Error).message, 'error'); }
   };
 
@@ -139,7 +140,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
       {clipOf ? <>
         <Label>Match this clip to</Label>
         <div className="flex gap-1" title="A shot whose grade starts late: split at the change, then fit the ungraded head to the graded rest (pixel pairs at the join, bounded)">
-          <Select value={matchTo} onChange={setMatchTo} options={[{value: '', label: 'the clip continuing it'}, ...clips.filter((c) => c.id !== target).map((c) => ({value: c.id, label: `Clip ${c.id}`}))]} className="flex-1" />
+          <Select value={matchTo} onChange={setMatchTo} options={[{value: '', label: 'the clip continuing it'}, ...clips.filter((c) => continuesPrev(clipOf, c)).map((c) => ({value: c.id, label: `Clip ${c.id}`}))]} className="flex-1" />
           <Btn onClick={onMatch} disabled={!!busy}>Match</Btn>
         </div>
       </> : null}

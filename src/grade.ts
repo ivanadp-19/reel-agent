@@ -149,7 +149,10 @@ export type RenderGrade = {
   media?: string; // the LUT-baked copy of the source to play instead of clip.src
 };
 
-export const bakeKey = (src: string, lut: string, mix: number) => `${src}|${lut}|${Math.round(clamp(mix, 0, 1) * 100)}`;
+// the bake's conversion around lut3d (scripts/lut.mjs), in the key: a copy baked through another one (the 8-bit rgb24
+// ffmpeg picked on its own, ~1.5 of luma darker) is missing, so every settle and render bakes it again
+export const BAKE = 'gbrpf32le';
+export const bakeKey = (src: string, lut: string, mix: number) => `${src}|${lut}|${Math.round(clamp(mix, 0, 1) * 100)}|${BAKE}`;
 
 // the parameters that apply to one clip: whole reel ← its source ← the clip itself
 export function paramsFor(pg: ProjectGrade, src: string, clipId?: string): GradeParams {
@@ -185,7 +188,9 @@ export function gradeFor(pg: ProjectGrade | null | undefined, src: string, clipI
     if (sat !== g.saturation || !same(st, tables)) skin = {tables: st, saturation: sat};
   }
   const mix = p.lutMix ?? DEFAULTS.lutMix;
-  const media = p.lut && mix > 0 ? pg.baked?.[bakeKey(file, p.lut, mix)] : undefined;
+  const key = p.lut && mix > 0 ? bakeKey(file, p.lut, mix) : '';
+  // until that bake lands, the copy baked before BAKE was in the key still plays: the LUT, ~1.5 of luma off
+  const media = key ? pg.baked?.[key] ?? pg.baked?.[key.slice(0, key.lastIndexOf('|'))] : undefined;
   if (!media && g.saturation === 1 && !skin && same(tables, identityTables)) return null;
   return {tables, saturation: g.saturation, skin, ...(media ? {media} : {})};
 }
@@ -210,11 +215,12 @@ export function lutBakes(pg: ProjectGrade | null | undefined, clips: {id: string
 
 // a LUT create_lut made, on the whole reel or as the override of one clip / source (set_grade's target); like = the
 // clip whose own grade the target takes over, this LUT in front at full mix (create_lut match: the head gets its
-// continuation's grade — its old knobs go, they were compensating for the missing grade)
-// ponytail: the pairs are read from the raw source, so a continuation with its own LUT is not composed in; compose
-// sampleCube(its LUT, match) when one does
+// continuation's grade — its old knobs go, they were compensating for the missing grade; the match LUT has the
+// continuation's own LUT in it, matchPair). The copies baked from an earlier .cube of that name go: the same path,
+// a new fit.
 export function withLut(pg: ProjectGrade | null | undefined, lut: string, target?: string, like?: string): ProjectGrade {
-  const g: ProjectGrade = pg ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  const g0: ProjectGrade = pg ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}};
+  const g = {...g0, baked: Object.fromEntries(Object.entries(g0.baked ?? {}).filter(([k]) => k.split('|')[1] !== lut))};
   if (!target) return {...g, lut};
   const {lut: _lut, lutMix: _mix, ...own} = (like ? g.overrides?.[like] : undefined) ?? {};
   return {...g, overrides: {...g.overrides, [target]: like ? {...own, lut, lutMix: 1} : {...g.overrides?.[target], lut}}};

@@ -28,15 +28,16 @@ export async function fetchAllowed(url, {signal, fetchImpl = fetch, allow = ALLO
   return r;
 }
 
-// a command, killed when the signal aborts; resolves {code, stdout, stderr}
-// (stderr: its last stderrMax characters — raise it when the output is parsed)
+// a command, killed when the signal aborts — with what it spawned: an abortable command runs as its own process
+// group (node scripts/lut.mjs → ffmpeg: killing the node alone left the bake running and its temp files behind);
+// resolves {code, stdout, stderr} (stderr: its last stderrMax characters — raise it when the output is parsed)
 export function runCmd(cmd, args, {signal, onPid, cwd, stderrMax = 4000} = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
-    const c = spawn(cmd, args, {cwd});
+    const c = spawn(cmd, args, {cwd, detached: !!signal});
     onPid?.(c.pid);
     let out = '', err = '';
-    const kill = () => { try { c.kill('SIGKILL'); } catch {} };
+    const kill = () => { try { process.kill(-c.pid, 'SIGKILL'); } catch { try { c.kill('SIGKILL'); } catch {} } };
     signal?.addEventListener('abort', kill, {once: true});
     c.stdout.on('data', (d) => (out += d));
     c.stderr.on('data', (d) => (err = (err + d).slice(-stderrMax)));

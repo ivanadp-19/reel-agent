@@ -78,6 +78,24 @@ test('fitCube is bounded out of sample: a color the pairs never showed gets the 
   }
 });
 
+test('fitCube keeps grays gray where the pairs are, even where the fit dips next to them (the blacks of G10 s3)', () => {
+  // crushed shadows, ×5 saturation, and a hue twist that grows toward the darks but keeps grays gray (what a real
+  // join's motion makes the fit do): G's output falls as G rises just off the gray axis. A running max lifted the
+  // gray nodes to their off-axis neighbour — +21/255 of green on a gray; the pairs' own nodes must keep their fit
+  const K = [0.2126, 0.7152, 0.0722], grade = (p) => {
+    const Y = K[0] * p[0] + K[1] * p[1] + K[2] * p[2], o = p.map((v) => Math.max(0, (Y - 0.1) * 1.5) + 5 * (v - Y));
+    o[1] += 4 * ((0.5 - Y) / 0.25) * (p[2] - Y);
+    return o;
+  };
+  const {x, y} = pairsOf(20000, () => { const t = rand() < 0.035 ? 0.14 + 0.08 * rand() : 0.3 + 0.4 * rand(); return [0, 0, 0].map(() => t + 0.03 * (rand() - 0.5)); }, grade);
+  const l = parseCube(fitCube(x, y));
+  for (let v = 0.16; v <= 0.68; v += 0.005) {
+    if (v > 0.2 && v < 0.32) continue; // no pairs there (and few at the edges of the two groups)
+    const o = sampleCube(l, [v, v, v]);
+    assert.ok(Math.max(...o) - Math.min(...o) <= 2 / 255, `gray ${Math.round(v * 255)} → ${o.map((c) => Math.round(c * 255)).join('/')}`);
+  }
+});
+
 test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, its grade taken over', () => {
   const clips = [{id: 'a', src: 'clips/x.mp4', inSec: 0, outSec: 8.87}, {id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}, {id: 'rest', src: 'clips/x.mp4', inSec: 9.204, outSec: 12.47}, {id: 'other', src: 'clips/y.mp4', inSec: 0, outSec: 3}];
   assert.deepEqual(lutSpans(clips, 'head'), [{id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}]);
@@ -85,12 +103,18 @@ test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, i
   assert.equal(lutSpans(clips, 'clips/x.mp4').length, 3);
   assert.throws(() => lutSpans(clips, 'nope'), /no clip/);
   assert.equal(matchPair(clips, 'head').to.id, 'rest');
-  assert.equal(matchPair(clips, 'head', 'a').to.id, 'a');
-  assert.throws(() => matchPair(clips, 'rest'), /to_clip_id/); // the next clip is another source
+  assert.equal(matchPair([...clips].reverse(), 'head').to.id, 'rest', 'wherever it sits on the timeline');
+  assert.throws(() => matchPair(clips, 'head', 'a'), /does not continue/); // another shot: never
+  assert.throws(() => matchPair(clips, 'rest'), /no clip continues/); // the next clip is another source
+  // the continuation plays with a whole-reel LUT: the match carries it (the head's LUT replaces it)
+  assert.deepEqual(matchPair(clips, 'head', undefined, {look: 'none', intensity: 0.8, auto: false, bySrc: {}, lut: 'luts/brand.cube', lutMix: 0.7}).to, {id: 'rest', src: 'clips/x.mp4', inSec: 9.204, outSec: 12.47, lut: 'luts/brand.cube', mix: 0.7});
   const g = {look: 'none', intensity: 0.8, auto: false, bySrc: {}, lutMix: 0.5, overrides: {head: {adjust: {saturation: 2}, lut: 'luts/old.cube', lutMix: 0.5}, rest: {adjust: {contrast: 1.4}, highlights: 0.4}}};
   assert.deepEqual(withLut(g, 'luts/m.cube', 'head', 'rest').overrides.head, {adjust: {contrast: 1.4}, highlights: 0.4, lut: 'luts/m.cube', lutMix: 1});
   assert.deepEqual(withLut(g, 'luts/r.cube', 'rest').overrides.rest, {adjust: {contrast: 1.4}, highlights: 0.4, lut: 'luts/r.cube'});
   assert.equal(withLut(null, 'luts/r.cube').lut, 'luts/r.cube');
+  // a new fit under the same name: the copies baked from the old .cube go, so the next settle bakes it again
+  const baked = {'clips/x.mp4|luts/m.cube|100|gbrpf32le': 'clips/lut/x-old.mp4', 'clips/x.mp4|luts/m.cube|100': 'clips/lut/x-older.mp4', 'clips/x.mp4|luts/r.cube|50|gbrpf32le': 'clips/lut/x-r.mp4'};
+  assert.deepEqual(withLut({...g, baked}, 'luts/m.cube', 'head', 'rest').baked, {'clips/x.mp4|luts/r.cube|50|gbrpf32le': 'clips/lut/x-r.mp4'});
 });
 
 // ---- ffmpeg: decoding the frames the reel shows, and the bake ----
@@ -130,5 +154,32 @@ test('an identity .cube bakes without loss (planar float around lut3d, not 8-bit
   const baked = JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')).baked.k;
   const [src, out] = [path.join(pub, 'clips', 'a.mp4'), path.join(pub, baked)].map(yuvAvg);
   src.forEach((v, c) => assert.ok(Math.abs(out[c] - v) <= 0.3, `${['Y', 'U', 'V'][c]} ${v.toFixed(2)} → ${out[c].toFixed(2)}`));
+  fs.rmSync(dir, {recursive: true, force: true});
+});
+
+test('match: fitted to the continuation as it plays (its LUT in), refused across two shots', () => {
+  const dir = tmp(), pub = path.join(dir, 'public');
+  fs.mkdirSync(path.join(pub, 'clips'), {recursive: true}); fs.mkdirSync(path.join(pub, 'luts'));
+  // one still shot whose grade starts at frame 10 (the head is 0–9), and another picture
+  ff(['-f', 'lavfi', '-i', "testsrc2=s=160x284:r=1:d=1,fps=30,hue=s=0.5,colorchannelmixer=rr=0.8:bb=0.9:enable='gte(n\\,10)'", ...x264, path.join(pub, 'clips', 's.mp4')]);
+  ff(['-f', 'lavfi', '-i', 'smptebars=s=160x284:r=30:d=1', ...x264, path.join(pub, 'clips', 'o.mp4')]);
+  fs.writeFileSync(path.join(pub, 'luts', 'tint.cube'), cube(([r, g, b]) => [r * 0.7, g, b], 17, 'tint'));
+  const head = {id: 'head', src: 'clips/s.mp4', inSec: 0, outSec: 10 / 30}, rest = {id: 'rest', src: 'clips/s.mp4', inSec: 10 / 30, outSec: 1};
+  const job = (name, to) => {
+    fs.writeFileSync(path.join(dir, 'job.json'), JSON.stringify({match: {name, from: head, to}}));
+    const r = spawnSync('node', [path.resolve(import.meta.dirname, '../scripts/lut.mjs'), 'job.json', 'out.json'], {cwd: dir, encoding: 'utf8'});
+    return {r, out: r.status === 0 ? JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')) : null, lut: () => parseCube(fs.readFileSync(path.join(pub, 'luts', `${name}.cube`), 'utf8'))};
+  };
+  const plain = job('plain', rest), tinted = job('tinted', {...rest, lut: 'luts/tint.cube', mix: 1});
+  assert.equal(plain.r.status, 0, plain.r.stderr);
+  assert.ok(plain.out.after < 10 && plain.out.worst.rgb.length === 3, JSON.stringify(plain.out));
+  const [a, b] = [plain.lut(), tinted.lut()], px = decode(path.join(pub, 'clips', 's.mp4'), {span: head, count: 2})[0];
+  let red = 0, green = 0, n = 0;
+  for (let i = 0; i < px.length; i += 3 * 97) { const p = [px[i], px[i + 1], px[i + 2]], oa = sampleCube(a, p), ob = sampleCube(b, p); red += Math.abs(ob[0] - 0.7 * oa[0]); green += Math.abs(ob[1] - oa[1]); n++; }
+  assert.ok(red / n < 0.01 && green / n < 0.01, `the head's LUT has the continuation's in it: R off ${(red / n).toFixed(3)}, G off ${(green / n).toFixed(3)}`);
+  const other = job('other', {id: 'bars', src: 'clips/o.mp4', inSec: 0, outSec: 1});
+  assert.notEqual(other.r.status, 0);
+  assert.match(other.r.stderr, /do not show the same picture/);
+  assert.ok(!fs.existsSync(path.join(pub, 'luts', 'other.cube')), 'nothing written');
   fs.rmSync(dir, {recursive: true, force: true});
 });

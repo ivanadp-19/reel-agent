@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {localizeRemoteBrolls} from '../scripts/remote-broll.mjs';
+import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
 
 const tmps = [];
 const tmpdir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-broll-')); tmps.push(d); return d; };
@@ -58,4 +58,17 @@ test('progress per downloaded MB; the src is rewritten to the local copy; only P
   assert.ok(fs.statSync(path.join(dir, path.basename(p.brolls[0].src))).size > 3e6);
   assert.ok(['1 MB', '2 MB', '3 MB'].every((mb) => seen.some((l) => l.endsWith(mb))), seen.join(' | '));
   await assert.rejects(localizeRemoteBrolls(props('https://evil.example/x.jpg'), {dir, fetchImpl: sends(1)}), /only Pexels/);
+});
+
+test('an aborted command is killed with what it spawned (a render cancelled while node scripts/lut.mjs runs ffmpeg)', async () => {
+  const file = path.join(tmpdir(), 'pid');
+  const ac = new AbortController();
+  const run = runCmd(process.execPath, ['-e', `const c = require('child_process').spawn('sleep', ['30'], {stdio: 'ignore'}); require('fs').writeFileSync(${JSON.stringify(file)}, String(c.pid)); setInterval(() => {}, 1000)`], {signal: ac.signal});
+  const gone = (pid) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+  for (let i = 0; i < 100 && !fs.existsSync(file); i++) await new Promise((r) => setTimeout(r, 20));
+  const grandchild = +fs.readFileSync(file, 'utf8');
+  ac.abort(new Error('cancelled'));
+  await assert.rejects(run, /cancelled/);
+  for (let i = 0; i < 50 && !gone(grandchild); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(gone(grandchild), `sleep ${grandchild} survived its parent's kill`);
 });

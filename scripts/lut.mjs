@@ -7,10 +7,11 @@
 //     from reference photos: the footage's color statistics (frames of the clips'
 //     ranges, src/lut.ts lutSpans) matched to the references' → public/luts/<name>.cube;
 //     → public/lut.json {lut: 'luts/<name>.cube'}
-//   {match: {name, from: {src, inSec, outSec}, to: {src, inSec, outSec}, frames}}  fit a .cube on
-//     pixel pairs (src/lut.ts fitCube): the last frames of `from` against the first frames of `to`
-//     — the same shot a frame apart (src/lut.ts matchPair) → public/luts/<name>.cube;
-//     → public/lut.json {lut, pairs, before, after} (mean |difference| of the pairs, of 255)
+//   {match: {name, from: {id, src, inSec, outSec}, to: {id, src, inSec, outSec, lut?, mix?}, frames}}  fit a
+//     .cube on pixel pairs (src/lut.ts fitCube): the last frames of `from` against the first frames of `to`
+//     through its own LUT — the same shot a frame apart (src/lut.ts matchPair) → public/luts/<name>.cube;
+//     → public/lut.json {lut, pairs, before, after, worst} (mean |difference| of the pairs, of 255; worst = the
+//     luma band the fit leaves most off, its mean R/G/B error); refused when the pairs stay far apart (another shot)
 //
 // Input: JSON (argv[2]); output file argv[3] (default public/lut.json). Deterministic ffmpeg + math, no model, no network.
 import fs from 'node:fs';
@@ -18,13 +19,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {cubeFromReferences, fitCube, labStats, mixCube, parseCube, sampleCube} from '../src/lut.ts';
+import {BAKE} from '../src/grade.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
 const OUT = path.join(PUBLIC, 'clips', 'lut');
-// the bake's conversion around lut3d, part of its cache key (a new one bakes every copy again): planar float —
-// the 8-bit rgb24 ffmpeg picked on its own lost ~1.5 of luma even through an identity LUT
-const BAKE = 'gbrpf32le';
 const progress = (pct, label) => console.log(`PROGRESS:${pct}:${label}`);
 const inPublic = (rel) => {
   const abs = path.resolve(PUBLIC, rel);
@@ -77,7 +76,11 @@ export function makeLut({name, refs, clips = [], strength = 0.7}) {
   return writeLut(rel, cubeFromReferences(foot, ref, name, {strength}));
 }
 
-// the frames either side of the join: `from`'s last ones (nearest the join first) against `to`'s first ones
+// the frames either side of the join: `from`'s last ones (nearest the join first) against `to`'s first ones, through
+// the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under: a frame of motion leaves
+// ~5, another shot ~40 (least squares on unrelated pixels regresses to gray, and the mean still falls)
+const SAME_SHOT = 10;
+const cubeAt = (lut, mix) => { const text = fs.readFileSync(inPublic(lut), 'utf8'); return parseCube(mix >= 1 ? text : mixCube(parseCube(text), mix)); };
 export function matchLut({name, from, to, frames = 3}) {
   const rel = lutRel(name);
   progress(10, 'Reading the frames at the join');
@@ -85,16 +88,22 @@ export function matchLut({name, from, to, frames = 3}) {
   const b = decode(inPublic(to.src), {span: {...to, outSec: Math.min(to.outSec, to.inSec + 1)}, count: 0});
   const k = Math.min(frames, a.length, b.length);
   const x = concat(a.slice(0, k)), y = concat(b.slice(0, k));
+  if (to.lut) { const l = cubeAt(to.lut, to.mix ?? 1); for (let i = 0; i < y.length; i += 3) y.set(sampleCube(l, [y[i], y[i + 1], y[i + 2]]), i); }
   progress(50, `Fitting ${k} frame pair(s)`);
   const text = fitCube(x, y, {title: name});
-  const l = parseCube(text), n = x.length / 3;
+  const l = parseCube(text), n = x.length / 3, bands = Array.from({length: 10}, () => [0, 0, 0, 0]); // luma tenths: R, G, B error, pairs
   let before = 0, after = 0;
   for (let i = 0; i < n; i++) {
-    const o = sampleCube(l, [x[i * 3], x[i * 3 + 1], x[i * 3 + 2]]);
-    for (let c = 0; c < 3; c++) { before += Math.abs(y[i * 3 + c] - x[i * 3 + c]); after += Math.abs(y[i * 3 + c] - o[c]); }
+    const p = [x[i * 3], x[i * 3 + 1], x[i * 3 + 2]], o = sampleCube(l, p), band = bands[Math.min(9, Math.floor((0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) * 10))];
+    band[3]++;
+    for (let c = 0; c < 3; c++) { before += Math.abs(y[i * 3 + c] - p[c]); after += Math.abs(y[i * 3 + c] - o[c]); band[c] += o[c] - y[i * 3 + c]; }
   }
-  const r1 = (v) => Math.round((v / (n * 3)) * 2550) / 10;
-  return {lut: writeLut(rel, text), pairs: k, before: r1(before), after: r1(after)};
+  const r1 = (v) => Math.round(v * 2550) / 10, bef = r1(before / n / 3), aft = r1(after / n / 3);
+  if (aft > SAME_SHOT) throw new Error(`${from.id ?? 'the clip'} and ${to.id ?? 'the other'} do not show the same picture at the join (mean difference ${bef} → ${aft} of 255 after the fit, over ${SAME_SHOT}): a match needs the same shot either side of a split`);
+  // the mean hides a cast on a tenth of the picture (the blacks): the band (≥ 1 % of the pairs) left most off
+  const worst = bands.map((s, i) => ({luma: [Math.round(i * 25.5), Math.round((i + 1) * 25.5)], rgb: s.slice(0, 3).map((v) => r1(v / s[3])), share: s[3] / n}))
+    .filter((w) => w.share >= 0.01).reduce((w, v) => (Math.max(...v.rgb.map(Math.abs)) > Math.max(...w.rgb.map(Math.abs)) ? v : w));
+  return {lut: writeLut(rel, text), pairs: k, before: bef, after: aft, worst: {luma: worst.luma, rgb: worst.rgb}};
 }
 
 export function bake({key, src, lut, mix}) {
@@ -108,13 +117,15 @@ export function bake({key, src, lut, mix}) {
   const out = path.join(PUBLIC, rel);
   if (fs.existsSync(out) && fs.statSync(out).size > 0) return rel;
   fs.mkdirSync(OUT, {recursive: true});
-  const cubeFile = path.join(OUT, `.${hash}.cube`);
+  // this process's own temp names: two bakes of one key (a render's and the editor's, a retry next to an orphan)
+  // never write into each other's file — the last complete one is renamed in
+  const cubeFile = path.join(OUT, `.${hash}-${process.pid}.cube`);
   fs.writeFileSync(cubeFile, cubeText);
   const vf = `format=${alpha ? 'gbrapf32le' : 'gbrpf32le'},lut3d=file=${cubeFile}:interp=tetrahedral,format=${alpha ? 'yuva420p' : 'yuv420p'}`;
   const enc = alpha
     ? ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '30', '-row-mt', '1', '-an']
     : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart'];
-  const tmp = out + '.part' + path.extname(out);
+  const tmp = `${out}.part-${process.pid}${path.extname(out)}`;
   const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...(alpha ? ['-c:v', 'libvpx-vp9'] : []), '-i', input, '-vf', vf, ...enc, tmp]);
   fs.rmSync(cubeFile, {force: true});
   if (r.status !== 0) { fs.rmSync(tmp, {force: true}); throw new Error(`LUT bake failed for ${path.basename(src)}: ${String(r.stderr).trim().split('\n').pop()}`); }
