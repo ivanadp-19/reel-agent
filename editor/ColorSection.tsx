@@ -1,12 +1,15 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
-import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
+import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, withLut, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
+import {lutSpans, matchPair} from '../src/lut';
+import {continuesPrev} from '../src/timeline';
 import {runJob, readPublic} from './jobs';
 import {Btn, Label, Section, Select, Toggle} from './ui';
 
 // Color (set_grade / create_lut): the whole reel or one source / clip (an
-// override), every knob of src/grade.ts, LUTs (upload a .cube or make one from
-// reference photos). The same resolution and bake list as the MCP.
+// override), every knob of src/grade.ts, LUTs (upload a .cube, make one from
+// reference photos measured on the target's range, or match a clip to the one
+// continuing it). The same resolution, spans, pairs and bake list as the MCP.
 
 type Lut = {name: string; file: string};
 const base = (src: string) => src.split('/').pop()!;
@@ -30,6 +33,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
   const [target, setTarget] = useState(''); // '' = whole reel, else a source or a clip id
   const [luts, setLuts] = useState<Lut[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [matchTo, setMatchTo] = useState(''); // '' = the clip that continues the target
   const cubeInput = useRef<HTMLInputElement>(null);
   const refsInput = useRef<HTMLInputElement>(null);
   const loadLuts = () => fetch('/api/luts').then((r) => (r.ok ? r.json() : [])).then((l) => setLuts(Array.isArray(l) ? l : [])).catch(() => setLuts([]));
@@ -90,12 +94,26 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
         if (!r?.file) throw new Error(r?.error ?? 'upload failed');
         refs.push(r.file);
       }
-      await runJob('/api/lut', {make: {name, refs, clips: clips.map((c) => ({src: c.src})), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
+      await runJob('/api/lut', {make: {name, refs, clips: lutSpans(clips, target || undefined), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       const {lut} = await readPublic<{lut?: string}>('lut.json');
       await loadLuts();
       setBusy(null);
-      if (lut) { patch((l) => ({...l, lut})); notify(`LUT ${name} made from ${refs.length} photo(s)`, 'ok'); }
+      if (lut) { await settle(withLut(grade, lut, target || undefined)); notify(`LUT ${name} made from ${refs.length} photo(s)`, 'ok'); }
     } catch (err) { setBusy(null); notify('Create LUT: ' + (err as Error).message, 'error'); }
+  };
+  // create_lut match: this clip fitted to the one continuing it (or the one picked), then that clip's grade + the LUT
+  const onMatch = async () => {
+    try {
+      const {from, to} = matchPair(clips, target, matchTo || undefined, grade);
+      const name = window.prompt('Name of the new LUT (letters, digits, - _)', `${from.id.replace(/[^\w-]/g, '_').slice(0, 34)}-match`)?.trim();
+      if (!name || !/^[\w-]{1,40}$/.test(name)) return;
+      setBusy('Starting…');
+      await runJob('/api/lut', {match: {name, from, to}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
+      const r = await readPublic<{lut?: string; before?: number; after?: number; worst?: {luma: number[]; rgb: number[]}}>('lut.json');
+      await loadLuts();
+      setBusy(null);
+      if (r.lut) { await settle(withLut(grade, r.lut, from.id, to.id)); notify(`${from.id} matched to ${to.id}: difference ${r.before} → ${r.after} of 255${r.worst ? `; luma ${r.worst.luma.join('–')} off by R/G/B ${r.worst.rgb.join(' / ')}` : ''}`, 'ok'); }
+    } catch (err) { setBusy(null); notify('Match: ' + (err as Error).message, 'error'); }
   };
 
   return (
@@ -119,8 +137,15 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
         <Btn onClick={() => cubeInput.current?.click()} title="Upload a .cube">.cube</Btn>
       </div>
       {eff.lut ? <Slider label="LUT mix" value={eff.lutMix ?? 1} min={0} max={1} step={0.05} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patch((l) => ({...l, lutMix: v}))} /> : null}
+      {clipOf ? <>
+        <Label>Match this clip to</Label>
+        <div className="flex gap-1" title="A shot whose grade starts late: split at the change, then fit the ungraded head to the graded rest (pixel pairs at the join, bounded)">
+          <Select value={matchTo} onChange={setMatchTo} options={[{value: '', label: 'the clip continuing it'}, ...clips.filter((c) => continuesPrev(clipOf, c)).map((c) => ({value: c.id, label: `Clip ${c.id}`}))]} className="flex-1" />
+          <Btn onClick={onMatch} disabled={!!busy}>Match</Btn>
+        </div>
+      </> : null}
       <input ref={refsInput} type="file" accept="image/*" multiple onChange={onRefs} className="hidden" />
-      <Btn onClick={() => refsInput.current?.click()} disabled={!!busy || !clips.length} title="Match the footage's colors to reference photos of the look (deterministic, bounded) and save it as a .cube" className="w-full">Create LUT from reference photos…</Btn>
+      <Btn onClick={() => refsInput.current?.click()} disabled={!!busy || !clips.length} title="Match the target's footage (the whole reel, a source or a clip) to reference photos of the look (deterministic, bounded) and save it as a .cube" className="w-full">Create LUT from reference photos…</Btn>
       {busy && <p className="text-[11px] text-on-surface-variant truncate">{busy}</p>}
       <div className="flex gap-2">
         {target && grade.overrides?.[target] ? <Btn onClick={() => { const {[target]: _, ...rest} = grade.overrides ?? {}; setGrade({...grade, overrides: rest}); }} className="flex-1">Reset override</Btn> : null}

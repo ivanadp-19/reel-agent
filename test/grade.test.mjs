@@ -88,4 +88,8 @@ test('LUTs: every clip (and its person mattes) that resolves to a LUT is baked o
   const key = bakeKey('clips/a.mp4', 'luts/cesar.cube', 0.8);
   assert.equal(gradeFor({...pg, baked: {[key]: 'clips/lut/a-123.mp4'}}, 'clips/a.mp4', 'k0').media, 'clips/lut/a-123.mp4');
   assert.equal(gradeFor(pg, 'clips/b.mp4', 'k2'), null);
+  // a copy baked before the float conversion was in the key: it plays until the re-bake, and the re-bake is asked for
+  const old = {...pg, baked: {'clips/a.mp4|luts/cesar.cube|80': 'clips/lut/a-rgb24.mp4'}};
+  assert.equal(gradeFor(old, 'clips/a.mp4', 'k0').media, 'clips/lut/a-rgb24.mp4');
+  assert.ok(lutBakes(old, clipsAB).some((b) => !old.baked[b.key]), 'baked again');
 });
