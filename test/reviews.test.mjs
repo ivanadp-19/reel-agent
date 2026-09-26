@@ -9,6 +9,7 @@ import bcrypt from 'bcryptjs';
 import {createLink, hashToken, inReviewsRow, keepUnapproved, loadReviews, proxyArgs, pruneVersions, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
 import {handleReview} from '../server/review.mjs';
+import {SESSION_COOKIE, parseRoles, signSession} from '../server/session.mjs';
 
 const DAY = 86400e3;
 const T0 = Date.parse('2026-09-25T12:00:00Z');
@@ -86,13 +87,17 @@ test('retention: files of a project with a live link are kept, others are not', 
   assert.equal(retainedFiles(dir, pub, {now: T0 + DAY}).size, 0);
 });
 
-// the same order as server/index.mjs: gate first, /r/ → the review handler, else the static files
+// the same order as server/index.mjs: gate first, /r/ → the review handler, else the static files.
+// Login users made here (low-cost hashes, a test secret): an owner, a reviewer of acme, one of another client, one without a role
+const SECRET = 'reviews-test-secret';
+const AUTH = Object.fromEntries(['ana', 'boss', 'rev', 'otro', 'nadie'].map((u) => [u, bcrypt.hashSync('pw', 4)]));
+const ROLES = parseRoles(JSON.stringify({boss: {role: 'owner'}, rev: {role: 'reviewer', clients: ['acme']}, otro: {role: 'reviewer', clients: ['other']}}));
+const cookie = (user) => ({cookie: `${SESSION_COOKIE}=${signSession(SECRET, user, {hash: AUTH[user]})}`});
 function serve(pub, {publicMode = true, now} = {}) {
-  const auth = {ana: bcrypt.hashSync('pw', 4)};
   const srv = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
-    const g = await gate(req, url, {publicMode, auth, tokens: ['backend-tok']});
-    if (g.kind === 'review') return handleReview(req, res, url, {publicDir: pub, now});
+    const g = await gate(req, url, {publicMode, auth: AUTH, tokens: ['backend-tok', 'second-tok'], sessionSecret: SECRET, roles: ROLES});
+    if (g.kind === 'review') return handleReview(req, res, url, {publicDir: pub, now, g, login: publicMode});
     if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
     const f = path.join(pub, path.normalize(decodeURIComponent(url.pathname)));
     if (f.startsWith(pub) && fs.existsSync(f) && fs.statSync(f).isFile()) return serveFile(req, res, f);
@@ -381,18 +386,65 @@ test('the reviews row: 20 concurrent writes to one project lose none; one writer
   assert.throws(() => inReviewsRow(dir, '../x', () => {}), /bad project id/);
 });
 
-test('R-1: a pair version plays on /r/ like any other; its pair and snapshot are never served there', async () => {
+test('a pair version plays on /r/ for a login of its client; its pair and snapshot are never served there', async () => {
   const {pub, dir} = fixture(1);
   const v = withPair(pub, dir);
   const l = createLink(dir, 'p-1', {now: Date.now()});
   const srv = await serve(pub);
   try {
-    assert.match((await get(srv, `/r/${l.token}`)).body.toString(), /<video src="\/r\/[\w-]+\/v\/2\.mp4"/);
-    assert.equal((await get(srv, `/r/${l.token}/v/2.mp4`)).body.toString(), 'proxy');
-    assert.equal((await get(srv, `/r/${l.token}/v/2/full.mp4`)).body.toString(), 'full');
-    for (const p of [`/r/${l.token}/v/2/ACME_G2_H1_C1_v2_master.mp4`, `/r/${l.token}/v/2/project.json`, `/r/${l.token}/${v.deliverables.captions}`]) assert.equal((await get(srv, p)).status, 404, p);
+    const rev = cookie('rev');
+    assert.match((await get(srv, `/r/${l.token}`, rev)).body.toString(), /<video src="\/r\/[\w-]+\/v\/2\.mp4"/);
+    assert.equal((await get(srv, `/r/${l.token}/v/2.mp4`, rev)).body.toString(), 'proxy');
+    assert.equal((await get(srv, `/r/${l.token}/v/2/full.mp4`, rev)).body.toString(), 'full');
+    for (const p of [`/r/${l.token}/v/2/ACME_G2_H1_C1_v2_master.mp4`, `/r/${l.token}/v/2/project.json`, `/r/${l.token}/${v.deliverables.captions}`]) assert.equal((await get(srv, p, rev)).status, 404, p);
     assert.equal((await get(srv, `/${v.deliverables.master}`)).status, 401, 'behind auth like every other file');
   } finally { srv.close(); }
+});
+
+test('R-1: the /r/ link of a project without a client answers the same to anyone, signed in or not, any role, any mode', async () => {
+  const {pub, dir} = fixture(2);
+  const l = createLink(dir, 'p-1', {now: Date.now()});
+  const [pubSrv, localSrv] = [await serve(pub), await serve(pub, {publicMode: false})];
+  try {
+    const want = await get(pubSrv, `/r/${l.token}`);
+    assert.equal(want.status, 200);
+    for (const [srv, headers] of [[pubSrv, {}], [pubSrv, cookie('otro')], [pubSrv, cookie('nadie')], [pubSrv, {authorization: 'Basic ' + Buffer.from('ana:pw').toString('base64')}], [pubSrv, {'x-reel-token': 'second-tok'}], [localSrv, {}]]) {
+      const page = await get(srv, `/r/${l.token}`, headers);
+      assert.deepEqual([page.status, page.body.toString()], [200, want.body.toString()], JSON.stringify(headers));
+      assert.equal((await get(srv, `/r/${l.token}/v/2.mp4`, headers)).status, 200);
+      assert.equal((await get(srv, `/r/${l.token}/v/1.jpg`, headers)).status, 200);
+      assert.equal((await get(srv, `/r/${l.token}/v/1/full.mp4`, headers)).status, 200);
+    }
+  } finally { pubSrv.close(); localSrv.close(); }
+});
+
+test('a client\'s /r/ link (CEO-4, E-1): no login → /login, another client or no role → 403; its reviewer, the owner and the primary token see it', async () => {
+  const {pub, dir} = fixture(1);
+  fs.writeFileSync(path.join(pub, 'projects', 'p-1.json'), JSON.stringify({name: 'x', identity: IDENTITY}));
+  const l = createLink(dir, 'p-1', {now: Date.now()});
+  const [srv, local] = [await serve(pub), await serve(pub, {publicMode: false})];
+  try {
+    const page = `/r/${l.token}?v=1`, media = [`/r/${l.token}/v/1.mp4`, `/r/${l.token}/v/1.jpg`, `/r/${l.token}/v/1/full.mp4`];
+    const anon = await get(srv, page);
+    assert.deepEqual([anon.status, anon.headers.location], [303, `/login?next=${encodeURIComponent(page)}`]);
+    assert.equal(anon.headers['referrer-policy'], 'no-referrer');
+    const basic = {authorization: 'Basic ' + Buffer.from('boss:pw').toString('base64')};
+    for (const [who, headers] of [['anonymous', {}], ['another client', cookie('otro')], ['no role', cookie('nadie')], ['basic auth, even the owner', basic], ['a second backend token', {'x-reel-token': 'second-tok'}]]) {
+      for (const p of media) {
+        const r = await get(srv, p, headers);
+        assert.equal(r.status, 403, `${who} ${p}`);
+        assert.ok(!['1000', '5000'].includes(r.headers['content-length']), 'no byte of the reel');
+      }
+      if (headers.cookie || headers.authorization || headers['x-reel-token']) assert.equal((await get(srv, page, headers)).status, headers.cookie ? 403 : 303, who);
+    }
+    assert.equal((await get(local, page)).status, 403, 'local mode has no login: never the page');
+    for (const [who, headers] of [['its reviewer', cookie('rev')], ['the owner', cookie('boss')], ['the primary token', {'x-reel-token': 'backend-tok'}]]) {
+      assert.equal((await get(srv, page, headers)).status, 200, who);
+      for (const p of media) assert.equal((await get(srv, p, headers)).status, 200, `${who} ${p}`);
+    }
+    revokeLink(dir, 'p-1', l.id);
+    assert.equal((await get(srv, page, cookie('rev'))).status, 410, 'the link still expires and is revoked as before');
+  } finally { srv.close(); local.close(); }
 });
 
 test('retention (T6): the newest unapproved versions and the approved ones stay whole; older ones lose their pair, and without notes their proxy, poster and snapshot too; off until set', () => {

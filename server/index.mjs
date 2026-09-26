@@ -38,7 +38,7 @@ import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mj
 import {createLink, inReviewsRow, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
-import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
+import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
 import {handleReview} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
@@ -75,6 +75,12 @@ const run = (cmd, args, opts = {}) =>
     c.on('close', (code) => resolve({code, stdout: out, stderr: err}));
     c.on('error', () => resolve({code: 1, stdout: out, stderr: err}));
   });
+
+// REEL_USER_ROLES (session.mjs parseRoles): owner / reviewer of which clients, per login user. Read first:
+// a bad value stops the backend here, before it writes .backend-token or listens — never a backend
+// that silently drops everyone's roles
+let ROLES;
+try { ROLES = parseRoles(process.env.REEL_USER_ROLES); } catch (e) { console.error(`backend not started: ${e.message}`); process.exit(1); }
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -242,7 +248,10 @@ console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concu
 // refused); in Railway / public mode (REEL_PUBLIC=1) HTTP basic auth instead, with
 // the bcrypt hashes from REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same
 // hashes Caddy uses on the VM, so existing passwords keep working and no secret
-// crosses a chat. The review pages /r/<token> are the one public exception.
+// crosses a chat. The review pages /r/<token> are the one public exception (a client's
+// project also needs a login of that client, server/review.mjs). Roles (owner / reviewer
+// of which clients) come from REEL_USER_ROLES, parsed at the top of this file; only a
+// login session is a human (server/http.mjs humanOnly).
 // Browsers that cannot answer the basic-auth dialog use the form at /login instead
 // (server/session.mjs): same users, a signed session cookie keyed by
 // REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN; ≤ 5 failed logins per IP per
@@ -292,8 +301,8 @@ const server = createServer((req, res) => handle(req, res).catch((e) => {
 }));
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
-  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN});
-  if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
+  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN, roles: ROLES});
+  if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC, g, login: PUBLIC_MODE}); // token-gated (+ the client's login for a client's project), read-only, never /exports/*
   if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
@@ -304,7 +313,7 @@ async function handle(req, res) {
   // self-service CLI tokens for a user signed in with the browser (session cookie or basic auth)
   if (isCliTokenPath(url.pathname)) return handleCliTokens(req, res, url, g, {users: USERS, base: publicBase(req), hops: TRUST_HOPS, publicUrl: process.env.REEL_PUBLIC_URL});
   // public mode: the editor's pages and the media it reads by URL — for a session user too (server/http.mjs servePublic)
-  if (PUBLIC_MODE && servePublic(req, res, url.pathname, {publicDir: PUBLIC, distDir: DIST})) return;
+  if (PUBLIC_MODE && servePublic(req, res, url.pathname, {publicDir: PUBLIC, distDir: DIST, g})) return;
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
 

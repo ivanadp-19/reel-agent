@@ -62,6 +62,26 @@ export function parseCookies(header = '') {
 
 export const sessionUser = (req, secret, users) => verifySession(secret, parseCookies(req.headers.cookie)[SESSION_COOKIE], {users});
 
+// REEL_USER_ROLES (E-3): what a login user may do, next to REEL_AUTH_BCRYPT —
+// {"<user>": {"role": "owner" | "reviewer", "clients": ["<identity.client>", …]}}. An owner sees and does
+// everything; a reviewer only the projects of their clients. A user without an entry has no human-only
+// action (server/http.mjs humanOnly) and sees no client's project. → a map with no prototype; throws on
+// anything else, and the backend does not start (server/index.mjs).
+export function parseRoles(raw) {
+  const roles = Object.create(null);
+  if (raw == null || !String(raw).trim()) return roles;
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { throw new Error(`REEL_USER_ROLES is not JSON (${e.message}) — e.g. {"cesar":{"role":"reviewer","clients":["vibem"]},"felipe":{"role":"owner"}}`); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('REEL_USER_ROLES must be an object: {"<user>": {"role": "owner" | "reviewer", "clients": [...]}}');
+  for (const [user, r] of Object.entries(data)) {
+    if (!r || typeof r !== 'object' || !['owner', 'reviewer'].includes(r.role)) throw new Error(`REEL_USER_ROLES.${user}: role must be "owner" or "reviewer"`);
+    const clients = r.clients ?? [];
+    if (!Array.isArray(clients) || !clients.every((c) => typeof c === 'string' && c)) throw new Error(`REEL_USER_ROLES.${user}: clients must be a list of client ids (identity.client)`);
+    roles[user] = {role: r.role, clients};
+  }
+  return roles;
+}
+
 const isHttps = (req) => Boolean(req.socket?.encrypted) || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 function cookieHeader(req, value, maxAgeSec, forceSecure) {
   return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${forceSecure || isHttps(req) ? '; Secure' : ''}`;

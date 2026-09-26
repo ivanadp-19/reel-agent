@@ -6,12 +6,15 @@
 //   GET /r/<token>/v/<n>.jpg      its poster
 //   GET /r/<token>/v/<n>/full.mp4 the full render, as a download
 // Only files a version of the token's project references are ever served; the
-// token is the only credential (see scripts/reviews.mjs for how it is kept).
+// token is the credential (see scripts/reviews.mjs for how it is kept). A client's project
+// (identity.client) needs a login of that client as well (CEO-4, E-1: seesClient in
+// server/http.mjs): without a session the page goes to /login, with another client's it is 403.
+// A project without a client is served exactly as before (R-1).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {playableVersions, resolveToken} from '../scripts/reviews.mjs';
-import {serveFile} from './http.mjs';
+import {projectClients, seesClient, serveFile} from './http.mjs';
 
 export const PRIVACY_HEADERS = {
   'X-Robots-Tag': 'noindex, nofollow, noarchive',
@@ -83,8 +86,9 @@ ${versions.length > 1 ? `<h2>Versiones</h2><ul>${others}</ul>` : ''}
 `;
 }
 
-// → true when it answered (every /r/ request is answered here)
-export function handleReview(req, res, url, {publicDir, now = Date.now()}) {
+// `g` = the gate's answer ({kind: 'review', user, via, role, clients, primary}); `login` = public mode,
+// where /login exists. → true when it answered (every /r/ request is answered here)
+export function handleReview(req, res, url, {publicDir, now = Date.now(), g = null, login = false}) {
   const head = req.method === 'HEAD';
   if (req.method !== 'GET' && !head) { res.writeHead(405, {...PRIVACY_HEADERS, Allow: 'GET, HEAD'}); res.end(); return true; }
   const m = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)(?:\/v\/(\d{1,5})(\.mp4|\.jpg|\/full\.mp4))?\/?$/);
@@ -92,6 +96,11 @@ export function handleReview(req, res, url, {publicDir, now = Date.now()}) {
   const dir = path.join(publicDir, 'reviews');
   const t = resolveToken(dir, m[1], {now});
   if (t.state === 'unknown') { text(res, 404, 'Not found', head); return true; }
+  if (!seesClient(g, projectClients(publicDir, t.projectId))) {
+    if (login && !g?.user && !m[2]) { res.writeHead(303, {...PRIVACY_HEADERS, Location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`}); res.end(); return true; }
+    text(res, 403, 'Este reel es de un cliente: entra con una cuenta de ese cliente.', head);
+    return true;
+  }
   if (t.state !== 'live') { text(res, 410, t.state === 'revoked' ? 'Este link fue revocado.' : 'Este link expiró.', head); return true; }
   const versions = playableVersions(t.reviews, publicDir);
   if (!versions.length) { text(res, 404, 'No hay versiones disponibles.', head); return true; }

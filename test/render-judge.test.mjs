@@ -138,7 +138,7 @@ test('diff with the previous iteration: fixed, regressions and findings that sur
 });
 
 // ---- client feedback (César): noise as candidates, new checks, profiles ----
-import {offMicFindings, paginationFindings, accentScaleFindings, packFindings, glossaryFindings, parseInserts, insertFindings, sentencesOf, parsePhone, phoneFindings, lookOf, colorRefFindings, parityFindings, pickProfile, reelOf, listProfiles} from '../.agents/skills/render-judge/judge.mjs';
+import {offMicFindings, paginationFindings, accentScaleFindings, packFindings, glossaryFindings, parseInserts, insertFindings, sentencesOf, parsePhone, phoneFindings, lookOf, colorRefFindings, parityFindings, pickProfile, reelOf, listProfiles, reportText} from '../.agents/skills/render-judge/judge.mjs';
 
 test('candidates never count until the judge confirms them on the frame', () => {
   const cand = {check: 'split-name', severity: 'major', kind: 'candidate'};
@@ -241,16 +241,40 @@ test('color against the approved reference, parity between clean master and capt
   assert.deepEqual(bad.map((x) => x.severity), ['blocker', 'major', 'major']);
 });
 
-test('the César profile is picked by caption style or brand, and knows G1 / G7', () => {
-  const cesar = listProfiles().find((x) => x.id === 'cesar');
-  assert.ok(cesar);
-  assert.equal(pickProfile({captionStyle: 'vibem'})?.id, 'cesar');
-  assert.equal(pickProfile({captionStyle: 'prism', brand: {name: 'VIBEM'}})?.id, 'cesar');
-  assert.equal(pickProfile({captionStyle: 'prism'}), null);
-  assert.throws(() => pickProfile({}, 'nobody'), /no judge profile/);
-  assert.ok(reelOf(cesar, 'Depto G1 v2')?.inserts?.length >= 4);
-  assert.equal(reelOf(cesar, 'Torre G12'), null);
-  assert.ok(reelOf(cesar, 'G7 entrevista')?.phone);
+// a client profile lives on the volume (public/clients/<client>/profile.{json,md}), never in git: a fixture here
+test('a client profile is loaded from the volume first, picked by caption style or brand, and knows its reels; a named one that is missing says where it looked', () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-profiles-'));
+  try {
+    fs.mkdirSync(path.join(pub, 'clients', 'acme'), {recursive: true});
+    fs.writeFileSync(path.join(pub, 'clients', 'acme', 'profile.json'), JSON.stringify({id: 'acme-judge', match: {captionStyle: ['acmeStyle'], brand: ['acme']}, colorRefs: [{label: 'ok', paths: ['refs/a.mp4']}],
+      reels: {G1: {inserts: [{what: 'a', need: 'broll', keywords: ['a']}, {what: 'b', need: 'broll', keywords: ['b']}]}, G7: {phone: 'questions'}}}));
+    fs.writeFileSync(path.join(pub, 'clients', 'acme', 'profile.md'), '# acme');
+    fs.mkdirSync(path.join(pub, 'clients', 'bare'), {recursive: true}); // a client folder without a profile is not one
+    const all = listProfiles(pub);
+    assert.deepEqual(all.map((x) => x.id), ['acme-judge', 'example'], 'the volume first, then the repo\'s generic example');
+    const acme = all[0];
+    assert.equal(acme.file, path.join(pub, 'clients', 'acme', 'profile.json'));
+    assert.equal(acme.docFile, path.join(pub, 'clients', 'acme', 'profile.md'), 'its rules by eye sit next to it');
+    assert.equal(acme.base, path.join(pub, 'clients', 'acme'), 'its colorRefs paths are relative to its own folder');
+    assert.equal(pickProfile({captionStyle: 'acmeStyle'}, null, all), acme);
+    assert.equal(pickProfile({captionStyle: 'prism', brand: {name: 'ACME'}}, null, all), acme);
+    assert.equal(pickProfile({captionStyle: 'prism', brand: {style: {judgeProfile: 'acme-judge'}}}, null, all), acme);
+    assert.equal(pickProfile({captionStyle: 'prism'}, null, all), null, 'the example matches nothing');
+    assert.ok(reelOf(acme, 'Depto G1 v2')?.inserts?.length >= 2);
+    assert.equal(reelOf(acme, 'Torre G12'), null);
+    assert.ok(reelOf(acme, 'G7 entrevista')?.phone);
+    // no silent fallback: a profile the kit names but this machine lacks stops the judge and says where to put it
+    const none = listProfiles(path.join(pub, 'nowhere'));
+    assert.deepEqual(none.map((x) => x.id), ['example']);
+    assert.throws(() => pickProfile({brand: {style: {judgeProfile: 'acme-judge'}}}, null, none), /no judge profile "acme-judge" \(have: example\).*public\/clients\/<client>\/profile\.json/);
+    assert.throws(() => pickProfile({}, 'nobody', all), /no judge profile "nobody"/);
+    fs.writeFileSync(path.join(pub, 'clients', 'bare', 'profile.json'), '{broken');
+    assert.throws(() => listProfiles(pub), /profile\.json cannot be read/, 'a broken profile is never skipped');
+    // and the report always says which profile ran, or that none did
+    const r = {label: 'x', iteration: 1, durationSec: 1, counts: {blocker: 0, major: 0, minor: 0, nit: 0}, toConfirm: 0, patterns: [], render: 'r.mp4', findings: [], skipped: [], evidence: {sheets: {}, lookAt: [], tech: {}, audio: {}, inserts: [], captions: [], graphics: [], broll: []}};
+    assert.match(reportText({...r, profile: 'acme-judge', profileFile: acme.file}), /perfil de cliente: acme-judge \(.*clients\/acme\/profile\.json\)/);
+    assert.match(reportText({...r, profile: null}), /perfil de cliente: ninguno — solo la rúbrica genérica/);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
 // ---- review of PR #15: J/L-cuts, spelling homographs, shared caption layout, inserts by token ----

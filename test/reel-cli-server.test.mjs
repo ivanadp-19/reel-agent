@@ -48,7 +48,7 @@ test('gate: user tokens name the caller in both modes; a revoked one is refused 
   const call = (headers, opts, route = '/api/projects') => gate({method: 'GET', headers: {host: '127.0.0.1:3333', ...headers}}, new URL(`http://x${route}`), {tokens: ['backend-tok'], users, ...opts});
   assert.deepEqual(await call({'x-reel-token': token}, {publicMode: false}), {kind: 'ok', user: 'ana', admin: false, uid: 7, via: 'user-token'});
   assert.equal((await call({'x-reel-token': token}, {publicMode: true})).user, 'ana');
-  assert.deepEqual(await call({'x-reel-token': 'backend-tok'}, {publicMode: false}), {kind: 'ok', admin: true, via: 'backend-token'});
+  assert.deepEqual(await call({'x-reel-token': 'backend-tok'}, {publicMode: false}), {kind: 'ok', admin: true, via: 'backend-token', primary: true}, 'the first of REEL_BACKEND_TOKEN is the primary (it sees every client)');
   assert.deepEqual(await call({}, {publicMode: false}), {kind: 'ok', via: 'loopback'}, 'the editor and the MCP on loopback work as before');
   assert.deepEqual(await call({'x-reel-token': 'stale-backend-token'}, {publicMode: false}), {kind: 'ok', via: 'loopback'}, 'an old backend token is ignored as before');
   const req = await call({}, {publicMode: false, requireToken: true});
