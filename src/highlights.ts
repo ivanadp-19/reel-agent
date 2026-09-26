@@ -1,15 +1,16 @@
-// Highlight classification (César 9:27): a classification pass over the transcript
-// flags keywords, questions and CTAs ("comenta aquí abajo", "llena el formulario").
-// Those words render as highlight captions: solid #FFE500 (the official color),
-// Helvetica Bold, same soft shadow, slightly bigger, dynamic entry (highlightRise).
-// Primary path: LLM pass (scripts/captions-multiclip.mjs, OPENAI_API_KEY).
-// Fallback: the deterministic heuristic below. Both go through refineSpans (selectivity).
-// The agent can still adjust tiers via MCP.
+// Yellow words (César 9:27: key words and CTAs render as highlight captions, #FFE500, with the
+// pack's key-word entry). Deterministic, no hosted model (AGENTS.md): the project's own tiers win
+// (yellowWords); for words the project does not show yet, the rule-based proposer below suggests
+// them — figures and dates, proper names, the CTA, the pack's own word list — and the agent adjusts
+// them with annotate_captions or the editor.
+import {withTiers, wordKey} from './paging.ts';
 
-export type HighlightKind = 'keyword' | 'question' | 'cta';
+export type HighlightKind = 'keyword' | 'cta';
 export type HighlightSpan = {start: number; end: number; kind: HighlightKind}; // word indices, inclusive
-export type TextFix = {index: number; text: string}; // display-text correction (guion spelling/accents)
-export type HighlightResult = {spans: HighlightSpan[]; fixes?: TextFix[]};
+// a pack's proposer rules (Preset.highlight). perSentence: spans a sentence may keep (MAX_PER_SENTENCE
+// otherwise). words: nouns the client always marks (amenities, property nouns; accents and case do not
+// matter), never trimmed as promotional. maxShare: the share of yellow words validate allows (0.2 otherwise)
+export type HighlightRules = {perSentence?: number; words?: string[]; maxShare?: number};
 
 type AnyWord = {tier?: number; word?: string; text?: string};
 const raw = (w: AnyWord) => w.word ?? w.text ?? '';
@@ -70,19 +71,23 @@ export function applyGuionPunctuation(words: AnyWord[], guion: string): {marks: 
 }
 
 
-export function applyHighlights(words: AnyWord[], res: HighlightResult): number {
+// The one place the reel's yellow words are decided before paging: the captions job, which every
+// re-page goes through (MCP set_caption_style / run_ai_step, the editor, the CLI). The project's own
+// tiers (projectTiers: every word it already shows, 0 included) are authoritative — approved or
+// hand-set, they apply exactly and are never re-derived; a word the project knows by its id in the
+// source's other transcript (`was`: transcribed again) is the same word. Only words the project does
+// not show yet (a new reel, a clip added later) take the proposer's suggestion, marked `proposed`
+// (a new pack proposes them again). Returns how many it proposed.
+export function yellowWords<T extends AnyWord & {wid?: string; was?: string; proposed?: boolean}>(words: T[], tiers: Record<string, number>, rules: HighlightRules = {}): number {
+  const own = {...tiers};
+  for (const w of words) if (w.was && !Object.hasOwn(own, wordKey(w)) && Object.hasOwn(tiers, wordKey({...w, wid: w.was}))) own[wordKey(w)] = tiers[wordKey({...w, wid: w.was})];
+  const fresh = (w: T) => !w.wid || !Object.hasOwn(own, wordKey(w));
   let n = 0;
-  for (const s of res.spans) {
-    for (let i = Math.max(0, s.start); i <= Math.min(words.length - 1, s.end); i++) {
-      if (!words[i].tier) { words[i].tier = 1; n++; }
-    }
+  if (words.some(fresh)) {
+    for (const s of heuristicClassify(words, rules)) for (let i = s.start; i <= s.end; i++) if (fresh(words[i]) && !words[i].tier) { words[i].tier = 1; n++; }
+    for (const w of words) if (fresh(w)) w.proposed = true;
   }
-  for (const f of res.fixes ?? []) {
-    const w = words[f.index];
-    if (!w || !f.text) continue;
-    if (typeof w.word === 'string') w.word = f.text;
-    else if (typeof w.text === 'string') w.text = f.text;
-  }
+  withTiers(words, own);
   return n;
 }
 
@@ -90,16 +95,17 @@ export function applyHighlights(words: AnyWord[], res: HighlightResult): number 
 // his reference leaves both white and marks the meaning of a sentence instead ("mudar",
 // "necesidades"). So: at most MAX_PER_SENTENCE spans a sentence (numbers, names, claims, CTAs),
 // never a function word on its own or at the edge of a span, never a promotional adjective or a
-// generic real-estate noun. When unsure, white. refineSpans enforces the same rules on the LLM's
-// spans, so both paths end up equally selective.
+// generic real-estate noun. When unsure, white. A pack may set its own rules (HighlightRules):
+// César's v11 marks every place, amenity and property noun ('54 DEPARTAMENTOS'), not 1–2 a sentence.
 export const MAX_PER_SENTENCE = 2;
 const MAX_KEYWORD_WORDS = 4; // "internet rápido y estable"; anything longer is a sentence, not a keyword
 
 // lower case, no accents, no punctuation — what the word lists below are written in
 export const fold = (w: AnyWord) => bare(w).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9ñ%²]/g, '');
 
-// Spanish imperative CTA openers (extendable; folded)
-const CTA_VERBS = new Set(['comenta', 'comparte', 'llena', 'agenda', 'escribeme', 'escribenos', 'mandanos', 'mandame', 'visita', 'conoce', 'aprovecha', 'ponte', 'ven', 'llama', 'llamanos', 'registrate', 'descarga', 'unete', 'entra', 'checa', 'revisa', 'pide', 'solicita']);
+// Spanish imperative CTA openers, tú and usted forms (extendable; folded)
+const CTA_VERBS = new Set(['comenta', 'comparte', 'llena', 'agenda', 'escribeme', 'escribenos', 'mandanos', 'mandame', 'visita', 'conoce', 'aprovecha', 'ponte', 'ven', 'llama', 'llamanos', 'registrate', 'descarga', 'unete', 'entra', 'checa', 'revisa', 'pide', 'solicita',
+  'comente', 'llene', 'agende', 'escribanos', 'visite', 'conozca', 'aproveche', 'llamenos', 'registrese', 'descargue', 'solicite', 'pida']);
 const STOP = new Set(['y', 'e', 'o', 'pero', 'porque', 'cuando', 'si', 'que']);
 
 // function words: articles, prepositions, pronouns, conjunctions, auxiliaries (ES + EN; folded)
@@ -126,9 +132,10 @@ const CONCEPT = [
 ];
 const isConcept = (f: string) => CONCEPT.some((r) => r.test(f));
 
-const NUMBER_WORDS = new Set(['dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidos', 'veintitres', 'veinticuatro', 'veinticinco', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa', 'cien', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos', 'mil', 'millon', 'millones']);
+const NUMBER_WORDS = new Set(['dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidos', 'veintitres', 'veinticuatro', 'veinticinco', 'veintiseis', 'veintisiete', 'veintiocho', 'veintinueve', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa', 'cien', 'ciento', 'doscientos', 'trescientos', 'cuatrocientos', 'quinientos', 'seiscientos', 'setecientos', 'ochocientos', 'novecientos', 'mil', 'millon', 'millones']);
 const SMALL = new Set(['dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve']);
 const UNITS = new Set(['metros', 'metro', 'm2', 'm²', 'mts', 'km', 'kilometros', 'hectareas', 'mil', 'millones', 'pesos', 'dolares', 'mxn', 'usd', '%', 'porciento', 'minutos', 'anos', 'meses', 'recamaras', 'banos', 'niveles', 'pisos', 'cajones']);
+const MONTHS = new Set(['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'setiembre', 'octubre', 'noviembre', 'diciembre']);
 const isDigit = (f: string) => /^\d/.test(f);
 const isNum = (f: string) => isDigit(f) || NUMBER_WORDS.has(f);
 const isCap = (w: AnyWord) => /^[¿¡"'(]*[A-ZÁÉÍÓÚÑ]/.test(raw(w));
@@ -147,22 +154,22 @@ export function sentenceIds(words: AnyWord[]): number[] {
 }
 
 type Ranked = HighlightSpan & {rank?: number};
-const RANK: Record<HighlightKind, number> = {cta: 0, question: 0, keyword: 1};
+const RANK: Record<HighlightKind, number> = {cta: 0, keyword: 1};
+const ownWords = (rules: HighlightRules) => new Set((rules.words ?? []).map((word) => fold({word})));
 
-// the one gate every classifier's spans pass (heuristic and LLM alike): clamp, no overlaps, no
-// function or promotional word at a span's edge (a span of nothing else is dropped), keywords of
-// at most MAX_KEYWORD_WORDS words, and at most maxPerSentence spans a sentence — CTAs and
-// questions first, then by rank (heuristic: number > name > concept) and position.
-export function refineSpans(words: AnyWord[], spans: Ranked[], maxPerSentence = MAX_PER_SENTENCE): HighlightSpan[] {
-  const weak = (i: number) => { const f = fold(words[i]); return !f || FUNCTION_WORDS.has(f) || isPromo(f); };
+// the gate the proposer's spans pass: clamp, no overlaps, no function or promotional word at a
+// span's edge (a span of nothing else is dropped; the pack's own words are never promotional),
+// keywords of at most MAX_KEYWORD_WORDS words, and at most rules.perSentence spans a sentence —
+// CTAs first, then by rank (number > name or the pack's word > concept) and position.
+export function refineSpans(words: AnyWord[], spans: Ranked[], rules: HighlightRules = {}): HighlightSpan[] {
+  const own = ownWords(rules);
+  const weak = (i: number) => { const f = fold(words[i]); return !f || FUNCTION_WORDS.has(f) || (isPromo(f) && !own.has(f)); };
   const clean: Ranked[] = [];
-  for (const s0 of [...spans].filter((s) => Number.isInteger(s?.start) && Number.isInteger(s?.end)).sort((a, b) => a.start - b.start)) {
+  for (const s0 of [...spans].sort((a, b) => a.start - b.start)) {
     let start = Math.max(0, s0.start), end = Math.min(words.length - 1, s0.end);
-    const kind: HighlightKind = s0.kind === 'question' || s0.kind === 'cta' ? s0.kind : 'keyword';
-    if (kind !== 'question') {
-      while (start <= end && weak(start)) start++;
-      while (end >= start && weak(end)) end--;
-    }
+    const kind: HighlightKind = s0.kind === 'cta' ? 'cta' : 'keyword';
+    while (start <= end && weak(start)) start++;
+    while (end >= start && weak(end)) end--;
     if (start > end) continue;
     if (kind === 'keyword' && end - start + 1 > MAX_KEYWORD_WORDS) continue;
     if (clean.length && start <= clean[clean.length - 1].end) continue;
@@ -171,12 +178,13 @@ export function refineSpans(words: AnyWord[], spans: Ranked[], maxPerSentence = 
   const sid = sentenceIds(words);
   const bySentence = new Map<number, Ranked[]>();
   for (const s of clean) bySentence.set(sid[s.start], [...(bySentence.get(sid[s.start]) ?? []), s]);
-  const kept = [...bySentence.values()].flatMap((ss) => ss.map((s, pos) => ({s, pos})).sort((a, b) => (a.s.rank! - b.s.rank!) || (a.pos - b.pos)).slice(0, maxPerSentence).map((x) => x.s));
+  const kept = [...bySentence.values()].flatMap((ss) => ss.map((s, pos) => ({s, pos})).sort((a, b) => (a.s.rank! - b.s.rank!) || (a.pos - b.pos)).slice(0, rules.perSentence ?? MAX_PER_SENTENCE).map((x) => x.s));
   return kept.sort((a, b) => a.start - b.start).map(({start, end, kind}) => ({start, end, kind}));
 }
 
-export function heuristicClassify(words: AnyWord[]): HighlightSpan[] {
+export function heuristicClassify(words: AnyWord[], rules: HighlightRules = {}): HighlightSpan[] {
   const sid = sentenceIds(words);
+  const own = ownWords(rules);
   const spans: Ranked[] = [];
   for (let i = 0; i < words.length; i++) {
     const t = fold(words[i]);
@@ -185,7 +193,7 @@ export function heuristicClassify(words: AnyWord[]): HighlightSpan[] {
     const next = (j: number) => (j < words.length && sid[j] === sid[i] && !/[,;:]["')»]*$/.test(raw(words[j - 1])) ? fold(words[j]) : '');
     // CTA: imperative verb + its object (up to 3 more words, stop at glue/verb/number/name/promo word;
     // refineSpans trims a dangling article: "aprovecha la preventa" → "aprovecha")
-    if (CTA_VERBS.has(t)) {
+    if (CTA_VERBS.has(t) && (i === 0 || fold(words[i - 1]) !== 'que')) { // '…que conozca' is a subjunctive, not an ask
       let end = i;
       while (end - i < 3) {
         const n = next(end + 1);
@@ -196,10 +204,10 @@ export function heuristicClassify(words: AnyWord[]): HighlightSpan[] {
       i = end;
       continue;
     }
-    // numbers (prices, sizes, counts) with their unit: "90 metros", "noventa metros", "54"
-    if (isNum(t)) {
+    // numbers (prices, sizes, counts) with their unit: "90 metros", "noventa metros", "54"; dates: "agosto 2027"
+    if (isNum(t) || (MONTHS.has(t) && isNum(next(i + 1)))) {
       let end = i;
-      while (isNum(next(end + 1))) end++;
+      while (isNum(next(end + 1)) || (next(end + 1) === 'y' && isNum(next(end + 2)))) end += isNum(next(end + 1)) ? 1 : 2; // 'cincuenta y cuatro'
       const numeric = words.slice(i, end + 1).map(fold);
       if (UNITS.has(next(end + 1))) end++;
       else if (numeric.length === 1 && SMALL.has(t)) continue; // a lone "dos" is speech, not a figure
@@ -208,43 +216,23 @@ export function heuristicClassify(words: AnyWord[]): HighlightSpan[] {
       continue;
     }
     // proper-noun runs (names, places), "de"/"del" inside one: "Ciudad de México". A sentence's
-    // first word is capitalized anyway, so alone it is not a name ("Preventa…", "Completo…").
+    // first word is capitalized anyway, so alone it is not a name ("Preventa…", "Completo…"), nor does
+    // it take a figure that counts the word after it ("Tenemos 54 departamentos", "Solo 5 minutos": the
+    // number rule marks the figure and its unit); a figure that stands on its own does ("Montealbán 326,").
     if (isCap(words[i]) && !FUNCTION_WORDS.has(t) && !isPromo(t)) {
+      const initial = i === 0 || sid[i - 1] !== sid[i];
+      const counts = (j: number) => { const m = next(j + 1); return !!m && !FUNCTION_WORDS.has(m) && !isCap(words[j + 1]); };
       let end = i;
       for (;;) {
         const n = next(end + 1);
-        if (n && (isCap(words[end + 1]) && !FUNCTION_WORDS.has(n) || isDigit(n))) { end++; continue; }
+        if (n && (isCap(words[end + 1]) && !FUNCTION_WORDS.has(n) || (isDigit(n) && (!initial || end > i || !counts(end + 1))))) { end++; continue; }
         if ((n === 'de' || n === 'del') && next(end + 2) && isCap(words[end + 2])) { end += 2; continue; }
         break;
       }
-      const initial = i === 0 || sid[i - 1] !== sid[i];
       if (!initial || end > i) { spans.push({start: i, end, kind: 'keyword', rank: 2}); i = end; continue; }
     }
+    if (own.has(t)) { spans.push({start: i, end: i, kind: 'keyword', rank: 2}); continue; } // the pack's amenity / property nouns
     if (isConcept(t)) spans.push({start: i, end: i, kind: 'keyword', rank: 3});
   }
-  return refineSpans(words, spans);
+  return refineSpans(words, spans, rules);
 }
-
-// the classifier's result, whatever produced it, through the same gate
-export const guardHighlights = (words: AnyWord[], res: HighlightResult): HighlightResult => ({spans: refineSpans(words, res.spans ?? []), fixes: res.fixes ?? []});
-
-// LLM pass prompt. Input: numbered transcript words (+ optional guion text for spelling).
-// Output: {"spans": [{start,end,kind}], "fixes": [{index,text}]} — indices into the input.
-export const CLASSIFY_PROMPT = `You classify caption words for a Spanish real-estate reel (VIBEM).
-You receive numbered transcript words, and optionally the GUION (the script the talent read).
-Return ONLY JSON: {"spans": [{"start": int, "end": int, "kind": "keyword"|"question"|"cta"}], "fixes": [{"index": int, "text": string}]}.
-
-A span turns yellow on screen. Be very selective: the client's reference edit marks only the words that carry the MEANING of a sentence, and most sentences keep everything white.
-
-spans (word indices, inclusive) — mark at most 1–2 spans per sentence, often none:
-- keyword: cifras y medidas ("326", "noventa metros", "54"), nombres propios y lugares ("Montealbán", "Mérida"), una amenidad concreta ("pet park", "sky bar", "realidad virtual"), o la palabra que es la idea o el remate de la frase: verbos de cambio o decisión y sustantivos de concepto (ej. "mudar" en "si te quieres mudar", "necesidades" en "pensado para tus necesidades").
-- question: una pregunta completa dirigida al espectador.
-- cta: llamados a la acción (ej. "comenta aquí abajo", "llena el formulario", "escríbeme hoy", "agenda tu cita") — el verbo y su objeto, nada más.
-
-NEVER mark:
-- function words on their own or at the edge of a span (el, la, de, en, que, y, tu, es, para…).
-- promotional adjectives and generic nouns that only sound like selling: "preventa", "completo", "exclusivo", "increíble", "único", "nuevo", "moderno", "lujo", "ideal", "mejor", "gran", "proyecto", "departamentos", "desarrollo", "oportunidad", "ubicación", "precio", "amenidades". Ej. "54 departamentos en preventa" → only "54"; "te enseño el proyecto completo" → nothing; "aprovecha la preventa" → only "aprovecha".
-- a whole sentence or clause as a keyword (a keyword is 1–4 words).
-Rules: spans never overlap; prefer the number, the name or the meaning word over a longer phrase; when in doubt, leave it unmarked (white).
-
-fixes (only when a GUION is given): the display text of the word at index, corrected to the guion's exact spelling and accents where the spoken word matches a guion word (ej. ASR "skybull" -> "skypool", "60" -> "sesenta" if the guion says "sesenta"). Never invent wording that was not said; only fix spelling, accents and number style. Omit fixes when no guion was provided.`;

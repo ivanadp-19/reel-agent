@@ -47,14 +47,13 @@ export type Preset = {
   shadow: string; // CSS text-shadow ('' = none)
   container: 'none' | 'pill' | 'bar' | 'glass' | 'comic'; // comic = white pill, black border, hard offset shadow (Pop)
   reveal: 'page' | 'build'; // build = words appear at their onset and stay
-  upcoming: 'hidden' | 'dim' | 'collapse'; // build only. hidden: space reserved; dim: karaoke; collapse: no space — the block recenters as words join
+  upcoming: 'hidden' | 'dim'; // build only. hidden: space reserved; dim: karaoke
   active: 'none' | 'color' | 'box-slide' | 'box-jump'; // the spoken word: color, or a karaoke box that slides to it (Focus, 80 ms) or jumps by fade (Lift, Stack)
   position: 'anchored' | 'float'; // anchored = face-aware topPct; float = alternate corners
   pageIn: {type: AnimIn; ms: number};
   pageOut: LeaveKind; // how a page leaves (src/motion.ts; cut = it stays until the next page)
   wordIn: ArriveKind; // build: how a plain word arrives at its onset (src/motion.ts)
   keyIn: ArriveKind; // how a tier word arrives (at its onset in build mode, with the page otherwise)
-  fastBuildMs?: number; // build: target gap between words of a fast-spoken phrase (reference data; not read by the pager or renderer yet)
   holdMs: number; // a page stays this long after its last word (never past the next page)
   autoScale: boolean; // short pages render bigger (1 word ×1.5, 2 ×1.35, 3 ×1.18)
   focusPull: number; // px of blur on the footage while a tier-2 word is on screen (0 = off)
@@ -63,7 +62,15 @@ export type Preset = {
   heroPunch: number; // extra scale on the footage while a tier-2 word is up, 3–4 f in (Impact II: 0.12; 0 = off)
   glitchPulse: boolean; // a 250 ms blur + chromatic pulse on the footage at each tier-1 word (Impact II)
   tiers: {0?: TierStyle; 1: TierStyle; 2: TierStyle}; // 0 = plain words (rarely styled)
-  layout: {maxWords: number; maxCharsLine: number; unbreakable?: boolean}; // unbreakable: never split tier spans / name+number pairs across pages (César 10:35, 'Montealbán 326' is one name)
+  // unbreakable: never split tier spans / name+number pairs across pages. topPct: the block's top on
+  // every page (face-aware placement otherwise). padPx: side padding (PAGE_PAD_PX otherwise).
+  // overflowPad: a unit wider than the wrap width runs into the padding before the page shrinks.
+  // keepCommas: a comma stays on screen mid-page (in its word's color) and never ends a page; a
+  // page-final comma and every period go. figurePages: a highlighted figure may stand alone ('326').
+  // keepDigits: a figure the ASR wrote in digits stays digits where the guion spells it out.
+  // glueExcept: function words a page may end on here
+  layout: {maxWords: number; maxCharsLine: number; unbreakable?: boolean; topPct?: number; padPx?: number; overflowPad?: boolean; keepCommas?: boolean; figurePages?: boolean; keepDigits?: boolean; glueExcept?: string[]};
+  highlight?: import('./highlights.ts').HighlightRules; // how the captions step proposes key words for a new reel (1–2 a sentence otherwise)
 };
 
 const SOFT = '0 2px 14px rgba(0,0,0,0.55), 0 0 30px rgba(0,0,0,0.35)';
@@ -104,6 +111,64 @@ export const FLOAT_SLOTS = [
 // screen is a statement, not a subtitle
 export const pageScale = (p: Preset, nWords: number) => (!p.autoScale ? 1 : nWords <= 1 ? 1.5 : nWords === 2 ? 1.35 : nWords === 3 ? 1.18 : 1);
 
+// César's look = the G1 reel "v11" he approved, measured frame by frame against our renders.
+// Where his older written notes say otherwise (yellow at the SAME size, a block that recenters,
+// a 250 ms hold, a 45 ms cascade), the v11 video wins (user decision 2026-09-26). The font is a
+// per-project FILE, public/fonts/Helvetica-Bold.ttf, never committed (src/projectFont.ts).
+const vibem: Preset = {
+  ...base,
+  id: 'vibem',
+  label: 'VIBEM (César)',
+  desc: "César's v11 captions: Helvetica Bold caps, white at 85 %, soft centered halo, no stroke, block top at 53 %; each word slides up at its own spoken onset into its final place (the lines never recenter); key words (every figure, date, place, name, amenity and property noun, and the CTA) #FFE500 at 1.15× typed in letter by letter with a white-to-yellow sweep; a page stays ~550 ms after its last word unless the next page comes first; hard-cut exit",
+  // ascent / descent: Apple's Helvetica Bold (hhea 1577 / 471 of 2048), pinned so any Helvetica file sits on v11's baseline;
+  // name: the file must be that face (an Arial saved under the name renders, silently, in Arial)
+  font: {family: 'Helvetica', custom: {family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700, ascent: 0.77, descent: 0.23, name: 'Helvetica Bold'}, weight: 700, sizePx: 100, case: 'upper', trackingPx: -2, lineHeight: 1.05, wordGapEm: 0.22},
+  colors: {text: 'rgba(255,255,255,0.85)', dim: 'rgba(255,255,255,0.55)', accent: '#FFE500'}, // César 9:37: letters at 85% opacity (rgba so the shadow keeps full strength)
+  // his Premiere caption shadow (9:21 screenshot): opacity 75, angle 135, distance 0, size 7.8, blur 40
+  // -> centered soft halo: tight 8px core at 0.75 + wide 40px diffusion; NO offset (he rejected the hard look)
+  shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
+  reveal: 'build',
+  // v11: every word sits at its final x from the page's first frame; an unspoken word keeps its space.
+  // His 10:35 note said the block recenters as it grows: v11 video wins (user decision 2026-09-26)
+  upcoming: 'hidden',
+  pageIn: {type: 'none', ms: 0},
+  pageOut: 'cut',
+  // at each word's own spoken onset (v11 onsets can be 2 f apart). His note of a 45 ms cascade
+  // broke sync by up to 1.1 s: v11 video wins (user decision 2026-09-26)
+  wordIn: 'ccSlideUp',
+  keyIn: 'highlightRise', // per-char rise, 1 char a frame, + white->yellow sweep (César 9:27)
+  // v11: a page the next one does not cut stays 16–18 f after its last word. His 9:47 note said
+  // ~250 ms: v11 video wins (user decision 2026-09-26)
+  holdMs: 550,
+  // v11: yellow cap height 44–46 px against 38 px white, ink widths ×1.15. The render-judge QC note
+  // said SAME size: v11 video wins (user decision 2026-09-26)
+  tiers: {1: {weight: 700, color: 'accent', scale: 1.15}, 2: {weight: 700, color: 'accent', scale: 1.15}},
+  // v11: no name / number bonds (MONTEALBÁN | 326 are two pages; his 10:35 note bonded them: v11
+  // video wins, user decision 2026-09-26). Block top at 53 % on every page, whatever face detection
+  // finds. Wrap at 934 px (padPx 73): v11's widest one-line phrase is 929 px, its narrowest wrapped
+  // one 940. A single word may run into the side padding at full size (DEPARTAMENTOS at 93 % of the
+  // width) before the page shrinks. Commas stay mid-page and break nothing (MAYAB, ALTA / ESPECIALIDAD,
+  // STAR MÉDICA); '326' stands alone. His notes had commas break the page: v11 video wins (user decision 2026-09-26)
+  // Figures in digits (54, not the guion's 'cincuenta y cuatro'). A page may end on 'desde' ('A PODER
+  // VER / DESDE' | 'TU / DEPARTAMENTO'), which the other packs carry over.
+  layout: {maxWords: 8, maxCharsLine: 18, topPct: 53, padPx: 73, overflowPad: true, keepCommas: true, figurePages: true, keepDigits: true, glueExcept: ['desde']},
+  // v11 marks 28 of 104 words: every figure and date (CINCO MINUTOS, 326, 54, AGOSTO 2027), place and
+  // name (PLAZA ALTABRISA, FARO DEL MAYAB, STAR MÉDICA), amenity and property noun (ROOFTOP, HOSPITALES,
+  // SÚPER, DEPARTAMENTOS), CERCA and the CTA (LLENA EL FORMULARIO) — not 1–2 a sentence. His G2 note
+  // kept 'departamentos' white: v11 video wins (user decision 2026-09-26). Names and figures come from
+  // the proposer's rules; this list is the real-estate vocabulary he marks.
+  highlight: {
+    perSentence: Infinity,
+    maxShare: 0.35,
+    words: [
+      'rooftop', 'alberca', 'albercas', 'piscina', 'gimnasio', 'gym', 'skypool', 'solarium', 'terraza', 'terrazas', 'jacuzzi', 'asador', 'asadores', 'coworking', 'lobby', 'spa', 'sauna', 'cancha', 'canchas', 'ludoteca', 'cava', 'cavas', 'salon', 'salones', 'skybar', 'skywalk', // amenities ('sky bar': the kit's glossary joins it)
+      'cerca', 'hospital', 'hospitales', 'super', 'supermercado', 'banco', 'bancos', 'farmacia', 'farmacias', 'escuela', 'escuelas', 'universidad', 'universidades', 'restaurantes', 'playa', 'aeropuerto', // what is nearby
+      'departamento', 'departamentos', 'depa', 'depas', 'penthouse', 'penthouses', 'lote', 'lotes', // property nouns
+    ],
+  },
+  titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
+};
+
 export const PRESETS: Record<string, Preset> = {
   // ---- from the real-estate references ----
   palabra: {
@@ -139,47 +204,8 @@ export const PRESETS: Record<string, Preset> = {
     pageIn: {type: 'blur', ms: 220},
     layout: {maxWords: 4, maxCharsLine: 22},
   },
-  // César's own WithSubtitles look (measured on his Morantes reels):
-  // Helvetica Bold caps, white, no box, words pop in one by one as they are
-  // spoken, key words flat yellow #FFE500. The font is a per-project FILE
-  // (public/fonts/Helvetica-Bold.ttf — currently a Liberation Sans Bold
-  // stand-in until César's file lands; src/projectFont.ts).
-  vibem: {
-    ...base,
-    id: 'vibem',
-    label: 'VIBEM (César)',
-    desc: "César published-reel captions (frames 9:20): Helvetica-Bold caps, whole phrase on 2 balanced lines, sized to span most of the frame, tight tracking, white, soft diffuse gray shadow (no offset), no stroke, keyword words #FFE500 at the SAME size. Entry = his CC slide up; hard-cut exit",
-    font: {family: 'Helvetica', custom: {family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700}, weight: 700, sizePx: 100, case: 'upper', trackingPx: -2, lineHeight: 1.05, wordGapEm: 0.22},
-    colors: {text: 'rgba(255,255,255,0.85)', dim: 'rgba(255,255,255,0.55)', accent: '#FFE500'}, // César 9:37: letters at 85% opacity (rgba so the shadow keeps full strength)
-    // his Premiere caption shadow (9:21 screenshot): opacity 75, angle 135, distance 0, size 7.8, blur 40
-    // -> centered soft halo: tight 8px core at 0.75 + wide 40px diffusion; NO offset (he rejected the hard look)
-    shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
-    reveal: 'build',
-    upcoming: 'collapse', // César 10:35 (frame sequences from his 9 reels): words DO build in, but the block
-    // RECENTERS live as it grows ('TODO A' -> 'TODO A LA MANO', always centered) — unspoken words take no space
-    pageIn: {type: 'none', ms: 0},
-    pageOut: 'cut',
-    wordIn: 'ccSlideUp',
-    fastBuildMs: 45, // his reveal sheets: 'TODO A' -> 'TODO A LA MANO' inside 0.18s — a fast phrase builds in ~45ms steps
-    keyIn: 'highlightRise', // classifier highlights (keywords/questions/CTAs): per-char rise + white->yellow sweep (César 9:27)
-    holdMs: 250, // César 9:47: NO captions during silence — page ends ~250ms after its last word; never hold through pauses
-    tiers: {1: {weight: 700, color: 'accent', scale: 1}, 2: {weight: 700, color: 'accent', scale: 1}}, // highlights: solid #FFE500 at the SAME size as the white words (César's QC feedback on the render judge; was 1.15×), dynamic entry
-    layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true}, // reference-validated v11 values: v9's natural-phrase paging restored (César 11:12: v10.x cut phrases mid-clause). His reels: one line when it fits, 2 balanced lines when not; 3 lines / smaller size beat splitting a name (César 10:35)
-    titles: {reveal: 'riseChars', out: 'cut'}, // César 9:51: Apple-style title default = per-char rise (his pick 1); pick 2 = 'trackingSnap' per graphic; clean-blue graphics keep his .aep bounceCharsBlue
-  },
-  vibemReference: {
-    ...base,
-    id: 'vibemReference', label: 'VIBEM reference, progressive',
-    desc: 'White Helvetica Bold capitals, progressive centered words, yellow key phrase',
-    font: {family: 'Helvetica', custom: {family: 'HelveticaCesar', file: 'fonts/Helvetica-Bold.ttf', weight: 700}, weight: 700, sizePx: 100, case: 'upper', trackingPx: -2, lineHeight: 1.05, wordGapEm: 0.22},
-    colors: {text: 'rgba(255,255,255,0.85)', dim: 'rgba(255,255,255,0.55)', accent: '#FFE500'},
-    shadow: '0 0 8px rgba(0,0,0,0.75), 0 0 40px rgba(0,0,0,0.55)',
-    reveal: 'build', upcoming: 'collapse', pageIn: {type: 'none', ms: 0}, pageOut: 'cut',
-    wordIn: 'ccSlideUp', keyIn: 'highlightRise', holdMs: 250,
-    tiers: {1: {weight: 700, color: 'accent'}, 2: {weight: 700, color: 'accent'}},
-    layout: {maxWords: 8, maxCharsLine: 18, unbreakable: true},
-    titles: {reveal: 'riseChars', out: 'cut'},
-  },
+  vibem,
+  vibemReference: {...vibem, id: 'vibemReference', label: 'VIBEM (César), old id'}, // stored projects keep working: the same pack under its old id
   // ---- Captions.ai-like packs ----
   prism: {
     ...base,

@@ -5,7 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {normalizeCaption} from '../src/captions.ts';
-import {transcriptIssues, validateProject} from '../src/validate.ts';
+import {fontFiles, transcriptIssues, validateProject} from '../src/validate.ts';
+import {readFont} from '../src/sfnt.ts';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -23,5 +24,7 @@ export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => {
 export function projectIssues(p, publicDir, fps = 30) {
   let tr = null;
   try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'transcript.json'), 'utf8')); } catch {}
-  return [...validateProject(p, fps, facesOf(p, publicDir)), ...(tr ? transcriptIssues(p, tr) : [])];
+  // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name)
+  const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { return [f, readFont(fs.readFileSync(file)).fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
+  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...(tr ? transcriptIssues(p, tr) : [])];
 }

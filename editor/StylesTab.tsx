@@ -3,7 +3,7 @@ import {useEditor} from './store';
 import {PRESETS, type PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
 import {FONT_FAMILIES, type ClientFont} from '../src/fonts';
-import {styleEffects, styleSchema, type Brand, type Style} from '../src/brand';
+import {glossaryText, parseGlossary, styleEffects, styleSchema, type Brand, type Style} from '../src/brand';
 import {ColorSection} from './ColorSection';
 import {Btn, IconBtn, Label, Section, Select, TextInput} from './ui';
 
@@ -44,7 +44,8 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
     if (fx.captionsOff != null) setCaptionsOff(fx.captionsOff);
     if (fx.audio) setAudio({...(audio ?? {}), ...fx.audio});
     if (fx.grade) setGrade({...(grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), ...fx.grade, ...(fx.grade.adjust ? {adjust: {...grade?.adjust, ...fx.grade.adjust}} : {})});
-    if (fx.pack && fx.pack in PRESETS && fx.pack !== captionStyle) onStyleChange(fx.pack as PresetId);
+    // as set_brand: the kit's pack, re-paged — the same pack too when the kit brings another glossary
+    if (fx.pack && (fx.pack !== captionStyle || JSON.stringify(k.glossary ?? []) !== JSON.stringify(brand?.glossary ?? []))) onStyleChange(fx.pack);
     notify(`Brand kit "${k.name ?? slug}" loaded${k.style ? ' with its style' : ''}`, 'ok');
   };
   // the kit's style: notes in words + the other preferences as JSON (validated by styleSchema)
@@ -60,6 +61,10 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
     if (!r.success) return setPrefsErr(r.error.issues.map((i) => `${i.path.join('.')} ${i.message}`).join('; '));
     setPrefsErr(null); setStyle(r.data);
   };
+  // set_brand glossary: one term a line, "Altabrisa: Alta Brisa, Altabriza" (applied when captions are generated or re-paged)
+  const [glossText, setGlossText] = useState('');
+  useEffect(() => { setGlossText(glossaryText(brand?.glossary)); }, [brand?.name, JSON.stringify(brand?.glossary)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const commitGlossary = () => patchBrand((b) => { const g = parseGlossary(glossText, b.glossary); return g.length ? {...b, glossary: g} : (({glossary: _, ...rest}) => rest)(b); });
   const saveKit = async () => {
     if (!brand) return;
     const name = window.prompt('Save this kit as', brand.name ?? '');
@@ -153,6 +158,8 @@ export const StylesTab: React.FC<{onStyleChange: (s: PresetId) => void; notify: 
             <textarea value={notes} onChange={(e) => setStyle({...prefs, notes: e.target.value} as Style)} rows={3} placeholder="In their words: sin subtítulos, cortes secos, color natural, piel sin naranja…" className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[12px] resize-y" />
             <textarea value={prefsText} onChange={(e) => setPrefsText(e.target.value)} onBlur={commitPrefs} rows={prefsText ? Math.min(10, prefsText.split('\n').length + 1) : 2} placeholder='Preferences as JSON: {"captions": "off", "pack": "palabra", "grade": {"look": "natural", "skin": 0.8}, "pace": "rápido"}' className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[11px] font-mono resize-y" />
             {prefsErr && <p className="text-[11px] text-error">{prefsErr}</p>}
+            <Label>Glossary — the client's spellings, applied when captions are generated</Label>
+            <textarea value={glossText} onChange={(e) => setGlossText(e.target.value)} onBlur={commitGlossary} rows={glossText ? Math.min(10, glossText.split('\n').length + 1) : 2} placeholder={'Altabrisa: Alta Brisa\nStar Médica: Esther Médica'} className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded p-2 text-[11px] font-mono resize-y" />
             <div className="flex gap-2">
               <Btn onClick={saveKit} className="flex-1">Save as kit…</Btn>
               <Btn onClick={() => { setBrand(null); notify('Brand kit removed', 'ok'); }} className="flex-1">Remove kit</Btn>

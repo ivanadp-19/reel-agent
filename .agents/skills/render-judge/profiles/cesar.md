@@ -26,15 +26,24 @@ what the judge checks **with its eyes** for him, on top of `judge.md` and
 
 ## Captions (VIBEM look)
 
+His look is the G1 reel **v11** he approved, measured frame by frame. Where his
+older written notes say otherwise (yellow at the same size, a block that
+recenters, a 250 ms hold, a 45 ms cascade), the v11 video wins (user decision
+2026-09-26). The `vibem` pack is v11; `vibemReference` is the same pack under
+an old id.
+
 | Rule | How the judge checks it |
 |---|---|
 | One page = one sentence at most | The shared pager ends every page at a sentence end (it used to keep "Carmen. Está" together in `vibem`). The rule `pagination` catches old or hand-made pages; the fix re-pages with `set_caption_style vibem` |
-| Words enter in a **45 ms cascade** | judgment: `motion_proof` at the start of 2–3 pages. At 30 fps, 45 ms is 1–2 frames between one word's arrival and the next. Words that appear together, or at the pace of speech with no cascade, are a major. No preset parameter declares this, so no rule can measure it |
-| Yellow (#FFE500) at the **same size** as white | Decided in the preset: `vibem` tiers are at scale 1.0, no longer 1.15. The rule `accent-size` only guards against a regression |
-| Helvetica Bold, caps, white at 85 %, soft halo, no stroke | judgment on the overview sheet. The preset uses the file `public/fonts/Helvetica-Bold.ttf`; a Liberation Sans stand-in is not his font. Say so if the face on screen is not Helvetica |
-| No captions over silence (a page ends ~250 ms after its last word) | judgment: frames inside pauses show no page |
-| Glossary wins over the transcript: **skypool**, **solarium** | rule `glossary` on captions and graphics ("sky pool", "skypul" → "skypool"), and `split-name` when a term is split across pages |
-| Compound names never split across pages or lines | `split-name` rule for glossary terms and highlight spans. A capitalized pair is only a **candidate**: capitals are a bad signal for compounds, so look at the real frame at the page change before you count it |
+| Commas stay on screen mid-page, in the word's color, and never end a page (FARO DEL / MAYAB, ALTA); a page-final comma and every period go; a yellow figure stands alone (MONTEALBÁN \| 326); digits stay digits even when the guion spells them out (54) | Decided in the pager (`layout.keepCommas` / `figurePages`, src/paging.ts) and the guion reconciliation (src/guion.ts). His notes broke pages on commas: the v11 video wins (user decision 2026-09-26) |
+| Each word slides up at its own spoken onset, already in its final place: the lines never recenter while a page builds | Decided in the preset (`upcoming: 'hidden'`, no cascade); `sync` measures the onsets |
+| Yellow words: every figure and date (CINCO MINUTOS, 326, 54, AGOSTO 2027), place and name (PLAZA ALTABRISA, FARO DEL MAYAB, STAR MÉDICA), amenity and property noun (ROOFTOP, HOSPITALES, SÚPER, DEPARTAMENTOS), CERCA and the CTA (LLENA EL FORMULARIO): v11 marks 28 of 104 words. His G2 note kept "departamentos" white: the v11 video wins (user decision 2026-09-26) | judgment on the overview sheet. The captions step proposes them with the `vibem` rules (`highlight` in the preset: 30 proposed on G1, the 28 of v11 plus ALTA ESPECIALIDAD); the agent adjusts with `annotate_captions`. Tiers set by hand are never re-derived by a restyle or a re-run; moving to `vibem` from another pack re-proposes the words that pack only proposed. `tier1-density` warns above 35 % |
+| Yellow (#FFE500) at **1.15×** the white words | Decided in the preset (tiers at 1.15, measured on v11: cap height 44–46 px against 38 at 576×1024). The rule `accent-size` (`accentScale` in `cesar.json`) only guards against a regression |
+| Helvetica Bold, caps, white at 85 %, soft halo, no stroke, block top at 53 % | judgment on the overview sheet. The preset loads `public/fonts/Helvetica-Bold.ttf` (`npm run setup` extracts it on a Mac); a missing file, or another face saved under that name (an Arial), stops the render and `validate` reports `font-missing` / `font-wrong` (`npm run setup` checks the face too). Say so if the face on screen is not Helvetica (Arial's R has a straight leg) |
+| A long word may run into the side margin at full size (DEPARTAMENTOS spans 93 % of the width in v11) | `overflow` counts only a word wider than the whole frame |
+| No captions over silence: a page stays ~550 ms after its last word unless the next page comes first | judgment: frames inside a pause longer than ~0.6 s show no page |
+| Glossary wins over the transcript: **skypool**, **solarium**, and each reel's place and project names | The brand kit's `glossary` (`set_brand glossary`, the Styles tab; the kit lives in `public/brands/`, never in git) is applied by the captions pipeline before paging: a two-word variant of a one-word term becomes one word. The rule `glossary` checks captions and graphics against this profile's list plus the kit's, and `split-name` flags a term split across pages |
+| Names may split across lines and pages, as in v11 (MONTEALBÁN \| 326 on two pages, CITY / CENTER on two lines) | `namesMaySplit` in `cesar.json`: `split-name` only counts a split glossary term |
 
 ## Look
 

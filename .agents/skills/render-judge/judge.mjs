@@ -38,10 +38,11 @@ const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
 const {placeClips} = await import(src('timeline.ts'));
-const {normalizeCaption, projectCaptions} = await import(src('captions.ts'));
+const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, transcriptIssues, SAFE} = await import(src('validate.ts'));
 const {presetOf} = await import(src('captionPresets.ts'));
-const {captionPreset, fitPage, wrapUnits, MIN_FONT_PX} = await import(src('captionLayout.ts'));
+const {captionPreset, fitPage, wrapUnits, realAdvances, MIN_FONT_PX} = await import(src('captionLayout.ts'));
+const {readFont} = await import(src('sfnt.ts'));
 const {projectBrolls} = await import(src('brollModel.ts'));
 const {projectGraphics} = await import(src('graphicTemplates.ts'));
 const {contentWords} = await import(src('brollMatch.ts'));
@@ -200,7 +201,8 @@ const phraseKey = (s) => String(s).split(/\s+/).map(fold).filter(Boolean).join('
 // rawOf(word) → the transcript word with its punctuation (a caption's text has lost its periods)
 const rawText = (w) => w.text;
 const CONNECTORS = new Set(['de', 'del', 'la', 'las', 'los', 'el', 'y']);
-export function splitNameFindings(pages, glossary = [], style, rawOf = rawText) {
+// glossaryOnly: the client's look splits names across pages (César v11: MONTEALBÁN | 326), so only a glossary term counts
+export function splitNameFindings(pages, glossary = [], style, rawOf = rawText, glossaryOnly = false) {
   const out = [];
   const preset = presetOf(style);
   const terms = glossary.flatMap((g) => [g.term, ...(g.variants ?? [])]).map((t) => String(t).split(/\s+/).map(fold).filter(Boolean)).filter((t) => t.length > 1);
@@ -219,7 +221,8 @@ export function splitNameFindings(pages, glossary = [], style, rawOf = rawText) 
       const ws = [...left, ...right];
       if (consecutive(ws) && ws.every((w, i) => fold(w.text) === t[i])) { why = `término del glosario "${ws.map((w) => clean(w.text)).join(' ')}" partido`; span = ws; }
     }
-    if (why) { /* glossary term found above */ } else if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) why = 'frase resaltada partida';
+    if (why) { /* glossary term found above */ } else if (glossaryOnly) continue;
+    else if ((a.tier ?? 0) > 0 && (b.tier ?? 0) > 0) why = 'frase resaltada partida';
     else if (CAP.test(at) && /^\d/.test(bt)) { why = 'nombre + número partido'; kind = 'candidate'; }
     else if (CAP.test(at) && CAP.test(bt)) { why = 'posible nombre compuesto partido'; kind = 'candidate'; }
     else if (CONNECTORS.has(fold(at)) && CAP.test(bt) && A.words.length > 1 && CAP.test(clean(A.words.at(-2).text)) && consecutive([A.words.at(-2), a, b])) { why = 'posible nombre compuesto partido'; kind = 'candidate'; span = [A.words.at(-2), a, b]; } // "Playa del | Carmen"
@@ -241,12 +244,13 @@ export function splitNameFindings(pages, glossary = [], style, rawOf = rawText) 
 // caption text that runs off the frame / pages too tall (a failure César reported). The page
 // layout is src/captionLayout.ts — the SAME function CaptionTrack renders with (bonded pairs,
 // widths as rendered, the shrink to fit, the wrap) — so this only adds the verdict. Widths
-// are still a table estimate (heuristic): confirm flagged pages with frame_at on the render.
+// are a table estimate (heuristic) unless the pack's own font file was read (realAdvances): confirm
+// flagged pages with frame_at on the render.
 export function overflowFindings(pages, style, brandFont) {
   const preset = captionPreset(style, brandFont);
   const gapEm = preset.font.wordGapEm ?? 0.26;
   const out = [];
-  pages.forEach((c) => {
+  pages.forEach((c, i) => {
     if (!c.words.length) return;
     const fit = fitPage(c, preset, {float: preset.position === 'float' && !c.pin});
     const at = (c.startMs + (c.endMs - c.startMs) / 2) / 1000;
@@ -269,7 +273,7 @@ export function overflowFindings(pages, style, brandFont) {
         break;
       }
     }
-    const dur = (c.endMs - c.startMs) / 1000;
+    const dur = (shownUntilMs(pages, i, preset.holdMs) - c.startMs) / 1000; // on screen, the hold included
     if (dur > 0 && text.length / dur > T.cps) out.push(F('reading-speed', 'minor', 'rule', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) — ${Math.round(text.length / dur)} caracteres/s, ilegible (≤ ${T.cps})`, {page: c.id}, []));
   });
   return out;
@@ -471,14 +475,23 @@ export function paginationFindings(pages, style, rawOf = rawText) {
   }
   return out;
 }
-// highlighted (accent) words at the same size as plain ones: preset data, so the fix is code, not a tool
-export function accentSizeFindings(style) {
+// the client's own pack (the brand kit's style.pack, the profile's captionStyle): a reel on another
+// pack is switched back — never that pack's preset edited to look like the client's
+export function packFindings(style, profile, kitPack) {
+  const own = [...new Set([kitPack, ...(profile?.match?.captionStyle ?? [])])].filter((x) => x && presetOf(x).id === x);
+  if (!own.length || own.includes(style)) return [];
+  return [F('wrong-pack', 'major', 'rule', null, null, `los subtítulos usan el pack "${style}"; el de este cliente es "${own[0]}"`, {pack: style, want: own[0]},
+    [{tool: 'set_caption_style', note: 're-pages the generated captions for the client\'s pack, keeping tiers and hand-made pages', args: {style: own[0]}}])];
+}
+// highlighted (accent) words at the client's size against the plain ones (César v11: 1.15×):
+// preset data, so the fix is code, not a tool (on the client's own pack: packFindings covers any other)
+export function accentScaleFindings(style, want) {
   const preset = presetOf(style);
   const plain = preset.tiers[0]?.scale ?? 1;
-  const bigger = [1, 2].filter((t) => (preset.tiers[t]?.scale ?? 1) !== plain);
-  if (!bigger.length) return [];
-  return [F('accent-size', 'major', 'rule', null, null, `el acento (tier ${bigger.join('/')}) sale a ${bigger.map((t) => `${preset.tiers[t].scale}×`).join('/')} del texto blanco en el preset "${preset.id}" — debe ir al MISMO tamaño`, {preset: preset.id},
-    [{tool: 'escalate', note: `preset data (src/captionPresets.ts ${preset.id}.tiers scale → ${plain}): a code change, not an agent edit`, args: {}}])];
+  const off = [1, 2].filter((t) => (preset.tiers[t]?.scale ?? 1) / plain !== want);
+  if (!off.length) return [];
+  return [F('accent-size', 'major', 'rule', null, null, `el acento (tier ${off.join('/')}) sale a ${off.map((t) => `${(preset.tiers[t]?.scale ?? 1) / plain}×`).join('/')} del texto blanco en el preset "${preset.id}" — debe ir a ${want}×`, {preset: preset.id},
+    [{tool: 'escalate', note: `preset data (src/captionPresets.ts ${preset.id}.tiers scale → ${want * plain}): a code change, not an agent edit`, args: {}}])];
 }
 // the client's glossary wins over the transcript: "sky pool" / "skypul" on screen when the term is "skypool"
 export function glossaryFindings(items, glossary = []) {
@@ -1146,15 +1159,21 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- captions ---
   const pages = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, FPS);
   const gfx = projectGraphics(p.graphics, p.clips, FPS);
-  const glossary = profile?.glossary ?? [];
+  const glossary = [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])]; // the profile's and the project's brand kit's
   if (p.captionsOff) skipped.push(role === 'master' ? 'captions (clean master: none on screen by design)' : 'captions (switched off with set_captions — check the brief wants that)');
   else {
+    // the pack's font file, as the renderer reads it (src/projectFont.ts): pages are sized by its real widths
+    const custom = presetOf(p.captionStyle).font.custom;
+    if (custom) try { realAdvances(custom.family, readFont(fs.readFileSync(path.join(publicDir, custom.file))).advance); } catch {} // missing or another face: the render stopped on it (validate: font-missing / font-wrong)
     const rawWord = new Map(words.map((w) => [w.wid, w.word]));
     const rawOf = (w) => (w.wid && rawWord.get(w.wid)) || w.text; // the transcript keeps the periods captions drop
-    findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body));
+    const namesMaySplit = !!profile?.captions?.namesMaySplit; // the client's look splits names across lines and pages (César v11)
+    findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf, namesMaySplit), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body).filter((f) => !(namesMaySplit && f.check === 'split-name')));
     if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? [])));
     if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle, rawOf));
-    if (profile?.captions?.accentSameSize) findings.push(...accentSizeFindings(p.captionStyle));
+    const offPack = packFindings(p.captionStyle, profile, p.brand?.style?.pack);
+    findings.push(...offPack);
+    if (profile?.captions?.accentScale && !offPack.length) findings.push(...accentScaleFindings(p.captionStyle, profile.captions.accentScale));
   }
   const texts = [
     ...pages.map((c) => ({text: c.words.map((w) => w.text).join(' '), ref: c.id, at: c.startMs / 1000})),
@@ -1167,7 +1186,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (role !== 'master' && firstText * 1000 > T.firstTextMs && total > 5) findings.push(F('hook-text', 'major', 'rule', 0, Number.isFinite(firstText) ? firstText : null, `nada escrito en pantalla hasta ${Number.isFinite(firstText) ? `${firstText.toFixed(1)} s` : 'el final'} — el hook no se lee sin audio`, {}, [{tool: 'add_graphic', note: 'hook-stack / big-word at the first word (reel-edit step 5)', args: {template: 'hook-stack', at_wid: words[0]?.wid}}]));
 
   // --- validate (src/validate.ts) — estimated geometry: heuristic ---
-  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor'};
+  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
   const whenOf = (ref) => { const c = pages.find((x) => x.id === ref); if (c) return [c.startMs / 1000, c.endMs / 1000]; const g = gfx.find((x) => x.id === ref); return g ? [g.startMs / 1000, g.endMs / 1000] : [null, null]; };
   for (const i of validateProject(p, FPS)) {
     if (i.code === 'hook' && (role === 'master' || findings.some((f) => f.check === 'hook-text'))) continue;
@@ -1313,9 +1332,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   evidence.claims = haveTr ? claimEvidence(sentencesOf(words), brolls, gfx, profile?.proofCues ?? []).slice(0, 14) : [];
   evidence.inserts = inserts.map((x) => `${x.what} → ${x.need}: ${x.keywords.join(', ')}${x.anchor ? ` @${x.anchor}` : ''}`);
   evidence.audio = audio;
-  // client rules only eyes can check (profiles/<id>.md): e.g. a word cascade → motion_proof at page starts
+  // client rules only eyes can check (profiles/<id>.md)
   evidence.profileDoc = profile ? path.join('.agents/skills/render-judge', profile.doc ?? `profiles/${profile.id}.md`) : null;
-  evidence.motionAt = profile?.captions?.cascadeMs && pages.length ? pages.filter((c) => c.words.length >= 3).slice(0, 3).map((c) => r2(Math.max(0, c.startMs / 1000 - 0.05))) : [];
   evidence.tech = {size: v ? `${v.width}x${v.height}` : null, fps, vcodec: v?.codec_name, pix_fmt: v?.pix_fmt, acodec: a?.codec_name, sampleRate: a?.sample_rate, channels: a?.channels, durationSec: r2(+info?.format?.duration), expectedSec: r2(total)};
 
   const order = (f) => (counts(f) ? 0 : 1e8) + SEVERITIES.indexOf(f.severity) * 1e6 + (f.at ?? -1);
@@ -1362,7 +1380,6 @@ export function reportText(r) {
   L.push(`  look at (frame_at video=<render>): ${r.evidence.lookAt.map((t) => `${t}s`).join(', ') || '—'}`);
   L.push(`  tech: ${JSON.stringify(r.evidence.tech)}`, `  audio: ${JSON.stringify(r.evidence.audio)}`);
   if (r.evidence.profileDoc) L.push(`  client rules by eye: ${r.evidence.profileDoc}`);
-  if (r.evidence.motionAt?.length) L.push(`  word cascade (profile): motion_proof at ${r.evidence.motionAt.map((t) => `${t}s`).join(', ')} — consecutive words must arrive the profile's cascade apart`);
   if (r.evidence.claims?.length) {
     L.push('', 'PROMESAS DEL VO A VERIFICAR (heuristic — no es regla: el juez mira los frames; claim-image = major con timestamp + la promesa sin ilustrar; nunca auto-fix):');
     for (const c of r.evidence.claims) L.push(`  @${tc(c.t0)}–${tc(c.t1)} "${c.text.slice(0, 90)}"${c.cues.length ? `  [prueba: ${c.cues.join(', ')}]` : ''}  en pantalla: ${c.inserts.join(', ') || 'solo el presentador'}  → frame_at ${c.lookAt.map((t) => `${t}s`).join(', ')}`);

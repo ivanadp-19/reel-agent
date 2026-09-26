@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {deepgramAll, parseDeepgramJson, useDeepgram} from '../scripts/lib-transcribe.mjs';
+import {cacheName, deepgramAll, parseDeepgramJson, useDeepgram} from '../scripts/lib-transcribe.mjs';
 
 test('parseDeepgramJson: words map to the cached {word,startMs,endMs} format', () => {
   const data = {results: {channels: [{alternatives: [{words: [
@@ -22,15 +22,18 @@ test('parseDeepgramJson: a failed/empty response is an empty list, not a crash',
   assert.deepEqual(parseDeepgramJson({results: {channels: [{alternatives: [{}]}]}}), []);
 });
 
-test('useDeepgram: key present unless REEL_STT pins whisperx', () => {
+test('useDeepgram: key present unless REEL_STT pins whisperx; the cache file follows the engine', () => {
   const k = process.env.DEEPGRAM_API_KEY, s = process.env.REEL_STT;
   try {
     process.env.DEEPGRAM_API_KEY = 'x'; delete process.env.REEL_STT;
     assert.equal(useDeepgram(), true);
+    assert.equal(cacheName('Guion1', 'es'), 'Guion1.es.dg.json'); // a WhisperX Guion1.es.json is never served as Deepgram's
     process.env.REEL_STT = 'whisperx';
     assert.equal(useDeepgram(), false);
+    assert.equal(cacheName('Guion1', 'es'), 'Guion1.es.json');
     delete process.env.REEL_STT; delete process.env.DEEPGRAM_API_KEY;
     assert.equal(useDeepgram(), false);
+    assert.equal(cacheName('Guion1', 'es'), 'Guion1.es.json'); // the name WhisperX caches always had: they stay valid
   } finally {
     if (k === undefined) delete process.env.DEEPGRAM_API_KEY; else process.env.DEEPGRAM_API_KEY = k;
     if (s === undefined) delete process.env.REEL_STT; else process.env.REEL_STT = s;
@@ -60,7 +63,7 @@ const withStub = async (answers, fn) => {
   }
 };
 
-test('deepgramAll: good transcripts are cached (punctuated); failures and loops go to WhisperX; one retry on 5xx', async () => {
+test('deepgramAll: good transcripts are cached (punctuated); failures and loops are left over (the job fails on them); one retry on 5xx', async () => {
   await withStub({
     ok: [words('Hola, estamos en Mérida.')],
     flaky: [503, words('Segunda va.')],
@@ -70,11 +73,11 @@ test('deepgramAll: good transcripts are cached (punctuated); failures and loops 
     const {left, lastError} = await deepgramAll(wavs, 'es', dir);
     assert.deepEqual([...left.keys()].sort(), ['down', 'loop']);
     assert.match(String(lastError), /deepgram 500|degenerate/);
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'ok.es.json'), 'utf8')), [
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'ok.es.dg.json'), 'utf8')), [
       {word: 'Hola,', startMs: 0, endMs: 250}, {word: 'estamos', startMs: 300, endMs: 550}, {word: 'en', startMs: 600, endMs: 850}, {word: 'Mérida.', startMs: 900, endMs: 1150},
     ]);
-    assert.ok(fs.existsSync(path.join(dir, 'flaky.es.json')));
-    assert.ok(!fs.existsSync(path.join(dir, 'down.es.json')) && !fs.existsSync(path.join(dir, 'loop.es.json')));
+    assert.ok(fs.existsSync(path.join(dir, 'flaky.es.dg.json')));
+    assert.ok(!fs.existsSync(path.join(dir, 'down.es.dg.json')) && !fs.existsSync(path.join(dir, 'loop.es.dg.json')));
     assert.equal(calls.filter((c) => c.key === 'flaky').length, 2); // one retry, then it worked
     assert.equal(calls.filter((c) => c.key === 'down').length, 2); // one retry, then WhisperX
     const p = calls.find((c) => c.key === 'ok').params;
@@ -91,7 +94,7 @@ test('deepgramAll: lang auto asks Deepgram to detect the language', async () => 
     await deepgramAll(wavs, 'auto', dir);
     assert.equal(calls[0].params.get('detect_language'), 'true');
     assert.equal(calls[0].params.get('language'), null);
-    assert.ok(fs.existsSync(path.join(dir, 'a.auto.json')));
+    assert.ok(fs.existsSync(path.join(dir, 'a.auto.dg.json')));
   });
 });
 

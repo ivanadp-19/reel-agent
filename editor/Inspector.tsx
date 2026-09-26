@@ -24,8 +24,8 @@ const ENTER_HELP: Partial<Record<Enter | 'pack', string>> = {
   disc: 'a disc from a corner covers, then retires (Orbit)', blinds: 'accent bars close and open (Form)', particles: 'the old shot dissolves left to right', diagWipe: 'a ~20° edge comes down (Linen)', blocks: 'the new shot rises with a stepped edge (Vista)',
   cardDrop: 'the new shot falls in as a card (Pop)', lightLeak: 'warm and pink flares over the cut (Lens)', pack: "the style pack's own family",
 };
-const ARRIVES: BrollIn[] = ['cut', 'slideUp', 'popFrom', 'slideRight'];
-const LEAVES: BrollOut[] = ['cut', 'slideDown', 'shrink', 'fall'];
+const ARRIVES: BrollIn[] = ['cut', 'fade', 'slideUp', 'popFrom', 'slideRight'];
+const LEAVES: BrollOut[] = ['cut', 'fade', 'slideDown', 'shrink', 'fall'];
 const MODES: BrollItem['mode'][] = ['fullscreen', 'top', 'inset', 'card', 'carousel'];
 
 // Right "Inspector" panel: Clip / Captions / B-roll / Graphics / Styles / Settings.

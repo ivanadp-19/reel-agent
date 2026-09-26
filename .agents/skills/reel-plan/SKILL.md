@@ -70,7 +70,8 @@ plain `add_broll` follow it.
 | Teaching, notes, blackboard | `chalk` (handwritten, yellow tags, scribbled outline, torn photos) |
 | Fashion lookbook, boutique | `linen` (peach serif box, diagonal beige bands) |
 | Documentary, history, archive | `align` (mono on white, tiles by scale, decoding labels) |
-| Mexican real-estate walk-throughs like the reference reels | `palabra`, `caja` or `tracked` |
+| César / VIBEM (any of his reels) | `vibem` — comes with `set_brand from: vibem`; never another pack |
+| Other Mexican real-estate walk-throughs like the reference reels | `palabra`, `caja` or `tracked` |
 
 A brand kit or a project accent overrides the pack's palette; display packs keep their faces.
 

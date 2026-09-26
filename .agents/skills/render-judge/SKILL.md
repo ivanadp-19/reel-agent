@@ -23,7 +23,9 @@ Files in this folder:
   color references, crew words, script inserts, known reels). The MD holds what
   the judge checks with its eyes. `judge.mjs` picks the profile by `--profile`,
   by the kit's `style.judgeProfile`, or by the profile's `match` (caption
-  style, brand name). Current profile: `cesar` (VIBEM).
+  style, brand name). Current profile: `cesar` (VIBEM): his reels are made
+  with `set_brand from: vibem`, which applies the `vibem` pack (his approved v11)
+  and names this profile (`judgeProfile`).
 
 ## Labels (the only words used for a render's state)
 

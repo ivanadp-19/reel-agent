@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {DROP_DB, assignSpeakers, flagOffMicBySpeaker, loudnessFromPcm} from '../src/speech.ts';
+import {continuesPrev} from '../src/timeline.ts';
+import {align, coreOf, normKey} from '../src/guion.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -59,7 +61,12 @@ function runWhisperx(wavs, outDir, device, lang, withPrompt = true) {
 // Word times are relative to the SOURCE file, so the cache is keyed by source
 // (+ language): autocut segments and re-arranged copies never re-transcribe.
 export const sourceKey = (clip) => path.basename(clip.src).replace(/\.[^.]+$/, '');
-const cacheFile = (clip, lang) => path.join(TRANSCRIPTS, `${sourceKey(clip)}.${lang}.json`);
+// ... and by engine: with a Deepgram key a WhisperX transcript is never served from the cache (its
+// misaligned times would stick for good), nor the other way round. WhisperX keeps the original
+// name, so existing caches stay valid; the .spk / .loud sidecars are per source, shared by both.
+// A source that has both says, per word, which word of the other one it is (`was`, below).
+export const cacheName = (key, lang, dg = useDeepgram()) => `${key}.${lang}${dg ? '.dg' : ''}.json`;
+const cacheFile = (clip, lang, dg) => path.join(TRANSCRIPTS, cacheName(sourceKey(clip), lang, dg));
 
 // Loudness sidecar per source (20 ms windows): tells the presenter's takes from
 // a quieter voice off camera (a director feeding lines). See src/speech.ts.
@@ -127,9 +134,9 @@ function parseWhisperxJson(file) {
 // ---- Deepgram Nova-3 (optional, pre-recorded API) ----
 // DEEPGRAM_API_KEY in .env switches transcription to Deepgram: seconds per clip
 // instead of minutes on CPU WhisperX. Words land in the SAME cache format
-// ({word, startMs, endMs}), so every downstream step is untouched. Any failure
-// (no network, bad key, quota) falls back to local WhisperX for those clips.
-// REEL_STT=whisperx forces the local engine even with a key set.
+// ({word, startMs, endMs}), so every downstream step is untouched. A failure
+// (no network, bad key, quota) fails the job with Deepgram's error: WhisperX word
+// times never stand in unannounced. REEL_STT=whisperx forces the local engine.
 export const useDeepgram = () => Boolean(process.env.DEEPGRAM_API_KEY) && (process.env.REEL_STT || 'auto') !== 'whisperx';
 
 export function parseDeepgramJson(data) {
@@ -176,12 +183,12 @@ export async function deepgramAll(wavs, lang, dir = TRANSCRIPTS) {
     try {
       const words = await deepgramTranscribe(wav, lang);
       if (isDegenerate(words)) throw new Error('degenerate transcript');
-      fs.writeFileSync(path.join(dir, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
+      fs.writeFileSync(path.join(dir, cacheName(key, lang, true)), JSON.stringify(words, null, 2));
       left.delete(key);
     } catch (e) {
       lastError = e;
       if (e.status === 401 || e.status === 403) dead = true;
-      console.error(`deepgram failed for ${key} (${String(e).slice(0, 140)}); WhisperX takes it`);
+      console.error(`deepgram failed for ${key} (${String(e).slice(0, 140)})`);
     }
   };
   const entries = [...wavs];
@@ -190,7 +197,7 @@ export async function deepgramAll(wavs, lang, dir = TRANSCRIPTS) {
 }
 
 // Transcribe every not-yet-cached source among `clips` (Deepgram when a key is
-// set, else one WhisperX batch; Deepgram failures fall back to WhisperX).
+// set, else one WhisperX batch; a Deepgram failure throws).
 // onBatch(label) is called once before the run (for progress UI).
 // the transcription time of a job, for the project's timing log: the backend reads this
 // stderr line (server/index.mjs → scripts/timing.mjs) and logs it as its own stage
@@ -218,16 +225,9 @@ async function transcribeUncached(clips, onBatch, lang) {
 
   if (useDeepgram()) {
     onBatch?.(`Transcribing ${wavs.size} clip${wavs.size === 1 ? '' : 's'} (Deepgram)`);
-    const r = await deepgramAll(wavs, lang);
-    if (!r.left.size) return;
-    wavs = r.left;
-    for (const key of [...pending.keys()]) if (!wavs.has(key)) pending.delete(key);
-    // Deepgram-only setups: the clips it could not do are skipped per clip
-    // (transcribeClip throws for them), not the whole job — the log names why
-    if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
-      console.error(`WhisperX is not installed — ${wavs.size} clip(s) left untranscribed after Deepgram failed: ${String(r.lastError).slice(0, 160)}`);
-      return;
-    }
+    const {left, lastError} = await deepgramAll(wavs, lang);
+    if (left.size) throw new Error(`Deepgram could not transcribe ${[...left.keys()].join(', ')} (${String(lastError).slice(0, 160)}) — run it again, or set REEL_STT=whisperx to use WhisperX`);
+    return;
   }
 
   if (!fs.existsSync(path.join(ROOT, '.venv', 'bin', 'whisperx'))) {
@@ -260,7 +260,7 @@ async function transcribeUncached(clips, onBatch, lang) {
     if (!fs.existsSync(out)) continue; // ffmpeg failed for this one → transcribeClip will throw
     const words = parseWhisperxJson(out);
     if (isDegenerate(words)) { retry.push(path.join(TMP, `${key}.16k.wav`)); continue; }
-    fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(words, null, 2));
+    fs.writeFileSync(path.join(TRANSCRIPTS, cacheName(key, lang, false)), JSON.stringify(words, null, 2));
   }
   if (!retry.length) return;
   const outDir2 = path.join(outDir, 'noprompt');
@@ -270,7 +270,7 @@ async function transcribeUncached(clips, onBatch, lang) {
     const key = path.basename(wav, '.16k.wav');
     const out = path.join(outDir2, `${key}.16k.json`);
     if (wx2.status !== 0 || !fs.existsSync(out)) { console.error(`whisperx retry without prompt failed for ${key}`); continue; }
-    fs.writeFileSync(path.join(TRANSCRIPTS, `${key}.${lang}.json`), JSON.stringify(parseWhisperxJson(out), null, 2));
+    fs.writeFileSync(path.join(TRANSCRIPTS, cacheName(key, lang, false)), JSON.stringify(parseWhisperxJson(out), null, 2));
   }
 }
 
@@ -282,14 +282,29 @@ export function isDegenerate(words) {
   return Math.max(...counts.values()) >= words.length * 0.6;
 }
 
+// A source transcribed by both engines (Deepgram after WhisperX, or back): each served word names the
+// word of the other transcript it is (`was`, its index), aligned by text as a guion is (src/guion.ts
+// align). A project captioned on the other one's word ids moves to these (src/paging.ts repage).
+const WAS = new Map(); // once per source a process
+function wasOf(cache, other) {
+  if (!WAS.has(cache)) {
+    const a = JSON.parse(fs.readFileSync(other, 'utf8')), b = JSON.parse(fs.readFileSync(cache, 'utf8'));
+    const was = [];
+    for (const op of align(a.map((w) => ({text: w.word})), b.map((w) => ({text: w.word, core: coreOf(w.word), key: normKey(w.word), sentStart: false, entity: false})))) if (op.kind === 'pair') was[op.guion[0]] = op.asr[0];
+    WAS.set(cache, was);
+  }
+  return WAS.get(cache);
+}
+
 // Words for one clip (source-relative times). Uses the cache; transcribes on miss.
 // offMic: 'mark' | 'cut' | 'off' — unless off, words of a quieter second voice
 // come back with {off: true} (callers decide whether to skip them; indices stay).
 export async function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
-  const cache = cacheFile(clip, lang);
+  const cache = cacheFile(clip, lang), other = cacheFile(clip, lang, !useDeepgram());
   if (!fs.existsSync(cache)) await transcribeClips([clip], undefined, lang);
   if (!fs.existsSync(cache)) throw new Error(`transcription failed for ${clip.id}`);
   let words = JSON.parse(fs.readFileSync(cache, 'utf8'));
+  if (fs.existsSync(other)) { const was = wasOf(cache, other); words = words.map((w, i) => (was[i] != null ? {...w, was: was[i]} : w)); }
   const turns = speakersFor(clip);
   if (turns) words = assignSpeakers(words, turns);
   if (offMic === 'off') return words;
@@ -304,8 +319,13 @@ export async function assembleWords(clips, onProgress, lang = 'auto', offMic = '
   await transcribeClips(clips, (label) => onProgress?.(0, clips.length, {id: label, label, batch: true}), lang);
   const out = [];
   let offsetMs = 0;
+  let anchor;
   for (const [idx, clip] of clips.entries()) {
     onProgress?.(idx, clips.length, clip);
+    // a clip that continues the previous one (a split with nothing cut out) is the same take to the speech:
+    // its words page with the previous clip's, and a word on the join is emitted once, whole, by the first
+    const joined = continuesPrev(clips[idx - 1], clip), goesOn = continuesPrev(clip, clips[idx + 1]);
+    anchor = joined ? anchor : clip.id;
     let words;
     try {
       words = await transcribeClip(clip, lang, offMic);
@@ -318,21 +338,22 @@ export async function assembleWords(clips, onProgress, lang = 'auto', offMic = '
     const inMs = clip.inSec * 1000;
     const outMs = clip.outSec * 1000;
     words.forEach((w, wi) => {
-      if (w.endMs <= inMs || w.startMs >= outMs) return;
+      if (w.endMs <= inMs || w.startMs >= outMs || (joined && w.startMs < clips[idx - 1].outSec * 1000)) return;
       if (offMic === 'cut' && w.off) return; // the off-camera voice gets no captions
       const s = Math.max(w.startMs, inMs) - inMs + offsetMs;
-      const e = Math.min(w.endMs, outMs) - inMs + offsetMs;
+      const e = (goesOn ? w.endMs : Math.min(w.endMs, outMs)) - inMs + offsetMs;
       out.push({
         wid: `${sourceKey(clip)}:${wi}`, // stable word id
         word: w.word,
         startMs: Math.round(s), // absolute timeline (current cut)
         endMs: Math.round(e),
-        clipId: clip.id, // anchor
+        clipId: anchor, // anchor: the first clip of its continuous stretch
         src: clip.src, // source file the word belongs to
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,
         ...(w.off ? {off: true} : {}),
         ...(w.speaker ? {speaker: w.speaker} : {}),
+        ...(w.was != null ? {was: `${sourceKey(clip)}:${w.was}`} : {}), // its id in the other engine's transcript
       });
     });
     offsetMs += (clip.outSec - clip.inSec) * 1000;

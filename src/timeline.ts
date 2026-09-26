@@ -62,6 +62,11 @@ export type Project = {
 // TIMELINE duration (what the viewer experiences) — source span divided by speed
 export const clipDurationSec = (c: Clip) => Math.max(0, (c.outSec - c.inSec) / (c.speed ?? 1));
 
+// c picks up exactly where prev ends in the same source (a split with nothing cut out: a shot change of a
+// pre-edit, a speed ramp's steps): to the speech it is one take, so words and caption pages run across the join
+export const continuesPrev = (prev: Clip | undefined, c: Clip | undefined) =>
+  !!prev && !!c && prev.src === c.src && Math.abs(c.inSec - prev.outSec) < 0.001;
+
 // J/L-cuts (timeline seconds, clamped to what actually works):
 // a J-cut plays the clip's first j seconds of audio under the previous clip's
 // tail (the main clip mutes those first frames so the lead flows straight
