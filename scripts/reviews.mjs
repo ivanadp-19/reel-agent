@@ -18,6 +18,8 @@
 //                   _captions.mov, _captions.png.zip, _supers.mov, _master_supers.mp4 (src/validate.ts
 //                   DELIVERABLES), NAME the system name (deliverableName: VIBEM_G2_H1_C1_v3)
 //     snapshot      reviews/<projectId>/v<n>/project.json — the props that were rendered
+//     masterKey     the cached master it was cut from (scripts/layers.mjs masterKey): an unchanged master —
+//                   same key, same bytes (the final audio too) — is a hard link to the earlier version's, not a copy
 //     pruned        the files of it the retention removed (pruneVersions), prunedAt when
 //   link: {id, hash, createdAt, expiresAt, revokedAt} — the token itself is never stored, only sha256(token)
 //
@@ -90,7 +92,7 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // pair's files, on this filesystem) and its `identity`, they move into v<n>/ under their
 // system names next to the `snapshot` of the rendered props. The JSON is written last: a
 // step that fails leaves no file of this version behind.
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot}) {
+export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey}) {
   const r = loadReviews(dir, projectId, {strict: true});
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
   const sub = path.join(dir, projectId);
@@ -109,12 +111,17 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
     if (deliverables) {
       fs.rmSync(vdir, {recursive: true, force: true}); // what a crash left under this number (never in the JSON)
       fs.mkdirSync(vdir);
-      const put = ({kind, ext}, src) => {
+      // the newest earlier master of the same key whose bytes are these: linked (the design's §5 cache)
+      const sameMaster = (src) => masterKey && r.versions.filter((x) => x.masterKey === masterKey && x.deliverables?.master).sort((a, b) => b.v - a.v)
+        .map((x) => path.join(publicDir, x.deliverables.master)).find((f) => sameBytes(f, src));
+      const put = ({key, kind, ext}, src) => {
         const f = path.join(vdir, deliverableName({identity, v, kind, ext}));
-        fs.renameSync(src, f);
+        const prev = key === 'master' && sameMaster(src);
+        if (prev) { fs.linkSync(prev, f); fs.rmSync(src); } else fs.renameSync(src, f);
         return rel(f);
       };
       version.identity = identity;
+      if (masterKey) version.masterKey = masterKey;
       version.deliverables = {};
       for (const [key, src] of Object.entries(deliverables)) {
         const d = DELIVERABLES.find((x) => x.key === key);
@@ -132,6 +139,18 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
     for (const f of [proxyAbs, posterAbs, vdir]) fs.rmSync(f, {recursive: true, force: true});
     throw e;
   }
+}
+
+// two files with the same bytes (a missing one: no), read 1 MB at a time
+function sameBytes(a, b) {
+  let fa, fb;
+  try {
+    if (fs.statSync(a).size !== fs.statSync(b).size) return false;
+    fa = fs.openSync(a, 'r'); fb = fs.openSync(b, 'r');
+    const x = Buffer.alloc(1 << 20), y = Buffer.alloc(1 << 20);
+    for (let n; (n = fs.readSync(fa, x)) > 0;) if (fs.readSync(fb, y, 0, n) !== n || !x.subarray(0, n).equals(y.subarray(0, n))) return false;
+    return true;
+  } catch { return false; } finally { for (const fd of [fa, fb]) if (fd !== undefined) fs.closeSync(fd); }
 }
 
 // Take a version back (its render job was cancelled while it was being recorded):
@@ -236,10 +255,10 @@ export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(
 // becomes a version (proxy + poster made next to their final place under temporary
 // names, then numbered). Drafts, QC failures and project-less renders → null.
 // signal: the render job's — a cancel kills the proxy's ffmpeg and records nothing.
-// deliverables / identity / snapshot: the pair of a project with an identity (recordVersion).
+// deliverables / identity / snapshot / masterKey: the pair of a project with an identity (recordVersion).
 // verify: run in the row right before the version is numbered — throws to record nothing (the
 // runner checks the pair's identity is still the project's).
-export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, verify, makeProxy: proxy = makeProxy}) {
+export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, verify, makeProxy: proxy = makeProxy}) {
   if (draft || !qcOk || !projectId) return null;
   if (signal?.aborted) throw signal.reason;
   const tmp = path.join(dir, projectId, `.tmp-${jobId}`);
@@ -252,7 +271,7 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
     return await inReviewsRow(dir, projectId, () => {
       if (signal?.aborted) throw signal.reason;
       verify?.();
-      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, ...(deliverables ? {deliverables, identity, snapshot} : {})});
+      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, ...(deliverables ? {deliverables, identity, snapshot, masterKey} : {})});
       try { pruneVersions(dir, projectId, publicDir); } catch (e) { console.error(`reviews of ${projectId}: retention not applied: ${e.message}`); } // never the new version's fault
       return version;
     });

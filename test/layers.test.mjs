@@ -151,7 +151,8 @@ test('layer args: master = h264 without captions at a lower crf; captions = PNG 
   assert.equal(alphaEncodeArgs({frames: 'f', outFile: 'x', alpha: 'png', fps: 30}), null, 'png: the frames are the layer');
   const vp9 = alphaEncodeArgs({frames: 'f', outFile: 'c.webm', alpha: 'vp9', fps: 30});
   assert.ok(['libvpx-vp9', 'yuva420p', 'realtime'].every((a) => vp9.includes(a)) && vp9.includes(path.join('f', '*.png')));
-  assert.ok(alphaEncodeArgs({frames: 'f', outFile: 'c.mov', alpha: 'prores', fps: 30}).includes('yuva444p10le'));
+  const prores = alphaEncodeArgs({frames: 'f', outFile: 'c.mov', alpha: 'prores', fps: 30});
+  assert.ok(prores.includes('yuva444p10le') && /out_color_matrix=bt709.*setparams=.*colorspace=bt709/.test(prores.join(' ')), 'Rec.709, tagged');
 });
 
 test('composite: frame-exact (renumbered by frame index), libvpx decodes the alpha, audio copied, layers stack', () => {
@@ -167,7 +168,9 @@ test('composite: frame-exact (renumbered by frame index), libvpx decodes the alp
   // a full-range master (what Remotion writes) stays full range, its layers converted into it, its tags kept
   const pc = compositeArgs({master: 'm.mp4', overlays: [{file: 'frames'}], outFile: 'o.mp4', fps: 30, color: {range: 'pc', space: 'bt470bg', trc: 'unknown'}});
   const pfc = pc[pc.indexOf('-filter_complex') + 1];
-  assert.match(pfc, /scale=out_range=pc,format=yuva420p/);
+  assert.match(pfc, /scale=out_color_matrix=bt601:out_range=pc,format=yuva420p/, 'into the master\'s matrix, named (the ProRes layers are 709)');
+  const hd = compositeArgs({master: 'm.mp4', overlays: [{file: 'x.mov', alpha: 'prores'}], outFile: 'o.mp4', fps: 30, color: {space: 'bt709'}});
+  assert.match(hd[hd.indexOf('-filter_complex') + 1], /scale=out_color_matrix=bt709:out_range=tv,/);
   assert.match(pfc, /format=yuvj420p\[v\]/);
   assert.ok(pc.includes('bt470bg') && !pc.includes('-color_trc'));
   assert.match(fc, /format=yuv420p\[v\]/, 'limited range stays limited');

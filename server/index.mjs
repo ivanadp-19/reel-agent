@@ -333,7 +333,7 @@ async function handle(req, res) {
     const file = path.join(PROJECTS_DIR, `${id}.json`);
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     try {
-      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC);
+      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env});
       return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
     } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
   }

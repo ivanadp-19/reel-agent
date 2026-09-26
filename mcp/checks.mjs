@@ -8,6 +8,7 @@ import {normalizeCaption} from '../src/captions.ts';
 import {deliveryFps} from '../src/timeline.ts';
 import {fontFiles, identityTaken, transcriptIssues, validateIdentity, validateProject} from '../src/validate.ts';
 import {readFont} from '../src/sfnt.ts';
+import {projectTranscript} from '../scripts/transcript-cache.mjs';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -20,18 +21,17 @@ export function withDefaults(p) {
 // face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
 export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(publicDir, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
 
-// this project's words, from its sources' transcript caches (scripts/lib-transcribe.mjs projectTranscript),
-// never the machine's last transcription run. Imported here, not at the top: lib-transcribe loads the .env
-// at import, and the reel CLI (it imports newProject) never reads the server's .env
-export const projectWords = async (p, publicDir) => (await import('../scripts/lib-transcribe.mjs')).projectTranscript(p, publicDir);
+// this project's words, from its sources' transcript caches (scripts/transcript-cache.mjs projectTranscript),
+// never the machine's last transcription run; `env` (the caller's ROOT .env + process env) picks the engine
+export const projectWords = projectTranscript; // (p, publicDir, env)
 
 // every issue: layout / timing / emphasis (validateProject), then off-mic words left in the cut and clip
 // edges inside a word (projectWords) — at the fps the project renders at
-export async function projectIssues(p, publicDir) {
+export async function projectIssues(p, publicDir, env) {
   const fps = deliveryFps(p);
   // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name)
   const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { return [f, readFont(fs.readFileSync(file)).fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
-  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir))];
+  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir, env))];
 }
 
 // A project's identity (set_identity) checked against the others saved here (public/projects/*.json):

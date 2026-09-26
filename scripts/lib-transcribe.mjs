@@ -3,9 +3,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {DROP_DB, assignSpeakers, flagOffMicBySpeaker, loudnessFromPcm} from '../src/speech.ts';
+import {loudnessFromPcm} from '../src/speech.ts';
 import {continuesPrev} from '../src/timeline.ts';
 import {align, coreOf, normKey} from '../src/guion.ts';
+import {cacheName, diarizeOn, sourceKey, useDeepgram, voices} from './transcript-cache.mjs';
+
+export {cacheName, sourceKey, useDeepgram}; // the cache names and the engine rule live in transcript-cache.mjs
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -58,14 +61,7 @@ function runWhisperx(wavs, outDir, device, lang, withPrompt = true) {
   );
 }
 
-// Word times are relative to the SOURCE file, so the cache is keyed by source
-// (+ language): autocut segments and re-arranged copies never re-transcribe.
-export const sourceKey = (clip) => path.basename(clip.src).replace(/\.[^.]+$/, '');
-// ... and by engine: with a Deepgram key a WhisperX transcript is never served from the cache (its
-// misaligned times would stick for good), nor the other way round. WhisperX keeps the original
-// name, so existing caches stay valid; the .spk / .loud sidecars are per source, shared by both.
-// A source that has both says, per word, which word of the other one it is (`was`, below).
-export const cacheName = (key, lang, dg = useDeepgram()) => `${key}.${lang}${dg ? '.dg' : ''}.json`;
+// the cache of a source by language and engine (transcript-cache.mjs cacheName)
 const cacheFile = (clip, lang, dg) => path.join(TRANSCRIPTS, cacheName(sourceKey(clip), lang, dg));
 
 // Loudness sidecar per source (20 ms windows): tells the presenter's takes from
@@ -91,7 +87,6 @@ function readLoudness(clip, key) {
 // Speaker sidecar per source (who is talking): pyannote through scripts/diarize.py, only when HF_TOKEN
 // is set (the model is gated). Cached next to the transcript; a failure is logged once and the
 // loudness-only detection carries on. REEL_DIARIZE=0 turns it off.
-const diarizeOn = () => Boolean(process.env.HF_TOKEN) && process.env.REEL_DIARIZE !== '0';
 function speakersFor(clip) {
   if (!diarizeOn()) return null;
   const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.spk.json`);
@@ -132,13 +127,7 @@ function parseWhisperxJson(file) {
     .filter((w) => w.word.length > 0);
 }
 
-// ---- Deepgram Nova-3 (optional, pre-recorded API) ----
-// DEEPGRAM_API_KEY in .env switches transcription to Deepgram: seconds per clip
-// instead of minutes on CPU WhisperX. Words land in the SAME cache format
-// ({word, startMs, endMs}), so every downstream step is untouched. A failure
-// (no network, bad key, quota) fails the job with Deepgram's error: WhisperX word
-// times never stand in unannounced. REEL_STT=whisperx forces the local engine.
-export const useDeepgram = () => Boolean(process.env.DEEPGRAM_API_KEY) && (process.env.REEL_STT || 'auto') !== 'whisperx';
+// ---- Deepgram Nova-3 (optional; the engine rule: transcript-cache.mjs useDeepgram) ----
 
 export function parseDeepgramJson(data) {
   const words = data?.results?.channels?.[0]?.alternatives?.[0]?.words ?? [];
@@ -308,30 +297,6 @@ export async function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
   if (fs.existsSync(other)) { const was = wasOf(cache, other); words = words.map((w, i) => (was[i] != null ? {...w, was: was[i]} : w)); }
   return voices(words, speakersFor(clip), offMic === 'off' ? null : loudnessFor(clip));
 }
-// who says each word (the diarizer's turns) and which are the quiet voice off the mic (the loudness track)
-function voices(words, turns, loud) {
-  if (turns) words = assignSpeakers(words, turns);
-  return loud ? flagOffMicBySpeaker(words, loud, +(process.env.REEL_OFFMIC_DB || DROP_DB)) : words;
-}
-
-// A project's words from the per-source caches only: the files transcribeClip reads (this engine's cache,
-// else the other engine's) with the speaker and loudness sidecars already written — it never transcribes,
-// diarizes or decodes. The shape of public/transcript.json (scripts/transcribe.mjs): per clip, the words of
-// its trim window; a source not transcribed yet has none. The project checks read this (mcp/checks.mjs),
-// never public/transcript.json, which is the last run of ANY project on the machine.
-export function projectTranscript(p, publicDir) {
-  const dir = path.join(publicDir, 'clips', 'transcripts');
-  const read = (name) => { try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { return null; } };
-  const lang = p.lang ?? 'auto', dg = useDeepgram();
-  return p.clips.map((clip) => {
-    const key = sourceKey(clip);
-    const cached = read(cacheName(key, lang, dg)) ?? read(cacheName(key, lang, !dg));
-    const words = Array.isArray(cached) ? voices(cached, diarizeOn() ? read(`${key}.spk.json`)?.turns : null, p.offMic === 'off' ? null : read(`${key}.loud.json`)) : [];
-    const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
-    return {clipId: clip.id, source: key, words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs)};
-  });
-}
-
 // Assemble all clips' words onto the timeline, honoring trim (in/out) and order.
 // onProgress(idx, total, clip) is called before each clip is transcribed.
 export async function assembleWords(clips, onProgress, lang = 'auto', offMic = 'mark') {

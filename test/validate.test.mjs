@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {validateProject} from '../src/validate.ts';
 
 const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 20, sourceDurationSec: 20};
@@ -98,6 +99,17 @@ test('projectIssues: off-mic and cut-word come from the project\'s own sources, 
     // off-mic switched off: the words carry no flag; a source never transcribed: no words, no issue
     assert.ok((await projectWords(project('clips/A.mp4', 5.1, {offMic: 'off'}), pub))[0].words.every((w) => !w.off));
     assert.deepEqual((await projectWords(project('clips/C.mp4', 2), pub))[0].words, []);
+    // a source cached by both engines: the caller's env picks, never the cwd's .env (nor is it loaded):
+    // a child in a temp cwd whose .env would say WhisperX
+    fs.writeFileSync(path.join(dir, 'D.auto.json'), JSON.stringify([Wd('heard-by-whisperx', 0, 1)]));
+    fs.writeFileSync(path.join(dir, 'D.auto.dg.json'), JSON.stringify([Wd('heard-by-deepgram', 0, 1)]));
+    fs.writeFileSync(path.join(pub, '.env'), 'REEL_STT=whisperx\nREEL_SENTINEL=1\n');
+    const code = `const {projectWords} = await import(${JSON.stringify(new URL('../mcp/checks.mjs', import.meta.url).href)});
+      const p = {clips: [{id: 'k0', src: 'clips/D.mp4', inSec: 0, outSec: 2}], lang: 'auto'};
+      const w = (env) => projectWords(p, ${JSON.stringify(pub)}, env)[0].words.map((x) => x.word).join();
+      console.log(JSON.stringify([w({DEEPGRAM_API_KEY: 'k'}), w({}), w({DEEPGRAM_API_KEY: 'k', REEL_STT: 'whisperx'}), process.env.REEL_SENTINEL ?? null]));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], {cwd: pub, encoding: 'utf8', env: {PATH: process.env.PATH}});
+    assert.deepEqual(JSON.parse(r.stdout || 'null'), ['heard-by-deepgram', 'heard-by-whisperx', 'heard-by-whisperx', null], r.stderr);
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 

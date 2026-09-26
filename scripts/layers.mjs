@@ -50,7 +50,10 @@ export const COMPOSITE_CRF = 18;
 export const ALPHA = {
   png: {ext: null},
   vp9: {ext: 'webm', encode: ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-auto-alt-ref', '0', '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1', '-crf', '18', '-b:v', '0'], decode: ['-c:v', 'libvpx-vp9']},
-  prores: {ext: 'mov', encode: ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le'], decode: []},
+  // a delivered file (the pair's captions.mov / supers.mov): Rec.709, tagged (setparams: ffmpeg 8 drops the
+  // -colorspace output options here) — an NLE reads untagged HD as 709, and swscale's untagged default (601)
+  // turned the kit's #FFE500 into #FFDA00 there
+  prores: {ext: 'mov', encode: ['-c:v', 'prores_ks', '-profile:v', '4444', '-vf', 'scale=out_color_matrix=bt709:out_range=tv,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709', '-pix_fmt', 'yuva444p10le'], decode: []},
 };
 // fps is a Number (src/timeline.ts renderFps): 30000/1001 → '29.97002997002997', which ffmpeg reads as 30000/1001
 const framesInput = (dir, fps) => ['-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(dir, '*.png')];
@@ -181,11 +184,13 @@ export function alphaEncodeArgs({frames, outFile, alpha, fps}) {
 // The result keeps the master's pixel format and color tags (`color`, from
 // probeColor: Remotion writes full-range yuvj420p tagged bt470bg), and each layer is
 // converted into that range before the overlay — a limited-range layer over a
-// full-range master would come out washed out. The master's audio is copied
-// (loudness runs on the result). `overlays` is a list so more layers can stack
+// full-range master would come out washed out — and into the master's matrix, named (601 when the
+// master is untagged, as ffmpeg reads it): unnamed, ffmpeg 5 keeps a tagged layer's own (the ProRes
+// layers are 709). The master's audio is copied (loudness runs on the result). `overlays` is a list so more layers can stack
 // later; each is {file, alpha} (png: `file` is the frames folder).
 export function compositeArgs({master, overlays, outFile, fps, draft = false, color = {}}) {
   const full = color.range === 'pc';
+  const matrix = {bt709: 'bt709', bt2020nc: 'bt2020'}[color.space] ?? 'bt601';
   const inputs = ['-i', master];
   const renumber = `settb=1/${fps},setpts=N`;
   const chains = [`[0:v]${renumber}[l0]`];
@@ -193,7 +198,7 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
   overlays.forEach((o, i) => {
     const alpha = o.alpha ?? 'png';
     inputs.push(...(alpha === 'png' ? framesInput(o.file, fps) : [...ALPHA[alpha].decode, '-i', o.file]));
-    chains.push(`[${i + 1}:v]${renumber},scale=out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
+    chains.push(`[${i + 1}:v]${renumber},scale=out_color_matrix=${matrix}:out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
     last = `l${i + 1}`;
   });
   chains.push(`[${last}]format=${full ? 'yuvj420p' : 'yuv420p'}[v]`);

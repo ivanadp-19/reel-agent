@@ -319,7 +319,7 @@ export function createRenderRunner({
     // master held by a hard link next to the cache's (`.part-` keeps another job's trim off it)
     const pair = !draft && job.projectId && job.identity?.client ? job.identity : null;
     const pairTmp = pair ? path.join(reviewsDir, job.projectId, `.tmp-pair-${id}`) : null;
-    let hold = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null;
+    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null;
     // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
     const cleanUp = async () => {
       let names = [];
@@ -489,7 +489,7 @@ export function createRenderRunner({
           if (result.master === 'cached') set('master', 1, {progress: ranges.master[1], label: 'Master reused from the cache'});
           // the pair's master, held until the remux after QC (a copy where hard links are not possible)
           if (pair) {
-            hold = path.join(masterCache.dir, `${key}.part-pair-${id}.mp4`);
+            hold = path.join(masterCache.dir, `${key}.part-pair-${id}.mp4`); pairKey = key;
             fs.rmSync(hold, {force: true}); // an earlier attempt's (re-queued after a crash)
             try { fs.linkSync(master, hold); } catch { await abortable(fs.promises.copyFile(master, hold)); }
             // its supers: the text graphics on a transparent layer of their own (ProRes 4444), laid under the captions
@@ -570,7 +570,7 @@ export function createRenderRunner({
             // master_supers: the supers burnt into that master (its final audio copied) — the master itself when there is no text graphic
             pairMasterSupers = path.join(pairTmp, 'master_supers.mp4');
             if (supersDrawn) await ffmpeg(commands.composite({master: pairMaster, layers: [{file: pairSupers, alpha: 'prores'}], outFile: pairMasterSupers, draft: false, fps}), 'master + supers composite');
-            else await abortable(fs.promises.copyFile(pairMaster, pairMasterSupers));
+            else try { fs.linkSync(pairMaster, pairMasterSupers); } catch { await abortable(fs.promises.copyFile(pairMaster, pairMasterSupers)); }
             // every file against the master, at the client's rate whatever the props said
             const m = await probeOf(pairMaster), bad = new Set();
             for (const [name, file] of [['captions', pairLayer], ['captions.png.zip', pairPng], ['supers', pairSupers], ['master_supers', pairMasterSupers]]) {
@@ -584,7 +584,7 @@ export function createRenderRunner({
             const cur = identityNow(job.projectId);
             if (JSON.stringify(cur) !== JSON.stringify(pair)) throw new RenderError(`the project's identity changed during the render (${cur ? JSON.stringify(cur) : 'none now'}): render again`);
           };
-          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, verify} : {})});
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, verify} : {})});
           if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; if (v.deliverables) result.deliverables = v.deliverables; }
         } catch (e) {
           stop(); // cancelled while the proxy was made: not a version error, a cancel

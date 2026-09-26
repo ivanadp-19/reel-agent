@@ -76,6 +76,9 @@ try {
     if (m) ENV[m[1]] = m[2].trim();
   }
 } catch {}
+// the env the backend's jobs run with ({...its .env, ...its process env}): which transcript engine the
+// project checks read (scripts/transcript-cache.mjs) — ROOT's .env, whatever cwd this process started in
+const JOB_ENV = {...ENV, ...process.env};
 
 // ---------- project io ----------
 const projFile = (id) => {
@@ -336,7 +339,7 @@ server.registerTool('rename_project', {description: 'Rename a project.', inputSc
 server.registerTool('set_plan', {description: 'Write the editorial plan BEFORE touching the timeline (the reel-plan skill has the template): the one idea of the reel and its hero word (by word id), the beats (hook, claims, close), the cuts you intend, the caption pack and why, the key words to emphasize (ids), graphics, B-roll moments (ids), music and transitions. get_project shows it from then on; every later step follows it, and the final message notes where you departed from it. Show the plan in the chat right after. Plan mode auto (the default): then keep editing. Plan mode review (set_plan_mode): a new or changed plan needs the user\'s yes — present it and STOP until they answer; until approve_plan records it, the tools that edit the project and the final render refuse to run (reads, proofs and draft renders still work).', inputSchema: {project_id: pid, plan: z.string().min(40).max(6000)}}, async ({project_id, plan}) => {
   const p = load(project_id); const r = withPlan(p, plan); p.plan = r.plan; p.planApproved = r.planApproved; await save(project_id, p);
   const wids = [...new Set(p.plan.match(/\b[\w.-]+:\d+\b/g) ?? [])];
-  const tr = await projectWords(p, PUBLIC); // this project's sources (never starts a job)
+  const tr = projectWords(p, PUBLIC, JOB_ENV); // this project's sources (never starts a job)
   const has = (w) => { const k = w.lastIndexOf(':'); return tr.some((t) => t.source === w.slice(0, k) && t.words.some((x) => String(x.i) === w.slice(k + 1))); };
   const unknown = tr.some((t) => t.words.length) ? wids.filter((w) => !has(w)) : []; // nothing transcribed yet: nothing to check against
   const {found} = planWords(p.plan, tr, p.clips, deliveryFps(p));
@@ -1105,7 +1108,7 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 // ---------- verification ----------
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
-const allIssues = (p) => projectIssues(p, PUBLIC); // mcp/checks.mjs, also GET /api/validate/<id> (async: a promise)
+const allIssues = (p) => projectIssues(p, PUBLIC, JOB_ENV); // mcp/checks.mjs, also GET /api/validate/<id> (async: a promise)
 const projectProps = projectRenderProps; // src/renderProps.ts: the same props the render CLI sends
 
 server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {

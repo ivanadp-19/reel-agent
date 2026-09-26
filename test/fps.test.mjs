@@ -9,9 +9,9 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {DELIVERY_FPS, deliveryFps, placeClips, renderFps, renderSec, totalDurationFrames} from '../src/timeline.ts';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
-import {alphaEncodeArgs, codeVersion, compositeArgs, masterKey, parityIssues, parityProbeArgs, parseParity, zipFrames, zipParity} from '../scripts/layers.mjs';
+import {alphaEncodeArgs, codeVersion, compositeArgs, createMasterCache, masterKey, parityIssues, parityProbeArgs, parseParity, zipFrames, zipParity} from '../scripts/layers.mjs';
 import {repairArgs} from '../scripts/first-frame.mjs';
-import {planRender} from '../scripts/render-runner.mjs';
+import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
 import {qc} from '../scripts/qc.mjs';
 
 const IDENTITY = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1, cta: 1}};
@@ -82,13 +82,18 @@ test('the pair at 29.97 with real ffmpeg: master, ProRes layer and PNG zip (from
   const frames = path.join(d, 'frames');
   fs.mkdirSync(frames);
   ff(['-f', 'lavfi', '-i', 'testsrc=size=108x192:rate=30000/1001', '-frames:v', '30', '-pix_fmt', 'yuvj420p', '-c:v', 'libx264', '-r', String(DELIVERY_FPS), path.join(d, 'master.mp4')]); // like Remotion: -r String(fps)
-  ff(['-f', 'lavfi', '-i', 'color=c=red@0.5:size=108x192:rate=30000/1001,format=rgba', '-frames:v', '30', path.join(frames, 'element-%03d.png')]);
+  ff(['-f', 'lavfi', '-i', 'color=c=0xFFE500@0.5:size=108x192:rate=30000/1001,format=rgba', '-frames:v', '30', path.join(frames, 'element-%03d.png')]);
   ff(alphaEncodeArgs({frames, outFile: path.join(d, 'captions.mov'), alpha: 'prores', fps: DELIVERY_FPS}).slice(3));
   ff(compositeArgs({master: path.join(d, 'master.mp4'), overlays: [{file: path.join(d, 'captions.mov'), alpha: 'prores'}], outFile: path.join(d, 'out.mp4'), fps: DELIVERY_FPS}).slice(3));
   const [m, c, o] = ['master.mp4', 'captions.mov', 'out.mp4'].map((f) => probe(path.join(d, f)));
   assert.deepEqual([m.frames, m.fps, m.sec], [30, '30000/1001', 1.001]);
   assert.deepEqual(parityIssues(m, c, {fps: DELIVERY_FPS}), []);
   assert.deepEqual(parityIssues(m, o, {fps: DELIVERY_FPS}), [], 'the composite keeps the rate and every frame');
+  // the delivered layer is Rec.709 and says so, as an NLE reads HD: its yellow decodes as drawn (601 gave 255,218,0)
+  const mov = path.join(d, 'captions.mov');
+  assert.equal(spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=color_space,color_primaries,color_transfer', '-of', 'csv=p=0', mov], {encoding: 'utf8'}).stdout.trim(), 'bt709,bt709,bt709');
+  const rgb = spawnSync('ffmpeg', ['-v', 'error', '-i', mov, '-frames:v', '1', '-vf', 'scale=in_color_matrix=bt709,format=rgb24', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 24}).stdout;
+  assert.deepEqual([...rgb.subarray(0, 3)], [255, 229, 0]);
   // the PNG sequence (CEO-14): every frame, stored, with fps.json — a zip any tool opens
   fs.writeFileSync(path.join(frames, 'notes.txt'), 'not a frame');
   await zipFrames(frames, path.join(d, 'captions.png.zip'), {fps: DELIVERY_FPS});
@@ -132,4 +137,31 @@ test('master key: R-2 — a reel without identity keys its master as before; at 
   const masterCache = {file: (k) => { seen.push(k); return path.join(root, `${k}.mp4`); }};
   for (const p of [old, client]) planRender(p, {requested: 'layers', root, publicDir: root, masterCache});
   assert.deepEqual(seen, [masterKey(old, {code: codeVersion(root), fps: 30, draft: false, publicDir: root}), masterKey(client, {code: codeVersion(root), fps: DELIVERY_FPS, draft: false, publicDir: root})]);
+});
+
+// The pair with the real runner (Remotion, ffmpeg, qc.mjs): 3 s of a synthetic clip, one caption page and one
+// text graphic → the five files at 30000/1001 frame for frame, the text only in the supers, the layers tagged 709.
+// Opt-in: REEL_RENDER_TESTS=1 node --test test/fps.test.mjs (Chrome, a few minutes; one render on the machine at a time)
+test('Remotion: the delivered pair of a real render', {skip: process.env.REEL_RENDER_TESTS !== '1' && 'set REEL_RENDER_TESTS=1 (needs Chrome, a few minutes)'}, async () => {
+  const d = tmp(), pub = path.join(d, 'public');
+  fs.mkdirSync(path.join(pub, 'clips'), {recursive: true});
+  ff(['-f', 'lavfi', '-i', 'testsrc2=s=1080x1920:r=30000/1001:d=4', '-f', 'lavfi', '-i', 'sine=f=300:d=4', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', path.join(pub, 'clips', 'a.mp4')]);
+  const saved = project({clips: [{id: 'c0', src: 'clips/a.mp4', inSec: 0, outSec: 3, sourceDurationSec: 4}], identity: IDENTITY,
+    captions: [{id: 'p0', src: 'clips/a.mp4', startMs: 200, endMs: 2800, topPct: 30, words: [{wid: 'a:0', text: 'Hello', startMs: 200, endMs: 1400, tier: 0}, {wid: 'a:1', text: 'there', startMs: 1400, endMs: 2800, tier: 1}]}],
+    graphics: [{id: 'g0', src: 'clips/a.mp4', startMs: 0, endMs: 3000, template: 'label-2tone', props: {top: 'Top line', bottom: 'Accent', plate: 'glass'}}]});
+  const props = projectRenderProps(saved);
+  const run = createRenderRunner({root: path.resolve(import.meta.dirname, '..'), publicDir: pub, masterCache: createMasterCache(path.join(d, 'masters')), identityNow: () => IDENTITY, log: () => {}});
+  const r = await run({id: 'jpair', draft: false, projectId: 'p1', identity: IDENTITY, mode: 'layers', expectSec: renderSec(props.clips, DELIVERY_FPS)}, {props: JSON.stringify(props), signal: new AbortController().signal, update: () => {}, setPid: () => {}});
+  assert.equal(r.version, 1);
+  const file = (k) => path.join(pub, r.deliverables[k]);
+  const m = probe(file('master'));
+  assert.deepEqual([m.frames, m.fps], [90, '30000/1001']);
+  for (const k of ['captions', 'supers', 'masterSupers']) assert.deepEqual(parityIssues(m, probe(file(k)), {fps: DELIVERY_FPS, name: k}), []);
+  assert.deepEqual(parityIssues(m, await zipParity(file('captionsPng')), {fps: DELIVERY_FPS, name: 'captionsPng'}), [], 'a PNG per frame');
+  for (const k of ['captions', 'supers']) assert.equal(spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=color_space,color_primaries,color_transfer', '-of', 'csv=p=0', file(k)], {encoding: 'utf8'}).stdout.trim(), 'bt709,bt709,bt709', k);
+  // frame 45, the label's band (y 62 %, its plate included): drawn on master_supers, never on the master
+  const band = (f) => spawnSync('ffmpeg', ['-v', 'error', '-i', f, '-vf', 'select=eq(n\\,45),crop=1080:300:0:1160,scale=108:30,format=gray', '-frames:v', '1', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 24}).stdout;
+  const [a, b] = [band(file('master')), band(file('masterSupers'))];
+  const diff = a.reduce((n, x, i) => n + Math.abs(x - b[i]), 0) / a.length;
+  assert.ok(a.length === 108 * 30 && diff > 5, `master vs master_supers in the label's band: mean |Δ| ${diff.toFixed(1)}`);
 });

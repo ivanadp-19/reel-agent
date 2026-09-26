@@ -264,10 +264,10 @@ test('recordFinal of a cancelled render job records nothing', async () => {
 // ---- the delivered pair of a project with an identity (scripts/render-runner.mjs) ----
 const IDENTITY = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1, cta: 1}};
 // a version of p-1 with its pair (fake bytes): the temps where the runner leaves them, then recordVersion
-function withPair(pub, dir, {captions = true, now = T0} = {}) {
+function withPair(pub, dir, {captions = true, now = T0, master = 'master', masterKey} = {}) {
   const t = path.join(dir, 'p-1', '.tmp-pair-j9');
   fs.mkdirSync(t, {recursive: true});
-  fs.writeFileSync(path.join(t, 'master.mp4'), 'master');
+  fs.writeFileSync(path.join(t, 'master.mp4'), master);
   if (captions) fs.writeFileSync(path.join(t, 'captions.mov'), 'prores');
   fs.writeFileSync(path.join(t, 'captions.png.zip'), 'zip');
   fs.writeFileSync(path.join(t, 'supers.mov'), 'prores supers');
@@ -275,8 +275,21 @@ function withPair(pub, dir, {captions = true, now = T0} = {}) {
   fs.writeFileSync(path.join(pub, '.proxy-9'), 'proxy'); fs.writeFileSync(path.join(pub, '.poster-9'), 'jpeg');
   fs.writeFileSync(path.join(pub, 'exports', 'edited-9.mp4'), 'full');
   return recordVersion(dir, 'p-1', {file: path.join(pub, 'exports', 'edited-9.mp4'), proxyTmp: path.join(pub, '.proxy-9'), posterTmp: path.join(pub, '.poster-9'), durationSec: 2, sizeBytes: 4, publicDir: pub, jobId: 'j9', now,
-    deliverables: {master: path.join(t, 'master.mp4'), captions: path.join(t, 'captions.mov'), captionsPng: path.join(t, 'captions.png.zip'), supers: path.join(t, 'supers.mov'), masterSupers: path.join(t, 'master_supers.mp4')}, identity: IDENTITY, snapshot: {clips: [{id: 'c0'}], captionStyle: 'palabra'}});
+    deliverables: {master: path.join(t, 'master.mp4'), captions: path.join(t, 'captions.mov'), captionsPng: path.join(t, 'captions.png.zip'), supers: path.join(t, 'supers.mov'), masterSupers: path.join(t, 'master_supers.mp4')}, identity: IDENTITY, snapshot: {clips: [{id: 'c0'}], captionStyle: 'palabra'}, masterKey});
 }
+
+test('an unchanged master (same masterKey, same bytes) is a hard link to the earlier version\'s (design §5), never a copy', () => {
+  const {pub, dir} = fixture(0);
+  const st = (x) => fs.statSync(path.join(pub, x.deliverables.master));
+  const v1 = withPair(pub, dir, {masterKey: 'k1'}), v2 = withPair(pub, dir, {masterKey: 'k1'});
+  assert.equal(v2.masterKey, 'k1');
+  assert.ok(st(v2).ino === st(v1).ino && st(v2).nlink === 2, 'one file, two names');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'p-1', '.tmp-pair-j9')), [], 'the fresh remux is gone');
+  const v3 = withPair(pub, dir, {masterKey: 'k1', master: 'master, other final audio'}), v4 = withPair(pub, dir, {masterKey: 'k2'});
+  assert.ok(st(v3).ino !== st(v1).ino && st(v4).ino !== st(v1).ino, 'other bytes, or another master: a file of its own');
+  removeVersion(dir, 'p-1', 1, pub);
+  assert.equal(fs.readFileSync(path.join(pub, v2.deliverables.master), 'utf8'), 'master', 'v1 taken back: v2 keeps its master');
+});
 
 test('a version with its pair: reviews/<id>/v<n>/ under the system names + the snapshot, taken back whole, kept while a link lives', () => {
   const {pub, dir} = fixture(1);
