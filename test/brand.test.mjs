@@ -103,9 +103,11 @@ test('a kit that names a pack applies it (set_brand from); an unknown pack is no
   fs.writeFileSync(files.kit, JSON.stringify({name: 'Kit test', colors: {accent: '#FFE500'}, style: {pack: 'vibem'}}));
   fs.writeFileSync(files.bad, JSON.stringify({name: 'Kit test', colors: {accent: '#FFE500'}, style: {pack: 'nopack'}}));
   fs.writeFileSync(files.project, JSON.stringify({name: 'kit test', clips: [], captions: [], brolls: [], graphics: [], captionStyle: 'palabra'}));
+  const {backendStub} = await import('./backend-stub.mjs');
+  const backend = await backendStub();
   const client = new Client({name: 'test', version: '0'});
-  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'kit-test'}, stderr: 'ignore'}));
-  t.after(async () => { await client.close(); for (const f of [...Object.values(files), files.project.replace('.json', '.lock'), files.project.replace('.json', '.timing.jsonl')]) fs.rmSync(f, {force: true}); });
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: backend.url, REEL_AGENT: 'kit-test'}, stderr: 'ignore'}));
+  t.after(async () => { await client.close(); await backend.close(); for (const f of [...Object.values(files), files.project.replace('.json', '.lock'), files.project.replace('.json', '.timing.jsonl')]) fs.rmSync(f, {force: true}); });
   const call = async (from) => (await client.callTool({name: 'set_brand', arguments: {project_id: `p-${tag}`, from}})).content.map((c) => c.text).join('\n');
   const read = () => JSON.parse(fs.readFileSync(files.project, 'utf8'));
   assert.match(await call(`${tag}-bad`), /pack "nopack" is not a caption pack — not applied/);

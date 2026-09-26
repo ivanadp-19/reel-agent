@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {backendStub} from './backend-stub.mjs';
 import {pendingChanges, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
 
 const PLAN = `STYLE: none
@@ -86,20 +87,21 @@ test('word ids the plan names resolve to words on the timeline; trimmed-away one
   assert.deepEqual(missing, ['a:4']);
 });
 
-// the MCP server end to end, on a throwaway project file (no backend: tools that
-// pass the gate fail on it later, which is fine here)
+// the MCP server end to end, on a throwaway project file (only the backend's project write, test/backend-stub.mjs:
+// tools that pass the gate and need more of the backend fail on it later, which is fine here)
 async function withServer(env, fn) {
   const id = `p-plantest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const file = path.join('public', 'projects', `${id}.json`);
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, JSON.stringify({name: 'plan gate test', clips, captions: [], brolls: [], graphics: []}));
+  const backend = await backendStub();
   const client = new Client({name: 'test', version: '0'});
-  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'plan-test', ...env}}));
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: backend.url, REEL_AGENT: 'plan-test', ...env}}));
   const call = async (name, args) => { const r = await client.callTool({name, arguments: {project_id: id, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
   const saved = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   try { await fn(call, saved); } finally {
-    await client.close();
-    for (const f of [file, file.replace(/\.json$/, '.lock')]) fs.rmSync(f, {force: true});
+    await client.close(); await backend.close();
+    for (const ext of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(file.replace(/\.json$/, ext), {force: true});
   }
 }
 const gated = (r) => /waits for the user to approve the plan/.test(r.text);

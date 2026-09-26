@@ -21,6 +21,7 @@ let srv, base, ingest;
 const uploadsDir = path.join(dir, '.uploads');
 const opens = []; // every descriptor openForUser handed out, and whether it was closed
 const uid = process.getuid?.() ?? 0;
+let free = Infinity; // the disk the clips land on (the backend: statfs of public/), over a 1 MB floor here
 
 // a small test video: h264 (remuxed) or mpeg4 (transcoded)
 const video = (name, codec) => {
@@ -38,7 +39,7 @@ before(async () => {
     opens.push(rec);
     return {path: o.path, close: () => { rec.closed = true; o.close(); }};
   };
-  ingest = createClipIngest({publicDir: pub, root: dir, token: TOKEN, uploadsDir, openForUser: spyOpen, explain: (tail, fb) => tail.trim().split('\n').pop() || fb, log: (l) => logs.push(l)});
+  ingest = createClipIngest({publicDir: pub, root: dir, token: TOKEN, uploadsDir, openForUser: spyOpen, explain: (tail, fb) => tail.trim().split('\n').pop() || fb, log: (l) => logs.push(l), freeBytes: () => free, minFreeBytes: 2 ** 20});
   // x-test-user: user:uid → the gate's verdict for a reel CLI user token (server/http.mjs gate)
   const gateOf = (req) => {
     const [user, u] = String(req.headers['x-test-user'] ?? '').split(':');
@@ -232,4 +233,25 @@ test('?upload=<id> incomplete → 409 upload_incomplete with its size (kept); ab
   assert.equal(bad.status, 400);
   assert.deepEqual(await bad.json(), {error: 'bad upload id', code: 'bad_request'});
   assert.ok(!Object.values(ingest.jobs).some((j) => j.clip?.id === 'x'), 'no async job for the CLI\'s ways');
+});
+
+test('a clip the disk cannot take over its floor is refused 507 low_disk before anything is written (a body, a path)', async () => {
+  const src = path.join(dir, 'disk.mp4');
+  fs.writeFileSync(src, Buffer.alloc(6000));
+  const before = fs.existsSync(clips) ? fs.readdirSync(clips) : [];
+  free = 2 ** 20 + 5000; // the floor + 5000 bytes
+  try {
+    const answers = [
+      await fetch(`${base}/api/add-clip?name=big.mp4`, {method: 'POST', body: Buffer.alloc(3000)}), // 3000 uploaded + ~3000 of clip
+      await fetch(`${base}/api/add-clip?path=${encodeURIComponent(src)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}}), // ~6000 of clip
+    ];
+    for (const r of answers) {
+      assert.equal(r.status, 507);
+      const x = await r.json();
+      assert.equal(x.code, 'low_disk');
+      assert.match(x.error, /^not enough free disk for this clip: 1 MB free, it needs 0 MB over the 1 MB floor/);
+    }
+  } finally { free = Infinity; }
+  assert.deepEqual(uploads(), [], 'no upload left on disk');
+  assert.deepEqual(fs.existsSync(clips) ? fs.readdirSync(clips) : [], before, 'no clip');
 });

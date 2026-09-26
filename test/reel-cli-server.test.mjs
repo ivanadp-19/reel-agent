@@ -123,6 +123,13 @@ test('admitRender: one render per user, a retry of the same one gets it back, fl
   const busy = admitRender([mine], {user: 'ana', props: JSON.stringify({clips: []}), mode: 'layers'}, floors);
   assert.deepEqual([busy.status, busy.code, busy.jobId], [409, 'render_busy', 'j1']);
   assert.equal(admitRender([mine], {user: 'ana', props, mode: 'full'}, floors).code, 'render_busy', 'another mode is another render');
+  // the identity is part of the render: a job queued before set_identity, or under another variant, is not this one
+  const H1 = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1}};
+  assert.equal(admitRender([mine], {user: 'ana', props, mode: 'layers', identity: H1}, floors).code, 'render_busy', 'queued before set_identity');
+  const paired = {...mine, identity: H1};
+  assert.equal(admitRender([paired], {user: 'ana', props, mode: 'layers', identity: {...H1, variant: {hook: 2}}}, floors).code, 'render_busy', 'H1 → H2 while it runs');
+  assert.equal(admitRender([paired], {user: 'ana', props, mode: 'layers'}, floors).code, 'render_busy', 'identity cleared');
+  assert.equal(admitRender([paired], {user: 'ana', props, mode: 'layers', identity: {...H1}}, floors).reuse, paired);
   assert.equal(admitRender([{...mine, status: 'done'}], {user: 'ana', props, mode: 'layers'}, floors), null);
   assert.equal(admitRender([mine], {user: 'bo', props, mode: 'layers'}, floors), null, 'other users queue behind');
   assert.equal(admitRender([mine], {user: null, props, mode: 'layers'}, floors), null, 'the editor / MCP (no user token) are not limited per user');
@@ -153,4 +160,8 @@ test('planRender: full mode, layer blockers, cached master, B-roll downloads sti
   fs.writeFileSync(masterCache.file(keyOf({brolls: [{src: `broll/${localBrollName(remote)}`}]})), '');
   assert.equal(plan({...base, brolls: [remote]}).full, false, 'a downloaded B-roll is keyed under its local name, as the render will');
   assert.equal(plan(base, {masterCache: null}).full, true);
+  // the pair (a final with an identity) never falls back to full: the plan says it fails, and why
+  assert.deepEqual(plan({...base, captions: [{...base.captions[0], behind: true}]}, {pair: true, requested: 'full'}), {mode: 'layers', full: true, fails: true, reasons: behind.reasons});
+  assert.deepEqual(plan(base, {pair: true, masterCache: null}), {mode: 'layers', full: true, fails: true, reasons: ['no master cache on this backend']});
+  assert.deepEqual(plan(base, {pair: true}), plan(base), 'layers it can run: the plan as always');
 });

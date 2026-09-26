@@ -4,7 +4,7 @@
 
 import {projectCaptions, type Caption} from './captions.ts';
 import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
-import {CENTERED, STAR_PX, TEMPLATES, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
+import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {guionIssues} from './guion.ts';
 import type {Clip} from './timeline.ts';
@@ -167,7 +167,7 @@ function fastWordIssues(p: {clips: Clip[]; captions: Caption[]}): Issue[] {
 
 // fonts: each of fontFiles(p) as the caller found it in public/: false = missing, its full name (name ID 4,
 // src/sfnt.ts) or true = present; absent = not checked
-export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean; guion?: string; brand?: FontsOf['brand']}, fps = 30, faces: Record<string, FaceBox | undefined> = {}, fonts: Record<string, boolean | string> = {}): Issue[] {
+export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean; guion?: string; brand?: FontsOf['brand']; identity?: unknown}, fps = 30, faces: Record<string, FaceBox | undefined> = {}, fonts: Record<string, boolean | string> = {}): Issue[] {
   const issues: Issue[] = [];
   if (p.captionsOff) p = {...p, captions: []}; // captions switched off: nothing of them reaches the render
   const custom = presetOf(p.captionStyle).font.custom;
@@ -248,6 +248,18 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
       if (o.startMs < g.endMs && g.startMs < o.endMs) issues.push({level: 'warn', code: 'overlap-graphics', msg: `graphics ${g.id} and ${o.id} are on screen at the same time`, ref: g.id});
     }
   }
+  // a client's deliverables (an identity) keep decor in the master and the text graphics in the supers layer
+  // above it: decor the one-pass render draws over a text graphic (it starts later, both in front) is under it
+  // in the review and master_supers. Where on screen they meet is geometry this cannot tell — a warning, not
+  // a blocker (edge-to-edge frames stay at the edges; layouts are drawn with the footage)
+  if (validateIdentity(p.identity).identity) {
+    const front = gfx.filter((g) => !g.behind && g.template !== 'layout' && !DECOR_FULL.has(g.template));
+    front.forEach((d, i) => {
+      if (isTextGraphic(d.template)) return;
+      const t = front.slice(0, i).find((o) => isTextGraphic(o.template) && o.endMs > d.startMs);
+      if (t) issues.push({level: 'warn', code: 'supers-order', msg: `graphic ${d.id} (${d.template}) is drawn over ${t.id} (${t.template}) here, but a client's master keeps decor under the supers: where they meet on screen the review and master_supers show it under — start it no later than ${t.id}, or keep them apart`, ref: d.id});
+    });
+  }
   // behind graphics need a matte
   for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes, p.clips)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
   // the guion's coverage (src/guion.ts): conflicts and missing / altered words are warnings for a
@@ -258,8 +270,8 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   return issues;
 }
 
-// Checks that need the last transcript run (public/transcript.json): off-mic
-// words still inside the cut, and clip edges that fall inside a word.
+// Checks that need the project's words (mcp/checks.mjs projectWords: its sources' transcript caches):
+// off-mic words still inside the cut, and clip edges that fall inside a word.
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[]): Issue[] {
@@ -283,4 +295,108 @@ export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[
     out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
   }
   return out;
+}
+
+// ---------- identity (set_identity): whose reel this is and which cut of it ----------
+// {client, family, script, variant}: the client's slug, the script number (G2) and the variant of
+// that script — its hook and/or CTA (H1_C2) or a plain version (V2); family groups the variants of
+// one script (default <client>-G<script>). The delivered files are named from it (deliverableName).
+// One set of rules for the MCP (set_identity), the backend (POST /api/projects answers 400; the
+// uniqueness against the saved projects is claimIdentity in mcp/checks.mjs) and the editor (Settings).
+export type Identity = {client: string; family: string; script: number; variant: null | {hook?: number; cta?: number} | {v: number}};
+// safe integers only: past 2^53 (1e21…) a number prints as 1e+21 and would put a '+' in a file name
+const posInt = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 1;
+const plain = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+
+// the identity normalized (default family, variant keys in order, unknown keys dropped), or why not;
+// null / absent = no identity: the project renders as before
+export function validateIdentity(x: unknown): {identity: Identity | null; error?: string} {
+  if (x == null) return {identity: null};
+  const no = (error: string) => ({identity: null, error: `identity${error}`});
+  if (!plain(x)) return no(': an object {client, script, variant?, family?}');
+  const {client, script, variant, family} = x;
+  if (typeof client !== 'string' || !/^[a-z0-9-]{1,32}$/.test(client)) return no('.client: a slug of a-z, 0-9 and "-", 1–32 characters (e.g. "vibem")');
+  if (!posInt(script) || script > 99) return no('.script: a whole number 1–99 (the G of the script)');
+  const vr = plain(variant) ? variant : null, keys = vr ? Object.keys(vr) : [];
+  if (variant != null && !(vr && keys.length && keys.every((k) => posInt(vr[k]) && (vr[k] as number) <= 999) && (keys.join() === 'v' || keys.every((k) => k === 'hook' || k === 'cta')))) return no('.variant: null, {hook, cta} (one or both) or {v} — whole numbers 1–999');
+  const fam = family ?? `${client}-G${script}`;
+  if (typeof fam !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(fam)) return no('.family: letters, digits and "-", 1–64 characters');
+  return {identity: {client, family: fam, script, variant: vr ? Object.fromEntries(['v', 'hook', 'cta'].filter((k) => k in vr).map((k) => [k, vr[k]])) as Identity['variant'] : null}};
+}
+
+// set_identity's arguments and the editor's form (flat numbers) → an identity to validate, its variant from the numbers given
+export const identityOf = ({client, script, family, hook, cta, v}: {client?: string; script?: number; family?: string; hook?: number; cta?: number; v?: number}) => {
+  const variant = Object.fromEntries(Object.entries({v, hook, cta}).filter(([, n]) => n != null));
+  return {client, script, family, variant: Object.keys(variant).length ? variant : null};
+};
+
+// VIBEM_G2_H1_C1: client, script and variant (C for the CTA, the client's own H1_C1) — the key of one project
+// each (identityTaken) and the stem of its file names
+const identityStem = ({client, script, variant}: Identity) =>
+  [client.toUpperCase(), `G${script}`, ...(!variant ? [] : 'v' in variant ? [`V${variant.v}`] : [variant.hook && `H${variant.hook}`, variant.cta && `C${variant.cta}`])].filter(Boolean).join('_');
+
+// another project (rows: {id, identity}) already holding this client + script + variant → why, else null
+export function identityTaken(rows: {id: string; identity?: unknown}[], id: string, identity: Identity): string | null {
+  const stem = identityStem(identity);
+  const other = rows.find((r) => { const o = r.id !== id && validateIdentity(r.identity).identity; return !!o && identityStem(o) === stem; });
+  return other ? `identity ${stem} is already project ${other.id} — one project per client, script and variant (clear it there or pick another variant)` : null;
+}
+
+// One edit on several projects (set_music targets, the editor's "apply to the family"): a family or a list
+// of ids (rows: {id, identity} of every saved project), minus except (ids or families) → the ids, or why
+// not. Never crosses clients: every project picked has the same identity.client (no identity counts as
+// its own). An except that matches nothing picked is an error, so a typo never widens the change.
+export function projectTargets(rows: {id: string; identity?: unknown}[], {family, project_ids}: {family?: string; project_ids?: string[]}, except: string[] = []): {ids: string[]; error?: string} {
+  const fail = (error: string) => ({ids: [], error});
+  if ((family == null) === (project_ids == null)) return fail('targets: give family or project_ids, not both');
+  const idOf = new Map(rows.map((r) => [r.id, validateIdentity(r.identity).identity]));
+  const unknown = (project_ids ?? []).filter((id) => !idOf.has(id));
+  if (unknown.length) return fail(`targets: no project ${unknown.join(', ')}`);
+  const picked = project_ids ? [...new Set(project_ids)] : rows.filter((r) => idOf.get(r.id)?.family === family).map((r) => r.id);
+  if (!picked.length) return fail(`targets: no project${project_ids ? '' : ` in family ${family}`}`);
+  const hit = (id: string, x: string) => id === x || idOf.get(id)?.family === x;
+  const unused = except.filter((x) => !picked.some((id) => hit(id, x)));
+  if (unused.length) return fail(`except: ${unused.join(', ')} is none of the targets (${picked.join(', ')})`);
+  const ids = picked.filter((id) => !except.some((x) => hit(id, x)));
+  if (!ids.length) return fail('targets: except leaves no project');
+  const byClient = new Map<string, string[]>();
+  for (const id of ids) { const c = idOf.get(id)?.client ?? '(no identity)'; byClient.set(c, [...(byClient.get(c) ?? []), id]); }
+  if (byClient.size > 1) return fail(`targets cross clients (${[...byClient].map(([c, l]) => `${c}: ${l.join(', ')}`).join('; ')}) — one client per call`);
+  return {ids};
+}
+
+// the write of each target in turn; one failing never stops the others → a line per project (ok / error and why)
+export async function eachTarget(ids: string[], write: (id: string) => Promise<unknown>): Promise<{failed: number; lines: string[]}> {
+  const lines: string[] = [];
+  let failed = 0;
+  for (const id of ids) {
+    try { await write(id); lines.push(`${id}: ok`); } catch (e) { failed++; lines.push(`${id}: error — ${(e as Error).message}`); }
+  }
+  return {failed, lines};
+}
+
+// What a version of a project with an identity delivers, frame for frame over each other (scripts/render-runner.mjs):
+// key in version.deliverables → the kind in its system name, the extension. The master carries no text; the
+// captions come twice (CEO-14): a ProRes 4444 layer with alpha and its PNG sequence zipped with fps.json; the
+// supers (the text graphics) are a ProRes 4444 layer; master_supers = the master with the supers burnt in.
+// The runner, the reviews store, the MCP and the editor all list them from here
+export const DELIVERABLES = [
+  {key: 'master', kind: 'master', ext: 'mp4'},
+  {key: 'captions', kind: 'captions', ext: 'mov'},
+  {key: 'captionsPng', kind: 'captions', ext: 'png.zip'},
+  {key: 'supers', kind: 'supers', ext: 'mov'},
+  {key: 'masterSupers', kind: 'master_supers', ext: 'mp4'},
+] as const;
+
+// the system name of a delivered file, {CLIENT}_G{s}[_H{h}][_C{c}][_V{k}]_v{n}_{kind}.{ext}:
+// VIBEM_G2_H1_C1_v3_master.mp4, VIBEM_G10_V2_v1_captions.png.zip. Only [A-Za-z0-9_.-], an extension of
+// one or two parts — never a path.
+export function deliverableName({identity, v, kind, ext}: {identity: unknown; v: number; kind: string; ext: string}): string {
+  const r = validateIdentity(identity);
+  if (!r.identity) throw new Error(r.error ?? 'a deliverable needs an identity (set_identity)');
+  const part = (s: unknown, re: RegExp) => typeof s === 'string' && re.test(s);
+  if (!posInt(v) || !part(kind, /^[A-Za-z0-9_]{1,16}$/) || !part(ext, /^[A-Za-z0-9]{1,16}(\.[A-Za-z0-9]{1,16})?$/)) throw new Error(`bad deliverable name parts: v${v} ${kind}.${ext}`);
+  const name = `${identityStem(r.identity)}_v${v}_${kind}.${ext}`;
+  if (!/^[A-Za-z0-9_-]+(\.[A-Za-z0-9]+){1,2}$/.test(name)) throw new Error(`bad deliverable name: ${name}`); // the guarantee, whatever built it
+  return name;
 }

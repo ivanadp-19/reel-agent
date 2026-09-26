@@ -5,6 +5,8 @@ import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, normalizeCaption} from '../src/captions';
 import {projectTiers, repage} from '../src/paging';
 import {chooseRenderMode, type RenderMode} from '../src/layers';
+import {withDeliveryFps} from '../src/renderProps';
+import type {Identity} from '../src/validate';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
 import {Timeline} from './Timeline';
@@ -37,11 +39,11 @@ const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const [exp, setExp] = useState<{status: string; jobId?: string; progress?: number; file?: string; qc?: string; label?: string; etaSec?: number | null; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string} | null>(null);
+  const [exp, setExp] = useState<{status: string; jobId?: string; progress?: number; file?: string; qc?: string; label?: string; etaSec?: number | null; mode?: RenderMode; master?: string; stages?: Record<string, number>; fallback?: string[]; version?: number; versionError?: string; deliverables?: Record<string, string>} | null>(null);
   const stopFollow = useRef<(() => void) | null>(null);
   // full = one pass; layers = cached master + caption layer + composite (scripts/layers.mjs); remembered per browser
   const [renderMode, setRenderMode] = useState<RenderMode>(() => { try { return localStorage.getItem('reel.renderMode') === 'layers' ? 'layers' : 'full'; } catch { return 'full'; } });
@@ -60,10 +62,11 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
 
   // Stable Player props: rebuild ONLY when the data changes, never on the
   // per-frame currentFrame updates — otherwise the Player re-syncs the video
-  // every frame and stutters/repeats a fraction of a second.
+  // every frame and stutters/repeats a fraction of a second. What the project delivers (a client's solid
+  // plates) comes from the render's own function: the preview is what the render draws
   const inputProps = useMemo(
-    () => ({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff}),
-    [clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff],
+    () => withDeliveryFps({clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff}, {identity}),
+    [clips, music, captions, brolls, graphics, mattes, accentColor, captionStyle, brand, grade, audio, captionsOff, identity],
   );
 
   // (project load + Start/Editor routing live in App.tsx)
@@ -72,28 +75,41 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   // guard — deleting the last clip must persist too (init() nulls projectId, so a
   // freshly cleared state never overwrites another project).
   const lastSeenUpdate = useRef<string | null>(null); // updatedAt we wrote or loaded — anything newer came from outside
+  // the identity the backend holds (loaded, or saved by us): a refused one (400 bad_identity — repeated in the
+  // client, a race the Settings pre-check lost) goes back to it, so the next autosave keeps every other edit
+  const savedIdentity = useRef<Identity | null | undefined>(undefined);
   useEffect(() => {
     if (!meta || !projectId) return;
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
+          if (r.status === 400) {
+            const x = await r.json().catch(() => ({}));
+            if (x.code === 'bad_identity') {
+              useEditor.getState().setIdentity(savedIdentity.current);
+              notify(`Identity not taken: ${x.error} — back to the saved one; the rest of the project saves`, 'error');
+            } else notify(`Not saved: ${x.error ?? 'the backend refused the project'}`, 'error');
+            return;
+          }
           const x = await r.json();
           if (x?.updatedAt) lastSeenUpdate.current = x.updatedAt;
+          savedIdentity.current = identity;
         })
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity]);
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
   useEffect(() => {
     if (!projectId) return;
     lastSeenUpdate.current = null;
+    savedIdentity.current = useEditor.getState().identity; // the project just loaded
     const iv = setInterval(async () => {
       try {
         const p = await fetch('/api/projects/' + projectId).then((r) => (r.ok ? r.json() : null));
@@ -104,6 +120,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         const st = useEditor.getState();
         st.init(META_RELOAD, {...p, captions: (p.captions ?? []).map(normalizeCaption)});
         st.setProjectInfo(projectId, p.name || 'Untitled project');
+        savedIdentity.current = p.identity;
         notify('Project updated from outside (agent)', 'ok');
       } catch { /* backend hiccup — try again next tick */ }
     }, 2000);
@@ -191,7 +208,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       async () => {
         const s = await fetch('/api/render/' + jobId).then((x) => x.json());
         setExp(s);
-        notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}` : 'Export ready', s.versionError ? 'error' : 'ok');
+        notify(s.versionError ? `Export ready — review version not recorded: ${s.versionError}` : s.version ? `Export ready — review version v${s.version}${s.deliverables ? ` + deliverables ${Object.values(s.deliverables as Record<string, string>).map((f) => f.split('/').pop()).join(', ')}` : ''}` : 'Export ready', s.versionError ? 'error' : 'ok');
       },
       (msg) => {
         setExp({status: 'error', jobId});
@@ -214,7 +231,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
   }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the backend decides with the same function; here it only tells the user ahead of time
-  const layersBlocked = useMemo(() => chooseRenderMode('layers', {clips, captions, graphics, captionStyle, captionsOff}, 30).reasons, [clips, captions, graphics, captionStyle, captionsOff]);
+  // a client's final (identity) splits its text graphics off too (src/layers.ts supersBlockers) — the render refuses what it cannot split
+  const layersBlocked = useMemo(() => chooseRenderMode('layers', {clips, captions, graphics, captionStyle, captionsOff}, meta?.fps ?? 30, {supers: !!identity?.client}).reasons, [clips, captions, graphics, captionStyle, captionsOff, meta?.fps, identity]);
   const exportVideo = async (draft = false) => {
     setExp({status: 'running', progress: 0});
     try {

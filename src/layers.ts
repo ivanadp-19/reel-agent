@@ -7,17 +7,22 @@
 // as a blocker, and the render falls back to the full pass.
 import {focusSpans, hideUnder, projectCaptions, tierSpans, type Caption} from './captions.ts';
 import {presetOf} from './captionPresets.ts';
-import {projectGraphics, type Graphic} from './graphicTemplates.ts';
+import {isTextGraphic, projectGraphics, type Graphic} from './graphicTemplates.ts';
 import type {Clip} from './timeline.ts';
 import {avoidGraphics} from './validate.ts';
 
 type Span = {startMs: number; endMs: number};
-export type LayerProps = {clips?: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean};
+export type LayerProps = {clips?: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean; textOff?: boolean};
 // two ducking ramps (MultiClipVideo's MusicTrack eases 250 ms each way): in a shorter gap the music never gets fully back up
 const SPEECH_GAP_MS = 500;
 
-export function captionLayout({clips = [], captions = [], graphics = [], captionStyle, captionsOff = false}: LayerProps, fps: number) {
+export function captionLayout({clips = [], captions = [], graphics = [], captionStyle, captionsOff = false, textOff = false}: LayerProps, fps: number) {
   const projectedGraphics = projectGraphics(graphics, clips, fps);
+  // what the graphics layers draw: a client's master (textOff) leaves the text ones to the supers layer and
+  // keeps the decor; a title's camera push moves the footage, so it stays with the footage, drawn title or not
+  const drawnGraphics = textOff ? projectedGraphics.filter((g) => !isTextGraphic(g.template)) : projectedGraphics;
+  const supers = projectedGraphics.filter((g) => isTextGraphic(g.template));
+  const zooms = projectedGraphics.filter((g) => g.camera === 'punch').map((g) => ({startMs: g.startMs - 100, endMs: g.endMs, scale: 0.4, inMs: 333, outMs: 230}));
   // captions step around text graphics, and none over a closing card (the voice goes on; the card carries the message)
   const shownCaptions = captionsOff ? [] : hideUnder(avoidGraphics(projectCaptions(captions, clips, fps), projectedGraphics, captionStyle), projectedGraphics.filter((g) => g.template === 'end-card'));
   const preset = presetOf(captionStyle);
@@ -34,7 +39,7 @@ export function captionLayout({clips = [], captions = [], graphics = [], caption
     if (last && w.startMs - last[1] <= SPEECH_GAP_MS) last[1] = Math.max(last[1], w.endMs);
     else speech.push([w.startMs, w.endMs]);
   }
-  return {preset, projectedGraphics, shownCaptions, focus, punch, pulses, speech};
+  return {preset, projectedGraphics, drawnGraphics, supers, zooms, shownCaptions, focus, punch, pulses, speech};
 }
 
 export type RenderMode = 'full' | 'layers';
@@ -52,11 +57,20 @@ export function layerBlockers(props: LayerProps, fps: number): string[] {
   return out;
 }
 
+// Why the text graphics cannot be their own supers layer over a text-free master (a client's deliverables):
+// one behind the presenter is drawn under the person matte, inside the footage. Decor behind stays in the
+// master; a glass plate (label-2tone, location-tag) is drawn solid for a client (src/renderProps.ts), no blur
+export function supersBlockers({clips = [], graphics = []}: LayerProps, fps: number): string[] {
+  return projectGraphics(graphics, clips, fps).filter((g) => isTextGraphic(g.template) && g.behind)
+    .map((g) => `text graphic behind the presenter: ${g.template} ${g.id} (drawn under the person matte, it cannot be its own supers layer)`);
+}
+
 // The mode a render runs in: `layers` when asked and possible, `full` otherwise.
 // No captions on screen needs no caption layer: the master is the reel (still cached).
-export function chooseRenderMode(requested: RenderMode | undefined, props: LayerProps, fps: number): {mode: RenderMode; reasons: string[]; captions: boolean} {
+// supers: a client's deliverables, whose text graphics are a layer too (supersBlockers)
+export function chooseRenderMode(requested: RenderMode | undefined, props: LayerProps, fps: number, {supers = false}: {supers?: boolean} = {}): {mode: RenderMode; reasons: string[]; captions: boolean} {
   const captions = captionLayout(props, fps).shownCaptions.length > 0;
   if (requested !== 'layers') return {mode: 'full', reasons: [], captions};
-  const reasons = layerBlockers(props, fps);
+  const reasons = [...layerBlockers(props, fps), ...(supers ? supersBlockers(props, fps) : [])];
   return {mode: reasons.length ? 'full' : 'layers', reasons, captions};
 }

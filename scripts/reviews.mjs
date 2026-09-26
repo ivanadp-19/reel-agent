@@ -11,22 +11,31 @@
 //     file      the full final render (exports/edited-<job>.mp4), download only
 //     proxy     720p H.264 CRF 26 +faststart (reviews/<projectId>/v<n>.mp4), what the page streams
 //     poster    one frame (reviews/<projectId>/v<n>.jpg)
-//     generated the files this feature created (proxy, poster) — the full render belongs to the export
+//     generated the files this feature created (proxy, poster, the pair) — the full render belongs to the export
+//   a final of a project with an identity (src/validate.ts) adds its deliverables (scripts/render-runner.mjs):
+//     identity      {client, family, script, variant} it was rendered under
+//     deliverables  {master, captions, captionsPng, supers, masterSupers}: reviews/<projectId>/v<n>/<NAME>_master.mp4,
+//                   _captions.mov, _captions.png.zip, _supers.mov, _master_supers.mp4 (src/validate.ts
+//                   DELIVERABLES), NAME the system name (deliverableName: VIBEM_G2_H1_C1_v3)
+//     snapshot      reviews/<projectId>/v<n>/project.json — the props that were rendered
+//     pruned        the files of it the retention removed (pruneVersions), prunedAt when
 //   link: {id, hash, createdAt, expiresAt, revokedAt} — the token itself is never stored, only sha256(token)
 //
 // Only finals that passed the QC gate are recorded (the backend calls recordVersion
 // after QC), never drafts.
 //
-// RETENTION (for any purge of public/exports or public/reviews): public/reviews/*.json
-// and every file a version references (file, proxy, poster) must stay while a link of
+// RETENTION (for any purge of public/exports or public/reviews from outside this module): public/reviews/*.json
+// and every file a version references (file, proxy, poster, the pair and its snapshot) must stay while a link of
 // that project lives (not revoked, not expired). retainedFiles() lists them; a purge
 // skips that set. The /r/ page hides a version whose proxy is gone and drops the
 // download button when the full render is gone, so purging an unlinked project's
-// files never breaks a page — it only shortens its version list.
+// files never breaks a page — it only shortens its version list. scripts/cleanup-exports.mjs
+// never touches public/reviews/; the versions' own retention is pruneVersions below.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
+import {DELIVERABLES, deliverableName} from '../src/validate.ts';
 
 export const LINK_DAYS = 30;
 export const MANAGED_BY = 'review-link';
@@ -41,10 +50,12 @@ const fileOf = (dir, projectId) => {
   return path.join(dir, `${projectId}.json`);
 };
 
-export function loadReviews(dir, projectId) {
+// strict: for a write (load → modify → save) — only a missing file reads as empty; one that cannot
+// be read or parsed throws, so the write never saves over versions and links it did not see
+export function loadReviews(dir, projectId, {strict = false} = {}) {
   const f = fileOf(dir, projectId);
   let r = {};
-  try { r = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+  try { r = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { if (strict && e.code !== 'ENOENT') throw new Error(`reviews of ${projectId} unreadable, nothing written: ${e.message}`); }
   return {projectId, managedBy: MANAGED_BY, versions: Array.isArray(r.versions) ? r.versions : [], links: Array.isArray(r.links) ? r.links : []};
 }
 function saveReviews(dir, r) {
@@ -55,6 +66,19 @@ function saveReviews(dir, r) {
   fs.renameSync(tmp, f);
 }
 
+// One writer at a time per project's reviews JSON: fn (load → modify → save) runs after the
+// previous one of that project settled (the shape of the MCP's inTurn). The version recorded
+// after a render, a link made or revoked through the backend and a cancel taking a version
+// back all go through it. → fn's result.
+// ponytail: in-process only — two backends over one public/ can still interleave; a file lock if that happens.
+const rows = new Map();
+export function inReviewsRow(dir, projectId, fn) {
+  const k = fileOf(dir, projectId);
+  const run = (rows.get(k) ?? Promise.resolve()).then(fn);
+  rows.set(k, run.catch(() => {})); // a failed write does not block the next one
+  return run;
+}
+
 export const linkState = (l, now = Date.now()) => (l.revokedAt ? 'revoked' : Date.parse(l.expiresAt) <= now ? 'expired' : 'live');
 // what the API hands out about a link: never the hash
 export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.createdAt, expiresAt: l.expiresAt, revokedAt: l.revokedAt ?? null, state: linkState(l, now)});
@@ -62,43 +86,71 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // Register a final render that passed QC. The proxy and poster were made under
 // temporary names next to where they go; here they get the version number (read +
 // numbered + written synchronously, so two renders of one project finishing
-// together cannot take the same number).
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now()}) {
-  const r = loadReviews(dir, projectId);
+// together cannot take the same number). With `deliverables` (key → file, src/validate.ts DELIVERABLES: the
+// pair's files, on this filesystem) and its `identity`, they move into v<n>/ under their
+// system names next to the `snapshot` of the rendered props. The JSON is written last: a
+// step that fails leaves no file of this version behind.
+export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot}) {
+  const r = loadReviews(dir, projectId, {strict: true});
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
   const sub = path.join(dir, projectId);
   fs.mkdirSync(sub, {recursive: true});
-  const proxyAbs = path.join(sub, `v${v}.mp4`), posterAbs = path.join(sub, `v${v}.jpg`);
-  fs.renameSync(proxyTmp, proxyAbs);
-  if (posterTmp && fs.existsSync(posterTmp)) fs.renameSync(posterTmp, posterAbs);
+  const proxyAbs = path.join(sub, `v${v}.mp4`), posterAbs = path.join(sub, `v${v}.jpg`), vdir = path.join(sub, `v${v}`);
   const rel = (abs) => path.relative(publicDir, abs).split(path.sep).join('/');
-  const version = {
-    v, createdAt: new Date(now).toISOString(), durationSec: Math.round(durationSec * 100) / 100, sizeBytes,
-    file: rel(file), proxy: rel(proxyAbs), poster: fs.existsSync(posterAbs) ? rel(posterAbs) : null, proxyBytes: fs.statSync(proxyAbs).size,
-    ...(jobId ? {job: String(jobId)} : {}), // the render job it came from (public/render-jobs/<job>.json, scripts/render-jobs.mjs)
-  };
-  version.generated = [version.proxy, version.poster].filter(Boolean);
-  r.versions.push(version);
-  saveReviews(dir, r);
-  return version;
+  try {
+    fs.renameSync(proxyTmp, proxyAbs);
+    if (posterTmp && fs.existsSync(posterTmp)) fs.renameSync(posterTmp, posterAbs);
+    const version = {
+      v, createdAt: new Date(now).toISOString(), durationSec: Math.round(durationSec * 100) / 100, sizeBytes,
+      file: rel(file), proxy: rel(proxyAbs), poster: fs.existsSync(posterAbs) ? rel(posterAbs) : null, proxyBytes: fs.statSync(proxyAbs).size,
+      ...(jobId ? {job: String(jobId)} : {}), // the render job it came from (public/render-jobs/<job>.json, scripts/render-jobs.mjs)
+    };
+    version.generated = [version.proxy, version.poster].filter(Boolean);
+    if (deliverables) {
+      fs.rmSync(vdir, {recursive: true, force: true}); // what a crash left under this number (never in the JSON)
+      fs.mkdirSync(vdir);
+      const put = ({kind, ext}, src) => {
+        const f = path.join(vdir, deliverableName({identity, v, kind, ext}));
+        fs.renameSync(src, f);
+        return rel(f);
+      };
+      version.identity = identity;
+      version.deliverables = {};
+      for (const [key, src] of Object.entries(deliverables)) {
+        const d = DELIVERABLES.find((x) => x.key === key);
+        if (!d) throw new Error(`unknown deliverable: ${key}`);
+        version.deliverables[key] = put(d, src);
+      }
+      fs.writeFileSync(path.join(vdir, 'project.json'), JSON.stringify(snapshot ?? null));
+      version.snapshot = rel(path.join(vdir, 'project.json'));
+      version.generated.push(...Object.values(version.deliverables), version.snapshot);
+    }
+    r.versions.push(version);
+    saveReviews(dir, r);
+    return version;
+  } catch (e) {
+    for (const f of [proxyAbs, posterAbs, vdir]) fs.rmSync(f, {recursive: true, force: true});
+    throw e;
+  }
 }
 
 // Take a version back (its render job was cancelled while it was being recorded):
 // the entry and the files this feature made for it (proxy, poster); the full render
 // belongs to the export. → whether it was there.
 export function removeVersion(dir, projectId, v, publicDir) {
-  const r = loadReviews(dir, projectId);
+  const r = loadReviews(dir, projectId, {strict: true});
   const x = r.versions.find((y) => y.v === v);
   if (!x) return false;
   r.versions = r.versions.filter((y) => y !== x);
   for (const f of x.generated ?? []) fs.rmSync(path.join(publicDir, f), {force: true});
+  if (x.deliverables) fs.rmSync(path.join(dir, projectId, `v${v}`), {recursive: true, force: true}); // the pair's folder
   saveReviews(dir, r);
   return true;
 }
 
 // a new link for the project → the token, shown once (only its hash is kept)
 export function createLink(dir, projectId, {days = LINK_DAYS, now = Date.now()} = {}) {
-  const r = loadReviews(dir, projectId);
+  const r = loadReviews(dir, projectId, {strict: true});
   if (!r.versions.length) throw new Error('no final render to share yet — export a final (not a draft) first');
   const token = crypto.randomBytes(16).toString('base64url');
   const d = Math.min(LINK_DAYS, Math.max(1, Math.round(+days || LINK_DAYS)));
@@ -109,7 +161,7 @@ export function createLink(dir, projectId, {days = LINK_DAYS, now = Date.now()} 
 }
 
 export function revokeLink(dir, projectId, linkId, {now = Date.now()} = {}) {
-  const r = loadReviews(dir, projectId);
+  const r = loadReviews(dir, projectId, {strict: true});
   const l = r.links.find((x) => x.id === linkId);
   if (!l) return null;
   l.revokedAt ??= new Date(now).toISOString();
@@ -149,24 +201,61 @@ export function retainedFiles(dir, publicDir, {now = Date.now()} = {}) {
     const r = loadReviews(dir, projectId);
     if (!r.links.some((l) => linkState(l, now) === 'live')) continue;
     keep.add(path.relative(publicDir, path.join(dir, f)).split(path.sep).join('/'));
-    for (const v of r.versions) for (const x of [v.file, v.proxy, v.poster]) if (x) keep.add(x);
+    for (const v of r.versions) for (const x of [v.file, v.proxy, v.poster, ...Object.values(v.deliverables ?? {}), v.snapshot]) if (x) keep.add(x);
   }
   return keep;
+}
+
+// RETENTION of the versions (CEO-12, T6): the newest `keep` unapproved versions of a project (one project =
+// one variant) and every approved one stay whole — REEL_REVIEW_KEEP_UNAPPROVED, unset = all of them until the
+// T2 measurements fix the number. An older one loses its deliverables (the GBs of v<n>/); one without notes
+// loses its proxy, poster and snapshot too — a version with notes keeps those for good, and so does every
+// version while a link of the project lives (its page plays the proxies). The entry stays, `pruned` saying
+// what went. Runs in the reviews row after each new version (recordFinal) → the paths removed.
+// (at least 1: the version just recorded is always whole)
+export const keepUnapproved = (env = process.env.REEL_REVIEW_KEEP_UNAPPROVED) => (/^[1-9]\d*$/.test(env ?? '') ? +env : Infinity);
+export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(), now = Date.now()} = {}) {
+  if (keep === Infinity) return [];
+  const r = loadReviews(dir, projectId, {strict: true});
+  const linked = r.links.some((l) => linkState(l, now) === 'live');
+  const gone = [];
+  for (const x of r.versions.filter((y) => !y.approval).sort((a, b) => b.v - a.v).slice(keep)) {
+    const files = [...Object.values(x.deliverables ?? {}), ...(x.notes?.length || linked ? [] : [x.proxy, x.poster, x.snapshot])].filter((f) => f && fs.existsSync(path.join(publicDir, f)));
+    if (!files.length) continue;
+    for (const f of files) fs.rmSync(path.join(publicDir, f), {force: true});
+    try { fs.rmdirSync(path.join(dir, projectId, `v${x.v}`)); } catch {} // only when nothing of it is left
+    x.pruned = [...new Set([...(x.pruned ?? []), ...files])];
+    x.prunedAt = new Date(now).toISOString();
+    gone.push(...files);
+  }
+  if (gone.length) saveReviews(dir, r);
+  return gone;
 }
 
 // The step after a render: only a FINAL whose QC passed, rendered for a known project,
 // becomes a version (proxy + poster made next to their final place under temporary
 // names, then numbered). Drafts, QC failures and project-less renders → null.
 // signal: the render job's — a cancel kills the proxy's ffmpeg and records nothing.
-export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal}) {
+// deliverables / identity / snapshot: the pair of a project with an identity (recordVersion).
+// verify: run in the row right before the version is numbered — throws to record nothing (the
+// runner checks the pair's identity is still the project's).
+export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, verify, makeProxy: proxy = makeProxy}) {
   if (draft || !qcOk || !projectId) return null;
   if (signal?.aborted) throw signal.reason;
   const tmp = path.join(dir, projectId, `.tmp-${jobId}`);
   fs.mkdirSync(path.dirname(tmp), {recursive: true});
   try {
-    const {durationSec} = await makeProxy(outFile, `${tmp}.mp4`, `${tmp}.jpg`, {signal});
+    const {durationSec} = await proxy(outFile, `${tmp}.mp4`, `${tmp}.jpg`, {signal});
     if (signal?.aborted) throw signal.reason; // cancelled while the proxy was made: no version
-    return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes: fs.statSync(outFile).size, publicDir, jobId});
+    const sizeBytes = fs.statSync(outFile).size;
+    // awaited here: the finally below must not remove the temps before the row gets to them
+    return await inReviewsRow(dir, projectId, () => {
+      if (signal?.aborted) throw signal.reason;
+      verify?.();
+      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, ...(deliverables ? {deliverables, identity, snapshot} : {})});
+      try { pruneVersions(dir, projectId, publicDir); } catch (e) { console.error(`reviews of ${projectId}: retention not applied: ${e.message}`); } // never the new version's fault
+      return version;
+    });
   } finally {
     fs.rmSync(`${tmp}.mp4`, {force: true}); fs.rmSync(`${tmp}.jpg`, {force: true});
   }

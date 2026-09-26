@@ -91,8 +91,9 @@ function readLoudness(clip, key) {
 // Speaker sidecar per source (who is talking): pyannote through scripts/diarize.py, only when HF_TOKEN
 // is set (the model is gated). Cached next to the transcript; a failure is logged once and the
 // loudness-only detection carries on. REEL_DIARIZE=0 turns it off.
+const diarizeOn = () => Boolean(process.env.HF_TOKEN) && process.env.REEL_DIARIZE !== '0';
 function speakersFor(clip) {
-  if (!process.env.HF_TOKEN || process.env.REEL_DIARIZE === '0') return null;
+  if (!diarizeOn()) return null;
   const f = path.join(TRANSCRIPTS, `${sourceKey(clip)}.spk.json`);
   if (fs.existsSync(f)) { const d = JSON.parse(fs.readFileSync(f, 'utf8')); return d.turns ?? null; }
   const wav = path.join(TMP, `${sourceKey(clip)}.16k.wav`);
@@ -305,11 +306,30 @@ export async function transcribeClip(clip, lang = 'auto', offMic = 'mark') {
   if (!fs.existsSync(cache)) throw new Error(`transcription failed for ${clip.id}`);
   let words = JSON.parse(fs.readFileSync(cache, 'utf8'));
   if (fs.existsSync(other)) { const was = wasOf(cache, other); words = words.map((w, i) => (was[i] != null ? {...w, was: was[i]} : w)); }
-  const turns = speakersFor(clip);
+  return voices(words, speakersFor(clip), offMic === 'off' ? null : loudnessFor(clip));
+}
+// who says each word (the diarizer's turns) and which are the quiet voice off the mic (the loudness track)
+function voices(words, turns, loud) {
   if (turns) words = assignSpeakers(words, turns);
-  if (offMic === 'off') return words;
-  const loud = loudnessFor(clip);
   return loud ? flagOffMicBySpeaker(words, loud, +(process.env.REEL_OFFMIC_DB || DROP_DB)) : words;
+}
+
+// A project's words from the per-source caches only: the files transcribeClip reads (this engine's cache,
+// else the other engine's) with the speaker and loudness sidecars already written — it never transcribes,
+// diarizes or decodes. The shape of public/transcript.json (scripts/transcribe.mjs): per clip, the words of
+// its trim window; a source not transcribed yet has none. The project checks read this (mcp/checks.mjs),
+// never public/transcript.json, which is the last run of ANY project on the machine.
+export function projectTranscript(p, publicDir) {
+  const dir = path.join(publicDir, 'clips', 'transcripts');
+  const read = (name) => { try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { return null; } };
+  const lang = p.lang ?? 'auto', dg = useDeepgram();
+  return p.clips.map((clip) => {
+    const key = sourceKey(clip);
+    const cached = read(cacheName(key, lang, dg)) ?? read(cacheName(key, lang, !dg));
+    const words = Array.isArray(cached) ? voices(cached, diarizeOn() ? read(`${key}.spk.json`)?.turns : null, p.offMic === 'off' ? null : read(`${key}.loud.json`)) : [];
+    const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
+    return {clipId: clip.id, source: key, words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs)};
+  });
 }
 
 // Assemble all clips' words onto the timeline, honoring trim (in/out) and order.

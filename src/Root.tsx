@@ -1,7 +1,7 @@
 import React from 'react';
 import {Composition, staticFile} from 'remotion';
 import {MultiClipVideo} from './MultiClipVideo';
-import {totalDurationFrames} from './timeline';
+import {renderFps, totalDurationFrames} from './timeline';
 
 // The editor renders MultiClipVideo via @remotion/player; this composition is
 // what `remotion render` exports. Props come straight from the editor on export;
@@ -18,7 +18,8 @@ export const RemotionRoot: React.FC = () => {
       height={1920}
       defaultProps={{clips: [], music: null, captions: [], brolls: [], graphics: [], mattes: [], accentColor: '#FFB020', captionStyle: 'palabra', brand: null, grade: null, audio: null, captionsOff: false}}
       calculateMetadata={async ({props}) => {
-        const fps = 30;
+        // 30, or 29.97 for a client's deliverables: the backend puts it on the props from the saved project (src/renderProps.ts)
+        const fps = renderFps(props as {fps?: unknown});
         // Files on disk are ONLY a Studio convenience: a render request always
         // carries its arrays (an empty one means "none", never "read the disk").
         const p = props as {clips?: unknown; music?: unknown; captions?: unknown; brolls?: unknown};

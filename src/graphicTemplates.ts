@@ -257,6 +257,22 @@ export const FULL_FRAME = new Set<string>(['kinetic-card', 'end-card']);
 export const DECOR_FULL = new Set<string>(['outline-rect', 'frame-light', 'rules', 'person-outline']);
 // graphics that are drawn by another layer (the person outline lives with the matte) and need a matte
 export const MATTE_TEMPLATES = new Set<string>(['person-outline']);
+// graphics that draw no text (layouts, decor, frames, the person outline): a client's master keeps them.
+// Every other template is a super — its own layer in a client's deliverables (scripts/render-runner.mjs);
+// a new template counts as text until it is listed here, so text never leaks into a master
+export const TEXT_FREE = new Set<string>(['layout', 'sticker', 'ornament', 'rules', 'person-outline', 'neon-frame', 'scribble', 'outline-rect', 'frame-light']);
+export const isTextGraphic = (template: string) => !TEXT_FREE.has(template);
+// the dark backing of label-2tone's glass plate and location-tag's pill (src/Graphics.tsx): glass blurs the
+// footage behind it; solid (a client's deliverables: src/renderProps.ts withDeliveryFps) is the same tint with
+// no blur — their supers are a transparent layer with no footage to blur, so master + supers == composite.
+// Unblurred footage shows through more, so solid is SOLID_DENSER denser (a tuning knob, by eye)
+const BACKINGS = {plate: {rgb: '8,10,14', alpha: 0.42, blurPx: 10}, pill: {rgb: '0,0,0', alpha: 0.38, blurPx: 14}};
+export const SOLID_DENSER = 0.12;
+export function backing(kind: keyof typeof BACKINGS, solid = false): {background: string; backdropFilter?: string; WebkitBackdropFilter?: string} {
+  const {rgb, alpha, blurPx} = BACKINGS[kind];
+  if (solid) return {background: `rgba(${rgb},${+(alpha + SOLID_DENSER).toFixed(2)})`};
+  return {background: `rgba(${rgb},${alpha})`, backdropFilter: `blur(${blurPx}px)`, WebkitBackdropFilter: `blur(${blurPx}px)`};
+}
 
 // how a graphic arrives, leaves and lives (src/motion.ts); 'auto' = the template's own entrance / a short fade out
 export const REVEAL_KINDS = ['auto', 'blur', 'fade', 'letters', 'typewriter', 'shuffle', 'tracking', 'bounceChars', 'bounceCharsBlue', 'riseChars', 'trackingSnap', 'drop', 'slideBlur', 'slideDown', 'band', 'wipe'] as const;

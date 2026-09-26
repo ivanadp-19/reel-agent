@@ -7,6 +7,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {aheadOf, createRenderJobs, descendants, describeJob, killTree, legacyView, listJobs, pidAlive, prune, readJob, writeJob} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, etaFor, overall, parseRemotion} from '../scripts/render-runner.mjs';
 import {createMasterCache} from '../scripts/layers.mjs';
+import {loadReviews, recordFinal} from '../scripts/reviews.mjs';
 
 const tmps = [];
 const tmpdir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'render-jobs-')); tmps.push(d); return d; };
@@ -24,10 +25,12 @@ const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
 // Stand-ins for `remotion render` and `scripts/qc.mjs --finalize` (written at test time:
 // node --test would run any .mjs under test/ as a test file). The fake render prints the
 // same non-TTY progress lines; the props say how it behaves:
-// {fake: {mode: 'ok' | 'fail' | 'hang' | 'die' | 'gate', frames, delayMs}}.
+// {fake: {mode: 'ok' | 'fail' | 'hang' | 'die' | 'gate', frames, delayMs, pngs}}; the caption layer's pass
+// (layer: 'captions') writes its folder of \`pngs\` PNG frames (60, the frames the fake probe gives the pair's files).
 const FAKE_RENDER = `import fs from 'node:fs';
 const [outFile, propsFile] = process.argv.slice(2);
-const {mode = 'ok', frames = 6, delayMs = 5} = JSON.parse(fs.readFileSync(propsFile, 'utf8')).fake ?? {};
+const props = JSON.parse(fs.readFileSync(propsFile, 'utf8'));
+const {mode = 'ok', frames = 6, delayMs = 5, pngs = 60} = props.fake ?? {};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 console.log('Bundling 50%');
 console.log('Bundled code');
@@ -54,9 +57,13 @@ for (let i = 1; i <= frames; i++) {
   // 'gate': stop after frame 4 until the test writes <outFile>.go (a mid-render state it can read at leisure)
   if (mode === 'gate' && i === 4) while (!fs.existsSync(outFile + '.go')) await sleep(5);
 }
-if (mode !== 'hang') { console.log('Encoded ' + frames + '/' + frames); fs.writeFileSync(outFile, 'fake mp4'); }
+if (mode !== 'hang') {
+  console.log('Encoded ' + frames + '/' + frames);
+  if (props.layer !== 'captions') fs.writeFileSync(outFile, 'fake mp4');
+  else { fs.mkdirSync(outFile, {recursive: true}); for (let i = 0; i < pngs; i++) fs.writeFileSync(outFile + '/element-' + String(i).padStart(4, '0') + '.png', 'png ' + i); }
+}
 `;
-const FAKE_FINALIZE = `const ok = process.argv[2].indexOf('qcfail-me') < 0;
+const FAKE_FINALIZE = `const ok = process.argv[2].indexOf('qcfail-me') < 0 && process.argv[3] !== 'fail';
 if (process.argv[3] === 'hang') {
   // like qc.mjs normalizing: a half-written .loudnorm.mp4 next to the render, then stuck
   require('node:fs').writeFileSync(process.argv[2].replace(/\\.mp4$/, '.loudnorm.mp4'), 'half');
@@ -66,31 +73,37 @@ if (process.argv[3] === 'hang') {
 `;
 
 // a public/ + root with the fakes, a job store and a runner over them
-function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner} = {}) {
+// (more: extra command fakes; unrecord null: the runner's own, over the real reviews store)
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner, more = {}, projects = {}} = {}) {
   const root = tmpdir();
   const pub = path.join(root, 'public');
   fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
+  // saved projects (public/projects/<id>.json): the identity a pair is checked against when it is recorded
+  fs.mkdirSync(path.join(pub, 'projects'), {recursive: true});
+  for (const [id, p] of Object.entries(projects)) fs.writeFileSync(path.join(pub, 'projects', `${id}.json`), JSON.stringify(p));
   fs.writeFileSync(path.join(root, 'fake-render.mjs'), FAKE_RENDER);
   fs.writeFileSync(path.join(root, 'fake-finalize.cjs'), FAKE_FINALIZE);
-  const calls = {render: 0, master: 0, captions: 0, composite: 0, record: [], updates: [], timing: []};
+  const calls = {render: 0, master: 0, captions: 0, supers: 0, composite: 0, record: [], updates: [], timing: []};
   const fake = (kind) => ({outFile, propsFile}) => { calls[kind]++; return [process.execPath, [path.join(root, 'fake-render.mjs'), outFile, propsFile]]; };
   const commands = {
     render: fake('render'),
     master: fake('master'),
     captions: fake('captions'),
+    supers: fake('supers'),
     // the composite: the master (the fake caption "layer" is a file) copied to the export
     composite: ({master, outFile}) => { calls.composite++; return [process.execPath, ['-e', 'require("fs").copyFileSync(process.argv[1], process.argv[2])', master, outFile]]; },
     finalize: ({outFile}) => [process.execPath, [path.join(root, 'fake-finalize.cjs'), outFile, finalizeMode]],
+    ...more,
   };
   const run = runner ?? createRenderRunner({
     root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
     logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
     record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
-    unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; }),
+    ...(unrecord === null ? {} : {unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; })}),
   });
   const dir = path.join(pub, 'render-jobs');
   const spy = (job, ctx) => run(job, {...ctx, props: ctx.props, update: (u) => { calls.updates.push({id: job.id, ...u}); ctx.update(u); }, setPid: ctx.setPid, signal: ctx.signal});
-  const jobs = createRenderJobs({dir, run: spy, workers, log: quiet, memory, ...(owner ? {owner} : {}), ...(stallMs ? {stallMs} : {}), ...(prepareStallMs ? {prepareStallMs} : {})});
+  const jobs = createRenderJobs({dir, run: spy, abandon: run.abandon, workers, log: quiet, memory, ...(owner ? {owner} : {}), ...(stallMs ? {stallMs} : {}), ...(prepareStallMs ? {prepareStallMs} : {})});
   return {root, pub, dir, jobs, calls};
 }
 const props = (fake = {}, extra = {}) => JSON.stringify({clips: [{id: 'c0'}], fake, ...extra});
@@ -440,6 +453,360 @@ test('layers falls back to full when the captions reach into the footage, and sa
   const plain = s.jobs.submit({props: props({frames: 1}), draft: true}).job;
   await s.jobs.idle();
   assert.equal(readJob(s.dir, plain.id).result.mode, 'full');
+});
+
+// ---- the delivered pair: a final of a project with an identity (master + ProRes caption layer in reviews/<id>/v<n>/) ----
+const IDENTITY = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1, cta: 1}};
+// a pair job's props as the backend queues them: the delivery fps on them (src/renderProps.ts withDeliveryFps)
+const pairProps = (fake, extra = {}) => props(fake, {fps: 30000 / 1001, ...extra});
+const nodeE = (code, ...args) => [process.execPath, ['-e', code, ...args]];
+// layered() + the pair's ffmpeg / ffprobe steps as fakes: encode writes the .mov, remux the master
+// (P.hang: it stalls half-written), probe reports P.frames per file name, else per extension; frameStats finds nothing to repair
+// (P.rate: the r_frame_rate it reports — a client's files come out at 29.97; P.fps: the rate each ffmpeg step was given)
+const paired = () => {
+  const P = {frames: {mp4: 60, mov: 60}, alpha: [], remux: [], hang: false, rate: '30000/1001', fps: []};
+  const more = {
+    encode: ({outFile, alpha, fps}) => { P.alpha.push(alpha); P.fps.push(['encode', fps]); return nodeE('require("fs").writeFileSync(process.argv[1], "prores 4444")', outFile); },
+    remux: ({video, audio, outFile}) => {
+      P.remux.push({video, audio, held: fs.existsSync(video)});
+      return P.hang ? nodeE('require("fs").writeFileSync(process.argv[1], "half"); setInterval(() => {}, 1e6)', outFile) : nodeE('require("fs").copyFileSync(process.argv[1], process.argv[2])', video, outFile);
+    },
+    probe: ({file}) => { const n = P.frames[path.basename(file)] ?? P.frames[path.extname(file).slice(1)]; const [a, b = 1] = P.rate.split('/').map(Number); return nodeE(`console.log(JSON.stringify({streams: [{nb_frames: '${n}', r_frame_rate: '${P.rate}', duration: '${(n * b) / a}'}]}))`); },
+    frameStats: () => nodeE(''),
+  };
+  return {...layered(), more, P, projects: {p1: {name: 'one', identity: IDENTITY}}};
+};
+// the real recordFinal → recordVersion, its 720p proxy faked; seen: what record got, and whether the pair was on disk then
+const recording = (seen) => async (o) => {
+  seen.push({...o, onDisk: Object.values(o.deliverables ?? {}).map((f) => fs.existsSync(f))});
+  return recordFinal({...o, makeProxy: async (input, proxy, poster) => { fs.copyFileSync(input, proxy); fs.writeFileSync(poster, 'jpg'); return {durationSec: 2}; }});
+};
+const filesUnder = (d) => (fs.existsSync(d) ? fs.readdirSync(d, {recursive: true}).filter((f) => fs.statSync(path.join(d, f)).isFile()).sort() : []);
+
+test('the pair: a layered final of a project with an identity leaves master + ProRes captions in reviews/<id>/v1/ under system names, with the snapshot', async () => {
+  const L = paired();
+  const seen = [];
+  const s = setup({...L, record: recording(seen), unrecord: null});
+  const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY}); // no mode: the pair forces layers
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'done', j.error);
+  assert.deepEqual(j.identity, IDENTITY, 'the job carries it (a re-queue keeps it)');
+  assert.equal(j.result.mode, 'layers');
+  assert.deepEqual(L.P.alpha, ['prores', 'prores'], 'supers and captions: ProRes 4444 although this backend composites PNG frames');
+  assert.deepEqual([s.calls.master, s.calls.supers, s.calls.captions, s.calls.composite], [1, 1, 1, 1], 'no text graphic: master_supers is the master, no second composite');
+  assert.equal(L.P.remux.length, 1);
+  assert.match(path.basename(L.P.remux[0].video), /^k-same-f\.part-pair-/, 'the cached master, held by its own link');
+  assert.ok(L.P.remux[0].held);
+  assert.equal(L.P.remux[0].audio, path.join(s.pub, 'exports', `edited-${job.id}.mp4`), 'the audio of the composite that passed loudness + QC');
+  assert.deepEqual(seen[0].onDisk, [true, true, true, true, true], 'record gets the five files on disk');
+  const v1 = path.join(s.pub, 'reviews', 'p1', 'v1');
+  assert.deepEqual(fs.readdirSync(v1).sort(), ['ACME_G2_H1_C1_v1_captions.mov', 'ACME_G2_H1_C1_v1_captions.png.zip', 'ACME_G2_H1_C1_v1_master.mp4', 'ACME_G2_H1_C1_v1_master_supers.mp4', 'ACME_G2_H1_C1_v1_supers.mov', 'project.json']);
+  const v = loadReviews(path.join(s.pub, 'reviews'), 'p1').versions[0];
+  assert.deepEqual(v.deliverables, {master: 'reviews/p1/v1/ACME_G2_H1_C1_v1_master.mp4', captions: 'reviews/p1/v1/ACME_G2_H1_C1_v1_captions.mov', captionsPng: 'reviews/p1/v1/ACME_G2_H1_C1_v1_captions.png.zip', supers: 'reviews/p1/v1/ACME_G2_H1_C1_v1_supers.mov', masterSupers: 'reviews/p1/v1/ACME_G2_H1_C1_v1_master_supers.mp4'});
+  assert.deepEqual(v.identity, IDENTITY);
+  assert.equal(v.snapshot, 'reviews/p1/v1/project.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(s.pub, v.snapshot), 'utf8')), JSON.parse(pairProps({frames: 2})), 'the props that were rendered');
+  assert.equal(fs.readFileSync(path.join(s.pub, v.deliverables.captions), 'utf8'), 'prores 4444');
+  assert.equal(fs.readFileSync(path.join(s.pub, v.deliverables.master), 'utf8'), 'fake mp4', 'the master\'s picture');
+  assert.equal(fs.readFileSync(path.join(s.pub, v.deliverables.supers), 'utf8'), 'prores 4444', 'a supers layer although the reel has no text graphic (transparent)');
+  assert.equal(fs.readFileSync(path.join(s.pub, v.deliverables.masterSupers), 'utf8'), 'fake mp4', 'no text graphic: master_supers = the master');
+  assert.deepEqual(j.result.deliverables, v.deliverables);
+  assert.equal(j.result.version, 1);
+  assert.deepEqual(fs.readdirSync(path.join(s.pub, 'reviews', 'p1')).filter((f) => f.startsWith('.')), [], 'no temp of the pair left');
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4'], 'the master stays cached, its hold is gone');
+  assert.ok(fs.existsSync(path.join(s.pub, 'exports', `edited-${job.id}.mp4.json`)), 'the composite is a final like any other');
+});
+
+test('the pair never falls back to full: captions the layer cannot carry, or no master cache, fail the job with the reasons and record nothing', async () => {
+  const seen = [];
+  const L = paired();
+  const s = setup({...L, record: recording(seen)});
+  const blocked = s.jobs.submit({props: pairProps({frames: 1, blocked: 'hero punch: the pack scales the footage on its tier-2 words'}), draft: false, projectId: 'p1', identity: IDENTITY}).job;
+  await s.jobs.idle();
+  const j = readJob(s.dir, blocked.id);
+  assert.equal(j.status, 'failed');
+  assert.match(j.error, /deliverables need the layered render: hero punch: the pack scales the footage/);
+  assert.deepEqual([s.calls.render, s.calls.master, s.calls.captions, seen.length], [0, 0, 0, 0]);
+  const s2 = setup({...paired(), masterCache: null, record: recording(seen)});
+  const noCache = s2.jobs.submit({props: pairProps({frames: 1}), draft: false, projectId: 'p1', identity: IDENTITY}).job;
+  await s2.jobs.idle();
+  assert.match(readJob(s2.dir, noCache.id).error, /deliverables need the layered render: no master cache/);
+  assert.equal(s2.calls.render, 0);
+  for (const x of [s, s2]) assert.deepEqual([filesUnder(path.join(x.pub, 'reviews')), exportsOf(x)], [[], []]);
+});
+
+test('the pair: a master and a caption layer that differ in frames fail the job — no version, no file of the pair; the render is kept as qcfail', async () => {
+  const seen = [];
+  const L = paired();
+  L.P.frames.mov = 59;
+  const s = setup({...L, record: recording(seen)});
+  const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY});
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'failed');
+  assert.match(j.error, /no deliverables, no version: deliverables parity failed: frames: master 60, captions 59/);
+  assert.equal(seen.length, 0, 'never recorded');
+  assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')), []);
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4']);
+  assert.deepEqual(exportsOf(s).sort(), [`edited-${job.id}-qcfail.mp4`, `edited-${job.id}-qcfail.mp4.json`], 'never an unrecorded final');
+});
+
+test('the pair: a QC failure leaves nothing under reviews/', async () => {
+  const seen = [];
+  const L = paired();
+  const s = setup({...L, record: recording(seen), finalizeMode: 'fail'});
+  const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY});
+  await s.jobs.idle();
+  assert.match(readJob(s.dir, job.id).error, /QC failed/);
+  assert.deepEqual([seen.length, L.P.remux.length], [0, 0]);
+  assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')), []);
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4']);
+});
+
+test('the pair: a cancel halfway (the remux) or after the version was recorded leaves no file of the pair and no version', async () => {
+  const L = paired();
+  L.P.hang = true;
+  const seen = [];
+  const s = setup({...L, record: recording(seen), unrecord: null});
+  const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY});
+  await until(() => filesUnder(path.join(s.pub, 'reviews')).some((f) => f.endsWith('master.mp4')), 5000);
+  assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')).map((f) => path.basename(f)), ['captions.mov', 'captions.png.zip', 'master.mp4', 'supers.mov'], 'mid-remux: the pair in its temp');
+  s.jobs.cancel(job.id);
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, job.id).status, 'cancelled');
+  assert.deepEqual([filesUnder(path.join(s.pub, 'reviews')), exportsOf(s), seen.length], [[], [], 0]);
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4']);
+  // cancelled while the version is being recorded: the runner's own unrecord takes it back, v1/ included
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const L2 = paired();
+  const s2 = setup({...L2, record: async (o) => { const v = await recording(seen)(o); await gate; return v; }, unrecord: null});
+  const late = s2.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY}).job;
+  await until(() => fs.existsSync(path.join(s2.pub, 'reviews', 'p1', 'v1', 'project.json')), 5000);
+  s2.jobs.cancel(late.id);
+  release();
+  await s2.jobs.idle();
+  const j = readJob(s2.dir, late.id);
+  assert.equal(j.status, 'cancelled');
+  assert.equal(j.result, undefined);
+  assert.deepEqual(loadReviews(path.join(s2.pub, 'reviews'), 'p1').versions, []);
+  assert.deepEqual(filesUnder(path.join(s2.pub, 'reviews')), ['p1.json'], 'proxy, poster and v1/ gone');
+  assert.deepEqual(exportsOf(s2), []);
+});
+
+test('the pair: an identity changed or cleared while the render ran records nothing under the old names (another project may hold them now)', async () => {
+  for (const now of [{...IDENTITY, variant: {hook: 2, cta: 1}}, null]) {
+    const seen = [];
+    const L = paired();
+    const s = setup({...L, record: recording(seen), unrecord: null});
+    const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY});
+    fs.writeFileSync(path.join(s.pub, 'projects', 'p1.json'), JSON.stringify({name: 'one', identity: now})); // set_identity / clear meanwhile
+    await s.jobs.idle();
+    const j = readJob(s.dir, job.id);
+    assert.equal(j.status, 'failed');
+    assert.match(j.error, /no deliverables, no version: the project's identity changed during the render/);
+    assert.equal(seen.length, 1, 'refused in the reviews row, when the version would be numbered');
+    assert.deepEqual(loadReviews(path.join(s.pub, 'reviews'), 'p1').versions, []);
+    assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')), [], 'no pair, no proxy, no temp');
+    assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4']);
+    assert.deepEqual(exportsOf(s).sort(), [`edited-${job.id}-qcfail.mp4`, `edited-${job.id}-qcfail.mp4.json`]);
+  }
+});
+
+test('the pair: what a dead backend left (layer, remuxed master, proxy temps, held master) goes when recover() or a cancel ends the job', () => {
+  const L = paired();
+  const s = setup(L);
+  const [failed, cancelled, requeued, other] = ['1700000000000aaaaaa', '1700000000000bbbbbb', '1700000000000cccccc', '1700000000000dddddd'];
+  const leftovers = (id) => [
+    path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${id}`, 'captions.mov'), path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${id}`, 'master.mp4'),
+    path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${id}`, 'supers.mov'), path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${id}`, 'master_supers.mp4'),
+    path.join(s.pub, 'reviews', 'p1', `.tmp-${id}.mp4`), path.join(s.pub, 'reviews', 'p1', `.tmp-${id}.jpg`),
+    path.join(L.cacheDir, `k-same-f.part-pair-${id}.mp4`), path.join(L.cacheDir, `k-same-f.part-${id}.mp4`),
+  ];
+  for (const id of [failed, cancelled, requeued, other]) for (const f of leftovers(id)) { fs.mkdirSync(path.dirname(f), {recursive: true}); fs.writeFileSync(f, 'GBs'); }
+  fs.writeFileSync(path.join(L.cacheDir, 'k-same-f.mp4'), 'cached');
+  const job = (id, attempts) => {
+    writeJob(s.dir, {id, seq: +id.slice(0, 13), status: 'running', owner: deadPid(), attempts, draft: false, projectId: 'p1', identity: IDENTITY, createdAt: new Date().toISOString()});
+    fs.writeFileSync(path.join(s.dir, `${id}.props.json`), props());
+  };
+  job(failed, 2); // interrupted twice → failed
+  job(cancelled, 1); fs.writeFileSync(path.join(s.dir, `${cancelled}.cancel`), 'x'); // a cancel asked while its backend was down
+  job(requeued, 1); // re-queued: its next run takes its temps over
+  s.jobs.recover();
+  assert.deepEqual([failed, cancelled, requeued].map((id) => readJob(s.dir, id).status), ['failed', 'cancelled', 'queued']);
+  const left = (id) => leftovers(id).filter((f) => fs.existsSync(f)).length;
+  assert.deepEqual([left(failed), left(cancelled), left(requeued), left(other)], [0, 0, 8, 8], 'only the jobs that ended');
+  assert.ok(!fs.existsSync(path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${failed}`)), 'the temp folder itself');
+  // the re-queued one cancelled before it runs again: its leftovers go too
+  assert.equal(s.jobs.cancel(requeued).ok, true);
+  assert.equal(left(requeued), 0);
+  assert.equal(left(other), 8, 'a job this store never ended is not touched');
+  assert.ok(fs.existsSync(path.join(L.cacheDir, 'k-same-f.mp4')), 'the cached master stays');
+});
+
+test('R-2: a draft with an identity, a layered final and a full final without one render exactly as before', async () => {
+  const L = paired();
+  const s = setup(L);
+  const d = s.jobs.submit({props: pairProps({frames: 1}), draft: true, projectId: 'p1', identity: IDENTITY}).job;
+  const f = s.jobs.submit({props: props({frames: 1}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  const full = s.jobs.submit({props: props({frames: 1}), draft: false, projectId: 'p1'}).job;
+  await s.jobs.idle();
+  const [rd, rf, rfull] = [d, f, full].map((x) => readJob(s.dir, x.id));
+  assert.deepEqual([rd.status, rf.status, rfull.status], ['done', 'done', 'done']);
+  assert.deepEqual([rd.result.mode, rf.result.mode, rfull.result.mode], ['full', 'layers', 'full'], 'a draft is never forced to layers');
+  assert.deepEqual([L.P.alpha, L.P.remux, s.calls.supers], [[], [], 0], 'no supers pass, no ProRes encode, no remux, no probe');
+  assert.ok(!('identity' in rf) && !('identity' in rfull), 'no identity field on a job without one');
+  assert.ok([rd, rf, rfull].every((x) => !('deliverables' in x.result)));
+  assert.equal(s.calls.record.length, 2, 'the two finals, as always');
+  for (const o of s.calls.record) assert.deepEqual(Object.keys(o).sort(), ['dir', 'draft', 'jobId', 'outFile', 'projectId', 'publicDir', 'qcOk', 'signal']);
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-same-f.mp4']);
+});
+
+// frame 0 flat, frame 1 footage (scripts/first-frame.mjs parseStats): every guarded file gets repaired
+const BLANK_LEAD = ['frame:0', ...['YMIN=25', 'YMAX=25', 'YAVG=25', 'UAVG=128', 'VAVG=128'].map((x) => `lavfi.signalstats.${x}`), 'frame:1', ...['YMIN=10', 'YMAX=200', 'YAVG=90', 'UAVG=120', 'VAVG=140'].map((x) => `lavfi.signalstats.${x}`)].join('\n');
+const at2997 = () => {
+  const L = paired();
+  Object.assign(L.more, {
+    frameStats: () => nodeE('console.log(process.argv[1])', BLANK_LEAD),
+    fixFirstFrame: ({file, outFile, fps}) => { L.P.fps.push(['fixFirstFrame', fps]); return nodeE('require("fs").copyFileSync(process.argv[1], process.argv[2])', file, outFile); },
+    composite: ({master, outFile, fps}) => { L.P.fps.push(['composite', fps]); return nodeE('require("fs").copyFileSync(process.argv[1], process.argv[2])', master, outFile); },
+  });
+  return L;
+};
+
+test('29.97: a client\'s final (props.fps 30000/1001, set by the backend) encodes, composites, repairs and checks parity at that rate; without fps, all at 30', async () => {
+  const L = at2997();
+  const seen = [];
+  const s = setup({...L, record: recording(seen), unrecord: null});
+  const {job} = s.jobs.submit({props: props({frames: 2}, {fps: 30000 / 1001}), draft: false, projectId: 'p1', identity: IDENTITY});
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'done', j.error);
+  assert.deepEqual([...new Set(L.P.fps.map(([k]) => k))].sort(), ['composite', 'encode', 'fixFirstFrame'], 'every ffmpeg step ran');
+  assert.ok(L.P.fps.every(([, fps]) => fps === 30000 / 1001), JSON.stringify(L.P.fps));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(s.pub, 'reviews', 'p1', 'v1', 'project.json'), 'utf8')).fps, 30000 / 1001, 'the snapshot says the rate');
+  // R-2: the same reel of a project without identity
+  const R = at2997();
+  const s2 = setup(R);
+  const plain = s2.jobs.submit({props: props({frames: 2}), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s2.jobs.idle();
+  assert.equal(readJob(s2.dir, plain.id).status, 'done');
+  assert.ok(R.P.fps.length && R.P.fps.every(([, fps]) => fps === 30), JSON.stringify(R.P.fps));
+});
+
+test('29.97: a pair that comes out at 30 fails its parity against the delivery rate — no version, no file of the pair', async () => {
+  // the files report 30/1: rendered at 30 although the props asked 29.97, or a job queued without the rate (before it existed)
+  for (const extra of [{fps: 30000 / 1001}, {}]) {
+    const L = paired();
+    L.P.rate = '30/1';
+    const seen = [];
+    const s = setup({...L, record: recording(seen)});
+    const {job} = s.jobs.submit({props: props({frames: 2}, extra), draft: false, projectId: 'p1', identity: IDENTITY});
+    await s.jobs.idle();
+    const j = readJob(s.dir, job.id);
+    assert.equal(j.status, 'failed');
+    assert.match(j.error, /deliverables parity failed: fps: 30\/1, want 30000\/1001/);
+    assert.equal(seen.length, 0);
+    assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')), []);
+  }
+});
+
+// ---- the supers: a client's text graphics as their own layer (master without text, master_supers) ----
+// a reel whose clip carries a text graphic (a stat with a camera punch) and a decor one (a sticker)
+const gfxReel = (over = {}) => ({
+  clips: [{id: 'c0', src: 'clips/a.mp4', inSec: 0, outSec: 2, sourceDurationSec: 10}],
+  graphics: [
+    {id: 'g1', src: 'clips/a.mp4', startMs: 0, endMs: 1000, template: 'stat', props: {value: '3', label: 'rooms'}, camera: 'punch', ...over},
+    {id: 'g2', src: 'clips/a.mp4', startMs: 200, endMs: 900, template: 'sticker', props: {src: 'assets/x.png'}},
+  ],
+});
+// paired() whose passes keep the props they were given, whose key says whether the master has text, and whose composites are logged
+const supersPaired = () => {
+  const L = paired();
+  const X = {passes: {}, keys: [], composites: []};
+  const pass = (kind) => ({outFile, propsFile}) => { X.passes[kind] = JSON.parse(fs.readFileSync(propsFile, 'utf8')); return [process.execPath, [path.join(path.dirname(propsFile), 'fake-render.mjs'), outFile, propsFile]]; };
+  Object.assign(L.more, {
+    master: pass('master'), supers: pass('supers'), captions: pass('captions'),
+    composite: ({master, layers, outFile}) => {
+      X.composites.push({master: path.basename(master), layers: layers.map((l) => [path.basename(l.file).replace(/-\w+$/, '-<id>'), l.alpha ?? 'png']), out: path.basename(outFile)});
+      return nodeE('require("fs").copyFileSync(process.argv[1], process.argv[2])', master, outFile);
+    },
+  });
+  L.keyOf = (p, {draft}) => { X.keys.push(p); return `k-${p.textOff ? 'textoff' : 'text'}-${draft ? 'd' : 'f'}`; };
+  return {L, X};
+};
+
+test('supers: a client\'s reel with a text graphic — a text-free master under its own key, the text graphics in a pass of their own, the export stacks master + supers + captions, master_supers = master + supers', async () => {
+  const {L, X} = supersPaired();
+  const seen = [];
+  const s = setup({...L, record: recording(seen), unrecord: null});
+  const {job} = s.jobs.submit({props: pairProps({}, gfxReel()), draft: false, projectId: 'p1', identity: IDENTITY});
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'done', j.error);
+  assert.deepEqual([X.passes.master.textOff, X.passes.master.captionsOff, X.passes.master.layer], [true, true, undefined], 'the master: no caption, no text graphic');
+  assert.deepEqual([X.passes.supers.layer, X.passes.supers.textOff], ['supers', undefined]);
+  assert.equal(X.passes.captions.layer, 'captions');
+  assert.ok(X.keys.length && X.keys.every((p) => p.textOff === true), 'the master key is the text-free master\'s');
+  assert.deepEqual(fs.readdirSync(L.cacheDir), ['k-textoff-f.mp4'], 'cached under its own key, never a master with text');
+  assert.deepEqual(X.composites, [
+    {master: 'k-textoff-f.mp4', layers: [['supers.mov', 'prores'], ['captions.mov', 'prores']], out: `edited-${job.id}.mp4`},
+    {master: 'master.mp4', layers: [['supers.mov', 'prores']], out: 'master_supers.mp4'},
+  ], 'the export: master, supers, captions bottom to top; master_supers: the remuxed master (final audio) + supers');
+  assert.deepEqual(L.P.alpha, ['prores', 'prores']);
+  assert.deepEqual(fs.readdirSync(path.join(s.pub, 'reviews', 'p1', 'v1')).sort(), ['ACME_G2_H1_C1_v1_captions.mov', 'ACME_G2_H1_C1_v1_captions.png.zip', 'ACME_G2_H1_C1_v1_master.mp4', 'ACME_G2_H1_C1_v1_master_supers.mp4', 'ACME_G2_H1_C1_v1_supers.mov', 'project.json']);
+  assert.deepEqual(Object.keys(j.result.deliverables), ['master', 'captions', 'captionsPng', 'supers', 'masterSupers']);
+  assert.ok(['supers', 'supers-encode', 'captions-png', 'pair'].every((k) => k in j.result.stages), JSON.stringify(j.result.stages));
+  assert.ok(!fs.existsSync(path.join(os.tmpdir(), `reel-supers-${job.id}`)), 'the supers frames are gone');
+  // R-2: the same reel without identity — the master keeps its text and its key, no supers pass, one composite
+  const {L: R, X: Y} = supersPaired();
+  const s2 = setup(R);
+  const plain = s2.jobs.submit({props: props({}, gfxReel()), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s2.jobs.idle();
+  assert.equal(readJob(s2.dir, plain.id).status, 'done');
+  assert.deepEqual([Y.passes.master.textOff, Y.passes.supers, s2.calls.supers], [undefined, undefined, 0]);
+  assert.ok(Y.keys.every((p) => !('textOff' in p)));
+  assert.deepEqual(fs.readdirSync(R.cacheDir), ['k-text-f.mp4']);
+  assert.deepEqual(Y.composites, [{master: 'k-text-f.mp4', layers: [['reel-captions-<id>', 'png']], out: `edited-${plain.id}.mp4`}]);
+});
+
+test('supers: a text graphic behind the presenter fails a client\'s final with the reason (it cannot be its own layer); decor behind, or no identity, renders', async () => {
+  const seen = [];
+  const L = paired();
+  const s = setup({...L, chooseMode: undefined, record: recording(seen)}); // the runner's own chooseRenderMode
+  const behind = s.jobs.submit({props: pairProps({frames: 1}, gfxReel({behind: true})), draft: false, projectId: 'p1', identity: IDENTITY}).job;
+  await s.jobs.idle();
+  const j = readJob(s.dir, behind.id);
+  assert.equal(j.status, 'failed');
+  assert.match(j.error, /deliverables need the layered render: text graphic behind the presenter: stat g1/);
+  assert.deepEqual([s.calls.master, s.calls.supers, seen.length, filesUnder(path.join(s.pub, 'reviews'))], [0, 0, 0, []]);
+  // the sticker behind: decor stays in the master, nothing to split
+  const decor = gfxReel();
+  decor.graphics[1].behind = true;
+  const ok = s.jobs.submit({props: pairProps({frames: 1}, decor), draft: false, projectId: 'p1', identity: IDENTITY}).job;
+  // a project without identity: the text graphic behind is drawn in its master as always
+  const plain = s.jobs.submit({props: props({frames: 1}, gfxReel({behind: true})), draft: false, projectId: 'p1', mode: 'layers'}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, ok.id).status, 'done', readJob(s.dir, ok.id).error);
+  assert.deepEqual([readJob(s.dir, plain.id).status, readJob(s.dir, plain.id).result.mode], ['done', 'layers']);
+});
+
+test('supers: a supers layer or master_supers off by a frame, or a supers pass that fails, leaves no file of the four and no version', async () => {
+  for (const spoil of [(L) => { L.P.frames['supers.mov'] = 59; }, (L) => { L.P.frames['master_supers.mp4'] = 61; }, (L) => { L.more.supers = () => nodeE('process.exit(3)'); }]) {
+    const seen = [];
+    const {L} = supersPaired();
+    spoil(L);
+    const s = setup({...L, record: recording(seen)});
+    const {job} = s.jobs.submit({props: pairProps({}, gfxReel()), draft: false, projectId: 'p1', identity: IDENTITY});
+    await s.jobs.idle();
+    const j = readJob(s.dir, job.id);
+    assert.equal(j.status, 'failed');
+    assert.match(j.error, /deliverables parity failed: frames: master 60, supers 59|deliverables parity failed: frames: master 60, master_supers 61|render exited 3/);
+    assert.equal(seen.length, 0);
+    assert.deepEqual(filesUnder(path.join(s.pub, 'reviews')), [], 'no file of the four, no temp');
+    assert.ok(!fs.existsSync(path.join(os.tmpdir(), `reel-supers-${job.id}`)));
+  }
 });
 
 test('prune drops the state of old finished jobs only — never an active job, never an mp4', () => {

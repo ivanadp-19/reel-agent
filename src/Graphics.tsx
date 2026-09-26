@@ -1,6 +1,6 @@
 import React, {createContext, useContext} from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
+import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, backing, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
 import {TEXT_REVEALS, arrive, layoutIn, layoutOut, leave, lifeFx, ms, revealText, scrambleChar, unfold, windowTrail, type ArriveKind, type LayoutIn, type LeaveKind, type TextReveal} from './motion';
 import {seedOf} from './transitions';
 import {fontFamily, heaviest, type FontFamily} from './fonts';
@@ -30,8 +30,9 @@ const SHADOW = '0 4px 24px rgba(0,0,0,0.55), 0 0 60px rgba(0,0,0,0.35)';
 
 const outCubic = Easing.out(Easing.cubic);
 
-// how the graphic being drawn arrives and leaves (set by One from the graphic or the caption pack)
-type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number; yPct?: number};
+// how the graphic being drawn arrives and leaves (set by One from the graphic or the caption pack);
+// solid: plates and pills without backdrop blur (a client's deliverables, src/graphicTemplates.ts backing)
+type Gfx = {reveal: Reveal; out: Out; framesLeft: number; seed: number; yPct?: number; solid?: boolean};
 const GfxContext = createContext<Gfx>({reveal: 'auto', out: 'auto', framesLeft: 1e6, seed: 1});
 // the template's own staggered entrance runs for 'auto' and 'blur' (its blur-in IS the catalog's 5–9 f blur-in)
 // and under the per-character reveals (Letters handles the title, the tag / subtitle still fade in after it);
@@ -119,7 +120,8 @@ const Label2Tone: React.FC<{props: any; accent: string}> = ({props, accent}) => 
   const line = (text: string): React.CSSProperties => ({...face.style, fontSize: fitSize(text, 72, face.family, 940, 52), lineHeight: 1.05, letterSpacing: -0.5, textAlign: 'center'});
   // glass plate: a soft dark backing that fades in with the first line (run 6:
   // the accent line fought a floral blouse); 'none' keeps the bare text
-  const plate: React.CSSProperties = props.plate === 'none' ? {} : {background: 'rgba(8,10,14,0.42)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', borderRadius: 26, padding: '16px 36px 20px', boxShadow: '0 10px 40px rgba(0,0,0,0.25)', opacity: a};
+  const {solid} = useContext(GfxContext);
+  const plate: React.CSSProperties = props.plate === 'none' ? {} : {...backing('plate', solid), borderRadius: 26, padding: '16px 36px 20px', boxShadow: '0 10px 40px rgba(0,0,0,0.25)', opacity: a};
   return (
     <div style={{display: 'flex', justifyContent: 'center'}}>
       <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', ...plate}}>
@@ -314,8 +316,9 @@ const LocationTag: React.FC<{props: any; accent: string}> = ({props, accent}) =>
   const b = useReveal(5, 9);
   const face = useFace('display');
   const {accent: fill} = useBrand();
+  const {solid} = useContext(GfxContext);
   return (
-    <div style={{display: 'inline-flex', alignItems: 'center', gap: 24, padding: '18px 36px 18px 26px', borderRadius: 999, background: 'rgba(0,0,0,0.38)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1.5px solid rgba(255,255,255,0.3)', textShadow: 'none', ...blurIn(a)}}>
+    <div style={{display: 'inline-flex', alignItems: 'center', gap: 24, padding: '18px 36px 18px 26px', borderRadius: 999, ...backing('pill', solid), border: '1.5px solid rgba(255,255,255,0.3)', textShadow: 'none', ...blurIn(a)}}>
       <div style={{width: 44, height: 44, flex: '0 0 auto', borderRadius: '50% 50% 50% 0', transform: 'rotate(-45deg)', background: fill, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
         <div style={{width: 15, height: 15, borderRadius: '50%', background: ink(fill)}} />
       </div>
@@ -537,7 +540,7 @@ export type Titles = {reveal: Reveal; out: Out}; // the caption pack's defaults 
 const BLOCK_IN: Partial<Record<Reveal, ArriveKind>> = {fade: 'fade', drop: 'drop', slideBlur: 'slideBlur', slideDown: 'slideDown', band: 'band', wipe: 'wipe'};
 const BLOCK_OUT: Partial<Record<Out, LeaveKind>> = {auto: 'fade', fade: 'fade', cut: 'cut', blur: 'blur', slideUp: 'slideUp', band: 'slideDown'};
 
-const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; titles?: Titles}> = ({g, accent, durationInFrames, titles}) => {
+const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; titles?: Titles; solid?: boolean}> = ({g, accent, durationInFrames, titles, solid}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const Comp = COMPONENTS[g.template];
@@ -561,7 +564,7 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; title
     pointerEvents: 'none',
   };
   const move = moving ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${scale.toFixed(3)}) rotate(${life.rotate.toFixed(2)}deg)` : '';
-  const ctx: Gfx = {reveal, out, framesLeft, seed: seedOf(g.id), yPct: g.yPct ?? TEMPLATES[g.template].y};
+  const ctx: Gfx = {reveal, out, framesLeft, seed: seedOf(g.id), yPct: g.yPct ?? TEMPLATES[g.template].y, solid};
   let node: React.ReactNode;
   if (FULL_FRAME.has(g.template) || DECOR_FULL.has(g.template)) {
     // covers the whole frame (a cutaway) or decorates it edge to edge: no text-block positioning
@@ -659,8 +662,8 @@ export const LayoutStage: React.FC<{items: Graphic[]; accentColor: string; foota
   );
 };
 
-// behind = only the graphics that go behind the presenter (rendered under the person matte)
-export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; behind?: boolean; titles?: Titles}> = ({items, accentColor, behind = false, titles}) => {
+// behind = only the graphics that go behind the presenter (rendered under the person matte); solidPlates: no backdrop blur (MultiClipVideo)
+export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; behind?: boolean; titles?: Titles; solidPlates?: boolean}> = ({items, accentColor, behind = false, titles, solidPlates}) => {
   const {fps} = useVideoConfig();
   if (!items?.length) return null;
   return (
@@ -670,7 +673,7 @@ export const GraphicsLayer: React.FC<{items: Graphic[]; accentColor: string; beh
         const dur = Math.max(1, Math.round(((g.endMs - g.startMs) / 1000) * fps));
         return (
           <Sequence key={`${g.id}@${from}`} from={from} durationInFrames={dur} layout="none" name={`gfx ${g.template}`}>
-            <One g={g} accent={accentColor} durationInFrames={dur} titles={titles} />
+            <One g={g} accent={accentColor} durationInFrames={dur} titles={titles} solid={solidPlates} />
           </Sequence>
         );
       })}

@@ -1,5 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {validateProject} from '../src/validate.ts';
 
 const clip = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 20, sourceDurationSec: 20};
@@ -65,6 +68,37 @@ test('transcriptIssues: an off-mic word listed on two pieces of one source count
   const clips = [{id: 'a', src: 'clips/S.mp4', inSec: 0, outSec: 1.5, sourceDurationSec: 5}, {id: 'b', src: 'clips/S.mp4', inSec: 1.5, outSec: 3, sourceDurationSec: 5}];
   const off = transcriptIssues({clips}, tr).filter((x) => x.code === 'off-mic');
   assert.match(off.find((x) => x.ref === 'b').msg, /^b: 2 off-mic word\(s\) still in the cut: cut_words S:1…S:2 "w1 w2"/);
+});
+
+// two projects, each on its own source: the checks read each one's transcript cache (both engines' names),
+// never public/transcript.json — the last transcription run on the machine, here the other project's
+test('projectIssues: off-mic and cut-word come from the project\'s own sources, whatever project transcribed last', async () => {
+  const {projectIssues, projectWords} = await import('../mcp/checks.mjs');
+  const {paint, track} = await import('./loud.mjs');
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-checks-'));
+  const dir = path.join(pub, 'clips', 'transcripts');
+  fs.mkdirSync(dir, {recursive: true});
+  const Wd = (word, a, b) => ({word, startMs: a * 1000, endMs: b * 1000});
+  // source A: a quiet take (the voice off the mic), then the loud one; cached under WhisperX's name
+  const a = [Wd('one', 1, 1.3), Wd('two', 1.35, 1.9), Wd('three.', 1.95, 2.4), Wd('one', 3, 3.3), Wd('two', 3.35, 3.9), Wd('three.', 3.95, 4.4), Wd('four', 4.6, 4.9), Wd('five', 4.95, 5.3), Wd('six.', 5.35, 5.8)];
+  const loud = track(10); paint(loud, 1, 2.4, -36); paint(loud, 3, 5.8, -24);
+  fs.writeFileSync(path.join(dir, 'A.auto.json'), JSON.stringify(a));
+  fs.writeFileSync(path.join(dir, 'A.loud.json'), JSON.stringify(loud));
+  // source B: one clean take, cached under Deepgram's name; B's run is the machine's last transcript.json
+  const b = [Wd('seven', 0.5, 0.9), Wd('eight.', 1, 1.4)];
+  fs.writeFileSync(path.join(dir, 'B.auto.dg.json'), JSON.stringify(b));
+  fs.writeFileSync(path.join(pub, 'transcript.json'), JSON.stringify([{clipId: 'k0', source: 'B', words: b.map((w, i) => ({i, ...w}))}]));
+  const project = (src, outSec, x = {}) => ({clips: [{id: 'k0', src, inSec: 0, outSec, sourceDurationSec: 6}], captions: [], graphics: [], mattes: [], lang: 'auto', ...x});
+  try {
+    const A = await projectIssues(project('clips/A.mp4', 5.1), pub); // ends inside "five"
+    assert.match(A.find((i) => i.code === 'off-mic')?.msg ?? '', /^k0: 3 off-mic word\(s\) still in the cut: cut_words A:0…A:2 "one two three\."/);
+    assert.match(A.find((i) => i.code === 'cut-word')?.msg ?? '', /k0 ends in the middle of "five"/);
+    const B = await projectIssues(project('clips/B.mp4', 2), pub);
+    assert.deepEqual(B.filter((i) => ['off-mic', 'cut-word'].includes(i.code)), []);
+    // off-mic switched off: the words carry no flag; a source never transcribed: no words, no issue
+    assert.ok((await projectWords(project('clips/A.mp4', 5.1, {offMic: 'off'}), pub))[0].words.every((w) => !w.off));
+    assert.deepEqual((await projectWords(project('clips/C.mp4', 2), pub))[0].words, []);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
 test('captions switched off (set_captions): their pages are not checked', () => {

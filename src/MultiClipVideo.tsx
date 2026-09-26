@@ -1,5 +1,5 @@
 import React from 'react';
-import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVideoConfig, useCurrentFrame, interpolate, getRemotionEnvironment} from 'remotion';
+import {AbsoluteFill, Audio, OffthreadVideo, Video, Sequence, staticFile, useVideoConfig, useCurrentFrame, getRemotionEnvironment} from 'remotion';
 import {CaptionTrack} from './CaptionTrack';
 import {BrollLayer, projectBrolls, type BrollItem} from './Broll';
 import {type Caption} from './captions';
@@ -15,6 +15,7 @@ import {registerClientFonts} from './fonts';
 import {gradeFor, type ProjectGrade} from './grade';
 import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, toneColor, type Enter} from './transitions';
 import {ms as msToFrames} from './motion';
+import {musicGain} from './audio';
 
 // Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
 // screen) while a tier-2 caption word or a B-roll card is up — Captions.ai
@@ -74,38 +75,19 @@ const TransitionOverlay: React.FC<{cuts: {frame: number; kind: Enter; seed: numb
   return shapes.length ? <AbsoluteFill style={{pointerEvents: 'none'}}>{shapes}</AbsoluteFill> : null;
 };
 
-// Music layer: start offset, volume, optional end fade-out, and optional
-// auto-ducking — the music dips while someone is speaking (speech = runs of spoken words, src/layers.ts).
+// Music layer: start offset, then the gain per frame — volume, fades and auto-ducking, the music
+// dipping while someone is speaking (musicGain, src/audio.ts; speech = runs of spoken words, src/layers.ts).
 const MusicTrack: React.FC<{music: NonNullable<Music>; totalFrames: number; speech: Array<[number, number]>}> = ({music, totalFrames, speech}) => {
   const {fps} = useVideoConfig();
-  const fadeFrames = Math.round((music.fadeOutSec ?? 0) * fps);
-  const DUCK_RAMP_MS = 250; // ease the dip in/out
   return (
     <Audio
       src={staticFile(music.src)}
       loop // a track shorter than the reel starts over (loops from Openverse are 30–60 s)
+      // f = the reel's frame, not the frame inside the current pass of the loop (Remotion's default,
+      // 'repeat'): the fades and the ducking run on reel time, across every loop seam
+      loopVolumeCurveBehavior="extend"
       trimBefore={Math.round((music.startSec ?? 0) * fps)}
-      volume={(f) => {
-        let v =
-          fadeFrames > 0
-            ? interpolate(f, [totalFrames - fadeFrames, totalFrames], [music.volume, 0], {
-                extrapolateLeft: 'clamp',
-                extrapolateRight: 'clamp',
-              })
-            : music.volume;
-        if (music.duck && speech.length) {
-          const ms = (f / fps) * 1000;
-          let dist = Infinity; // distance to the nearest speech span (0 = inside)
-          for (const [a, b] of speech) {
-            if (ms >= a && ms <= b) { dist = 0; break; }
-            dist = Math.min(dist, ms < a ? a - ms : ms - b);
-          }
-          const k = Math.min(1, dist / DUCK_RAMP_MS); // 0 in speech → ducked, 1 far away
-          const duckLevel = music.duckLevel ?? 0.25;
-          v *= duckLevel + (1 - duckLevel) * k;
-        }
-        return v;
-      }}
+      volume={(f) => musicGain(music, f, fps, totalFrames, speech)}
     />
   );
 };
@@ -124,10 +106,15 @@ export const MultiClipVideo: React.FC<{
   audio?: {clean?: string; sfx?: boolean} | null;
   captionsOff?: boolean; // the project's captions switch (set_captions): pages are kept, none is drawn
   // the layered render (scripts/layers.mjs): 'captions' draws only the caption pages on a
-  // transparent frame, to be laid over a master rendered with captionsOff
-  layer?: 'all' | 'captions';
+  // transparent frame, to be laid over a master rendered with captionsOff; 'supers' only the text
+  // graphics (a client's deliverables), to be laid over a master rendered with textOff
+  layer?: 'all' | 'captions' | 'supers';
+  textOff?: boolean; // no text graphic drawn (a client's master): decor, layouts and camera pushes stay
+  // label-2tone's plate and location-tag's pill drawn solid, no backdrop blur (a client's deliverables, every
+  // pass and the editor's preview alike: src/renderProps.ts withDeliveryFps), so the supers layer carries them
+  solidPlates?: boolean;
   captionsOnly?: boolean; // v11.1 alpha overlay (Root's CaptionOnly composition) = layer 'captions'
-}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false, layer = 'all', captionsOnly = false}) => {
+}> = ({clips = [], music = null, captions = [], brolls = [], graphics = [], mattes = [], accentColor: projectAccent = '#FFB020', captionStyle, brand = null, grade = null, audio = null, captionsOff = false, layer = 'all', textOff = false, solidPlates = false, captionsOnly = false}) => {
   const {fps} = useVideoConfig();
   const pack = packOf(captionStyle);
   const kit = resolveBrand(brand, projectAccent, pack);
@@ -137,11 +124,10 @@ export const MultiClipVideo: React.FC<{
   const totalFrames = totalDurationFrames(clips, fps);
   // captions + b-roll are anchored to clips (source-relative) → project to absolute;
   // the pages shown and what they do to the footage come from src/layers.ts (the layered render checks the same)
-  const {preset, projectedGraphics, shownCaptions, focus, punch, pulses, speech} = captionLayout({clips, captions, graphics, captionStyle, captionsOff}, fps);
+  const {preset, projectedGraphics, drawnGraphics, supers, zooms, shownCaptions, focus, punch, pulses, speech} = captionLayout({clips, captions, graphics, captionStyle, captionsOff, textOff}, fps);
   const projectedBrolls = projectBrolls(brolls, clips, fps);
   // a B-roll card sits over blurred footage whatever the pack
   const cards = projectedBrolls.filter((b) => b.mode === 'card').map((b) => ({startMs: b.startMs, endMs: b.endMs}));
-  const zooms: Zoom[] = projectedGraphics.filter((g) => g.camera === 'punch').map((g) => ({startMs: g.startMs - 100, endMs: g.endMs, scale: 0.4, inMs: 333, outMs: 230}));
   // cover transitions on clips and on B-roll cues
   const cuts = [
     ...placed.filter(({clip}, i) => i > 0 && COVER.has(clip.enter as Enter)).map(({clip, fromFrame}) => ({frame: fromFrame, kind: clip.enter as Enter, seed: seedOf(clip.id)})),
@@ -160,6 +146,18 @@ export const MultiClipVideo: React.FC<{
       <BrandContext.Provider value={kit}>
         <AbsoluteFill>
           <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} />
+        </AbsoluteFill>
+      </BrandContext.Provider>
+    );
+  }
+  // the supers layer: the text graphics in front of the presenter on a transparent frame. What a separate layer
+  // cannot carry is refused (a text graphic behind the presenter: src/layers.ts supersBlockers) or
+  // warned about (decor drawn over a text graphic ends up under it here: validate's supers-order)
+  if (layer === 'supers') {
+    return (
+      <BrandContext.Provider value={kit}>
+        <AbsoluteFill>
+          <GraphicsLayer items={supers} accentColor={accentColor} titles={preset.titles} solidPlates={solidPlates} />
         </AbsoluteFill>
       </BrandContext.Provider>
     );
@@ -239,7 +237,7 @@ export const MultiClipVideo: React.FC<{
       </FocusPull>
       }>
       {/* graphics marked `behind` sit between the footage and the cut-out presenter */}
-      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} behind titles={preset.titles} />
+      <GraphicsLayer items={drawnGraphics} accentColor={accentColor} behind titles={preset.titles} solidPlates={solidPlates} />
       <CaptionTrack captions={shownCaptions} captionStyle={captionStyle} behind />
       <PersonLayer mattes={mattes} clips={clips} grade={grade} outlines={projectedGraphics.filter((g) => g.template === 'person-outline')} accent={accentColor} />
       </LayoutStage>
@@ -252,7 +250,7 @@ export const MultiClipVideo: React.FC<{
       <TransitionOverlay cuts={cuts} accent={accentColor} />
 
       {/* motion graphics: headlines, labels, stats (in front of the presenter) */}
-      <GraphicsLayer items={projectedGraphics} accentColor={accentColor} titles={preset.titles} />
+      <GraphicsLayer items={drawnGraphics} accentColor={accentColor} titles={preset.titles} solidPlates={solidPlates} />
 
       {/* music */}
       {music && <MusicTrack music={music} totalFrames={totalFrames} speech={speech} />}

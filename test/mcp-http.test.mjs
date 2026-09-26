@@ -13,9 +13,12 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {gate, tokenOk} from '../server/http.mjs';
 import {createMcpHttp} from '../server/mcp-http.mjs';
+import {backendStub} from './backend-stub.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-process.env.REEL_API = 'http://127.0.0.1:9'; // no backend: the tools listed and called here do not need it
+// only the backend's project write (test/backend-stub.mjs): the tools called here need no more of it
+const stub = await backendStub();
+process.env.REEL_API = stub.url;
 const {createReelServer, releaseSession} = await import('../mcp/server.mjs');
 
 const tokA = crypto.randomBytes(16).toString('hex'), tokB = crypto.randomBytes(16).toString('hex');
@@ -73,7 +76,7 @@ before(async () => {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
-after(async () => { await mcp?.close(); srv?.close(); });
+after(async () => { await mcp?.close(); srv?.close(); await stub.close(); });
 
 const initBody = {jsonrpc: '2.0', id: 1, method: 'initialize', params: {protocolVersion: '2025-03-26', capabilities: {}, clientInfo: {name: 'test', version: '0'}}};
 const post = (headers, body = initBody) => fetch(`${base}/mcp`, {method: 'POST', headers: {'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers}, body: JSON.stringify(body)});

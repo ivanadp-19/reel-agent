@@ -3,6 +3,7 @@ import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {pct, uploadClip} from './upload';
 import {placeClips, clipDurationSec} from '../src/timeline';
+import {fmtDb, musicOf} from '../src/audio';
 
 type LibRow = {id: string; tags?: string[]};
 const fmt = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}`;
@@ -90,7 +91,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
     e.target.value = '';
     if (!file) return;
     const r = await fetch('/api/music?name=' + encodeURIComponent(file.name), {method: 'POST', body: file}).then((x) => x.json());
-    if (r.src) setMusic({src: r.src, volume: 0.8, startSec: 0, fadeOutSec: 1.5});
+    if (r.src) setMusic({src: r.src, ...musicOf({})}); // the same bed as set_music file: level, fades, ducking
   };
 
   return (
@@ -176,7 +177,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
               <span className="material-symbols-outlined text-secondary">audiotrack</span>
               <div className="flex-1 min-w-0">
                 <p className="text-body-sm font-medium truncate">{music.src.split('/').pop()}</p>
-                <p className="text-[10px] text-on-surface-variant font-mono">vol {Math.round(music.volume * 100)}%</p>
+                <p className="text-[10px] text-on-surface-variant font-mono">vol {fmtDb(music.volume)}</p>
               </div>
               <button onClick={() => setMusic(null)} title="Remove music" className="material-symbols-outlined text-[18px] text-on-surface-variant hover:text-error">
                 close

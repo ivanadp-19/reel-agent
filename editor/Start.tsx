@@ -115,7 +115,7 @@ export const Start: React.FC<{
     e.stopPropagation();
     try {
       const p = await fetch('/api/projects/' + id).then((r) => r.json());
-      const {createdAt: _c, updatedAt: _u, ...rest} = p;
+      const {createdAt: _c, updatedAt: _u, identity: _i, ...rest} = p; // one project per client + script + variant: the copy has none
       await fetch(`/api/projects/p-${Date.now()}`, {method: 'POST', body: JSON.stringify({...rest, name: `${p.name || 'Untitled project'} (copy)`})});
     } catch { /* ignore */ }
     onRefresh();
