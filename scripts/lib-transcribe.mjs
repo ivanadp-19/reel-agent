@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {DROP_DB, assignSpeakers, flagOffMicBySpeaker, loudnessFromPcm} from '../src/speech.ts';
+import {continuesPrev} from '../src/timeline.ts';
 
 const ROOT = process.cwd();
 const PUBLIC = path.join(ROOT, 'public');
@@ -304,8 +305,13 @@ export async function assembleWords(clips, onProgress, lang = 'auto', offMic = '
   await transcribeClips(clips, (label) => onProgress?.(0, clips.length, {id: label, label, batch: true}), lang);
   const out = [];
   let offsetMs = 0;
+  let anchor;
   for (const [idx, clip] of clips.entries()) {
     onProgress?.(idx, clips.length, clip);
+    // a clip that continues the previous one (a split with nothing cut out) is the same take to the speech:
+    // its words page with the previous clip's, and a word on the join is emitted once, whole, by the first
+    const joined = continuesPrev(clips[idx - 1], clip), goesOn = continuesPrev(clip, clips[idx + 1]);
+    anchor = joined ? anchor : clip.id;
     let words;
     try {
       words = await transcribeClip(clip, lang, offMic);
@@ -318,16 +324,16 @@ export async function assembleWords(clips, onProgress, lang = 'auto', offMic = '
     const inMs = clip.inSec * 1000;
     const outMs = clip.outSec * 1000;
     words.forEach((w, wi) => {
-      if (w.endMs <= inMs || w.startMs >= outMs) return;
+      if (w.endMs <= inMs || w.startMs >= outMs || (joined && w.startMs < clips[idx - 1].outSec * 1000)) return;
       if (offMic === 'cut' && w.off) return; // the off-camera voice gets no captions
       const s = Math.max(w.startMs, inMs) - inMs + offsetMs;
-      const e = Math.min(w.endMs, outMs) - inMs + offsetMs;
+      const e = (goesOn ? w.endMs : Math.min(w.endMs, outMs)) - inMs + offsetMs;
       out.push({
         wid: `${sourceKey(clip)}:${wi}`, // stable word id
         word: w.word,
         startMs: Math.round(s), // absolute timeline (current cut)
         endMs: Math.round(e),
-        clipId: clip.id, // anchor
+        clipId: anchor, // anchor: the first clip of its continuous stretch
         src: clip.src, // source file the word belongs to
         srcStartMs: w.startMs, // relative to the clip's own source start
         srcEndMs: w.endMs,

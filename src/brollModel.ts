@@ -15,8 +15,8 @@ export type BrollItem = {
   alternatives?: string[];
   scale?: number; // size multiplier (1 = default), set via the on-preview slider
   enter?: import('./transitions.ts').Enter; // how the cue comes in (src/transitions.ts); cover kinds draw over the cut, reveal kinds act as a cut
-  arrive?: import('./motion.ts').BrollIn; // how the cue's box arrives: slideUp (Elevate/Impact/Form/Focus), popFrom (Evo), slideRight (Y2K/Chalk); cut = fade
-  leave?: import('./motion.ts').BrollOut; // how it leaves: slideDown (Impact/Elevate), shrink (Evo), fall (Chalk); cut = fade
+  arrive?: import('./motion.ts').BrollIn; // how the cue's box arrives: slideUp (Elevate/Impact/Form/Focus), popFrom (Evo), slideRight (Y2K/Chalk), fade (Linen); cut = a hard cut
+  leave?: import('./motion.ts').BrollOut; // how it leaves: slideDown (Impact/Elevate), shrink (Evo), fall (Chalk), fade (Linen); cut = a hard cut
 };
 
 // the creator's own B-roll source (pool the generator can pick from)
