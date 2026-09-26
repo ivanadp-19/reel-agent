@@ -164,7 +164,7 @@ test('catalog is incremental: only new or changed files are decoded; gone files 
 
     // a transcript or library tags written later show up without decoding again
     const tr = path.join(pub, 'clips', 'transcripts'); fs.mkdirSync(tr, {recursive: true});
-    fs.writeFileSync(path.join(tr, 'hook_G2.es.json'), JSON.stringify([{word: 'Bienvenidos', startMs: 0, endMs: 400}, {word: 'al', startMs: 400, endMs: 500}, {word: 'rooftop', startMs: 500, endMs: 900}]));
+    fs.writeFileSync(path.join(tr, 'hook_G2.es.dg.json'), JSON.stringify([{word: 'Bienvenidos', startMs: 0, endMs: 400}, {word: 'al', startMs: 400, endMs: 500}, {word: 'rooftop', startMs: 500, endMs: 900}]));
     fs.writeFileSync(path.join(tr, 'hook_G2.loud.json'), '[]');
     fs.writeFileSync(path.join(d, 'library.json'), JSON.stringify([{id: 'x', src: 'inputs/street_day.mp4', tags: ['calle', 'ventanas'], desc: 'calle de noche'}]));
     const meta = await catalogDir(pub, 'inputs');

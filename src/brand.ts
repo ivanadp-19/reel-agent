@@ -7,8 +7,11 @@ import {createContext, useContext} from 'react';
 import {z} from 'zod';
 import {FONT_FILE, isCatalog, type ClientFont} from './fonts.ts';
 import {LOOKS, type GradeParams} from './grade.ts';
+import type {GlossaryEntry} from './guion.ts';
+import {PRESETS, type PresetId} from './captionPresets.ts';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'hex color like #FFB020');
+const glossarySchema = z.array(z.object({term: z.string().trim().min(1).max(60), variants: z.array(z.string().trim().min(1).max(60)).max(20).default([]), note: z.string().max(200).optional()})).max(200);
 const fontFile = z.object({
   family: z.string().trim().min(1).max(40),
   file: z.string().regex(FONT_FILE, 'a .ttf, .otf, .woff or .woff2 under public/').refine((f) => !f.startsWith('/') && !f.includes('..'), 'a path under public/, e.g. fonts/Helvetica-Bold.ttf'),
@@ -36,15 +39,16 @@ export const styleSchema = z.object({
 }).catchall(z.union([z.string().max(500), z.number(), z.boolean()]));
 export type Style = z.infer<typeof styleSchema>;
 
-// what loading a kit's style does to a project, without jobs (the pack needs a
-// re-paging job: the caller runs it). Shared by set_brand and the Styles tab.
-export function styleEffects(st: Style | undefined): {captionsOff?: boolean; grade?: GradeParams; audio?: {clean?: string; sfx?: boolean}; pack?: string} {
+// what loading a kit's style does to a project, without jobs: `pack` is a caption pack
+// id (an unknown name is left out) that the caller applies as set_caption_style does
+// (re-paging is a job). Shared by set_brand and the Styles tab.
+export function styleEffects(st: Style | undefined): {captionsOff?: boolean; grade?: GradeParams; audio?: {clean?: string; sfx?: boolean}; pack?: PresetId} {
   if (!st) return {};
   return {
     ...(st.captions ? {captionsOff: st.captions === 'off'} : {}),
     ...(st.grade && Object.keys(st.grade).length ? {grade: st.grade as GradeParams} : {}),
     ...(st.audio ? {audio: st.audio} : {}),
-    ...(st.pack ? {pack: st.pack} : {}),
+    ...(st.pack && Object.hasOwn(PRESETS, st.pack) ? {pack: st.pack} : {}),
   };
 }
 // a partial style on top of a kit's: null removes a key, adjust / grade merge key by key
@@ -77,9 +81,17 @@ export const brandSchema = z.object({
   }),
   logo: z.string().optional().describe('image under public/, e.g. brands/acme.png'),
   style: styleSchema.optional(),
+  glossary: glossarySchema.optional().describe("the client's spellings: the captions pipeline respells every variant as the term (src/guion.ts applyGlossary); the render judge checks the same list"),
 });
 // display / body: a catalog family (src/fonts.ts) or the family of one of `files`
-export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: string; body?: string; files?: ClientFont[]}; logo?: string; style?: Style};
+export type Brand = {name?: string; colors: {accent: string; dark?: string; light?: string}; fonts: {display?: string; body?: string; files?: ClientFont[]}; logo?: string; style?: Style; glossary?: GlossaryEntry[]};
+
+// the glossary as the Styles tab edits it, one term a line: "Altabrisa: Alta Brisa, Altabriza" (a term's note is kept)
+export const glossaryText = (g: GlossaryEntry[] = []) => g.map((e) => [e.term, (e.variants ?? []).join(', ')].filter(Boolean).join(': ')).join('\n');
+export const parseGlossary = (text: string, prev: GlossaryEntry[] = []): GlossaryEntry[] => text.split('\n').map((l) => l.split(':')).filter(([t]) => t.trim()).map(([t, v = '']) => {
+  const note = prev.find((e) => e.term === t.trim())?.note;
+  return {term: t.trim(), variants: v.split(',').map((x) => x.trim()).filter(Boolean), ...(note ? {note} : {})};
+});
 
 // what the renderer uses: every value resolved, `branded` = a kit is active
 export type Kit = {branded: boolean; accent: string; dark: string; light: string; display?: string; body?: string; script?: string; logo?: string; fontFiles: ClientFont[]};

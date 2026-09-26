@@ -291,19 +291,19 @@ export async function analyzeFile(file, {sheetOut} = {}) {
 
 const stem = (name) => name.replace(/\.[^.]+$/, '');
 
-// words the transcription pipeline cached for this source (scripts/lib-transcribe.mjs: clips/transcripts/<stem>.<lang>.json)
+// words the transcription pipeline cached for this source (scripts/lib-transcribe.mjs: clips/transcripts/<stem>.<lang>[.dg].json)
 export function transcriptFor(publicDir, name) {
   const dir = path.join(publicDir, 'clips', 'transcripts');
   let files = [];
   const key = `${stem(name)}.`;
-  try { files = fs.readdirSync(dir).filter((f) => f.startsWith(key) && /^[\w-]+\.json$/.test(f.slice(key.length)) && !/^(loud|spk)\.json$/.test(f.slice(key.length))); } catch { return null; }
+  try { files = fs.readdirSync(dir).filter((f) => f.startsWith(key) && /^[\w-]+(\.dg)?\.json$/.test(f.slice(key.length)) && !/^(loud|spk)\.json$/.test(f.slice(key.length))); } catch { return null; }
   for (const f of files) {
     try {
       const words = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
       if (!Array.isArray(words) || !words.length) continue;
       const all = words.map((w) => String(w.word ?? '').trim()).filter(Boolean);
       const text = all.slice(0, 30).join(' ');
-      return {source: `clips/transcripts/${f}`, lang: f.slice(key.length, -5), words: all.length, text: all.length > 30 ? `${text} …` : text};
+      return {source: `clips/transcripts/${f}`, lang: f.slice(key.length).split('.')[0], words: all.length, text: all.length > 30 ? `${text} …` : text};
     } catch {}
   }
   return null;

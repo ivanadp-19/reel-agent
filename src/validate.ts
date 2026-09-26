@@ -121,9 +121,60 @@ function hiddenShare(band: Band, g: Graphic, face: FaceBox): number {
 }
 const SINGLE_WORD = new Set(['big-word', 'oversized', 'fill-title']); // what may sit behind the head
 
-export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean; guion?: string}, fps = 30, faces: Record<string, FaceBox | undefined> = {}): Issue[] {
+// the font FILES a render loads from public/: the caption pack's own when captions are on screen
+// (src/projectFont.ts) and the brand kit's (src/fonts.ts). A missing one stops the render.
+type FontsOf = {captions: Caption[]; captionStyle?: string; brand?: {fonts?: {files?: {file: string}[]}} | null};
+export const fontFiles = (p: FontsOf): string[] =>
+  [...new Set([...(p.captions.length && presetOf(p.captionStyle).font.custom ? [presetOf(p.captionStyle).font.custom!.file] : []), ...(p.brand?.fonts?.files ?? []).map((f) => f.file)])];
+
+// Word times the ASR squeezed: WhisperX once packed a sentence with two figures and a date into
+// 1.84 s, ~16 syllables/s where speech runs ~6, and the captions ran off the voice. A run above
+// MAX_SYL_PER_S over at least a second is flagged with its word ids.
+// ponytail: syllables = vowel groups, a non-zero digit 2 (ES/EN; the zeros of '1,500,000' are said as
+// 'mil' / 'millón', next to nothing) — a hiatus or a silent e miscounts a word here and there, which the
+// margin to 10/s absorbs; a real syllabifier to tighten the threshold.
+const MAX_SYL_PER_S = 10;
+export const syllables = (t: string) => (t.toLowerCase().match(/[aeiouyáéíóúü]+/g)?.length ?? 0) + 2 * (t.match(/[1-9]/g)?.length ?? 0);
+// runs of words (in time order) whose shortest window of ≥ 1 s from any word is too fast; overlapping windows merge
+export function fastRuns(words: {text: string; startMs: number; endMs: number}[]): {from: number; to: number}[] {
+  const runs: {from: number; to: number}[] = [];
+  for (let i = 0; i < words.length; i++) {
+    let syl = 0;
+    for (let j = i; j < words.length; j++) {
+      syl += syllables(words[j].text);
+      const ms = words[j].endMs - words[i].startMs;
+      if (ms < 1000) continue;
+      if ((syl * 1000) / ms > MAX_SYL_PER_S) { const r = runs.at(-1); if (r && i <= r.to) r.to = Math.max(r.to, j); else runs.push({from: i, to: j}); }
+      break;
+    }
+  }
+  return runs;
+}
+function fastWordIssues(p: {clips: Clip[]; captions: Caption[]}): Issue[] {
+  const out: Issue[] = [];
+  for (const src of new Set(p.captions.map((c) => c.src))) {
+    const cut = p.clips.filter((c) => c.src === src); // the words still in the reel, in source ms
+    const ws = p.captions.filter((c) => c.src === src).flatMap((c) => c.words.map((w) => ({...w, cap: c.id})))
+      .filter((w) => w.wid && cut.some((c) => w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000)).sort((a, b) => a.startMs - b.startMs);
+    for (const {from, to} of fastRuns(ws)) {
+      const run = ws.slice(from, to + 1), ms = run[run.length - 1].endMs - run[0].startMs;
+      const rate = (run.reduce((n, w) => n + syllables(w.text), 0) * 1000) / ms;
+      out.push({level: 'warn', code: 'fast-words', msg: `words ${run[0].wid}…${run[run.length - 1].wid} "${run.map((w) => w.text).join(' ').slice(0, 60)}" run at ${rate.toFixed(0)} syllables/s over ${(ms / 1000).toFixed(1)} s (speech is ~6/s): the transcript squeezed their times and the captions run off the voice — re-transcribe with Deepgram or fix the times`, ref: run[0].cap});
+    }
+  }
+  return out;
+}
+
+// fonts: each of fontFiles(p) as the caller found it in public/: false = missing, its full name (name ID 4,
+// src/sfnt.ts) or true = present; absent = not checked
+export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number}[]; captionStyle?: string; captionsOff?: boolean; guion?: string; brand?: FontsOf['brand']}, fps = 30, faces: Record<string, FaceBox | undefined> = {}, fonts: Record<string, boolean | string> = {}): Issue[] {
   const issues: Issue[] = [];
   if (p.captionsOff) p = {...p, captions: []}; // captions switched off: nothing of them reaches the render
+  const custom = presetOf(p.captionStyle).font.custom;
+  for (const f of fontFiles(p)) {
+    if (fonts[f] === false) issues.push({level: 'error', code: 'font-missing', msg: `public/${f} is missing and the render stops without it — copy the licensed file there (VIBEM's fonts/Helvetica-Bold.ttf: \`npm run setup\` extracts it on macOS)`});
+    else if (typeof fonts[f] === 'string' && custom?.file === f && custom.name && fonts[f] !== custom.name) issues.push({level: 'error', code: 'font-wrong', msg: `public/${f} is "${fonts[f]}", not ${custom.name}, and the render stops on it — replace it with the licensed ${custom.name} (\`npm run setup\` extracts it on macOS)`});
+  }
   const gfx = projectGraphics(p.graphics ?? [], p.clips, fps);
   const caps = avoidGraphics(projectCaptions(p.captions, p.clips, fps), gfx, p.captionStyle); // as rendered
   const totalMs = caps.length || gfx.length ? Math.max(...caps.map((c) => c.endMs), ...gfx.map((g) => g.endMs), 0) : 0;
@@ -136,7 +187,7 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
     if (band.top < SAFE.topPct) issues.push({level: 'warn', code: 'safe-top', msg: `caption ${c.id} starts at ${band.top.toFixed(0)}% — inside the top UI band (<${SAFE.topPct}%)`, ref: c.id});
     if (band.bottom > SAFE.bottomPct) issues.push({level: 'warn', code: 'safe-bottom', msg: `caption ${c.id} reaches ${band.bottom.toFixed(0)}% — under the Reels caption/actions strip (>${SAFE.bottomPct}%)`, ref: c.id});
     const last = c.words[c.words.length - 1];
-    if (last && isGlue(last.text) && c.words.length > 1) issues.push({level: 'warn', code: 'glue', msg: `caption ${c.id} ends on "${last.text}" (function word)`, ref: c.id});
+    if (last && isGlue(last.text, presetOf(p.captionStyle).layout.glueExcept) && c.words.length > 1) issues.push({level: 'warn', code: 'glue', msg: `caption ${c.id} ends on "${last.text}" (function word)`, ref: c.id});
     const dur = c.endMs - c.startMs;
     if (dur < 250) issues.push({level: 'warn', code: 'short', msg: `caption ${c.id} lasts ${dur} ms`, ref: c.id});
     if (dur > 6000) issues.push({level: 'warn', code: 'long', msg: `caption ${c.id} lasts ${(dur / 1000).toFixed(1)} s — split it`, ref: c.id});
@@ -144,12 +195,14 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
     const next = caps[i + 1];
     if (next && next.startMs < c.endMs - 40 && next.clipId === c.clipId) issues.push({level: 'error', code: 'overlap-captions', msg: `captions ${c.id} and ${next.id} overlap in time`, ref: c.id});
   }
+  issues.push(...fastWordIssues(p));
   // emphasis density
   const words = p.captions.flatMap((c) => c.words);
   const t2 = words.filter((w) => w.tier === 2).length;
   const t1 = words.filter((w) => w.tier === 1).length;
   if (totalMs && t2 > Math.max(1, totalMs / 10000)) issues.push({level: 'warn', code: 'tier2-density', msg: `${t2} tier-2 words in ${(totalMs / 1000).toFixed(0)} s — aim for ≤ 1 per 10 s`});
-  if (words.length >= 20 && t1 / words.length > 0.2) issues.push({level: 'warn', code: 'tier1-density', msg: `${Math.round((t1 / words.length) * 100)}% of words are accented — keep it under 20%`});
+  const maxShare = presetOf(p.captionStyle).highlight?.maxShare ?? 0.2; // a pack may mark more (vibem: v11 is 27 %)
+  if (words.length >= 20 && t1 / words.length > maxShare) issues.push({level: 'warn', code: 'tier1-density', msg: `${Math.round((t1 / words.length) * 100)}% of words are accented — keep it under ${Math.round(maxShare * 100)}%`});
   const emoji = words.filter((w) => w.emoji).length;
   if (totalMs && emoji > Math.max(2, totalMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(totalMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
 

@@ -100,7 +100,7 @@ type EditorState = {
   setMusic: (music: Music) => void;
   setAccentColor: (color: string) => void;
   setCaptionStyle: (style: PresetId) => void;
-  setCaptions: (captions: Caption[]) => void;
+  setCaptions: (captions: Caption[], hiddenWids?: string[]) => void;
   setProjectInfo: (id: string, name: string) => void;
   setProjectName: (name: string) => void;
 
@@ -250,7 +250,11 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => ({
       captions: mapCap(s.captions, id, (c) => ({
         ...c,
-        words: c.words.map((w, i) => (i === wi ? {...w, tier: ((w.tier ?? 0) + 1) % 3} : w)),
+        words: c.words.map((w, i) => {
+          if (i !== wi) return w;
+          const {proposed: _, ...hand} = w; // set by hand: no longer the pack's proposal
+          return {...hand, tier: ((w.tier ?? 0) + 1) % 3};
+        }),
       })),
     })),
 
@@ -427,7 +431,7 @@ export const useEditor = create<EditorState>((set) => ({
     }),
   setAccentColor: (accentColor) => set((s) => ({accentColor, brand: s.brand ? {...s.brand, colors: {...s.brand.colors, accent: accentColor}} : s.brand})),
   setCaptionStyle: (captionStyle) => set({captionStyle}),
-  setCaptions: (captions) => set({captions, selectedId: null}),
+  setCaptions: (captions, hiddenWids) => set({captions, selectedId: null, ...(hiddenWids ? {hiddenWids} : {})}),
   setProjectInfo: (projectId, projectName) => set({projectId, projectName}),
   setProjectName: (projectName) => set({projectName}),
 

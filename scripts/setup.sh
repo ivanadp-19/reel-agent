@@ -55,6 +55,24 @@ echo "Person segmentation (text behind the presenter)"
 [ -f .models/selfie_segmenter.tflite ] || curl -sSfL -o .models/selfie_segmenter.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite
 ok "MediaPipe selfie segmenter ready"
 
+echo "Caption fonts (licensed files, never committed)"
+# the vibem pack loads public/fonts/Helvetica-Bold.ttf (src/projectFont.ts); a Mac has it inside Helvetica.ttc
+if [ -f public/fonts/Helvetica-Bold.ttf ]; then
+  # the face, not just the file name: an Arial saved as Helvetica-Bold.ttf renders, silently, in Arial
+  face=$(node --input-type=module -e "import fs from 'node:fs'; import {readFont} from './src/sfnt.ts'; try { console.log(readFont(fs.readFileSync('public/fonts/Helvetica-Bold.ttf')).fullName); } catch { console.log('not a font file'); }")
+  if [ "$face" = "Helvetica Bold" ]; then ok "public/fonts/Helvetica-Bold.ttf"
+  else miss "public/fonts/Helvetica-Bold.ttf is \"$face\", not Helvetica Bold — replace it with the licensed file (on a Mac: delete it and run npm run setup again)"; fi
+elif [ -f /System/Library/Fonts/Helvetica.ttc ]; then
+  .venv/bin/python -c 'import fontTools' 2>/dev/null || .venv/bin/pip install -q fonttools
+  mkdir -p public/fonts
+  .venv/bin/python - <<'PY'
+import logging; logging.disable(logging.WARNING)  # fontTools: "'created' timestamp seems very low"
+from fontTools.ttLib import TTCollection
+next(f for f in TTCollection('/System/Library/Fonts/Helvetica.ttc').fonts if f['name'].getDebugName(4) == 'Helvetica Bold').save('public/fonts/Helvetica-Bold.ttf')
+PY
+  ok "public/fonts/Helvetica-Bold.ttf (extracted from this Mac's Helvetica.ttc)"
+else miss "public/fonts/Helvetica-Bold.ttf missing (the vibem caption pack needs it) — copy your licensed Helvetica Bold .ttf there (on a Mac, npm run setup extracts it)"; fi
+
 echo "API keys"
 if [ ! -f .env ]; then cp .env.example .env; fi
 if grep -q '^PEXELS_API_KEY=.\+' .env; then ok "PEXELS_API_KEY set"; else miss "PEXELS_API_KEY empty (optional) — https://www.pexels.com/api"; fi

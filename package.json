@@ -27,7 +27,8 @@
     "typecheck": "tsc --noEmit",
     "mcp": "node mcp/server.mjs",
     "render": "node scripts/render-cli.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "golden": "node scripts/golden.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

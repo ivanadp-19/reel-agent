@@ -86,7 +86,7 @@ Then judge, with a timestamp for everything:
   - On the frames: legible over the footage, the accent color readable, never
     touching an edge, never over the face, emphasis on meaning words (not "de",
     "en").
-  - For the client's motion rules (e.g. a word cascade), look at a
+  - For the client's motion rules (its profile page), look at a
     `motion_proof` at the start of 2–3 pages.
 - **Cuts**: on the `cuts` sheet, jump cuts that jar, a cut that lands
   mid-gesture or mid-blink, a transition family that changes mid-reel.
@@ -151,8 +151,8 @@ PRIORIDAD
    fix: suggest_broll → add_broll {"at_wid":"take3:41","duration_sec":2.5,"mode":"fullscreen"}
 2. [0:02.5–0:03.4] pause (rule) — pausa rara de 0.85 s a mitad de frase entre "tiene" y "noventa"
    fix: split_clip {"before_wid":"take1:7"} → trim_clip {"clip_id":"take1","out_sec":3.45} → trim_clip {"clip_id":"<new piece>","in_sec":4.07}
-3. [0:05.4–0:06.8] split-name (candidate, CONFIRMADO en frame 6.2 s) — "Montealbán" | "326" en páginas distintas
-   fix: annotate_captions {"items":[{"wid":"take1:11","tier":1},{"wid":"take1:12","tier":1}]} → ⟲ set_caption_style {"style":"vibem"}
+3. [0:05.4–0:06.8] glossary (rule) — "sky pool" en pantalla; el término del cliente es "skypool"
+   fix: edit_caption {"caption_id":"c4","text":"con skypool privado"}
 4. [0:09.0–0:10.2] broll-fit (judgment) — alberca sobre "el precio es de dos millones": no muestra nada del precio
    fix: suggest_broll → add_broll asset_id=<fachada> at_wid=take2:1
 MENORES / NITS
@@ -160,7 +160,7 @@ MENORES / NITS
 DESCARTADOS / NO CONFIRMADOS
 - overflow@4.2 (heuristic) — frame 4.2 s: "Montealbán 326" cabe con margen
 - color-burnt@8.2 (candidate) — es el cielo, la piel está bien
-ORDEN DE APLICACIÓN: 1, 2, 4 (ids estables) → 3 (⟲ re-pagina: correr judge.mjs otra vez antes de seguir)
+ORDEN DE APLICACIÓN: 1, 2, 3, 4 (ids estables; un fix ⟲ que re-pagina va al final y pide correr judge.mjs otra vez)
 ESCALAR (no lo arregla el agente)
 - jcut-gap@14.2 — el J-cut de take4 deja 0.8 s de silencio tras el corte (renderer)
 SKIPPED

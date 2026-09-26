@@ -4,7 +4,8 @@
   "doc": "profiles/cesar.md",
   "match": {
     "captionStyle": [
-      "vibem"
+      "vibem",
+      "vibemReference"
     ],
     "brand": [
       "vibem",
@@ -14,8 +15,8 @@
   },
   "captions": {
     "pagination": "sentence",
-    "accentSameSize": true,
-    "cascadeMs": 45
+    "accentScale": 1.15,
+    "namesMaySplit": true
   },
   "glossary": [
     {

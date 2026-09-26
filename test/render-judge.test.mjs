@@ -1,6 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {pauseFindings, splitNameFindings, captionTextFindings, consistencyFindings, repeatFindings, repeatedFootageFindings, overflowFindings, verdictOf, diffWithPrev, dhash, hamming, timelineSpeech} from '../.agents/skills/render-judge/judge.mjs';
+import {PRESETS} from '../src/captionPresets.ts';
+
+// no pack bonds names since César's v11 (vibem splits MONTEALBÁN | 326); the bonding recipe stays tested on a stand-in
+PRESETS.bonded = {...PRESETS.vibem, id: 'bonded', layout: {...PRESETS.vibem.layout, unbreakable: true}};
 
 const clip = (id, src, inSec, outSec) => ({id, src: `clips/${src}.mp4`, inSec, outSec, sourceDurationSec: 30});
 const TW = (i, word, s, e) => ({i, word, startMs: s, endMs: e});
@@ -37,15 +41,18 @@ test('a compound name or name + number split across pages is flagged, unrelated 
     page('c3', 'a', [CW('a:5', '326.', 1420, 1800)]),
     page('c4', 'a', [CW('a:9', 'Juan', 2000, 2300)]), // not the word after 326 → a new sentence, not a split
   ];
-  const f = splitNameFindings(pages, [], 'vibem');
+  const f = splitNameFindings(pages, [], 'bonded');
   assert.deepEqual(f.map((x) => x.evidence.pages), [['c0', 'c1'], ['c2', 'c3']]);
   assert.match(f[1].msg, /nombre \+ número/);
   // never delete / retype pages: highlight both words (a span the pager never splits), then re-page
   assert.deepEqual(f[1].fix.map((x) => x.tool), ['annotate_captions', 'set_caption_style']);
   assert.deepEqual(f[1].fix[0].args.items.map((x) => x.wid), ['a:4', 'a:5']);
-  assert.equal(f[1].fix[1].args.style, 'vibem');
+  assert.equal(f[1].fix[1].args.style, 'bonded');
   assert.equal(f[1].fix[1].changesIds, true);
   assert.equal(splitNameFindings(pages, [], 'prism')[1].fix[0].tool, 'escalate'); // a pack that does not bond names
+  // César v11 splits names across pages (profile namesMaySplit): only a glossary term still counts
+  assert.deepEqual(splitNameFindings(pages, [], 'vibem', undefined, true), []);
+  assert.deepEqual(splitNameFindings(pages, [{term: 'Playa del Carmen'}], 'vibem', undefined, true).map((x) => x.evidence.pages), [['c0', 'c1']]);
 });
 
 test('caption sync is one finding per page, with the worst word', () => {
@@ -98,6 +105,13 @@ test('dhash + hamming: the same frame is 0 apart, an inverted one far', () => {
   assert.ok(hamming(dhash(px), dhash(inv)) > 40);
 });
 
+test('reading speed counts the time a page is on screen, the hold included', () => {
+  const quick = [page('c0', 'a', [CW('a:0', 'Desde', 212, 412), CW('a:1', 'el', 432, 512), CW('a:2', 'rooftop', 593, 934)]), page('c1', 'a', [CW('a:3', 'de', 974, 1074)])];
+  assert.deepEqual(overflowFindings(quick, 'vibem').filter((f) => f.check === 'reading-speed'), []); // v11 P1: 16 chars over 0.76 s
+  assert.equal(overflowFindings([quick[0]], 'palabra').filter((f) => f.check === 'reading-speed').length, 0); // 250 ms hold: 16 chars over 0.97 s
+  assert.equal(overflowFindings([page('c0', 'a', [CW('a:0', 'Desde', 0, 100), CW('a:1', 'el', 100, 150), CW('a:2', 'rooftop', 150, 300)]), page('c1', 'a', [CW('a:3', 'de', 320, 400)])], 'vibem').filter((f) => f.check === 'reading-speed').length, 1);
+});
+
 test('overflow: a word too wide even at the minimum size is a blocker', () => {
   const f = overflowFindings([page('c0', 'a', [CW(undefined, 'INCREÍBLEMENTEESPECTACULARÍSIMO', 0, 1000, 2)])].map((c) => ({...c, scale: 1.6})), 'palabra');
   assert.equal(f[0].severity, 'blocker');
@@ -124,7 +138,7 @@ test('diff with the previous iteration: fixed, regressions and findings that sur
 });
 
 // ---- client feedback (César): noise as candidates, new checks, profiles ----
-import {offMicFindings, paginationFindings, accentSizeFindings, glossaryFindings, parseInserts, insertFindings, sentencesOf, parsePhone, phoneFindings, lookOf, colorRefFindings, parityFindings, pickProfile, reelOf, listProfiles} from '../.agents/skills/render-judge/judge.mjs';
+import {offMicFindings, paginationFindings, accentScaleFindings, packFindings, glossaryFindings, parseInserts, insertFindings, sentencesOf, parsePhone, phoneFindings, lookOf, colorRefFindings, parityFindings, pickProfile, reelOf, listProfiles} from '../.agents/skills/render-judge/judge.mjs';
 
 test('candidates never count until the judge confirms them on the frame', () => {
   const cand = {check: 'split-name', severity: 'major', kind: 'candidate'};
@@ -169,7 +183,7 @@ test('crew talk and a camera read are not off-mic', () => {
   assert.deepEqual(f[0].fix[0].args.ranges, [{from_wid: 'a:0', to_wid: 'a:3'}]);
 });
 
-test('one page per sentence; accent at the plain size; the glossary wins', () => {
+test("one page per sentence; accent at the profile's scale; the glossary wins", () => {
   const f = paginationFindings([page('c0', 'a', [CW('a:0', 'Tiene', 0, 300), CW('a:1', 'alberca.', 350, 800), CW('a:2', 'Y', 900, 1000), CW('a:3', 'gym', 1050, 1400)])], 'vibem');
   assert.equal(f.length, 1);
   // a generated page is re-paged by the shared pager (keeps word ids, accents, timing) — never deleted and retyped
@@ -177,8 +191,13 @@ test('one page per sentence; accent at the plain size; the glossary wins', () =>
   const hand = paginationFindings([{...page('c1', 'a', [CW(undefined, 'Tiene', 0, 300), CW(undefined, 'alberca.', 350, 800), CW(undefined, 'Y', 900, 1000)]), covers: ['a:0']}], 'vibem');
   assert.deepEqual(hand[0].fix.map((x) => [x.tool, x.args.text]), [['edit_caption', 'Tiene alberca.']]);
   assert.ok(!f.concat(hand).some((x) => x.fix.some((y) => y.tool === 'delete_captions' || y.tool === 'add_caption')));
-  assert.deepEqual(accentSizeFindings('vibem'), []); // César: yellow at the same size as white — decided in the preset
-  assert.equal(accentSizeFindings('prism').length, 1); // a pack with bigger key words is flagged
+  assert.deepEqual(accentScaleFindings('vibem', 1.15), []); // César v11: yellow at 1.15× the white — decided in the preset
+  assert.deepEqual(accentScaleFindings('vibemReference', 1.15), []); // the old id is the same pack
+  assert.equal(accentScaleFindings('prism', 1.15).length, 1); // key words at another size are flagged
+  // a César project moved to another pack is switched back — never that pack's preset edited
+  const cesar = {match: {captionStyle: ['vibem', 'vibemReference']}};
+  assert.deepEqual(packFindings('caja', cesar, 'vibem').map((x) => [x.check, x.fix[0].tool, x.fix[0].args.style]), [['wrong-pack', 'set_caption_style', 'vibem']]);
+  assert.deepEqual([packFindings('vibem', cesar, 'vibem'), packFindings('vibemReference', cesar, 'vibem'), packFindings('caja', null, undefined)], [[], [], []]);
   const g = glossaryFindings([{text: 'con sky pool privado', ref: 'c4', at: 3}, {text: 'SKYPOOL', ref: 'g1', at: 0}], [{term: 'skypool', variants: ['sky pool', 'skypul']}]);
   assert.equal(g.length, 1); // "SKYPOOL" is the term (case is the style's)
   assert.equal(g[0].fix[0].args.text, 'con skypool privado');
@@ -313,19 +332,19 @@ const pagesText = (ps) => ps.map((p) => p.words.map((w) => w.text).join(' '));
 
 test('split-name recipe end to end: the judge flags "Playa | del Carmen", its annotation reaches the pager, re-paging joins the name', () => {
   const words = tw(['Vivir', 'en', 'Playa', 'del', 'Carmen', 'es', 'fácil.']);
-  const before = pageWords(words, presetOf('vibem'));
+  const before = pageWords(words, presetOf('bonded'));
   assert.deepEqual(pagesText(before), ['Vivir en Playa', 'del Carmen es fácil']);
   const pages = before.map((c) => ({...c, clipId: 'a'}));
-  const [f] = splitNameFindings(pages, [], 'vibem');
+  const [f] = splitNameFindings(pages, [], 'bonded');
   assert.equal(f.kind, 'candidate');
   assert.deepEqual(f.fix.map((x) => x.tool), ['annotate_captions', 'set_caption_style']);
   assert.deepEqual(f.fix[0].args.items.map((x) => x.wid), ['a:2', 'a:3', 'a:4']); // the whole name, connector included
   // apply the recipe: annotate (project tiers) → set_caption_style passes them to the pager
   const tiers = Object.fromEntries(f.fix[0].args.items.map((x) => [x.wid, x.tier]));
   const annotated = pages.map((c) => ({...c, words: c.words.map((w) => (tiers[w.wid] ? {...w, tier: tiers[w.wid]} : w))}));
-  const after = pageWords(withTiers(words, projectTiers(annotated)), presetOf('vibem'));
+  const after = pageWords(withTiers(words, projectTiers(annotated)), presetOf('bonded'));
   assert.deepEqual(pagesText(after), ['Vivir en Playa del Carmen', 'es fácil']);
-  assert.deepEqual(splitNameFindings(after.map((c) => ({...c, clipId: 'a'})), [], 'vibem'), []); // fixed: no longer repeats until "stuck"
+  assert.deepEqual(splitNameFindings(after.map((c) => ({...c, clipId: 'a'})), [], 'bonded'), []); // fixed: no longer repeats until "stuck"
 });
 
 test('a glossary term of any length split across pages is found as a whole', () => {
@@ -355,10 +374,10 @@ test('the judge reads sentence ends from the transcript (captions lose their per
   assert.equal(splitNameFindings(pages, [], 'vibem', (w) => ({'a:1': 'Carmen.'})[w.wid] ?? w.text).length, 0);
 });
 
-test('project tiers: only raised, by word id', () => {
-  assert.deepEqual(projectTiers([{words: [{wid: 'a:1', tier: 1}, {wid: 'a:2', tier: 0}, {text: 'x', tier: 2}]}]), {'a:1': 1});
-  const w = withTiers([{wid: 'a:1', tier: 2}, {wid: 'a:2'}], {'a:1': 1, 'a:2': 1});
-  assert.deepEqual(w.map((x) => x.tier), [2, 1]); // never lowers the classifier's tier
+test('project tiers: every word the project shows, by word id and word, applied exactly', () => {
+  assert.deepEqual(projectTiers([{words: [{wid: 'a:1', text: 'Mérida,', tier: 1}, {wid: 'a:2', text: 'hoy', tier: 0}, {text: 'x', tier: 2}]}]), {'a:1 merida': 1, 'a:2 hoy': 0});
+  const w = withTiers([{wid: 'a:1', word: 'mérida', tier: 2}, {wid: 'a:2', word: 'hoy'}, {wid: 'a:3', word: 'ya', tier: 1}], {'a:1 merida': 1, 'a:2 hoy': 1});
+  assert.deepEqual(w.map((x) => x.tier), [1, 1, 1]); // the project's tier wins, lowered too; a word it does not show keeps its own
 });
 
 // ---- César, G10 V2: black flashes from one frame, cuts inside a source clip, VO promises ----

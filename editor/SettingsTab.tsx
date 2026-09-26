@@ -2,7 +2,8 @@ import React, {useState} from 'react';
 import {useEditor} from './store';
 import {CLEAN} from '../src/audio';
 import {spansWithoutMatte} from '../src/graphicTemplates';
-import {validateProject, transcriptIssues, type Issue} from '../src/validate';
+import {fontFiles, validateProject, transcriptIssues, type Issue} from '../src/validate';
+import {readFont} from '../src/sfnt';
 import type {TClip} from '../src/cuts';
 import type {Matte} from '../src/Person';
 import {runJob, readPublic} from './jobs';
@@ -16,7 +17,7 @@ type MusicRow = {id: string; title: string; creator: string; license: string; du
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 
 export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => void}> = ({notify}) => {
-  const {meta, projectId, clips, music, captions, graphics, mattes, captionStyle, captionsOff, guion, offMic, audio, plan, setMusic, setAudio, setPlan, addMattes} = useEditor();
+  const {meta, projectId, clips, music, captions, graphics, mattes, captionStyle, captionsOff, guion, offMic, audio, plan, brand, setMusic, setAudio, setPlan, addMattes} = useEditor();
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mq, setMq] = useState('');
@@ -61,7 +62,12 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
     // face boxes the captions job wrote, per source; the last transcript run for the off-mic / cut-word checks
     const faces = Object.fromEntries(await Promise.all(clips.map(async (c) => [c.src, await fetch(`/clips/faces/${sourceOf(c.src)}.json`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined)])));
     const tr = await fetch(`/transcript.json?_=${Date.now()}`).then((r) => (r.ok ? r.json() : [])).catch(() => []) as TClip[];
-    setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle, captionsOff, guion}, meta.fps, faces), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
+    // font files the render loads, and the face each one is (a missing path gets the editor's page back, hence the type check)
+    const fonts = Object.fromEntries(await Promise.all(fontFiles({captions, captionStyle, brand}).map(async (f) => [f, await fetch(`/${f}`).then(async (r) => {
+      if (!r.ok || /text\/html/.test(r.headers.get('content-type') ?? '')) return false;
+      try { return readFont(new Uint8Array(await r.arrayBuffer())).fullName ?? true; } catch { return '(not a font file)'; }
+    }).catch(() => undefined)])));
+    setIssues([...validateProject({clips, captions, graphics, mattes, captionStyle, captionsOff, guion, brand}, meta.fps, faces, fonts), ...transcriptIssues({clips, offMic}, Array.isArray(tr) ? tr : [])]);
   };
   const prepareMattes = async () => {
     setBusy('Starting…');

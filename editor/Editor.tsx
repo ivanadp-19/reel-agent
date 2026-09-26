@@ -2,8 +2,8 @@ import React, {useEffect, useLayoutEffect, useMemo, useRef, useState} from 'reac
 import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
-import {projectCaptions, mergeCaptions, normalizeCaption} from '../src/captions';
-import {projectTiers, reapplyTiers} from '../src/paging';
+import {projectCaptions, normalizeCaption} from '../src/captions';
+import {projectTiers, repage} from '../src/paging';
 import {chooseRenderMode, type RenderMode} from '../src/layers';
 import type {PresetId} from '../src/captionPresets';
 import {useEditor} from './store';
@@ -227,23 +227,23 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     }
   };
 
-  // replace = re-page everything for a new style (word tiers carried over by word id)
+  // replace = re-page everything for a style (src/paging.ts repage, as the MCP's set_caption_style); a new
+  // pack proposes its own key words where the old one's were only proposed
   const generateCaptions = async (replace = false, style: PresetId = captionStyle) => {
+    const repropose = replace && style !== captionStyle;
     setGenerating(true);
     setGenLabel('Starting…');
     try {
-      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId, tiers: projectTiers(captions), guion})}).then((x) => x.json());
+      const {jobId} = await fetch('/api/captions', {method: 'POST', body: JSON.stringify({clips, lang, style, offMic, project_id: projectId, tiers: projectTiers(captions, repropose), guion, glossary: useEditor.getState().brand?.glossary ?? []})}).then((x) => x.json()); // the store's kit: a kit loaded this instant re-pages with its own glossary
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
         async () => {
           const fresh = await fetch(`/captions.multi.json?_=${Date.now()}`).then((x) => x.json()).catch(() => []);
           const freshPages = Array.isArray(fresh) ? fresh : [];
-          const {captions: merged, added} = replace
-            ? {captions: [...captions.filter((c) => !c.words.some((w) => w.wid)), ...reapplyTiers(captions, freshPages)], added: freshPages.length}
-            : mergeCaptions(captions, freshPages, clips);
+          const {captions: merged, added, hidden} = repage(captions, freshPages, clips, {hidden: hiddenWids, replace, repropose});
           pushHistory();
-          setCaptions(merged);
+          setCaptions(merged, hidden);
           setGenerating(false);
           notify(added ? `Captions ready (+${added})` : 'Captions up to date', 'ok');
         },
