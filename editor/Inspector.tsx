@@ -7,6 +7,7 @@ import {pageBefore, projectCaptions} from '../src/captions';
 import {projectBrolls, type BrollAsset, type BrollItem} from '../src/brollModel';
 import type {PresetId} from '../src/captionPresets';
 import {PACKS} from '../src/stylePacks';
+import {faceKnobs, type FaceHold} from '../src/faces';
 import {ENTERS, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {GraphicsTab} from './GraphicsTab';
@@ -43,8 +44,9 @@ export const Inspector: React.FC<{
     select, selectClip, setText, movePageStart, shiftCaption, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
     setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setClipTags, setTransitionPattern, applySpeedRamp,
-    captionsOff, setCaptionsOff, guion, setGuion, projectId, identity,
+    captionsOff, setCaptionsOff, guion, setGuion, projectId, identity, faceShift, faceHold, brand, setFaceKnobs,
   } = useEditor();
+  const knobs = faceKnobs({faceShift, faceHold, brand});
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
   const [pageText, setPageText] = useState(''); // the hand-typed page (no JS dialog: automation-driven browsers cannot answer one)
@@ -285,6 +287,16 @@ export const Inspector: React.FC<{
             <div className="flex items-center justify-between mb-5" title="set_captions: the pages are kept, none is rendered (a reel without subtitles)">
               <Label>{captionsOff ? 'Captions off — not rendered' : 'Show captions'}</Label>
               <Toggle on={!captionsOff} onChange={(on) => setCaptionsOff(!on)} />
+            </div>
+            {/* set_captions face_shift / face_hold (src/faces.ts): how far and how long a position holds to clear every face; the pages re-place, their words stay */}
+            <div className="mb-5" title="set_captions face_shift: how far (± % of the height) the captions may move from the pack's position so they never cover a face — 0 = never move (Validate reports it). Pages placed by hand stay">
+              <Label>Cuánto puede moverse para no tapar caras (±{knobs.shift}%)</Label>
+              <input type="range" min={0} max={66} step={1} value={knobs.shift} onChange={(e) => setFaceKnobs({faceShift: Number(e.target.value)})} aria-label="Cuánto puede moverse para no tapar caras (±%)" className="w-full mt-1 mb-2 accent-primary" />
+              <div className="flex items-center gap-2" title="set_captions face_hold: one position per take (never moves inside it), for the whole reel, or per page (the most free)">
+                <Label>Posición</Label>
+                <Select value={knobs.hold} onChange={(v) => setFaceKnobs({faceHold: v as FaceHold})} options={[{value: 'toma', label: 'por toma'}, {value: 'video', label: 'por video'}, {value: 'pagina', label: 'por página'}]} />
+                {faceShift != null || faceHold != null ? <Btn onClick={() => setFaceKnobs({faceShift: null, faceHold: null})}>Kit</Btn> : null}
+              </div>
             </div>
             <div className="mb-5" title="set_guion: generated captions take the script's wording where it aligns with the audio (ASR timing kept); where they disagree the audio stays and Validate reports it">
               <Label>Guion (client script)</Label>

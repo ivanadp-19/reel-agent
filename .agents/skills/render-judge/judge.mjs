@@ -68,6 +68,10 @@ const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
 export const {dhash, hamming} = gradeScan;
 const {projectTranscript} = await import(path.join(ROOT, 'scripts', 'transcript-cache.mjs'));
 const {threadArgs} = await import(path.join(ROOT, 'scripts', 'first-frame.mjs'));
+// captions over a face (src/faces.ts): the same band rule validate places and warns by, on faces YuNet finds in the render
+const {captionHits, facesIn} = await import(src('faces.ts'));
+const {captionLayout} = await import(src('layers.ts'));
+const {canScanFaces, scanFaces} = await import(path.join(ROOT, 'scripts', 'face-scan.mjs'));
 
 const FPS = 30; // the pure rules' default; judge() passes the project's own rate
 // the env the backend's jobs see: ROOT's .env under the process env (the transcript engine, scripts/transcript-cache.mjs)
@@ -966,6 +970,34 @@ export function frameZeroFindings(frames, {fades = {}, video = null} = {}) {
     [{tool: 'frame_at', note: 'look at t = 0 and the next frame; the fix is in the renderer (a separate PR) — until then re-render or trim the first frame by hand, never automatically', args: {at_sec: 0, ...(video ? {video} : {})}}])];
 }
 
+// ---------- captions over a face, as rendered ----------
+// YuNet (scripts/face-scan.mjs, 2 frames a second, niced, cached by the file's path + size + mtime under
+// .captions-tmp/judge/faces/) on the CLEAN master — the pair's (--role captioned --pair) or the version's
+// _master.mp4 next to its snapshot — where no caption hides a face; each page as the render lays it out (the pack's
+// band, around the graphics: src/layers.ts, src/faces.ts captionHits) against the faces seen while it is up. One
+// finding per page, at its worst moment. No clean master: the captioned render itself, said in skipped (a face the
+// captions hide may not be seen); no venv or model: skipped, never a crash.
+export async function captionFaceFindings({p, rate, file, role, pair, snapshot, publicDir, skipped}) {
+  if (!canScanFaces()) { skipped.push('caption-face: no YuNet here (.venv / .models/yunet.onnx) — captions over a face not checked on the render'); return []; }
+  const near = snapshot && fs.existsSync(path.dirname(snapshot)) ? fs.readdirSync(path.dirname(snapshot)).filter((f) => f.endsWith('_master.mp4')).map((f) => path.join(path.dirname(snapshot), f))[0] : null;
+  const master = (role === 'captioned' && pair && fs.existsSync(pair) ? pair : null) ?? near;
+  if (!master) skipped.push('caption-face: no clean master (--role captioned --pair <…_master.mp4>) — looked at the captioned render, where a face the captions hide may not be seen');
+  const seen = master ?? file;
+  let scan;
+  try { scan = await scanFaces(publicDir, seen, {out: path.join(ROOT, '.captions-tmp', 'judge', 'faces', `${path.basename(seen).replace(/[^\w.-]+/g, '_')}.json`), cuts: false}); } catch (e) { skipped.push(`caption-face: ${String(e?.message ?? e).slice(0, 160)}`); return []; }
+  const pages = captionLayout(p, rate).shownCaptions;
+  const facesAt = (ms) => facesIn(scan, ms / 1000).map((f) => ({left: f.left * 100, top: f.top * 100, right: f.right * 100, bottom: f.bottom * 100}));
+  const worst = new Map();
+  for (const h of captionHits(pages, p.captionStyle, facesAt)) if (!(worst.get(h.i)?.area >= h.area)) worst.set(h.i, h);
+  const pc = (x) => Math.round(x);
+  return [...worst.values()].map((h) => {
+    const c = pages[h.i], at = r2(h.ms / 1000);
+    return F('caption-face', 'major', 'rule', r2(c.startMs / 1000), r2(c.endMs / 1000), `la página ${c.id} ("${c.words.map((w) => w.text).join(' ').slice(0, 40)}") tapa una cara a los ${at} s: cara ${pc(h.face.top)}–${pc(h.face.bottom)} %, subtítulos ${pc(h.top)}–${pc(h.bottom)} % de la altura (visto en ${master ? 'el master limpio' : 'el render con subtítulos'})`,
+      {page: c.id, face: h.face, band: {top: h.top, bottom: h.bottom, left: h.x[0], right: h.x[1]}, lookAt: at, frames: path.basename(seen)},
+      [{tool: 'validate', note: 'caption-face names the take and the fix: raise face_shift (set_captions), fewer lines, a smaller size, a B-roll over the face, or a position by hand (edit_caption top_pct)', args: {}}]);
+  });
+}
+
 // ---------- a cut or a whip INSIDE a source clip ----------
 // Every used range of every source (clips: inSec→outSec; B-roll video cues: the first seconds
 // of their file, which is where the render plays them from) is scanned for scene changes
@@ -1450,6 +1482,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     findings.push(...offPack);
     if (profile?.captions?.accentScale && !offPack.length) findings.push(...accentScaleFindings(p.captionStyle, profile.captions.accentScale));
   }
+  if (pages.length) findings.push(...await captionFaceFindings({p, rate, file, role, pair: pair && resolve(pair), snapshot, publicDir, skipped}));
   const texts = [
     ...pages.map((c) => ({text: c.words.map((w) => w.text).join(' '), ref: c.id, at: c.startMs / 1000})),
     ...gfx.map((g) => ({text: Object.values(g.props ?? {}).flatMap((x) => (typeof x === 'string' ? [x] : Array.isArray(x) ? x.map((l) => l?.text ?? '').filter(Boolean) : [])).join(' '), ref: g.id, at: g.startMs / 1000})),
@@ -1461,7 +1494,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (role !== 'master' && firstText * 1000 > T.firstTextMs && total > 5) findings.push(F('hook-text', 'major', 'rule', 0, Number.isFinite(firstText) ? firstText : null, `nada escrito en pantalla hasta ${Number.isFinite(firstText) ? `${firstText.toFixed(1)} s` : 'el final'} — el hook no se lee sin audio`, {}, [{tool: 'add_graphic', note: 'hook-stack / big-word at the first word (reel-edit step 5)', args: {template: 'hook-stack', at_wid: words[0]?.wid}}]));
 
   // --- validate (src/validate.ts) — estimated geometry: heuristic ---
-  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
+  const sevOf = {'caption-face': 'major', matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
   const whenOf = (ref) => { const c = pages.find((x) => x.id === ref); if (c) return [c.startMs / 1000, c.endMs / 1000]; const g = gfx.find((x) => x.id === ref); return g ? [g.startMs / 1000, g.endMs / 1000] : [null, null]; };
   for (const i of validateProject(p, rate)) {
     if (i.code === 'hook' && (role === 'master' || findings.some((f) => f.check === 'hook-text'))) continue;

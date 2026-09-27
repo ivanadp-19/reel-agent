@@ -103,8 +103,8 @@ export const DEFAULT_TOP = 58;
 type Item = {w: TimelineWord; word: string; text: string; cut: boolean};
 type Page = Item[];
 
-// topBySrc: vertical position per source file (face-aware placement), % from top
-export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Record<string, number> = {}): Caption[] {
+// every page at the pack's top (layout.topPct, else DEFAULT_TOP); src/faces.ts placeCaptions then moves them off the faces
+export function pageWords(words: TimelineWord[], preset: Preset): Caption[] {
   const {maxWords, maxCharsLine, unbreakable, topPct, keepCommas, figurePages, glueExcept, silenceMs = GAP_MS, maxChars = Infinity, maxMs = Infinity, minMs = 0, minWords} = preset.layout;
   const glue = (t: string) => isGlue(t, glueExcept);
 
@@ -280,7 +280,7 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       words: keepCommas ? ws.map((w, k) => (k === ws.length - 1 ? {...w, text: noComma(w.text)} : w)) : ws, // a page-final comma goes
       startMs: ws[0].startMs,
       endMs: ws[ws.length - 1].endMs,
-      topPct: topPct ?? topBySrc[src] ?? DEFAULT_TOP, // a pack's pinned top wins over face-aware placement
+      topPct: topPct ?? DEFAULT_TOP,
     };
   });
 }

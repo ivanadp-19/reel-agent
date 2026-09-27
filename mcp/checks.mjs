@@ -15,6 +15,8 @@ import {readScan} from '../scripts/grade-scan.mjs';
 import {scopeFindings, stageFindings} from '../src/stages.ts';
 import {readWind} from '../scripts/wind-scan.mjs';
 import {windIssues} from '../src/audio.ts';
+import {captionFaceIssues, faceCacheName, placeCaptions} from '../src/faces.ts';
+import {canScanFaces, readFaces} from '../scripts/face-scan.mjs';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -24,8 +26,18 @@ export function withDefaults(p) {
   return p;
 }
 
-// face boxes the captions job detected (public/clips/faces/<source>.json), by clip src
-export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(publicDir, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
+// the face scans (scripts/face-scan.mjs, public/clips/faces/<source>.json) of the project's clips and local B-roll, by src:
+// samples over time for the captions (src/faces.ts), the summary box for the graphics' face rule (src/validate.ts)
+export const facesOf = (p, publicDir) => Object.fromEntries([...new Set([...p.clips, ...(p.brolls ?? [])].map((c) => c.src).filter((s) => !/^https?:/i.test(s)))].map((src) => { try { return [src, JSON.parse(fs.readFileSync(path.join(publicDir, 'clips', 'faces', faceCacheName(src)), 'utf8'))]; } catch { return [src, undefined]; } }));
+
+// the pack's own font file read, so a page's lines are measured as rendered (src/captionLayout.ts realAdvances):
+// validate's caption band and the face placement. Missing or not a font: the estimate (validate: font-missing)
+export function packFont(p, publicDir) {
+  const custom = presetOf(p.captionStyle).font.custom;
+  if (custom) try { realAdvances(custom.family, readFont(fs.readFileSync(path.join(publicDir, custom.file))).advance); } catch {}
+}
+// the project's pages placed clear of the faces (src/faces.ts), at the rate it renders at
+export const placedCaptions = (p, publicDir) => { packFont(p, publicDir); return placeCaptions(p, facesOf(p, publicDir), deliveryFps(p)); };
 
 // this project's words, from its sources' transcript caches (scripts/transcript-cache.mjs projectTranscript),
 // never the machine's last transcription run; `env` (the caller's ROOT .env + process env) picks the engine
@@ -52,12 +64,13 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const scans = Object.fromEntries(srcs.map((src) => [src, readScan(publicDir, src)]));
   const winds = Object.fromEntries(srcs.map((src) => [src, readWind(publicDir, src)]));
   const pending = srcs.filter((src) => scans[src] === null), failed = srcs.filter((src) => scans[src]?.error);
-  const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null);
+  const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null || (canScanFaces() && readFaces(publicDir, src) === null));
   if (kicked.length) try { kick?.(kicked); } catch {}
   const words = await projectWords(p, publicDir, env);
   // wind is the take's: the quiet of each whole source (between its first and last word), not only what the cut keeps
   const takes = Object.fromEntries((await projectWords({...p, clips: srcs.map((src) => ({id: src, src, inSec: 0, outSec: Infinity}))}, publicDir, env)).map((t) => [t.clipId, t.words]));
-  const {inScope, advisory} = scopeFindings([...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
+  const faces = facesOf(p, publicDir);
+  const {inScope, advisory} = scopeFindings([...validateProject(p, fps, faces, fonts), ...captionFaceIssues(p, faces, fps), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
     ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))], p.scope);
   return [...inScope, ...advisory.map(({advisory: _, ...i}) => ({...i, level: 'warn', msg: `${i.msg.split(' Fix: ')[0]} — ${i.omitted} omitida (the job did not ask for it): advisory, report it, do not fix it`}))];

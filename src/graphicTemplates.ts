@@ -424,3 +424,16 @@ export function projectGraphics(items: Graphic[], clips: Clip[], fps: number): G
   }
   return out.sort((a, b) => a.startMs - b.startMs);
 }
+
+// ---- layouts: where the video and the B-roll panel go (LayoutStage draws it; src/faces.ts maps faces through it) ----
+export type Box = {top: number; left: number; width: number; height: number}; // % of frame
+export const WINDOW_BAR = 44; // px, Mac OS classic title bar over a 'window' layout's video
+export const layoutBoxes = (props: any): {video: Box; panel: Box | null} => {
+  const m = props.inset ?? 7;
+  const full = {top: m, left: m, width: 100 - 2 * m, height: 100 - 2 * m};
+  if (props.split === 'broll-bottom') return {video: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}, panel: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}};
+  if (props.split === 'broll-top') return {video: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}, panel: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}};
+  // a true circle: equal pixels, so height% = width% × (1080/1920)
+  if (props.shape === 'circle') { const d = Math.min(full.width, full.height * (16 / 9)); return {video: {top: 50 - (d * 9) / 16 / 2, left: 50 - d / 2, width: d, height: (d * 9) / 16}, panel: null}; }
+  return {video: full, panel: null};
+};

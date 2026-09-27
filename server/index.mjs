@@ -56,6 +56,7 @@ import {createClipIngest} from './ingest.mjs';
 import {createDrive, createDriveImport} from './drive.mjs';
 import {createGradeScans, readScan, scanSource} from '../scripts/grade-scan.mjs';
 import {readWind, scanWind} from '../scripts/wind-scan.mjs';
+import {canScanFaces, readFaces, scanFaces} from '../scripts/face-scan.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -294,11 +295,17 @@ const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
 // half-graded sources (scripts/grade-scan.mjs): every frame of a source, niced, one scan at a time in the
 // background — after an ingest, and for the unscanned sources a validate finds; never inside a request.
-// The same lane measures each source's audio for wind first (scripts/wind-scan.mjs, a few seconds): a source
-// counts as scanned once both are current
+// The same lane measures each source's audio for wind first (scripts/wind-scan.mjs, a few seconds) and its faces
+// over time (scripts/face-scan.mjs, for captions that never cover one — skipped without the venv / model): a source
+// counts as scanned once all are current
 const gradeScans = createGradeScans({publicDir: PUBLIC,
-  read: (dir, src) => { const g = readScan(dir, src); return g && !readWind(dir, src) ? null : g; },
-  scan: async (src) => { await scanWind(PUBLIC, src).catch((e) => console.log(`wind scan ${src}: ${String(e?.message ?? e).slice(0, 200)}`)); return scanSource(PUBLIC, src); }});
+  read: (dir, src) => { const g = readScan(dir, src); return g && (!readWind(dir, src) || (canScanFaces() && !readFaces(dir, src))) ? null : g; },
+  scan: async (src) => {
+    const note = (what) => (e) => console.log(`${what} scan ${src}: ${String(e?.message ?? e).slice(0, 200)}`);
+    await scanWind(PUBLIC, src).catch(note('wind'));
+    if (canScanFaces()) await scanFaces(PUBLIC, src).catch(note('face'));
+    return scanSource(PUBLIC, src);
+  }});
 const freeDiskBytes = () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; };
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure,
   freeBytes: freeDiskBytes, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});

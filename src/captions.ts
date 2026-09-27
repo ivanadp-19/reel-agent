@@ -30,7 +30,8 @@ export type Caption = {
   endMs: number;
   topPct: number;
   scale?: number; // size multiplier (1 = default), set via the on-preview slider
-  pin?: boolean; // explicit vertical position: float presets honor topPct instead of cycling
+  pin?: boolean; // explicit vertical position (a person set it): float presets honor topPct instead of cycling; the face placement never moves it
+  slot?: number; // a floating page the face placement moved (src/faces.ts): its FLOAT_SLOTS corner (the alignment), at topPct
   covers?: string[]; // hand-edited page: the transcript word ids it stands in for (re-paging skips them)
   behind?: boolean; // drawn behind the presenter (needs a person matte for its span, like behind graphics)
   shiftMs?: number; // shown this far off the time its words are said (edit_caption shift_ms): the text moves, the speech does not

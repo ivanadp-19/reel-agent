@@ -3,7 +3,7 @@
 // caption_proof stills); the point is to catch the obvious before a render.
 
 import {projectCaptions, type Caption} from './captions.ts';
-import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
+import {floatSlot, pageScale, presetOf, type Preset} from './captionPresets.ts';
 import {fitPage} from './captionLayout.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
@@ -20,19 +20,25 @@ export type Issue = {level: 'error' | 'warn'; code: string; msg: string; ref?: s
 export const SAFE = {topPct: 13, bottomPct: 79, rightPct: 88};
 const W = 1080, H = 1920;
 
-type Band = {top: number; bottom: number}; // % of frame height
+export type Band = {top: number; bottom: number}; // % of frame height
 
-// on-screen band of a caption page for its preset, for validate's warnings: its lines at its size as the
-// renderer lays them out (src/captionLayout.ts fitPage — a pack's own font measured once its file is read:
-// mcp/checks.mjs, the render judge); index = its place in the projected list (floating presets cycle their
-// slots by it, like the renderer)
-function captionBand(c: Caption, style: string | undefined, index: number): Band {
+// a page's block, % of the frame, as the renderer lays it out (src/captionLayout.ts fitPage — a pack's own font measured
+// once its file is read: mcp/checks.mjs, the render judge): its height (its lines at its size, + a container's padding)
+// and its widest line (src/faces.ts: which faces it can meet)
+export function captionBlock(c: Caption, p: Preset, float: boolean): {h: number; w: number} {
+  const {lines, units, fontSize} = fitPage(c, p, {float});
+  const gap = (p.font.wordGapEm ?? 0.26) * fontSize, pad = p.container !== 'none' ? p.font.sizePx * 0.5 : 0;
+  const widths = lines.map((a, k) => units.slice(a, lines[k + 1] ?? units.length).reduce((n, u, j) => n + u.em * fontSize + (j ? gap : 0), 0));
+  return {h: ((Math.max(1, lines.length) * fontSize * p.font.lineHeight + pad) / H) * 100, w: ((Math.max(0, ...widths) + 2 * pad) / W) * 100};
+}
+// on-screen band of a caption page for its preset, for validate's warnings and the face placement (src/faces.ts);
+// index = its place in the projected list (floating presets cycle their slots by it, like the renderer, unless the
+// face placement gave it one: floatSlot)
+export function captionBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
   const float = p.position === 'float' && !c.pin;
-  const {lines, fontSize} = fitPage(c, p, {float});
-  const hPx = Math.max(1, lines.length) * fontSize * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
-  const top = float ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
-  return {top, bottom: top + (hPx / H) * 100};
+  const top = float ? floatSlot(c, index).top : c.topPct;
+  return {top, bottom: top + captionBlock(c, p, float).h};
 }
 // the band avoidGraphics PLACES a page by, inside every render: characters over maxCharsLine, never a font's
 // widths — MultiClipVideo places the pages before any font file is read, so fitPage's band would move a page
@@ -44,7 +50,7 @@ function placeBand(c: Caption, style: string | undefined, index: number): Band {
   const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
   const scale = (c.scale ?? 1) * pageScale(p, c.words.length);
   const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
-  const top = p.position === 'float' && !c.pin ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
+  const top = p.position === 'float' && !c.pin ? floatSlot(c, index).top : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};
 }
 

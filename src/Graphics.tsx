@@ -1,6 +1,6 @@
 import React, {createContext, useContext} from 'react';
 import {Sequence, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, Easing} from 'remotion';
-import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, backing, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
+import {CENTERED, DECOR_FULL, FULL_FRAME, STAR_PX, TEMPLATES, WINDOW_BAR, backing, layoutBoxes, oversizedPx, type Graphic, type Out, type Reveal} from './graphicTemplates';
 import {TEXT_REVEALS, arrive, layoutIn, layoutOut, leave, lifeFx, ms, revealText, scrambleChar, unfold, windowTrail, type ArriveKind, type LayoutIn, type LeaveKind, type TextReveal} from './motion';
 import {seedOf} from './transitions';
 import {fontFamily, heaviest, type FontFamily} from './fonts';
@@ -591,7 +591,7 @@ const One: React.FC<{g: Graphic; accent: string; durationInFrames: number; title
 };
 
 // ---- layouts: frame the base video ----
-export type Box = {top: number; left: number; width: number; height: number}; // % of frame
+export {layoutBoxes, WINDOW_BAR, type Box} from './graphicTemplates';
 
 // the layout active at the current frame (projected graphics of template 'layout')
 export const useActiveLayout = (items: Graphic[]): Graphic | null => {
@@ -601,20 +601,8 @@ export const useActiveLayout = (items: Graphic[]): Graphic | null => {
   return items.find((g) => g.template === 'layout' && ms >= g.startMs && ms < g.endMs) ?? null;
 };
 
-// where the video and the B-roll panel go for a layout
-export const layoutBoxes = (props: any): {video: Box; panel: Box | null} => {
-  const m = props.inset ?? 7;
-  const full = {top: m, left: m, width: 100 - 2 * m, height: 100 - 2 * m};
-  if (props.split === 'broll-bottom') return {video: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}, panel: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}};
-  if (props.split === 'broll-top') return {video: {top: 50, left: m, width: 100 - 2 * m, height: 50 - m}, panel: {top: m, left: m, width: 100 - 2 * m, height: 46 - m}};
-  // a true circle: equal pixels, so height% = width% × (1080/1920)
-  if (props.shape === 'circle') { const d = Math.min(full.width, full.height * (16 / 9)); return {video: {top: 50 - (d * 9) / 16 / 2, left: 50 - d / 2, width: d, height: (d * 9) / 16}, panel: null}; }
-  return {video: full, panel: null};
-};
-
 const SHAPE_RADIUS: Record<string, string> = {rounded: '36px', arch: '50% 50% 28px 28px / 42% 42% 28px 28px', circle: '50%', phone: '64px', window: '10px', none: '0'};
 const BORDER: Record<string, string> = {none: 'none', thin: '3px solid rgba(255,255,255,0.85)', glass: '1.5px solid rgba(255,255,255,0.35)', accent: '6px solid var(--accent)'};
-const WINDOW_BAR = 44; // px, Mac OS classic title bar
 
 // wraps the clip layer: canvas behind, the clips inside a shaped, inset frame. `footage` is the clip layer
 // (hidden by a cutout layout so the canvas shows behind the cut-out presenter); `children` are the layers

@@ -5,24 +5,25 @@ import type {Graphic} from './graphicTemplates';
 
 export {projectBrolls} from './brollModel';
 export type {BrollItem, BrollAsset} from './brollModel';
-import type {BrollItem} from './brollModel';
+import {BROLL_BOX, type BrollItem} from './brollModel';
 import {transitionFx} from './transitions';
-import {brollIn, brollOut, cardLanding, ms} from './motion';
+import {brollMotion} from './motion';
 
 // remote (Pexels) URLs load directly; local paths go through staticFile
 const resolveSrc = (s: string) => (/^https?:\/\//.test(s) ? s : staticFile(s));
 
+// where each mode's box sits (src/brollModel.ts BROLL_BOX, % of the frame — src/faces.ts maps faces through it), and its look
+const pct = (b: {top: number; left: number; width: number; height: number}) => ({top: `${b.top}%`, left: `${b.left}%`, width: `${b.width}%`, height: `${b.height}%`});
 const boxByMode: Record<BrollItem['mode'], React.CSSProperties> = {
-  fullscreen: {top: 0, left: 0, width: '100%', height: '100%'},
-  top: {top: 0, left: 0, width: '100%', height: '45%'},
-  inset: {top: '6%', right: '5%', width: '34%', height: '22%', borderRadius: 18, overflow: 'hidden', border: '3px solid rgba(255,255,255,0.9)', boxShadow: '0 20px 50px rgba(0,0,0,0.5)'},
+  fullscreen: pct(BROLL_BOX.fullscreen),
+  top: pct(BROLL_BOX.top),
+  inset: {...pct(BROLL_BOX.inset), borderRadius: 18, overflow: 'hidden', border: '3px solid rgba(255,255,255,0.9)', boxShadow: '0 20px 50px rgba(0,0,0,0.5)'},
   // Prism Pro: a square card, 80 % wide, centred a touch above the middle, over the blurred footage
-  card: {top: '28%', left: '10%', width: '80%', height: '45%', overflow: 'hidden', boxShadow: '0 30px 80px rgba(0,0,0,0.35)'},
+  card: {...pct(BROLL_BOX.card), overflow: 'hidden', boxShadow: '0 30px 80px rgba(0,0,0,0.35)'},
   // Prime: three panels in the lower half (the box is the centre panel; the sides are drawn from it)
-  carousel: {top: '52%', left: '32%', width: '36%', height: '40%', overflow: 'visible'},
+  carousel: {...pct(BROLL_BOX.carousel), overflow: 'visible'},
 };
 const CAROUSEL_STEP_MS = 2400; // a step every 2.4 s, taken in 2 frames with motion blur
-const CARD_EXIT_MS = 500; // it leaves upwards, accelerating (12 f at 24 fps)
 
 type Defaults = {arrive: BrollItem['arrive']; leave: BrollItem['leave']}; // the style pack's, for cues that do not say
 const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width: number; height: number} | null; defaults?: Defaults}> = ({item, panel, defaults}) => {
@@ -44,18 +45,14 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   const card = item.mode === 'card' && !panel;
   const carousel = item.mode === 'carousel' && !panel;
   const dur = Math.max(1, Math.round(((item.endMs - item.startMs) / 1000) * fps));
-  const exitT = card ? Math.min(1, Math.max(0, 1 - (dur - 1 - frame) / ms(fps, CARD_EXIT_MS))) : 0;
-  const cardY = card ? (1 - cardLanding(frame, fps)) * 900 - exitT * exitT * 1500 : 0;
-  // the box's own arrival and exit (src/motion.ts): dx/dy in % of the box, then scale
-  const arriveK = item.arrive ?? defaults?.arrive ?? 'cut', leaveK = item.leave ?? defaults?.leave ?? 'cut';
-  const inFx = brollIn(arriveK, frame, fps);
-  const outFx = brollOut(leaveK, dur - 1 - frame, fps);
+  // the box's own arrival and exit, its size and a card's rise (src/motion.ts brollMotion): dx/dy in % of the box, then scale
+  const mo = brollMotion({arrive: item.arrive ?? defaults?.arrive ?? 'cut', leave: item.leave ?? defaults?.leave ?? 'cut', scale, card}, frame, dur, fps);
   const move = [
-    inFx.dx + outFx.dx || inFx.dy + outFx.dy ? `translate(${(inFx.dx + outFx.dx).toFixed(1)}%, ${(inFx.dy + outFx.dy).toFixed(1)}%)` : '',
-    scale * inFx.scale * outFx.scale === 1 ? '' : `scale(${(scale * inFx.scale * outFx.scale).toFixed(3)})`,
-    card ? `translateY(${cardY.toFixed(1)}px)` : '',
+    mo.dx || mo.dy ? `translate(${mo.dx.toFixed(1)}%, ${mo.dy.toFixed(1)}%)` : '',
+    mo.scale === 1 ? '' : `scale(${mo.scale.toFixed(3)})`,
+    card ? `translateY(${mo.cardY.toFixed(1)}px)` : '',
   ].filter(Boolean).join(' ');
-  const boxBlur = inFx.blur + outFx.blur;
+  const boxBlur = mo.blur;
   const media = (offsetSec = 0, style: React.CSSProperties = {}) => item.kind === 'video'
     ? <VideoComp src={src} muted trimBefore={Math.round(offsetSec * fps)} style={{width: '100%', height: '100%', objectFit: 'cover', ...style}} />
     : <Img src={src} style={{width: '100%', height: '100%', objectFit: 'cover', ...style}} />;
@@ -79,7 +76,7 @@ const One: React.FC<{item: BrollItem; panel?: {top: number; left: number; width:
   };
 
   return (
-    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: (inFx.opacity ?? 1) * (outFx.opacity ?? 1), transform: move || undefined, transformOrigin: origin, filter: boxBlur > 0.2 ? `blur(${boxBlur.toFixed(1)}px)` : undefined}}>
+    <div data-ab={`broll:${item.id}`} style={{position: 'absolute', ...box, opacity: mo.opacity, transform: move || undefined, transformOrigin: origin, filter: boxBlur > 0.2 ? `blur(${boxBlur.toFixed(1)}px)` : undefined}}>
       {carousel ? (
         <div style={{position: 'absolute', inset: 0, transform: stepping ? `translateX(${(-104 * (1 - stepT)).toFixed(1)}%)` : undefined}}>{[-1, 0, 1].map((k) => panel3(k as -1 | 0 | 1))}</div>
       ) : (

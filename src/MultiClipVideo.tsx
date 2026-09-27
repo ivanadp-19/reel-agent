@@ -6,7 +6,7 @@ import {type Caption} from './captions';
 import {packOf} from './stylePacks';
 import {GraphicsLayer, LayoutStage} from './Graphics';
 import {type Graphic} from './graphicTemplates';
-import {captionLayout} from './layers';
+import {captionLayout, pullAt, PULL_ORIGIN_Y, type Span, type Zoom} from './layers';
 import {placeClips, totalDurationFrames, type Clip, type Music} from './timeline';
 import {ClipMedia} from './ClipMedia';
 import {PersonLayer, type Matte} from './Person';
@@ -14,46 +14,20 @@ import {BrandContext, resolveBrand, type Brand} from './brand';
 import {registerClientFonts} from './fonts';
 import {gradeFor, type ProjectGrade} from './grade';
 import {COVER, DUR_MS, OVER, REVEALS, WHOOSH, coverShapes, overlapOf, seedOf, toneColor, type Enter} from './transitions';
-import {ms as msToFrames} from './motion';
 import {musicGain} from './audio';
 
-// Focus pull: the footage blurs (and grows a touch so the blurred edges stay off
-// screen) while a tier-2 caption word or a B-roll card is up — Captions.ai
-// Prism's signature. The same wrapper lands the reel's opening: a radial
-// zoom-blur (or a plain blur-in) clearing over the first ~200 ms.
-type Span = {startMs: number; endMs: number};
-const JL_RAMP_FRAMES = 4; // J/L-cut audio fades over this many frames at its free edge
-const smooth = (x: number) => x * x * (3 - 2 * x);
-// 0→1 inside a span with ramps at both ends (ms)
-const inSpans = (ms: number, spans: Span[], IN: number, OUT: number) => {
-  let k = 0;
-  for (const s of spans) {
-    if (ms < s.startMs || ms > s.endMs) continue;
-    k = Math.max(k, Math.min(1, Math.max(0, Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1))));
-  }
-  return smooth(k);
-};
-type Zoom = Span & {scale: number; inMs: number; outMs: number}; // a camera push that lives with a title (Orbit)
-const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; zooms?: Zoom[]; children: React.ReactNode}> = ({spans, blurPx, opening = 'none', punch, pulses = [], zooms = [], children}) => {
+// Focus pull: the footage blurs (and grows a touch so the blurred edges stay off screen) while a tier-2 caption
+// word or a B-roll card is up, and lands the reel's opening, punches and pulses — src/layers.ts pullAt, which
+// src/faces.ts reads too (where a face ends up on screen)
+const FocusPull: React.FC<{spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; zooms?: Zoom[]; children: React.ReactNode}> = ({children, ...o}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const ms = (frame / fps) * 1000;
-  const k = inSpans(ms, spans, 150, 240); // the blur is gone by the time the span ends (the next page lands sharp)
-  const openF = msToFrames(fps, 210);
-  const o = opening !== 'none' && frame < openF ? 1 - smooth(frame / openF) : 0; // 1 at the first frame, gone by ~200 ms
-  const p = punch ? inSpans(ms, punch.spans, 125, 125) : 0; // Impact II: 1.12× in 3–4 f on the hero word
-  const g = pulses.length ? inSpans(ms, pulses, 125, 125) : 0; // Impact II: a 250 ms blur + chromatic pulse
-  let z = 0; // Orbit: 1.0 → 1.4× in 8 f from 3 f before the title, back over ~6 f when it leaves
-  for (const zm of zooms) {
-    if (ms < zm.startMs || ms > zm.endMs + zm.outMs) continue;
-    const v = ms < zm.startMs + zm.inMs ? (ms - zm.startMs) / zm.inMs : ms <= zm.endMs ? 1 : 1 - (ms - zm.endMs) / zm.outMs;
-    z = Math.max(z, zm.scale * smooth(Math.min(1, Math.max(0, v))));
-  }
-  const blur = Math.max(k * blurPx, o * 24, g * 14);
-  const scale = 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0) + (punch?.scale ?? 0) * p + 0.04 * g + z;
+  const {blur, scale, g} = pullAt(frame, fps, o);
   const split = g > 0.05 ? ` drop-shadow(${(6 * g).toFixed(1)}px 0 rgba(255,0,90,0.7)) drop-shadow(${(-6 * g).toFixed(1)}px 0 rgba(0,220,255,0.7))` : '';
-  return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)${split}`, transform: `scale(${scale.toFixed(3)})`, transformOrigin: '50% 38%'} : undefined}>{children}</AbsoluteFill>;
+  return <AbsoluteFill style={blur > 0.3 || scale > 1.001 ? {filter: `blur(${blur.toFixed(1)}px)${split}`, transform: `scale(${scale.toFixed(3)})`, transformOrigin: `50% ${PULL_ORIGIN_Y}%`} : undefined}>{children}</AbsoluteFill>;
 };
+
+const JL_RAMP_FRAMES = 4; // J/L-cut audio fades over this many frames at its free edge
 
 // Cover transitions: shapes drawn over the cut (above footage and B-roll, below graphics and captions)
 const TransitionOverlay: React.FC<{cuts: {frame: number; kind: Enter; seed: number}[]; accent: string}> = ({cuts, accent}) => {

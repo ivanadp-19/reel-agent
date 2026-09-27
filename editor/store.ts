@@ -15,10 +15,11 @@ import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cut
 import type {AudioOptions} from '../src/audio';
 import type {Identity} from '../src/validate';
 import type {Scopable} from '../src/stages';
+import type {FaceHold} from '../src/faces';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null; scope: Scopable[] | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null; scope: Scopable[] | null; faceShift: number | null; faceHold: FaceHold | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -52,6 +53,8 @@ type EditorState = {
   audio: AudioOptions; // voice cleanup + sfx (set_audio / Settings tab)
   plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
+  faceShift: number | null; // this project's reach to clear a face, ± % (set_captions face_shift); null = the kit's / the default (src/faces.ts)
+  faceHold: FaceHold | null; // how long one caption position holds: toma / video / pagina (set_captions face_hold); null = the kit's / the default
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
   identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
   scope?: Scopable[] | null; // the stages the job asks for (set_scope / Settings → Stages); null or undefined = all
@@ -129,6 +132,7 @@ type EditorState = {
   setGrade: (grade: ProjectGrade | null) => void;
   setAudio: (audio: AudioOptions) => void;
   setCaptionsOff: (captionsOff: boolean) => void;
+  setFaceKnobs: (k: {faceShift?: number | null; faceHold?: FaceHold | null}) => void;
   setPlan: (plan: string) => void;
   setGuion: (guion: string) => void;
   setIdentity: (identity?: Identity | null) => void;
@@ -182,6 +186,8 @@ export const useEditor = create<EditorState>((set) => ({
   audio: null,
   plan: '',
   captionsOff: false,
+  faceShift: null,
+  faceHold: null,
   guion: '',
   past: [],
   future: [],
@@ -210,6 +216,8 @@ export const useEditor = create<EditorState>((set) => ({
         audio: p.audio ?? null,
         plan: p.plan ?? '',
         captionsOff: p.captionsOff ?? false,
+        faceShift: p.faceShift ?? null,
+        faceHold: p.faceHold ?? null,
         guion: p.guion ?? '',
         identity: p.identity,
         scope: p.scope,
@@ -524,6 +532,7 @@ export const useEditor = create<EditorState>((set) => ({
   setGrade: (grade) => set({grade}),
   setAudio: (audio) => set({audio}),
   setCaptionsOff: (captionsOff) => set({captionsOff}),
+  setFaceKnobs: (k) => set(k),
   setPlan: (plan) => set({plan}),
   setGuion: (guion) => set({guion}),
   setScope: (scope) => set({scope}),

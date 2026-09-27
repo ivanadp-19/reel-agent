@@ -4,18 +4,19 @@
 //         — the editor's CURRENT cut (trim + order).
 // Steps : 1) transcribe each source clip with WhisperX (cached per source),
 //         2) map words onto the assembled/trimmed timeline,
-//         3) face-aware vertical placement (local YuNet),
-//         4) page words per the caption preset (src/paging.ts) → argv[3] (the backend's job: its own file; by hand:
-//            public/captions.multi.json)
+//         3) page words per the caption preset (src/paging.ts),
+//         4) place the pages clear of every face (src/faces.ts, local YuNet scans) → argv[3] (the backend's job: its own
+//            file; by hand: public/captions.multi.json)
 // Yellow words: the project's own tiers (`tiers`, every word it shows) apply exactly; only words it does
 // not show yet get the pack's rule-based proposal (src/highlights.ts yellowWords). The agent adjusts them.
 // Output: PROGRESS:<pct>:<label> lines on stdout for the server to relay.
 import fs from 'node:fs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
-import {assembleWords, sourceKey} from './lib-transcribe.mjs';
+import {assembleWords} from './lib-transcribe.mjs';
 import {yellowWords, applyGuionPunctuation} from '../src/highlights.ts';
-import {pageWords, DEFAULT_TOP} from '../src/paging.ts';
+import {pageWords} from '../src/paging.ts';
+import {canScanFaces, readFaces, scanFaces} from './face-scan.mjs';
+import {placedCaptions} from '../mcp/checks.mjs';
 import {reconcileWords, reconciliationLine, applyGlossary, joinFigures} from '../src/guion.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
@@ -28,68 +29,6 @@ const {clips, lang = 'auto', style, offMic = 'mark', tiers = {}, project_id, gui
 if (!clips?.length) {
   console.error('no clips');
   process.exit(1);
-}
-
-// --- face-aware placement (one frame per source clip → local YuNet) ---
-// Captions default to 58% down the frame, which on a talking head lands on the
-// mouth. Find the face and put the block just under the chin, or above the
-// head when the face sits low. Cached per source file.
-// Disable with REEL_FACE_AWARE=0 in .env.
-const FACES_DIR = path.join(PUBLIC, 'clips', 'faces');
-const TMP = path.join(ROOT, '.captions-tmp');
-const MODEL = path.join(ROOT, '.models', 'yunet.onnx');
-const BLOCK_PCT = 9; // ≈ two caption lines at 62px on a 1920px frame
-const MIN_TOP = 8;
-const MAX_TOP = 72; // block bottom ≤ ~81%: stays clear of the Reels UI strip
-
-function faceToTop(face) {
-  if (!face?.found) return DEFAULT_TOP;
-  const top = face.top * 100;
-  const bottom = face.bottom * 100;
-  const below = bottom + 3; // a little under the chin
-  if (below <= MAX_TOP) return Math.round(Math.max(MIN_TOP, below));
-  const above = top - 4 - BLOCK_PCT; // face sits low → go above the head
-  return Math.round(Math.min(MAX_TOP, Math.max(MIN_TOP, above)));
-}
-
-function detectFaces(clips) {
-  if ((process.env.REEL_FACE_AWARE ?? '1') === '0') return {};
-  fs.mkdirSync(FACES_DIR, {recursive: true});
-  fs.mkdirSync(TMP, {recursive: true});
-  const bySource = new Map();
-  for (const c of clips) if (!bySource.has(sourceKey(c))) bySource.set(sourceKey(c), c);
-  const result = {};
-  const pending = [];
-  for (const [key, clip] of bySource) {
-    const cache = path.join(FACES_DIR, `${key}.json`);
-    if (fs.existsSync(cache)) { result[key] = JSON.parse(fs.readFileSync(cache, 'utf8')); continue; }
-    // three frames across the trim window (a B-roll gap or a black hold in
-    // the middle must not hide the presenter) — first face found wins
-    const jpgs = [0.1, 0.5, 0.9].map((f, k) => {
-      const t = clip.inSec + Math.max(0, (clip.outSec - clip.inSec) * f);
-      const jpg = path.join(TMP, `${key}.face${k}.jpg`);
-      const ff = spawnSync('ffmpeg', ['-y', '-ss', String(t), '-i', path.join(PUBLIC, clip.src), '-frames:v', '1', '-vf', 'scale=540:-2', '-q:v', '4', jpg], {cwd: ROOT});
-      return ff.status === 0 && fs.existsSync(jpg) ? jpg : null;
-    }).filter(Boolean);
-    if (jpgs.length) pending.push({key, jpgs});
-  }
-  if (!pending.length) return result;
-  if (!fs.existsSync(MODEL)) {
-    console.error('face detection skipped: .models/yunet.onnx missing (run `npm run setup`)');
-    return result;
-  }
-  const py = spawnSync('.venv/bin/python', ['scripts/face.py', MODEL, ...pending.flatMap((p) => p.jpgs)], {cwd: ROOT});
-  if (py.status !== 0) {
-    console.error('face detection failed, using default caption position:', String(py.stderr).trim().split('\n').pop()?.slice(0, 160));
-    return result; // not cached → next run retries
-  }
-  const faces = JSON.parse(String(py.stdout));
-  for (const p of pending) {
-    const face = p.jpgs.map((j) => faces[j]).find((f) => f?.found) ?? {found: false};
-    result[p.key] = face;
-    fs.writeFileSync(path.join(FACES_DIR, `${p.key}.json`), JSON.stringify(face));
-  }
-  return result;
 }
 
 // The saved project, for what a caller did not send (the CLI sends neither guion nor glossary)
@@ -142,9 +81,18 @@ if (guionPathP) {
   if (nP.marks || nP.starts) progress(86, `guion: ${nP.marks} punctuation marks, ${nP.starts} sentence starts`);
 }
 
-progress(88, 'Finding faces');
-const faces = detectFaces(clips);
-const topBySrc = Object.fromEntries(clips.map((c) => [c.src, faceToTop(faces[sourceKey(c)])]));
-const captions = pageWords(words, presetOf(style), topBySrc);
+// clear of the faces (src/faces.ts): every source on screen — the clips and the project's own B-roll — scanned first
+// when it is not yet (scripts/face-scan.mjs), then each page placed by the project's knobs (faceShift / faceHold).
+// No venv or model (the VM): the pages stay at the pack's top, with a warning. REEL_FACE_AWARE=0: no scan, no move
+let captions = pageWords(words, presetOf(style));
+if ((process.env.REEL_FACE_AWARE ?? '1') !== '0') {
+  const srcs = [...new Set([...clips, ...(saved?.brolls ?? [])].map((c) => c.src).filter((s) => !/^https?:/i.test(s) && fs.existsSync(path.join(PUBLIC, s))))];
+  const todo = srcs.filter((s) => !readFaces(PUBLIC, s));
+  for (const [k, src] of todo.entries()) {
+    progress(88 + Math.round((k / todo.length) * 10), `Finding faces (${k + 1}/${todo.length})`);
+    try { await scanFaces(PUBLIC, src); } catch (e) { console.error(`face scan skipped — captions stay at the pack's top where it is missing: ${String(e?.message ?? e).slice(0, 200)}`); if (e?.retry && !canScanFaces()) break; }
+  }
+  captions = placedCaptions({...(saved ?? {}), clips, captions, captionStyle: style, brolls: saved?.brolls ?? [], graphics: saved?.graphics ?? []}, PUBLIC);
+}
 fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2));
 progress(100, `Done — ${captions.length} captions`);

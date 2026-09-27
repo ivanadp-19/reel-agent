@@ -52,3 +52,31 @@ test('Deepgram configured: its own cache, each word naming its id in the Whisper
   assert.notEqual(down.status, 0);
   assert.match(down.stderr, /Deepgram could not transcribe a .*503.* set REEL_STT=whisperx/);
 });
+
+// G1 through the real pipeline, synthetic: a vibem reel whose presenter's face sits above the band (43–50 %, G1's) keeps
+// 53 % on every take; the same reel with the face on the band later in a take moves that whole take, within the kit's ±12
+test('captions clear of the faces: the job places the pages from the face scans (G1: 53 % on every take)', async () => {
+  const {FACE_VERSION} = await import('../scripts/face-scan.mjs');
+  const scanOf = (face) => (cwd) => {
+    const file = path.join(cwd, 'public/clips/a.mp4');
+    fs.writeFileSync(file, 'not a real video: the scan is cached for these bytes');
+    const st = fs.statSync(file);
+    const samples = Array.from({length: 20}, (_, k) => ({t: k / 2, faces: [face(k / 2)]}));
+    fs.mkdirSync(path.join(cwd, 'public/clips/faces'), {recursive: true});
+    fs.writeFileSync(path.join(cwd, 'public/clips/faces/a.json'), JSON.stringify({version: FACE_VERSION, src: 'clips/a.mp4', size: st.size, mtimeMs: Math.round(st.mtimeMs), rate: 2, width: 360, height: 640, cuts: [3.1, 6.2], samples}));
+  };
+  const files = {
+    'public/clips/transcripts/a.es.json': said('Hola. Esta es la torre. Tiene alberca. Y un roof garden. Te espera. Ven hoy. Agenda tu cita.'),
+    'public/projects/p1.json': {brand: {style: {faceShift: 12, faceHold: 'toma'}}},
+  };
+  const g1 = run({style: 'vibem', project_id: 'p1'}, files, {REEL_FACE_AWARE: '1'}, scanOf(() => ({left: 0.45, top: 0.43, right: 0.55, bottom: 0.5})));
+  assert.equal(g1.status, 0, g1.stderr);
+  assert.ok(g1.pages.length >= 5);
+  assert.deepEqual([...new Set(g1.pages.map((c) => c.topPct))], [53]);
+  // from 4 s on (the second take) the face comes down onto the band: that take moves, as one
+  const low = run({style: 'vibem', project_id: 'p1'}, files, {REEL_FACE_AWARE: '1'}, scanOf((t) => (t >= 4 ? {left: 0.4, top: 0.52, right: 0.6, bottom: 0.6} : {left: 0.45, top: 0.43, right: 0.55, bottom: 0.5})));
+  assert.equal(low.status, 0, low.stderr);
+  const second = low.pages.filter((c) => c.startMs >= 3100 && c.startMs < 6200).map((c) => c.topPct);
+  assert.ok(second.length && new Set(second).size === 1 && second[0] !== 53 && Math.abs(second[0] - 53) <= 12, JSON.stringify(low.pages.map((c) => [c.startMs, c.topPct])));
+  assert.deepEqual([...new Set(low.pages.filter((c) => c.startMs < 3100).map((c) => c.topPct))], [53], 'the first take stays');
+});

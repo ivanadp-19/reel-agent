@@ -55,6 +55,9 @@ export function dhash(px) {
   return h;
 }
 export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x & 1n); x >>= 1n; } return n; }
+// two consecutive frames (frameLooks') of one shot: the structure moved ≤ cutHash bits — else a cut. The rule
+// lookSteps links a stretch by, and the face scan splits a source into shots by (scripts/face-scan.mjs)
+export const sameShot = (a, b, cutHash = CUT_HASH) => hamming(a.h, b.h) <= cutHash;
 
 // raw 27×24 yuv444p frames → [{y, u, v, s, h, b}]: mean luma / chroma, mean saturation (signalstats' SATAVG:
 // |U−128, V−128|), the dHash of the 3×3-block means (8-bit, as ffmpeg delivers them) and those 72 blocks'
@@ -112,7 +115,7 @@ const spread = (xs) => (xs.length ? Math.max(...xs) - Math.min(...xs) : 0);
 // ponytail: a look change shorter than minSide frames (a 1–2-frame flash) is not seen here
 export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, minSide = 3, maxHash = MAX_HASH, cutHash = CUT_HASH, global = GLOBAL, ok = () => true, joined = () => true, need = (by) => Object.keys(by).length > 0} = {}) {
   const hd = (k) => hamming(frames[k - 1].h, frames[k].h);
-  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && hd(k) <= cutHash;
+  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && sameShot(frames[k - 1], frames[k], cutHash);
   const block = (f, j) => ({y: f.b[j], u: f.b[72 + j], v: f.b[144 + j], s: f.b[216 + j]});
   const out = [];
   for (let a = 0; a < frames.length;) {

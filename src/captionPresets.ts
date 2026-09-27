@@ -121,6 +121,9 @@ export const FLOAT_SLOTS = [
   {top: 18, align: 'flex-end'},
   {top: 64, align: 'center'},
 ] as const;
+// where a floating page sits: the slot and top the face placement gave it (src/faces.ts), else the cycle by its index
+export const floatSlot = (c: {slot?: number; topPct: number}, index: number): {top: number; align: string} =>
+  c.slot != null ? {top: c.topPct, align: FLOAT_SLOTS[c.slot % FLOAT_SLOTS.length].align} : FLOAT_SLOTS[index % FLOAT_SLOTS.length];
 
 // short pages get bigger type (Captions.ai "auto scale"): one word alone on
 // screen is a statement, not a subtitle

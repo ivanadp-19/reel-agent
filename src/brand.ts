@@ -9,6 +9,7 @@ import {FONT_FILE, isCatalog, type ClientFont} from './fonts.ts';
 import {LOOKS, type GradeParams} from './grade.ts';
 import type {GlossaryEntry} from './guion.ts';
 import {PRESETS, type PresetId} from './captionPresets.ts';
+import {FACE_HOLDS} from './faces.ts';
 
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'hex color like #FFB020');
 const glossarySchema = z.array(z.object({term: z.string().trim().min(1).max(60), variants: z.array(z.string().trim().min(1).max(60)).max(20).default([]), note: z.string().max(200).optional()})).max(200);
@@ -36,6 +37,8 @@ export const styleSchema = z.object({
   music: z.string().max(200).optional(),
   broll: z.string().max(300).optional(),
   audio: z.object({clean: z.string().optional(), sfx: z.boolean().optional()}).optional(),
+  faceShift: z.number().min(0).max(66).optional().describe('how far captions may move (± % of the frame height) from the pack\'s position to clear a face; 0 = never (src/faces.ts)'),
+  faceHold: z.enum(FACE_HOLDS).optional().describe('how long one caption position holds: toma (a take), video (the whole reel), pagina (each page)'),
 }).catchall(z.union([z.string().max(500), z.number(), z.boolean()]));
 export type Style = z.infer<typeof styleSchema>;
 

@@ -30,7 +30,8 @@ import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, proj
 import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
 import {searchStock} from './stock.mjs';
 import {DELIVERABLES, deliverableName, eachTarget, familyTargets, identityOf, projectTargets, unbackedData, validateIdentity, validateProject} from '../src/validate.ts';
-import {claimIdentity, facesOf, newProject, projectIssues, projectRows, projectWords, withDefaults} from './checks.mjs';
+import {claimIdentity, facesOf, newProject, placedCaptions, projectIssues, projectRows, projectWords, withDefaults} from './checks.mjs';
+import {FACE_HOLDS, captionFaceIssues, faceKnobs} from '../src/faces.ts';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qcText} from '../scripts/qc.mjs';
 import {runCmd} from '../scripts/remote-broll.mjs';
@@ -182,7 +183,7 @@ const scopeLine = (p) => { const on = inScope(p.scope), off = STAGES.filter((s) 
 const musicLine = (m) => `vol ${fmtDb(m.volume)} (gain ${+m.volume.toFixed(4)}), fade in ${m.fadeInSec ?? 0}s / out ${m.fadeOutSec ?? 0}s, duck ${m.duck ? 'on' : 'off'}`;
 function summary(id, p) {
   const out = [];
-  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? `${path.basename(p.music.src)} ${musicLine(p.music)}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle}, off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
+  out.push(`Project "${p.name || 'Untitled project'}" (id ${id}) — ${f1(totalSec(p))}s, ${p.clips.length} clips, ${p.captions.length} captions${p.captionsOff ? ' (OFF — not rendered, set_captions)' : ''}, ${p.brolls.length} B-roll, music ${p.music ? `${path.basename(p.music.src)} ${musicLine(p.music)}${p.music.credit ? ` (credit: ${p.music.credit})` : ''}` : 'none'}, voice cleanup ${p.audio?.clean ?? 'off'}, accent ${p.accentColor}, lang ${p.lang}, caption style ${p.captionStyle} (faces: ±${faceKnobs(p).shift} %, by ${faceKnobs(p).hold}), off-mic ${p.offMic}, brand ${p.brand ? `${p.brand.name ?? 'custom'} (accent ${p.brand.colors.accent}${p.brand.fonts?.display ? `, headlines ${p.brand.fonts.display}` : ''}${p.brand.fonts?.body ? `, captions ${p.brand.fonts.body}` : ''}${p.brand.logo ? `, logo ${p.brand.logo}` : ''})` : 'none'}, color ${p.grade ? `${gradeLine(p, '')}${Object.keys(p.grade.overrides ?? {}).length ? ` (+${Object.keys(p.grade.overrides).length} per-source/clip overrides)` : ''}` : 'ungraded'}`);
   if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
   if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, planMode(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
   if (p.identity) out.push('', `IDENTITY (set_identity): ${identityLine(p.identity)}`);
@@ -491,6 +492,8 @@ server.registerTool('set_brand', {description: `Brand kit of the project (a clie
     if (fx.pack && (fx.pack !== p.captionStyle || glossaryChanged)) { await applyPack(p, fx.pack); applied.push(`pack ${fx.pack}${p.captions.length ? ' (captions re-paged)' : ''}`); }
     else if (r.data.style.pack && !fx.pack) applied.push(`pack "${r.data.style.pack}" is not a caption pack — not applied`);
   }
+  // the kit's faceShift / faceHold: the pages re-placed clear of the faces (src/faces.ts) — the words stay
+  if ((from || style) && p.captions.length) p.captions = placedCaptions(p, PUBLIC);
   let saved = '';
   if (save_as) { fs.mkdirSync(BRANDS, {recursive: true}); fs.writeFileSync(path.join(BRANDS, `${slug(save_as)}.json`), JSON.stringify({...r.data, name: r.data.name ?? save_as}, null, 2)); saved = ` — saved as "${slug(save_as)}"`; }
   await save(project_id, p);
@@ -664,15 +667,24 @@ server.registerTool('edit_caption', {description: 'Edit one caption page: new te
 server.registerTool('add_caption', {description: 'Add a caption page at a timeline time (seconds) lasting duration_sec.', inputSchema: {project_id: pid, at_sec: sec('timeline start'), duration_sec: z.number().min(0.3).default(2), text: z.string(), accent_words: z.array(z.string()).optional(), top_pct: z.number().min(0).max(95).optional()}}, async ({project_id, at_sec, duration_sec, text: t, accent_words, top_pct}) => {
   const p = load(project_id); const {clip, sourceSec} = locate(p, at_sec);
   const startMs = Math.round(sourceSec * 1000); const endMs = Math.round(Math.min(clip.outSec, sourceSec + duration_sec * (clip.speed ?? 1)) * 1000);
-  let cap = retext({id: nextId(p.captions, 'c'), src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, words: []}, t);
+  let cap = retext({id: nextId(p.captions, 'c'), src: clip.src, startMs, endMs, topPct: top_pct ?? p.captions.find((c) => c.src === clip.src)?.topPct ?? 58, ...(top_pct != null ? {pin: true} : {}), words: []}, t); // a position given by hand: pinned (the face placement never moves it)
   if (accent_words) { const set = new Set(accent_words.map(norm)); cap.words = cap.words.map((w) => ({...w, tier: set.has(norm(w.text)) ? 1 : 0})); }
   p.captions = [...p.captions, cap]; await save(project_id, p);
   return text(`Added caption on ${clip.id} @${f1(at_sec)}s: "${capText(cap)}" (id ${cap.id})`);
 });
 
-server.registerTool('set_captions', {description: 'Switch the captions of the reel off (or back on) without deleting them: off = the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on. Use it when the brief asks for a reel without subtitles (instead of duplicating the project or deleting pages). Music still ducks under the speech.', inputSchema: {project_id: pid, off: z.boolean()}}, async ({project_id, off}) => {
-  const p = load(project_id); p.captionsOff = off; await save(project_id, p);
-  return text(`Captions ${off ? `OFF (${p.captions.length} pages kept, none rendered)` : `ON (${p.captions.length} pages)`}`);
+server.registerTool('set_captions', {description: `Captions on the whole reel. off: switch them off (or back on) without deleting them — the render, the proofs and validate show no caption page, while the pages, their emphasis and positions are kept for when they come back on (a reel without subtitles, instead of duplicating the project or deleting pages; music still ducks under the speech). face_shift / face_hold: how the pages keep clear of every face on screen (src/faces.ts) — face_shift = how far (± % of the frame height) a caption position may move from the pack's to clear a face (0 = never: validate only reports caption-face), face_hold = how long one position holds: toma (a take: never moves inside it), video (one position for the whole reel), pagina (each page on its own). This project's value; null = back to the client's style kit (set_brand style faceShift / faceHold), else the defaults (±15 %, toma). Setting either re-places the pages (never re-pages them; pages placed by hand stay). Pass only what you change.`, inputSchema: {project_id: pid, off: z.boolean().optional(), face_shift: z.number().min(0).max(66).nullable().optional(), face_hold: z.enum(FACE_HOLDS).nullable().optional()}}, async ({project_id, off, face_shift, face_hold}) => {
+  const p = load(project_id);
+  if (off != null) p.captionsOff = off;
+  const knobs = face_shift !== undefined || face_hold !== undefined;
+  if (face_shift !== undefined) p.faceShift = face_shift; // null: the kit's / the default (a merge on the backend keeps what is absent)
+  if (face_hold !== undefined) p.faceHold = face_hold;
+  const before = p.captions;
+  if (knobs) p.captions = placedCaptions(p, PUBLIC);
+  await save(project_id, p);
+  const k = faceKnobs(p), moved = p.captions.filter((c, i) => c.topPct !== before[i]?.topPct || c.slot !== before[i]?.slot).length;
+  const faces = knobs ? captionFaceIssues(p, facesOf(p, PUBLIC), deliveryFps(p)) : [];
+  return text(`Captions ${p.captionsOff ? `OFF (${p.captions.length} pages kept, none rendered)` : `ON (${p.captions.length} pages)`}${knobs ? ` — faces: ±${k.shift} % by ${k.hold}; ${moved} page(s) moved${faces.length ? '\n' + issuesText(faces) : ', no page over a face'}` : ''}`);
 });
 
 server.registerTool('set_guion', {description: 'Attach the client\'s script (guion) to the project, as they wrote it. The captions job then aligns the ASR words to it: a word the guion spells otherwise takes its spelling (ASR timing kept), one ASR word that swallowed two ("acomodan" for "acomoda a") is split in its span, and what cannot be aligned with confidence is left as heard. Where audio and guion say different things (70 vs 60, another name) the AUDIO stays on screen and validate reports guion-conflict for a human; guion-missing / guion-altered / guion-extra say where the captions and the script part. Re-run run_ai_step captions (or set_caption_style) after setting it. Empty text removes it. Stage directions ([…], (…), lines like "INSERTO: …") are not treated as speech.', inputSchema: {project_id: pid, text: z.string().max(40000)}}, async ({project_id, text: guion}) => {
@@ -1156,6 +1168,7 @@ async function applyPack(p, style) {
   const fresh = await jobResult('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions, repropose), guion: p.guion, glossary: p.brand?.glossary ?? []}); // the pager sees the project's emphasis (a highlighted name stays one unit)
   const r = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true, repropose});
   p.captions = r.captions; p.hiddenWids = r.hidden;
+  p.captions = placedCaptions(p, PUBLIC); // the merged pages clear of the faces, hand-made ones included (src/faces.ts)
 }
 server.registerTool('set_caption_style', {description: `The STYLE PACK of the reel — one of the 20 Captions.ai looks, or the three real-estate references. A pack sets the caption look, the palette and faces (unless a brand kit or a project accent is set), the family of transitions, how B-roll cues arrive and leave, and the frame the style lives in. Packs: ${Object.values(PACKS).map((x) => `${x.id} = ${x.desc} [cuts: ${x.transition}${x.brollMode ? `, B-roll: ${x.brollMode}` : ''}${x.layout ? `, frame: ${x.layout.shape} on ${x.layout.canvas}` : ''}]`).join('; ')}. References: ${['palabra', 'caja', 'tracked'].map((id) => `${id} = ${PRESETS[id].desc}`).join('; ')}. Re-pages the generated captions for the new pack, keeping word tiers and hand-added pages. Needs the backend.`, inputSchema: {project_id: pid, style: z.enum(Object.keys(PRESETS))}}, async ({project_id, style}) => {
   const p = load(project_id); await applyPack(p, style);
@@ -1193,7 +1206,8 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
   const fresh = await jobResult('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion, glossary: p.brand?.glossary ?? []});
-  const {captions, added, hidden} = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; p.hiddenWids = hidden; await save(project_id, p);
+  const {captions, added, hidden} = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; p.hiddenWids = hidden;
+  p.captions = placedCaptions(p, PUBLIC); await save(project_id, p); // clear of the faces (src/faces.ts)
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
 
