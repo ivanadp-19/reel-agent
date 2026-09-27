@@ -1,4 +1,4 @@
-# Render benchmark (VM KVM 2: 2 vCPU AMD EPYC 9354P, 7.9 GB RAM, no GPU)
+# Render benchmark (the VM: KVM, 8 vCPU AMD EPYC 9354P, 31 GB RAM, no GPU)
 
 Why: César asked "¿por qué tarda tanto?" and whether the 12 reels can be edited
 in parallel. Baseline reported on 2026-09-24: **a 69 s draft ≈ 5 min** on this VM

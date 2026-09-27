@@ -300,6 +300,21 @@ test('roles in public mode need their own REEL_SESSION_SECRET: unset or equal to
   }
 });
 
+test('a port in use stops the backend with exit 1, so systemd\'s Restart=on-failure restarts it (it was exit 0)', async () => {
+  // booted from a root of its own (symlinks to the code): its start-up writes — .backend-token, public/, the render queue — land there
+  const repo = path.resolve(import.meta.dirname, '..');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-port-'));
+  for (const n of ['server', 'scripts', 'src', 'mcp', '.agents', 'node_modules', 'package.json']) fs.symlinkSync(path.join(repo, n), path.join(root, n));
+  const held = http.createServer().listen(0, '127.0.0.1');
+  await new Promise((r) => held.once('listening', r));
+  try {
+    const env = {...process.env, REEL_PORT: String(held.address().port), PORT: '', REEL_HOST: '127.0.0.1', REEL_PUBLIC: '', REEL_USER_ROLES: ''};
+    const r = spawnSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', path.join(root, 'server', 'index.mjs')], {cwd: root, env, encoding: 'utf8', timeout: 60e3});
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /backend not started: listen EADDRINUSE/);
+  } finally { held.close(); fs.rmSync(root, {recursive: true, force: true}); }
+});
+
 test('humanOnly: only a login session passes; loopback, basic auth, the backend token and user tokens get 403 "solo con login en la VM"', async () => {
   const pass = crypto.randomBytes(8).toString('hex');
   const auth = {boss: bcrypt.hashSync(pass, 4), rev: bcrypt.hashSync(pass, 4), otro: bcrypt.hashSync(pass, 4), nadie: bcrypt.hashSync(pass, 4)};

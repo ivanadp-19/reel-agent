@@ -40,7 +40,7 @@ public/*
 .uploads/
 .backend.pid
 .dev.pid
-editor/dist/
+editor/dist*/
 
 # layered renders: cached masters (scripts/layers.mjs)
 .render-cache/

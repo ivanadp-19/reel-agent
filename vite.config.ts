@@ -8,6 +8,9 @@ export default defineConfig({
   root: 'editor',
   publicDir: path.resolve(__dirname, 'public'),
   plugins: [react()],
+  // the build is index.html + assets only: the backend serves public/ itself (with its headers); a copy of it in
+  // editor/dist would be served without them, and a deploy's dist was 9 GB of it
+  build: {copyPublicDir: false},
   server: {
     port: 5173,
     proxy: {'/api': 'http://localhost:3333', '/r/': 'http://localhost:3333'}, // /r/<token>: the public review pages

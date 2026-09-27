@@ -195,7 +195,11 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
   const matrix = {bt709: 'bt709', bt2020nc: 'bt2020'}[color.space] ?? 'bt601';
   const inputs = ['-i', master];
   const renumber = `settb=1/${fps},setpts=N`;
-  const chains = [`[0:v]${renumber}[l0]`];
+  // a full-range master goes into the overlay as yuva420p holding its full-range values, and back out to yuvj420p
+  // the same way: ffmpeg < 7.1's overlay takes no yuvj420p main, and the conversion it inserts squeezed the master
+  // to limited range, the full-range layer blended into it and the whole stretched back (#FFE500: Y 227, not 211)
+  const keep = 'scale=in_range=pc:out_range=pc';
+  const chains = [`[0:v]${renumber}${full ? `,${keep},format=yuva420p` : ''}[l0]`];
   let last = 'l0';
   overlays.forEach((o, i) => {
     const alpha = o.alpha ?? 'png';
@@ -203,7 +207,7 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
     chains.push(`[${i + 1}:v]${renumber},scale=out_color_matrix=${matrix}:out_range=${full ? 'pc' : 'tv'},format=yuva420p[o${i}]`, `[${last}][o${i}]overlay=eof_action=pass:format=auto:ts_sync_mode=nearest[l${i + 1}]`);
     last = `l${i + 1}`;
   });
-  chains.push(`[${last}]format=${full ? 'yuvj420p' : 'yuv420p'}[v]`);
+  chains.push(`[${last}]${full ? `${keep},format=yuvj420p` : 'format=yuv420p'}[v]`);
   const tags = [['-color_range', color.range], ['-colorspace', color.space], ['-color_primaries', color.primaries], ['-color_trc', color.trc]].filter(([, v]) => v && v !== 'unknown').flat();
   return [
     '-hide_banner', '-nostats', '-y', ...inputs,

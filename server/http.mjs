@@ -77,14 +77,15 @@ export function servePublic(req, res, pathname, {publicDir, distDir, g}) {
       .flatMap((id) => (dir === 'reviews' ? projectClients(publicDir, id) : [id]));
   });
   if (!seesClient(g, clients)) return answer(403, {'Cache-Control': 'no-store'}, {error: 'a client\'s project: sign in with an account of that client', code: 'forbidden'});
+  // the editor's page is revalidated on every load: one cached from before a deploy names hashed assets that are gone
+  const index = path.join(distDir, 'index.html'), fresh = {'Cache-Control': 'no-cache'};
   for (const base of [publicDir, distDir]) {
     const file = path.join(base, clean);
     // a client's footage and renders: never kept by a shared cache between the browser and us; inert (inertHeaders)
-    if (file.startsWith(base + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) { serveFile(req, res, file, base === publicDir ? {'Cache-Control': 'private', ...inertHeaders(file)} : {}); return true; }
+    if (file.startsWith(base + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) { serveFile(req, res, file, base === publicDir ? {'Cache-Control': 'private', ...inertHeaders(file)} : file === index ? fresh : {}); return true; }
   }
   if (media) return answer(404, {}, {error: 'not found', code: 'not_found'});
-  const index = path.join(distDir, 'index.html');
-  if (fs.existsSync(index)) { serveFile(req, res, index); return true; }
+  if (fs.existsSync(index)) { serveFile(req, res, index, fresh); return true; }
   return answer(404, {}, {error: 'not found'});
 }
 
