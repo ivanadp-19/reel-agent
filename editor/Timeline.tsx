@@ -1,7 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
-import {placeClips, clipDurationSec} from '../src/timeline';
+import {placeClips, clipDurationSec, trimDragSec} from '../src/timeline';
 import {projectCaptions} from '../src/captions';
 import {projectBrolls} from '../src/Broll';
 import {projectGraphics} from '../src/graphicTemplates';
@@ -118,9 +118,7 @@ export const Timeline: React.FC<{playerRef: React.RefObject<PlayerRef | null>}> 
       if (!snapped && Math.abs(ev.clientX - startX) > 2) { pushHistory(); snapped = true; }
       // timeline px → SOURCE seconds (a sped-up clip consumes source faster)
       let d = ((ev.clientX - startX) / pxPerSec) * orig.speed;
-      // clamp so we never invert the clip or exceed the source
-      if (mode === 'left') d = Math.max(-orig.inSec, Math.min(d, orig.outSec - 0.2 - orig.inSec));
-      else d = Math.max(orig.inSec + 0.2 - orig.outSec, Math.min(d, orig.sourceDurationSec - orig.outSec));
+      d = trimDragSec(orig, mode, d); // src/timeline.ts: never inverted, never past the source, never the wrong way
       dSec = d;
       setTrimP({id, side: mode, dSec: d});
     };

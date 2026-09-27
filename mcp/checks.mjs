@@ -39,7 +39,9 @@ export const datosPorConfirmar = (p, publicDir, env) => unbackedData(p, projectW
 // words left in the cut, clip edges inside a word, the guion against the cut, the graphics' data against the
 // audio), then half-graded sources and wind (their scans) — at the fps the project renders at. A source not
 // scanned yet is said so and handed to kick(srcs): the backend's background lane (scripts/grade-scan.mjs
-// createGradeScans, which runs the wind scan too) — validate itself never decodes
+// createGradeScans, which runs the wind scan too) — validate itself never decodes. A finding of a stage the job did
+// not ask for (scopeFindings: a captions-only job on the client's finished export — its color is theirs) is a
+// warning that says so: reported, never fixed here
 export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const fps = deliveryFps(p);
   // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name);
@@ -55,9 +57,10 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const words = await projectWords(p, publicDir, env);
   // wind is the take's: the quiet of each whole source (between its first and last word), not only what the cut keeps
   const takes = Object.fromEntries((await projectWords({...p, clips: srcs.map((src) => ({id: src, src, inSec: 0, outSec: Infinity}))}, publicDir, env)).map((t) => [t.clipId, t.words]));
-  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
+  const {inScope, advisory} = scopeFindings([...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
-    ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))];
+    ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))], p.scope);
+  return [...inScope, ...advisory.map(({advisory: _, ...i}) => ({...i, level: 'warn', msg: `${i.msg.split(' Fix: ')[0]} — ${i.omitted} omitida (the job did not ask for it): advisory, report it, do not fix it`}))];
 }
 
 // Every finding of a project by stage (src/stages.ts stageFindings): its issues (projectIssues), the judge's

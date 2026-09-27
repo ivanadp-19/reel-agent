@@ -22,7 +22,8 @@
 // Anything else throws {status: 409 (the state does not allow it) | 403 (not this principal's step) | 400 (bad input)}.
 // Every step lands in the version's log with its principal (Sección 8).
 import {locateSec, renderFps, deliveryFps} from '../src/timeline.ts';
-import {identityStem, validateIdentity, validateProject} from '../src/validate.ts';
+import {halfGradedIssues, identityStem, validateIdentity, validateProject} from '../src/validate.ts';
+import {inScope} from '../src/stages.ts';
 
 const fail = (status, code, message) => { throw Object.assign(new Error(message), {status, code}); };
 // a note's second as people read it: 0:20.4
@@ -239,10 +240,12 @@ export function decideColorRef(x, actor, {step, at} = {}) {
 
 // ---- the owner's inbox (CEO-19, D28) ----
 // rows: every variant as the bandeja loads it ({projectId, id, stem, identity, versions, project: the live JSON on the
-// row of the project's current identity, else null});
+// row of the project's current identity, else null; scans: its sources' half-graded scans});
 // disk: {freeDiskMb, minDiskMb}. → items {key, kind, text, projectId?} — kind nota (to confirm: abierta / clasificada),
 // colorref (the delivered version's master proposed as a color reference, until the owner answers),
-// guion (guion-conflict from validate, on the live project), juez (the newest version's QC técnico no disponible),
+// guion (guion-conflict from validate, on the live project), color (a job without color — captions on the client's
+// finished export, delivered untouched —: a grade change inside a shot of their export, half-graded, for the owner to
+// tell them), juez (the newest version's QC técnico no disponible),
 // rojos (the last 3 versions of a variant red), disco (free disk under the render floor), metrica (notes on v1 per
 // variant, by G). `key` changes when the item does: the log names each one once (server/review.mjs).
 export function ownerInbox(rows, {disk} = {}) {
@@ -264,6 +267,11 @@ export function ownerInbox(rows, {disk} = {}) {
     let conflicts = [];
     try { if (r.project?.guion?.trim()) conflicts = validateProject({...r.project, clips: r.project.clips ?? [], captions: r.project.captions ?? []}, deliveryFps(r.project)).filter((i) => i.code === 'guion-conflict'); } catch {}
     for (const i of conflicts) items.push({key: `guion:${r.projectId}:${i.msg}`, kind: 'guion', ...where, text: `${r.stem}: ${one(i.msg)}`});
+    if (r.project && r.scans && !inScope(r.project.scope).includes('color')) {
+      let steps = [];
+      try { steps = halfGradedIssues({...r.project, clips: r.project.clips ?? []}, r.scans, deliveryFps(r.project)); } catch {}
+      for (const i of steps) items.push({key: `color:${r.projectId}:${i.msg}`, kind: 'color', ...where, text: `${r.stem}: su export cambia de color dentro de un plano — se entrega intacto (el color no es de este trabajo): avisarle. ${i.msg.split(' Fix: ')[0]}`});
+    }
   }
   if (disk?.freeDiskMb != null && disk.freeDiskMb < disk.minDiskMb) items.push({key: `disco:${Math.round(disk.freeDiskMb / 256)}`, kind: 'disco', text: `Disco bajo: ${(disk.freeDiskMb / 1024).toFixed(1)} GB libres (piso de render ${(disk.minDiskMb / 1024).toFixed(1)} GB) — cleanup-exports --apply y la retención`});
   // the metric: notes on v1 per variant, by G (a variant with no v1 yet is not counted)

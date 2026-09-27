@@ -8,7 +8,7 @@ import {fitPage} from './captionLayout.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {applyGlossary, coreOf, guionIssues, joinFigures, normKey, numberOf, type GlossaryEntry} from './guion.ts';
-import {continuesPrev, placeClips, renderSec, type Clip} from './timeline.ts';
+import {continuesPrev, MIN_PIECE_SEC, placeClips, renderSec, type Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
 
@@ -437,13 +437,16 @@ const textsOf = (x: unknown): string[] => (typeof x === 'string' ? [x] : Array.i
 // when it stops early or pops, `off`; ungraded when it is the flatter side, else in another grade) —
 // undefined = not scanned yet. Each clip that shows an odd part is warned with the fix: a
 // head (#47) — split_clip where the look changes (and at the cut, when the clip also holds the shot before),
-// create_lut match on it, set_clip graded: true; a tail — split it off, set_grade it like the shot before.
+// create_lut match on it, set_clip graded: true; a tail — split it off (at the change, and at the cut when the
+// clip runs past it), create_lut match on it to the shot it ends (to_clip_id), set_clip graded: true; set_grade
+// like the shot only when the project has no clip of the shot to match it to. Any part split_clip can make its own
+// clip (MIN_PIECE_SEC: 3 frames — a split's pieces continue each other, one shot) gets that fix; a shorter one is trimmed.
 // A clip that shows only that part, carries its own grade and is marked graded is fixed: nothing — a flag
 // inherited through a split is not a fix.
 export type GradeStep = {at: number; from: number; to?: number; off?: boolean; frames: number; dY: number; sat: [number, number]};
 export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<string, unknown>} | null}, scans: Record<string, {steps: GradeStep[]} | null | undefined>, fps = 30): Issue[] {
   const out: Issue[] = [];
-  const EPS = 0.02, SPLIT = 0.2; // EPS under a frame: a split lands on the change within the printed millisecond
+  const EPS = 0.02, SPLIT = MIN_PIECE_SEC; // EPS under a frame: a split lands on the change within the printed millisecond
   for (const pc of placeClips(p.clips, fps)) {
     const c = pc.clip;
     const tl = (s: number) => +((pc.startMs + ((s - c.inSec) / (c.speed ?? 1)) * 1000) / 1000).toFixed(3); // source → timeline s
@@ -452,18 +455,27 @@ export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<
       if (c.outSec <= u0 + EPS || c.inSec >= u1 - EPS) continue; // shows none of it
       const before = c.inSec < u0 - EPS, own = !before && c.outSec <= u1 + EPS && !!p.grade?.overrides?.[c.id];
       if (own && c.graded === true) continue; // fixed
-      // split_clip keeps ≥ 0.2 s a side: under that, the shot before is trimmed off (after the splits: a trim moves
-      // the timeline), and a head too short to be a clip is trimmed away.
-      // ponytail: a clip ending < 0.2 s after the change (or a tail's split that close to an edge) gets a split that split_clip refuses (and says why)
-      const pre = before && u0 - c.inSec >= SPLIT, piece = pre ? `the new piece at ${tl(u0)} s` : c.id;
+      // split_clip keeps 3 frames a side (MIN_PIECE_SEC): under that, the shot before is trimmed off (after the splits: a
+      // trim moves the timeline), and a part too short to be a clip is trimmed away.
+      // ponytail: a clip ending < 3 frames after the change (or a tail's split that close to an edge) gets a split that split_clip refuses (and says why)
+      const sp = c.speed ?? 1; // part lengths as the timeline shows them, as split_clip measures them
+      const pre = before && (u0 - c.inSec) / sp >= SPLIT, piece = pre ? `the new piece at ${tl(u0)} s` : c.id;
       // the later split first: each clip is whole frames, so a split moves the timeline AFTER it by up to a frame
       // (G10 followed first-to-last: 24.992 landed on 25.010, 0.55 of a frame) — never what comes before
       const at = [...(c.outSec > u1 + EPS ? [tl(u1)] : []), ...(pre || (st.off && before) ? [tl(u0)] : [])];
       const splits = at.length ? `split_clip at_sec ${at.join(', then at_sec ')} (timeline), then ` : '';
+      const shot = before ? c : p.clips.find((x) => continuesPrev(x, c)); // the clip of the shot a tail ends
+      // a part under 3 frames of the reel (a 3-frame step of 60 fps footage) cannot be a clip: trimmed, never matched,
+      // and the trim takes the voice under it
+      const short = `${st.frames} frames are too short for a clip of their own: the trim drops them with the voice under them — if cut-word then flags a word, leave them and tell the client instead`;
       const fix = own ? `it is its own clip with its own grade: once the join looks right (caption_proof), set_clip graded: true on ${c.id}`
-        : st.off ? `${splits}set_grade target ${before ? `the new piece at ${tl(u0)} s` : c.id} like the shot before it (compare the join with caption_proof), then set_clip graded: true on it`
+        // a tail too short for a clip: trimmed off the clip that holds the shot before it (split at the cut first when the
+        // clip runs past it); a clip that starts inside it loses its first frames, or goes when it is all tail
+        : st.off && (u1 - u0) / sp < SPLIT ? `${before ? `${c.outSec > u1 + EPS ? `split_clip at_sec ${tl(u1)} (timeline), then ` : ''}trim_clip out_sec ${st.at} on ${c.id}` : c.outSec > u1 + EPS ? `trim_clip in_sec ${u1} on ${c.id}` : `delete_clips ${c.id}`} (${short})`
+        : st.off && shot ? `${splits}create_lut match on the tail (clip_id ${before ? `of the new piece at ${tl(u0)} s` : c.id}, to_clip_id ${shot.id}: it takes the shot's grade), then set_clip graded: true on it`
+        : st.off ? `${splits}set_grade target ${c.id} like the shot before it (compare the join with caption_proof), then set_clip graded: true on it`
         : c.outSec < st.at - EPS ? `the clip ends inside the head: trim it off (trim_clip) or grade it (set_grade target ${c.id})`
-        : st.at - st.from < SPLIT ? `${pre ? `split_clip at_sec ${tl(u0)} (timeline), then ` : ''}trim_clip in_sec ${st.at} on ${piece} (${st.frames} frames are too short for a clip of their own)`
+        : (st.at - st.from) / sp < SPLIT ? `${pre ? `split_clip at_sec ${tl(u0)} (timeline), then ` : ''}trim_clip in_sec ${st.at} on ${piece} (${short})`
         : `${splits}${before && !pre ? `trim_clip ${c.id} in_sec ${u0} (the shot before goes), then ` : ''}create_lut match on the head (clip_id ${pre ? `of ${piece}` : c.id}), then set_clip graded: true on it`;
       const flat = (st.sat[0] < st.sat[1]) !== !!st.off, who = flat ? "the client's grade" : "the shot's look"; // the odd part the flatter side: ungraded
       const what = st.off ? `${who} stops at ${st.at} s: the ${st.frames} frames to ${u1} s are ${flat ? 'ungraded' : 'in another grade'}` : `${who} only starts at ${st.at} s (${st.frames} ${flat ? 'ungraded frames' : 'frames in another grade'}`;

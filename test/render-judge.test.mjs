@@ -593,7 +593,7 @@ test('source scan: a range that hits the deadline is skipped and not cached (a c
 });
 
 // ---- color rules (CEO-15): color-jump is advisory and never compares two locations; color-ref by development ----
-import {colorJumpFindings, colorRefGroups, cutFindings} from '../.agents/skills/render-judge/judge.mjs';
+import {colorJumpFindings, colorRefGroups, cutFindings, shotsOf, strandedFlashes} from '../.agents/skills/render-judge/judge.mjs';
 import {placeClips as place} from '../src/timeline.ts';
 
 test('color-jump: advisory (never fails a reel), and clips of different locations are not compared', () => {
@@ -627,6 +627,34 @@ test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split
   // two tiny pieces of one continuing shot are one flash, and the fix deletes both
   const two = cutFindings(place([clip('a', 'a', 0, 3), clip('x1', 'x', 0, 0.2), clip('x2', 'x', 0.2, 0.4), clip('b', 'b', 0, 3)], 30));
   assert.deepEqual(two.map((f) => [f.check, f.fix[0].args.clip_ids]), [['flash-cut', ['x1', 'x2']]]);
+  // Morantes 10's 3-frame tails split off (split_clip's minimum, MIN_PIECE_SEC) at 29.97 and 30: one shot with the
+  // shot they end and the one after, no flash; the same 3 frames cut out of the take are a flash
+  for (const fps of [30000 / 1001, 30]) {
+    const m = [clip('s', 'm', 5.906, 8.742), clip('t', 'm', 8.742, 8.842), clip('n', 'm', 8.842, 12)];
+    assert.deepEqual(cutFindings(place(m, fps)), []);
+    assert.equal(place(m, fps)[1].durFrames, 3);
+    assert.deepEqual(cutFindings(place([m[0], {...m[1], inSec: 8.8, outSec: 8.9}, clip('x', 'x', 0, 3)], fps)).map((f) => f.check), ['flash-cut', 'jump-cut']);
+  }
+});
+
+test('flash-cut: a 3-frame piece whose shot a trim took, left before the source\'s own cut, flashes (the render shows both cuts); with its shot there it does not', () => {
+  // the render's frames: one picture until `cut`, another after (the structure hash 32 bits apart there)
+  const looks = (n, cut) => Array.from({length: n}, (_, k) => ({h: k < cut ? 0n : 0xffffffffn}));
+  const stranded = place([clip('m', 'm', 0, 6), clip('t', 'm', 8.742, 8.842), clip('n', 'm', 8.842, 12)], 30);
+  const at = stranded[2].fromFrame;
+  assert.deepEqual(cutFindings(stranded).map((f) => f.check), ['jump-cut'], 'shotsOf joins t with n: no flash by the timeline alone');
+  assert.deepEqual(strandedFlashes(stranded, looks(400, at)).map((f) => [f.check, f.severity, f.evidence.clip, f.fix[0].args.clip_ids]), [['flash-cut', 'major', 't', ['t']]]);
+  assert.deepEqual(strandedFlashes(stranded, looks(400, 9999)), [], 'no cut on screen at the join: t plays on into n');
+  // the fixed tail with its shot: continuing on both sides, never a flash
+  const whole = place([clip('s', 'm', 5.906, 8.742), clip('t', 'm', 8.742, 8.842), clip('n', 'm', 8.842, 12)], 30);
+  assert.deepEqual(strandedFlashes(whole, looks(400, whole[2].fromFrame)), []);
+});
+
+test('shotsOf: a continuing piece is the same shot only at the same scale — a punch held across the split is, a punch lost is not', () => {
+  const b = {...clip('b', 'm', 7, 8.742), enter: 'punch'}, t = clip('t', 'm', 8.742, 8.842), n = clip('n', 'm', 8.842, 12);
+  assert.deepEqual(shotsOf(place([b, {...t, enter: 'punch'}, {...n, enter: 'punch'}], 30)).map((x) => x.ids), [['b', 't', 'n']]);
+  assert.deepEqual(shotsOf(place([b, t, n], 30)).map((x) => x.ids), [['b'], ['t', 'n']], 'a zoom pop at the join');
+  assert.deepEqual(cutFindings(place([clip('a', 'x', 0, 3), b, t, {...n, outSec: 8.9}], 30)).map((f) => f.check), ['flash-cut'], 'the 3 frames at 1.0 after the punch, then the cut: a flash');
 });
 
 // ---- the queued judge on a client's version: the project's own words and its own rate ----

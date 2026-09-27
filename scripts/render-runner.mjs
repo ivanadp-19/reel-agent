@@ -578,6 +578,7 @@ export function createRenderRunner({
             try { master = await mine; result.master = 'rendered'; } finally { inflight.delete(key); }
           }
           if (result.master === 'cached') set('master', 1, {progress: ranges.master[1], label: 'Master reused from the cache'});
+          result.masterFile = master; // the reel without captions: the render judge's grade-coverage measures there (--clean)
           // the pair's master, held until the remux after QC (a copy where hard links are not possible)
           if (pair && !original) {
             hold = path.join(masterCache.dir, `${key}.part-pair-${id}.mp4`); pairKey = key;

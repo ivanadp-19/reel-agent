@@ -15,7 +15,7 @@
 //   reveal kinds mask the outgoing clip away over the incoming one (REVEALS): crossBlur, polyWipe,
 //     diagWipe, particles, blocks — plus card and split
 //   cardDrop lands the incoming clip on top, falling and rotating (OVER)
-import type {Clip} from './timeline.ts';
+import {continuesPrev, type Clip} from './timeline.ts';
 
 export type Enter = 'cut' | 'punch' | 'zoom' | 'whip' | 'whipDiag' | 'card' | 'split'
   | 'flash' | 'crossBlur' | 'spin' | 'rgbFlash' | 'bands' | 'polyWipe' | 'clock' | 'mosaic' | 'disc' | 'blinds' | 'particles' | 'diagWipe' | 'blocks' | 'cardDrop' | 'lightLeak';
@@ -105,13 +105,23 @@ export function speedRamp(from: number, to: number, steps: number): number[] {
 // punch in on every other jump cut inside the same take (a new source resets it)
 export function punchAlternate(clips: Clip[]): Clip[] {
   let on = false;
-  return clips.map((c, i) => {
+  const out: Clip[] = [];
+  clips.forEach((c, i) => {
     const prev = clips[i - 1];
-    if (!prev || prev.src !== c.src) { on = false; return {...c, enter: undefined}; }
+    if (!prev || prev.src !== c.src) { on = false; out.push({...c, enter: undefined}); return; }
+    // a split that removed nothing is no jump cut: never a new punch there, and the piece holds the scale of the one it
+    // continues (a 3-frame half-graded piece at 1.0 after a punched one is a zoom pop)
+    if (continuesPrev(prev, c)) { out.push({...c, enter: heldScale(out[i - 1]) > 1 ? 'punch' : undefined}); return; }
     on = !on;
-    return {...c, enter: on ? 'punch' : 'cut'};
+    out.push({...c, enter: on ? 'punch' : 'cut'});
   });
+  return out;
 }
+// the scale a clip ends on from its entrance: a punch holds 12 % closer for the whole clip, a zoom lands there — what a
+// piece continuing it must start at (splitClip, punchAlternate; the judge's shotsOf joins pieces only on the same scale)
+export const heldScale = (c?: Clip) => (c?.enter === 'punch' || c?.enter === 'zoom' ? PUNCH : 1);
+// the scale a clip starts at when it has no transition of its own (cut or punch); null: a transition, never one shot
+export const startScale = (c: Clip) => (!c.enter || c.enter === 'cut' ? 1 : c.enter === 'punch' ? PUNCH : null);
 
 // ---- geometry (all in % of the frame) ----
 export type P = [number, number];

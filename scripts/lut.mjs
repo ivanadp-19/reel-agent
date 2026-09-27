@@ -8,9 +8,10 @@
 //     ranges, src/lut.ts lutSpans) matched to the references' → public/luts/<name>.cube;
 //     → public/lut.json {lut: 'luts/<name>.cube'}
 //   {match: {name, from: {id, src, inSec, outSec}, to: {id, src, inSec, outSec, lut?, mix?}, frames}}  fit a
-//     .cube on pixel pairs (src/lut.ts fitCube): the last frames of `from` against the first frames of `to`
-//     through its own LUT — the same shot a frame apart (src/lut.ts matchPair) → public/luts/<name>.cube;
-//     → public/lut.json {lut, pairs, before, after, worst} (mean |difference| of the pairs, of 255; worst = the
+//     .cube on pixel pairs (src/lut.ts fitCube): the frames of `from` at the join against `to`'s there (from's last vs
+//     to's first; a tail after its shot: from's first vs to's last) through to's own LUT — the same shot a frame
+//     apart (src/lut.ts matchPair) → public/luts/<name>.cube;
+//     → public/lut.json {lut, pairs, before, after, spread, worst} (mean |difference| of the pairs, of 255; worst = the
 //     luma band the fit leaves most off, its mean R/G/B error); refused when the pairs stay far apart (another shot)
 //
 // Input: JSON (argv[2]); output file argv[3] (default public/lut.json). Deterministic ffmpeg + math, no model, no network.
@@ -18,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {cubeFromReferences, fitCube, labStats, mixCube, parseCube, sampleCube} from '../src/lut.ts';
+import {cubeFromReferences, fitCube, labStats, mixCube, pairSpread, parseCube, sampleCube} from '../src/lut.ts';
 import {BAKE} from '../src/grade.ts';
 
 const ROOT = process.cwd();
@@ -76,16 +77,23 @@ export function makeLut({name, refs, clips = [], strength = 0.7}) {
   return writeLut(rel, cubeFromReferences(foot, ref, name, {strength}));
 }
 
-// the frames either side of the join: `from`'s last ones (nearest the join first) against `to`'s first ones, through
-// the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under: a frame of motion leaves
-// ~5, another shot ~40 (least squares on unrelated pixels regresses to gray, and the mean still falls)
-const SAME_SHOT = 10;
+// the frames either side of the join, nearest it first: `from`'s last ones against `to`'s first ones (a head before
+// its continuation) — or, when `to` ends where `from` starts (a tail after its shot), from's first against to's last —
+// through the LUT `to` plays with. SAME_SHOT = how far those pairs may be from one color map (src/lut.ts pairSpread,
+// of 255) — the same shot a frame apart: G10's heads 7.0–7.7, Morantes 10's 7-frame tail 3.3, its 3-frame neon pops (half
+// the picture clipped, hue-selective: the LUT's polynomial leaves 10.3–10.9 there) 7.3–8.9. Every one of the 126 joins
+// across the 63 cuts and jump cuts of the 14 finished exports stays over 12.2 (a soft cut of Morantes 4.1 at 39.3 s;
+// jump cuts of one framing: Morantes 10 at 30.86 s 12.5, 10.1 at 31.16 s 12.4). The polynomial's own residual could not
+// tell them apart (neon pops 10.9, jump cuts 13.4)
+const SAME_SHOT = 10.5;
 const cubeAt = (lut, mix) => { const text = fs.readFileSync(inPublic(lut), 'utf8'); return parseCube(mix >= 1 ? text : mixCube(parseCube(text), mix)); };
+const firstOf = (s) => decode(inPublic(s.src), {span: {...s, outSec: Math.min(s.outSec, s.inSec + 1)}, count: 0});
+const lastOf = (s) => decode(inPublic(s.src), {span: {...s, inSec: Math.max(s.inSec, s.outSec - 1)}, count: 0}).reverse();
 export function matchLut({name, from, to, frames = 3}) {
   const rel = lutRel(name);
   progress(10, 'Reading the frames at the join');
-  const a = decode(inPublic(from.src), {span: {...from, inSec: Math.max(from.inSec, from.outSec - 1)}, count: 0}).reverse();
-  const b = decode(inPublic(to.src), {span: {...to, outSec: Math.min(to.outSec, to.inSec + 1)}, count: 0});
+  const tail = Math.abs(to.outSec - from.inSec) < 0.001;
+  const [a, b] = tail ? [firstOf(from), lastOf(to)] : [lastOf(from), firstOf(to)];
   const k = Math.min(frames, a.length, b.length);
   const x = concat(a.slice(0, k)), y = concat(b.slice(0, k));
   if (to.lut) { const l = cubeAt(to.lut, to.mix ?? 1); for (let i = 0; i < y.length; i += 3) y.set(sampleCube(l, [y[i], y[i + 1], y[i + 2]]), i); }
@@ -98,12 +106,12 @@ export function matchLut({name, from, to, frames = 3}) {
     band[3]++;
     for (let c = 0; c < 3; c++) { before += Math.abs(y[i * 3 + c] - p[c]); after += Math.abs(y[i * 3 + c] - o[c]); band[c] += o[c] - y[i * 3 + c]; }
   }
-  const r1 = (v) => Math.round(v * 2550) / 10, bef = r1(before / n / 3), aft = r1(after / n / 3);
-  if (aft > SAME_SHOT) throw new Error(`${from.id ?? 'the clip'} and ${to.id ?? 'the other'} do not show the same picture at the join (mean difference ${bef} → ${aft} of 255 after the fit, over ${SAME_SHOT}): a match needs the same shot either side of a split`);
+  const r1 = (v) => Math.round(v * 2550) / 10, bef = r1(before / n / 3), aft = r1(after / n / 3), spread = pairSpread(x, y);
+  if (spread > SAME_SHOT) throw new Error(`${from.id ?? 'the clip'} and ${to.id ?? 'the other'} do not show the same picture at the join (their colors are no one map: spread ${spread} of 255, over ${SAME_SHOT}; the fit left ${bef} → ${aft}): a match needs the same shot either side of a split`);
   // the mean hides a cast on a tenth of the picture (the blacks): the band (≥ 1 % of the pairs) left most off
   const worst = bands.map((s, i) => ({luma: [Math.round(i * 25.5), Math.round((i + 1) * 25.5)], rgb: s.slice(0, 3).map((v) => r1(v / s[3])), share: s[3] / n}))
     .filter((w) => w.share >= 0.01).reduce((w, v) => (Math.max(...v.rgb.map(Math.abs)) > Math.max(...w.rgb.map(Math.abs)) ? v : w));
-  return {lut: writeLut(rel, text), pairs: k, before: bef, after: aft, worst: {luma: worst.luma, rgb: worst.rgb}};
+  return {lut: writeLut(rel, text), pairs: k, before: bef, after: aft, spread, worst: {luma: worst.luma, rgb: worst.rgb}};
 }
 
 export function bake({key, src, lut, mix}) {

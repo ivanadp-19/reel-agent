@@ -165,7 +165,10 @@ the fix — `split_clip` where the look changes (and at the shot's cut when the 
 also holds the shot before; that is a corte edit: do it in the Corte stage, or
 check corte again after it), then `create_lut match: true, clip_id: <the head>` —
 it fits the head to the clip continuing it and gives it that clip's grade — then
-`set_clip graded: true` on the head; never hand-tune knobs to chase it. Follow the
+`set_clip graded: true` on the head (a grade that stops early or pops for a shot's
+last frames: the same on the tail, with `to_clip_id: <the shot>`); never hand-tune
+knobs to chase it. In a job without color (captions only on a finished export) it
+is the client's: report it, never fix it. Follow the
 warnings in the order validate lists them (the latest first, the later split
 first): each clip is whole frames, so a split moves the timeline after it by up to
 a frame, and a time a later fix names would miss the cut. The render judge's

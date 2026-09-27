@@ -1,8 +1,7 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
 import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, withLut, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
-import {lutSpans, matchPair} from '../src/lut';
-import {continuesPrev} from '../src/timeline';
+import {lutSpans, matchCandidates, matchPair} from '../src/lut';
 import {runJob} from './jobs';
 import {Btn, Label, Section, Select, Toggle} from './ui';
 
@@ -98,7 +97,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
       if (lut) { await settle(withLut(grade, lut, target || undefined)); notify(`LUT ${name} made from ${refs.length} photo(s)`, 'ok'); }
     } catch (err) { setBusy(null); notify('Create LUT: ' + (err as Error).message, 'error'); }
   };
-  // create_lut match: this clip fitted to the one continuing it (or the one picked), then that clip's grade + the LUT
+  // create_lut match: this clip fitted to the one continuing it (or the one picked: a tail's shot), then that clip's grade + the LUT
   const onMatch = async () => {
     try {
       const {from, to} = matchPair(clips, target, matchTo || undefined, grade);
@@ -135,8 +134,8 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
       {eff.lut ? <Slider label="LUT mix" value={eff.lutMix ?? 1} min={0} max={1} step={0.05} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patch((l) => ({...l, lutMix: v}))} /> : null}
       {clipOf ? <>
         <Label>Match this clip to</Label>
-        <div className="flex gap-1" title="A shot whose grade starts late: split at the change, then fit the ungraded head to the graded rest (pixel pairs at the join, bounded)">
-          <Select value={matchTo} onChange={setMatchTo} options={[{value: '', label: 'the clip continuing it'}, ...clips.filter((c) => continuesPrev(clipOf, c)).map((c) => ({value: c.id, label: `Clip ${c.id}`}))]} className="flex-1" />
+        <div className="flex gap-1" title="A shot whose grade starts late or stops early: split at the change, then fit the odd part (the head, or the tail) to the rest of the shot — pick the shot for a tail (pixel pairs at the join, bounded)">
+          <Select value={matchTo} onChange={setMatchTo} options={[{value: '', label: 'the clip continuing it'}, ...matchCandidates(clips, clipOf).map((c) => ({value: c.id, label: `Clip ${c.id}`}))]} className="flex-1" />
           <Btn onClick={onMatch} disabled={!!busy}>Match</Btn>
         </div>
       </> : null}

@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, nextId, placeClips, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
+import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, MIN_PIECE_SEC, nextId, placeClips, rampClip, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -585,14 +585,13 @@ server.registerTool('delete_clips', {description: 'Remove clips from the timelin
   await save(project_id, p); return text(summary(project_id, p));
 });
 
-server.registerTool('split_clip', {description: 'Split a clip in two: at a timeline time (at_sec, like pressing S at the playhead) or in the pause right before a word (before_wid). To REMOVE words use cut_words instead — it snaps the boundaries for you.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds').optional(), before_wid: z.string().optional().describe('word id from get_transcript')}}, async ({project_id, at_sec, before_wid}) => {
+server.registerTool('split_clip', {description: 'Split a clip in two: at a timeline time (at_sec, like pressing S at the playhead) or in the pause right before a word (before_wid). Each piece keeps at least 3 frames; the two continue each other in the source, so they play as one shot. To REMOVE words use cut_words instead — it snaps the boundaries for you.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds').optional(), before_wid: z.string().optional().describe('word id from get_transcript')}}, async ({project_id, at_sec, before_wid}) => {
   const p = load(project_id);
   let clip, sourceSec;
   if (before_wid) { const w = await wordAt(p, before_wid); clip = w.clip; sourceSec = (w.prev ? Math.max(w.prev.endMs + 40, w.word.startMs - SNAP_MS) : w.word.startMs - 100) / 1000; }
   else if (at_sec != null) ({clip, sourceSec} = locate(p, at_sec));
   else throw new Error('give at_sec or before_wid');
-  if (sourceSec - clip.inSec < 0.2 || clip.outSec - sourceSec < 0.2) throw new Error('too close to the clip edge (min 0.2 s each side)');
-  const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error('could not split');
+  const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error(`too close to the clip edge (min 3 frames, ${MIN_PIECE_SEC.toFixed(3)} s, each side)`);
   p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); // captions follow their source on their own
   await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });
@@ -919,12 +918,8 @@ server.registerTool('set_speed_ramp', {description: 'Speed ramp across a clip, a
   const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
   const speeds = speedRamp(from_speed, to_speed, steps);
   const span = c.outSec - c.inSec; if (span / speeds.length < 0.3) throw new Error(`${clip_id} is too short for ${speeds.length} pieces`);
-  let id = clip_id; const ids = [id];
-  for (let k = 1; k < speeds.length; k++) {
-    const r = splitClip(p.clips, id, c.inSec + (span * k) / speeds.length); if (!r) throw new Error('could not split');
-    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); id = r.newId; ids.push(id);
-  }
-  ids.forEach((pid2, k) => { const piece = p.clips.find((x) => x.id === pid2); piece.speed = speeds[k]; });
+  const r = rampClip(p.clips, clip_id, speeds); if (!r) throw new Error('could not split');
+  p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); const ids = r.ids;
   await save(project_id, p);
   return text(`Speed ramp on ${clip_id}: ${ids.map((x, k) => `${x} ×${speeds[k]}`).join(' → ')}\n\n${summary(project_id, p)}`);
 });
@@ -1097,7 +1092,7 @@ server.registerTool('set_grade', {description: `Color, opt-in and adjustable: no
   return text(`Color:\n  ${[...lines, ...measured].join('\n  ')}`);
 });
 
-server.registerTool('create_lut', {description: 'Make a .cube LUT, two ways. From reference photos of the look the client wants (their stills, their past reels\' frames): the footage\'s color statistics — frames the reel shows of this project\'s clips, or of clip_id only — are matched to the references\' (tone curve by quantiles, palette by mean and spread, in Oklab; deterministic, bounded); strength 0–1 (0.7 default) = how far toward the references. Or match = true: make clip_id look like the clip that continues it in the same source (the same shot, split where the look changes; refused otherwise), fitted on pixel pairs — clip_id\'s last frames against the continuation\'s first as it plays (its LUT included), a frame apart (least squares, bounded to the colors those frames show: nothing extrapolated). That fixes a pre-edit whose grade starts a few frames late inside a shot: split_clip where the look changes, then create_lut match on the ungraded head — it takes its continuation\'s grade with this LUT in front; the result says how far apart the pairs were before and after (mean of 255; a frame of motion leaves ~4–5) and which luma band stays most off, per channel. Saved as public/luts/<name>.cube for any project; apply = also set it (the whole reel, or clip_id\'s override as set_grade target); set_grade lut_mix fine-tunes later. Needs the backend.', inputSchema: {project_id: pid, name: z.string().regex(/^[\w-]{1,40}$/), reference_images: z.array(z.string()).min(1).max(20).optional().describe('absolute paths (copied in) or paths under public/'), clip_id: z.string().optional().describe('measure and set only this clip (its range of the source)'), match: z.boolean().default(false).describe('fit clip_id to to_clip_id instead of reference photos'), to_clip_id: z.string().optional().describe('match: which clip continuing clip_id in the same source to look like (default: the first)'), strength: z.number().min(0).max(1).default(0.7), apply: z.boolean().default(true)}}, async ({project_id, name, reference_images, clip_id, match, to_clip_id, strength, apply}) => {
+server.registerTool('create_lut', {description: 'Make a .cube LUT, two ways. From reference photos of the look the client wants (their stills, their past reels\' frames): the footage\'s color statistics — frames the reel shows of this project\'s clips, or of clip_id only — are matched to the references\' (tone curve by quantiles, palette by mean and spread, in Oklab; deterministic, bounded); strength 0–1 (0.7 default) = how far toward the references. Or match = true: make clip_id look like the clip that continues it in the same source — or, with to_clip_id, the clip it continues (the same shot, split where the look changes; refused otherwise) — fitted on pixel pairs at the join, clip_id\'s frames against the other\'s as it plays (its LUT included), a frame apart (least squares, bounded to the colors those frames show: nothing extrapolated). That fixes a pre-edit whose grade starts a few frames late inside a shot — split_clip where the look changes, then create_lut match on the ungraded head: it takes its continuation\'s grade with this LUT in front — or stops early / pops for its last frames: split the tail off, then create_lut match clip_id <the tail> to_clip_id <the shot>; the result says how far apart the pairs were before and after (mean of 255; a frame of motion leaves ~4–5) and which luma band stays most off, per channel. Saved as public/luts/<name>.cube for any project; apply = also set it (the whole reel, or clip_id\'s override as set_grade target); set_grade lut_mix fine-tunes later. Needs the backend.', inputSchema: {project_id: pid, name: z.string().regex(/^[\w-]{1,40}$/), reference_images: z.array(z.string()).min(1).max(20).optional().describe('absolute paths (copied in) or paths under public/'), clip_id: z.string().optional().describe('measure and set only this clip (its range of the source)'), match: z.boolean().default(false).describe('fit clip_id to to_clip_id instead of reference photos'), to_clip_id: z.string().optional().describe('match: which clip to look like — one continuing clip_id in the same source (default: the first), or the one clip_id continues (a tail: its shot)'), strength: z.number().min(0).max(1).default(0.7), apply: z.boolean().default(true)}}, async ({project_id, name, reference_images, clip_id, match, to_clip_id, strength, apply}) => {
   const p = load(project_id);
   if (match) {
     if (!clip_id) throw new Error('match needs clip_id: the clip to fix');
@@ -1213,7 +1208,7 @@ server.registerTool('timing_report', {description: 'Where the time of this proje
   return text(timingText(summarize(readTiming(PROJECTS, project_id))));
 });
 
-server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook, and with a guion (set_guion) its coverage: guion-conflict (audio and script disagree — the audio stays; ask the human), guion-missing, guion-altered, guion-extra, guion-timing (before captions: script-coverage, a guion line the cut does not keep), data-from-audio (a warning: a figure or name on a graphic that this reel\'s own audio does not say near it — an end card anywhere in the reel — fix the graphic or leave it for the client to confirm, never take it from another reel, the guion or the brief), wind (a loud floor under 150 Hz in the quiet of a source — set_audio clean: wind, only if the brief lets you touch the audio), and half-graded: a source whose grade starts a few frames into a shot (a pre-edit graded only in part — every frame of each source is scanned in the backend\'s background; half-graded-pending until then), with the fix. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook, and with a guion (set_guion) its coverage: guion-conflict (audio and script disagree — the audio stays; ask the human), guion-missing, guion-altered, guion-extra, guion-timing (before captions: script-coverage, a guion line the cut does not keep), data-from-audio (a warning: a figure or name on a graphic that this reel\'s own audio does not say near it — an end card anywhere in the reel — fix the graphic or leave it for the client to confirm, never take it from another reel, the guion or the brief), wind (a loud floor under 150 Hz in the quiet of a source — set_audio clean: wind, only if the brief lets you touch the audio), and half-graded: a source whose grade starts a few frames into a shot or stops / pops for its last frames (a pre-edit graded only in part — every frame of each source is scanned in the backend\'s background; half-graded-pending until then), with the fix. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
   return text(issuesText(await allIssues(p)));
 });
@@ -1330,7 +1325,7 @@ server.registerTool('render', {description: 'Export the project to mp4 (1080x192
   const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, r.file.replace(/^\//, ''));
   const size = fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p))}s)` : ` (${f1(totalSec(p))}s)`; // REEL_API on another machine: the file lives there
   const review = (r.version ? `\nReview version v${r.version} recorded — share_version gives a link` : r.versionError ? `\nReview version NOT recorded: ${r.versionError}` : '') + (r.deliverables ? `\nDeliverables (public/): ${Object.values(r.deliverables).join(', ')}` : '');
-  const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
+  const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}${r.masterFile ? ` ${r.masterFile}` : ''}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}${size} [${how}]${r.qc ? `\nQC passed:\n${r.qc}` : ''}${review}`);
 });
 

@@ -72,7 +72,9 @@ render vN ──► DELIVER vN now, labeled "QC técnico en curso"
    not deliverables.
 2. **Snapshot, then judge in parallel.** Right after the render, and before
    you touch the project again, run
-   `node .agents/skills/render-judge/judge.mjs <project> <render> [--role …] [--pair …]`.
+   `node .agents/skills/render-judge/judge.mjs <project> <render> [--role …] [--pair …] [--clean <master>]`
+   — a layers render names its master (the file after `master rendered|cached`): pass it as `--clean`, so
+   `grade-coverage` measures frames no caption page hides.
    It reads the project as it is now and takes a few seconds, so a later edit
    cannot leak into this verdict. Then hand the report to the judge:
    - With the Agent tool, spawn a fresh `general-purpose` subagent **in the

@@ -144,17 +144,19 @@ export function lutSpans(clips: Clip[], target?: string): Span[] {
   if (!out.length) throw new Error(target ? `no clip or source "${target}"` : 'the project has no clips to measure the footage from');
   return out;
 }
-// create_lut match: the clip to fix and the one it must look like — the clip that continues it in the same source (a
-// shot a pre-edit graded only from its second part on, split at the change: the head, then the rest), wherever it sits
-// on the timeline; toClipId only picks among several. Never another shot: fitted across two, least squares washes the
-// head out. `to` carries the LUT it plays with (whole reel, source or its own): the head's LUT replaces that one, so
-// it is fitted to the continuation as it shows.
+// create_lut match: the clip to fix and the one it must look like — a clip it runs into in the same source, split
+// where the look changes inside a shot: the clip that continues it (a head a pre-edit graded only from its second part
+// on, then the rest) or the one it continues (a tail whose grade stops early or pops: the shot, then the tail) —
+// wherever they sit on the timeline (matchCandidates). Without toClipId, the continuation; the clip it continues only
+// when named (a tail names its shot — never by default: that would fit a graded rest to its ungraded head). Never
+// another shot: fitted across two, least squares washes the clip out (the job refuses it). `to` carries the LUT it
+// plays with (whole reel, source or its own): the clip's LUT replaces that one, so it is fitted to `to` as it shows.
+export const matchCandidates = (clips: Clip[], from: Clip): Clip[] => [...clips.filter((c) => continuesPrev(from, c)), ...clips.filter((c) => continuesPrev(c, from))];
 export function matchPair(clips: Clip[], clipId: string, toClipId?: string, grade?: ProjectGrade | null): {from: Span; to: Span & {lut?: string; mix?: number}} {
   const from = clips.find((c) => c.id === clipId);
   if (!from) throw new Error(`no clip ${clipId}`);
-  const next = clips.filter((c) => continuesPrev(from, c));
-  const to = toClipId ? next.find((c) => c.id === toClipId) : next[0];
-  if (!to) throw new Error(toClipId ? `${toClipId} does not continue ${clipId} in the same source: a match fits the same shot either side of a split` : `no clip continues ${clipId} in the same source: split_clip where the look changes inside the shot, then match the part before the split`);
+  const to = toClipId ? matchCandidates(clips, from).find((c) => c.id === toClipId) : clips.find((c) => continuesPrev(from, c));
+  if (!to) throw new Error(toClipId ? `${toClipId} neither continues ${clipId} nor is continued by it in the same source: a match fits the same shot either side of a split` : `no clip continues ${clipId} in the same source: split_clip where the look changes inside the shot, then match the part before the split (a tail: to_clip_id its shot)`);
   const p: {lut?: string | null; lutMix?: number} = grade ? paramsFor(grade, to.src, to.id) : {};
   const mix = p.lutMix ?? DEFAULTS.lutMix;
   return {from: span(from), to: {...span(to), ...(p.lut && mix > 0 ? {lut: p.lut, mix} : {})}};
@@ -188,6 +190,26 @@ const fromYC = ([y, cb, cr]: RGB): RGB => { const r = y + cr, b = y + cb; return
 const SECTORS = 12;
 const hue = (cb: number, cr: number) => ((Math.atan2(cr, cb) + Math.PI) / (2 * Math.PI)) * SECTORS; // 0…SECTORS
 
+// How far the pairs are from being one color map at all (of 255): x binned 16 per channel, the mean distance of each
+// pair's y from its bin's mean y (bins of ≥ 4 pairs). The same shot either side of a grade change makes y a function
+// of x — whatever the grade, clipped or hue-selective, a polynomial cannot follow; another shot, or a jump cut
+// between takes, does not (create_lut match's same-shot test, scripts/lut.mjs)
+export function pairSpread(x: ArrayLike<number>, y: ArrayLike<number>, bins = 16): number {
+  const at = new Map<number, number[]>();
+  for (let i = 0; i + 2 < x.length; i += 3) {
+    const k = [0, 1, 2].reduce((a, c) => a * bins + Math.min(bins - 1, Math.max(0, Math.floor(x[i + c] * bins))), 0);
+    const e = at.get(k);
+    if (e) e.push(i); else at.set(k, [i]);
+  }
+  let s = 0, n = 0;
+  for (const idx of at.values()) {
+    if (idx.length < 4) continue;
+    const mu = [0, 1, 2].map((c) => idx.reduce((a, i) => a + y[i + c], 0) / idx.length);
+    for (const i of idx) { s += (Math.abs(y[i] - mu[0]) + Math.abs(y[i + 1] - mu[1]) + Math.abs(y[i + 2] - mu[2])) / 3; n++; }
+  }
+  return n ? Math.round((s / n) * 2550) / 10 : Infinity;
+}
+
 export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, title = 'match'} = {}): string {
   const n = Math.floor(x.length / 3);
   if (n < 64 || y.length !== x.length) throw new Error('not enough pixel pairs to fit a LUT');
@@ -217,8 +239,18 @@ export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, 
     const q = [Math.min(hi, Math.max(lo, l)), u * s, v * s] as RGB, o = feat(q), qr = fromYC(q);
     return [0, 1, 2].map((c) => W[c].reduce((acc, w, j) => acc + w * o[j], 0) + p[c] - qr[c]) as RGB;
   };
+  // least squares shrinks chroma where the pairs scatter: a pop that clipped half the picture (Morantes 10's 3-frame
+  // tails) came out ×0.89 as saturated as its shot, a residual grade-coverage blocks — the fit keeps the target's mean
+  // saturation over the pairs (a gain on its chroma, 0.8–1.25) and its mean tint (an offset after the gain: the bounded
+  // fit leaves the pairs' mean off by a unit or two where it clamps); a clean fit is left alone
+  const T = [0, 0, 0], F = [0, 0, 0], fx = Array.from({length: n}, (_, i) => toYC(fit([x[i * 3], x[i * 3 + 1], x[i * 3 + 2]])));
+  for (let i = 0; i < n; i++) { const t = toYC([y[i * 3], y[i * 3 + 1], y[i * 3 + 2]]), f = fx[i]; T[0] += Math.hypot(t[1], t[2]); F[0] += Math.hypot(f[1], f[2]); T[1] += t[1]; T[2] += t[2]; }
+  const g = F[0] > 0 ? Math.min(1.25, Math.max(0.8, T[0] / F[0])) : 1;
+  for (const f of fx) { F[1] += f[1] * g; F[2] += f[2] * g; }
+  const du = (T[1] - F[1]) / n, dv = (T[2] - F[2]) / n;
+  const sat = (o: RGB): RGB => { if (Math.abs(g - 1) < 0.01 && Math.abs(du) + Math.abs(dv) < 0.002) return o; const [l, u, v] = toYC(o); return fromYC([l, u * g + du, v * g + dv]); };
   const m = size, data = new Float64Array(m ** 3 * 3), step = [1, m, m * m];
-  for (let i = 0; i < m ** 3; i++) data.set(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)]), i * 3);
+  for (let i = 0; i < m ** 3; i++) data.set(sat(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)])), i * 3);
   // monotone: a channel never falls while its own input rises. Per line of the cube, the least-squares monotone
   // values (pool adjacent violators) weighted by the pairs nearest each node: where the fit dips, the nodes the pairs
   // cover keep their value and the others follow them. A running max lifted a gray node to its off-axis neighbour

@@ -508,7 +508,9 @@ async function startJudge({dir, publicDir, projectId, v, cmd = JUDGE_CMD, timeou
   const done = (async () => {
     let judge;
     try {
-      const run = lane.then(() => runJudge(cmd, [projectId, path.join(publicDir, version.file), '--summary', '--public', publicDir, '--snapshot', path.join(publicDir, version.snapshot)], timeoutMs, spawned));
+      // grade-coverage on the clean master (its _master.mp4): the captioned render's pages hide most frames
+      const clean = version.deliverables?.master ? ['--clean', path.join(publicDir, version.deliverables.master)] : [];
+      const run = lane.then(() => runJudge(cmd, [projectId, path.join(publicDir, version.file), '--summary', '--public', publicDir, '--snapshot', path.join(publicDir, version.snapshot), ...clean], timeoutMs, spawned));
       lane = run.catch(() => {});
       const s = await run;
       judge = {label: s.label, findings: s.findings, at: at(), profile: s.profile ?? null, ...(s.report ? {report: s.report} : {})};
