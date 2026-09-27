@@ -1321,8 +1321,10 @@ test('a proof never takes a final\'s slot, and a final never waits on a proof\'s
   await until(() => readJob(s.dir, pr.id).status === 'done');
   assert.equal(readJob(s.dir, fin.id).status, 'running');
   assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, '.slot-0.lock'), 'utf8')).job, fin.id);
-  assert.ok(readJob(s.dir, pr.id).result.nice >= 15, 'niced while a render holds a slot');
-  fs.writeFileSync(path.join(s.pub, 'exports', `edited-${fin.id}.mp4.go`), '');
+  const busyNice = readJob(s.dir, pr.id).result.nice;
+  fs.writeFileSync(path.join(s.pub, 'exports', `edited-${fin.id}.mp4.go`), ''); // released before asserting: a failure never leaves the gated render (and the file) hanging
+  // REEL_PROOF_NICE (10) or the test's own niceness when it already runs lower (a niced run can't raise a child's priority)
+  assert.ok(busyNice >= Math.min(19, Math.max(os.getPriority(), +(process.env.REEL_PROOF_NICE ?? 10))), `niced while a render holds a slot (nice ${busyNice})`);
   await until(() => readJob(s.dir, fin.id).status === 'done', 8000);
   // a proof holds the proof slot → a final starts at once
   const held = proofOf(s, {mode: 'gate'});
