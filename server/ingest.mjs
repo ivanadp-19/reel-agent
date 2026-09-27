@@ -79,8 +79,12 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     for (const n of fs.readdirSync(clipsDir)) if (n.endsWith('.mp4') && fs.statSync(path.join(clipsDir, n)).size === size && (await sha256(path.join(clipsDir, n))) === hash) return n.slice(0, -4);
     return null;
   }
+  const thumb = (out, id, dur) => run('ffmpeg', ['-y', '-ss', String(Math.min(0.5, dur / 2)), '-i', out, '-frames:v', '1',
+    '-vf', 'scale=160:-1', path.join(thumbsDir, `${id}.jpg`)], {cwd: root});
   const reused = async (same, {rawName, tag}) => {
     const dur = await durationOf(path.join(clipsDir, `${same}.mp4`));
+    // a file put in clips/ by hand has no thumbnail yet
+    if (!fs.existsSync(path.join(thumbsDir, `${same}.jpg`))) await thumb(path.join(clipsDir, `${same}.mp4`), same, dur);
     log(`ingest ${tag}: same bytes as clips/${same}.mp4 → reused, nothing re-encoded or re-transcribed`);
     return {id: same, src: `clips/${same}.mp4`, label: rawName.replace(/\.[^.]+$/, ''), inSec: 0, outSec: dur, sourceDurationSec: dur, ingest: `same file as clips/${same}.mp4: reused with its transcripts`};
   };
@@ -151,8 +155,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     const dur = (await durationOf(out)) || duration || 0;
 
     report(95, 'Making thumbnail');
-    await run('ffmpeg', ['-y', '-ss', String(Math.min(0.5, dur / 2)), '-i', out, '-frames:v', '1',
-      '-vf', 'scale=160:-1', path.join(thumbsDir, `${id}.jpg`)], {cwd: root});
+    await thumb(out, id, dur);
 
     return {
       id, src: `clips/${id}.mp4`, label: rawName.replace(/\.[^.]+$/, ''),

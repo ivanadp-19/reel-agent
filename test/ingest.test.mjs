@@ -242,9 +242,11 @@ test('a file with the same bytes as a source in public/clips is that source: no 
     assert.ok(Math.abs(c.sourceDurationSec - 2) < 0.2 && c.outSec === c.sourceDurationSec);
     assert.match(c.ingest, /same file as clips\/take\.mp4/);
   };
+  fs.rmSync(path.join(clips, 'thumbs', 'take.jpg')); // as a file put in clips/ by hand: no thumbnail yet
   const byPath = await fetch(`${base}/api/add-clip?name=take.mp4&path=${encodeURIComponent(kept)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}});
   assert.equal(byPath.status, 200);
   same(await byPath.json());
+  assert.ok(fs.existsSync(path.join(clips, 'thumbs', 'take.jpg')), 'the reused source gets the thumbnail it lacked');
   const copy = path.join(dir, 'again.mp4');
   fs.copyFileSync(kept, copy);
   same(await (await fetch(`${base}/api/add-clip?name=again.mp4&path=${encodeURIComponent(copy)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}})).json());
