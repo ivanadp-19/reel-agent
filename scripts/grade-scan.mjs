@@ -55,6 +55,9 @@ export function dhash(px) {
   return h;
 }
 export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x & 1n); x >>= 1n; } return n; }
+// two consecutive frames (frameLooks') of one shot: the structure moved ≤ cutHash bits — else a cut. The rule
+// lookSteps links a stretch by, and the face scan splits a source into shots by (scripts/face-scan.mjs)
+export const sameShot = (a, b, cutHash = CUT_HASH) => hamming(a.h, b.h) <= cutHash;
 
 // raw 27×24 yuv444p frames → [{y, u, v, s, h, b}]: mean luma / chroma, mean saturation (signalstats' SATAVG:
 // |U−128, V−128|), the dHash of the 3×3-block means (8-bit, as ffmpeg delivers them) and those 72 blocks'
@@ -112,7 +115,7 @@ const spread = (xs) => (xs.length ? Math.max(...xs) - Math.min(...xs) : 0);
 // ponytail: a look change shorter than minSide frames (a 1–2-frame flash) is not seen here
 export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, minSide = 3, maxHash = MAX_HASH, cutHash = CUT_HASH, global = GLOBAL, ok = () => true, joined = () => true, need = (by) => Object.keys(by).length > 0} = {}) {
   const hd = (k) => hamming(frames[k - 1].h, frames[k].h);
-  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && hd(k) <= cutHash;
+  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && sameShot(frames[k - 1], frames[k], cutHash);
   const block = (f, j) => ({y: f.b[j], u: f.b[72 + j], v: f.b[144 + j], s: f.b[216 + j]});
   const out = [];
   for (let a = 0; a < frames.length;) {
@@ -234,21 +237,23 @@ export async function scanSource(publicDir, src, {force = false} = {}) {
 // The backend's background lane: kick(srcs) queues each unscanned source (a second kick of one queued
 // or running joins it) and never throws; one scan at a time for the whole backend. read: what counts as
 // scanned (the backend's lane also runs the wind scan, scripts/wind-scan.mjs, and wants both current)
+// kind: what to scan of each ('all' by default; the backend's lane also takes 'faces' for a B-roll, scripts/face-scan.mjs)
 export function createGradeScans({publicDir, log = console.log, scan = (src) => scanSource(publicDir, src), read = readScan} = {}) {
   const queued = new Set();
   let chain = Promise.resolve();
-  const kick = (srcs) => {
+  const kick = (srcs, kind = 'all') => {
     for (const src of [].concat(srcs)) {
-      if (queued.has(src) || read(publicDir, src) !== null) continue; // current, or no such file
-      queued.add(src);
+      const key = `${kind}:${src}`;
+      if (queued.has(key) || read(publicDir, src, kind) !== null) continue; // current, or no such file
+      queued.add(key);
       chain = chain.then(async () => {
         const t0 = Date.now();
-        try { const e = await scan(src); log(`grade scan ${src}: ${e.frames} frames, ${e.steps.length} half-graded step(s) in ${((Date.now() - t0) / 1000).toFixed(1)} s`); } catch (e) { log(`grade scan ${src}: ${String(e?.message ?? e).slice(0, 300)}`); } finally { queued.delete(src); }
+        try { const e = await scan(src, kind); log(`${kind === 'all' ? 'grade' : kind} scan ${src}: ${e.frames != null ? `${e.frames} frames, ${e.steps.length} half-graded step(s)` : `${e.samples?.length ?? 0} samples`} in ${((Date.now() - t0) / 1000).toFixed(1)} s`); } catch (e) { log(`${kind === 'all' ? 'grade' : kind} scan ${src}: ${String(e?.message ?? e).slice(0, 300)}`); } finally { queued.delete(key); }
       });
     }
     return chain;
   };
-  return {kick, pending: (src) => queued.has(src)};
+  return {kick, pending: (src, kind = 'all') => queued.has(`${kind}:${src}`)};
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

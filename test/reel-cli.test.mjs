@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import {main, autocutPlan, checkCaptions, diffCaptions, projectPatch, slug} from '../cli/reel.mjs';
 import {serveFile} from '../server/http.mjs';
 import {captionsRevision, replaceCaptions} from '../server/captions-revision.mjs';
+import {faceKnobs, placeCaptions} from '../src/faces.ts';
 
 const TOKEN = 'reel_test-secret-0123456789abcdefghij';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-cli-'));
@@ -34,6 +35,15 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/captions/17') return send(res, 200, ++S.captionsCalls < 2 ? {status: 'running', progress: 50, label: 'Transcribing'} : {status: 'done', progress: 100, label: 'Ready', result: [{id: 'n0', src: 'clips/take1.mp4', startMs: 1000, endMs: 1600, topPct: 62, words: [{wid: 'take1:5', text: 'nuevo', startMs: 1000, endMs: 1600}]}]});
   if (p === '/api/trim-silence' && req.method === 'POST') { S.trimBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '23'}); }
   if (p === '/api/trim-silence/23') return send(res, 200, {status: 'done', progress: 100, label: 'Ready', ...(S.noTrimResult ? {} : {result: {plan: [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]}})});
+  if ((m = p.match(/^\/api\/projects\/([\w-]+)\/place-captions$/)) && req.method === 'POST') { // the backend's: src/faces.ts over the saved project (no scans here)
+    const cur = S.projects.get(m[1]), knobs = JSON.parse(await readBody(req));
+    S.placed = (S.placed ?? 0) + 1;
+    const next = {...cur, ...knobs};
+    next.captions = placeCaptions(next, {}, 30);
+    S.projects.set(m[1], next);
+    const k = faceKnobs(next);
+    return send(res, 200, {project: m[1], changed: true, moved: 0, faceShift: k.shift, faceHold: k.hold, issues: []});
+  }
   if ((m = p.match(/^\/api\/projects\/([\w-]+)\/captions$/))) { // the backend's route, over its revision logic
     const cur = S.projects.get(m[1]);
     if (!cur) return send(res, 404, {error: 'not found', code: 'not_found'});
@@ -271,6 +281,13 @@ test('projects set: by id or name, CAS write, retry changes nothing, a new pack 
   assert.deepEqual([nothing.code, nothing.out.code], [2, 'bad_usage']);
   const missing = await reel(['projects', 'set', 'Nope', '--lang', 'en', '--json']);
   assert.deepEqual([missing.code, missing.out.code], [4, 'not_found']);
+  // the captions' reach and hold: the backend re-places the pages (never re-pages them); kit = back to the kit's
+  const placed = S.placed ?? 0;
+  const knobs = await reel(['projects', 'set', 'promo', '--face-shift', '12', '--face-hold', 'video', '--json']);
+  assert.equal(knobs.code, 0, knobs.stdout);
+  assert.deepEqual([knobs.out.set, knobs.out.faces.faceShift, knobs.out.faces.faceHold, S.placed, S.projects.get('promo').faceShift], [{faceShift: 12, faceHold: 'video'}, 12, 'video', placed + 1, 12]);
+  assert.equal((await reel(['projects', 'set', 'promo', '--face-shift', 'kit', '--json'])).out.faces.faceShift, 15);
+  for (const bad of [['--face-shift', '80'], ['--face-shift', 'lots'], ['--face-hold', 'take']]) assert.equal((await reel(['projects', 'set', 'promo', ...bad, '--json'])).code, 2, bad.join(' '));
 });
 
 test('autocut: --dry-run prints the plan and saves nothing; then the clips are replaced by their segments; no plan from the backend is an error', async () => {

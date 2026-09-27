@@ -19,6 +19,15 @@ export type BrollItem = {
   leave?: import('./motion.ts').BrollOut; // how it leaves: slideDown (Impact/Elevate), shrink (Evo), fall (Chalk), fade (Linen); cut = a hard cut
 };
 
+// where each mode's box sits, % of the frame (Broll.tsx draws it; src/faces.ts maps faces through it)
+export const BROLL_BOX: Record<BrollItem['mode'], {top: number; left: number; width: number; height: number}> = {
+  fullscreen: {top: 0, left: 0, width: 100, height: 100},
+  top: {top: 0, left: 0, width: 100, height: 45},
+  inset: {top: 6, left: 61, width: 34, height: 22}, // 5 % from the right edge
+  card: {top: 28, left: 10, width: 80, height: 45},
+  carousel: {top: 52, left: 32, width: 36, height: 40},
+};
+
 // the creator's own B-roll source (pool the generator can pick from)
 export type BrollAsset = {id: string; src: string; kind: 'video' | 'image'; label: string; thumb?: string};
 

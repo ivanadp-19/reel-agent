@@ -74,7 +74,13 @@ with (two projects with that name: exit 5, pass the id).
   a language code (`es`, not `Spanish`: exit 2); `--caption-style` is one of the
   packs `reel help projects set --json` lists. A new pack re-pages the generated
   captions for it (tiers and hand-made pages stay), like the MCP. Setting what is
-  already set changes nothing (`changed: false`).
+  already set changes nothing (`changed: false`). `--face-shift <0–66|kit>` /
+  `--face-hold <toma|video|pagina|kit>` — how far and how long the captions hold a
+  position to clear every face (the MCP's `set_captions face_shift / face_hold`): the
+  backend re-places the pages (`POST /api/projects/<id>/place-captions`, never a
+  re-page) and answers `faces: {moved, faceShift, faceHold, issues}`; a re-page and
+  `captions generate` re-place too, and `captions generate` hands on the job's face
+  `warnings` (a source not scanned yet, a box that cannot scan).
 - `reel autocut <project> [--dry-run] [--timeout <s>]` — the editor's / MCP's
   autocut step: the backend's `/api/trim-silence` job analyzes the speech of every
   clip, then each clip is replaced by its speech segments (silence at the ends and

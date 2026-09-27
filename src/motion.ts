@@ -224,6 +224,16 @@ export function brollOut(kind: BrollOut, framesLeft: number, fps: number): Broll
   }
 }
 
+// A B-roll cue's box at frame `frame` of its `dur`: its arrival and exit (dx / dy in % of the box), its size (scale ×
+// the cue's own) and a card's rise and exit (cardY px: fast then drifting up over its landing, out upwards
+// accelerating over its last CARD_EXIT_MS). Broll.tsx draws it; src/faces.ts maps the faces a cue shows through it
+const CARD_EXIT_MS = 500; // 12 f at 24 fps
+export function brollMotion(o: {arrive: BrollIn; leave: BrollOut; scale: number; card: boolean}, frame: number, dur: number, fps: number) {
+  const inFx = brollIn(o.arrive, frame, fps), outFx = brollOut(o.leave, dur - 1 - frame, fps);
+  const exitT = o.card ? Math.min(1, Math.max(0, 1 - (dur - 1 - frame) / ms(fps, CARD_EXIT_MS))) : 0;
+  return {dx: inFx.dx + outFx.dx, dy: inFx.dy + outFx.dy, scale: o.scale * inFx.scale * outFx.scale, cardY: o.card ? (1 - cardLanding(frame, fps)) * 900 - exitT * exitT * 1500 : 0, blur: inFx.blur + outFx.blur, opacity: (inFx.opacity ?? 1) * (outFx.opacity ?? 1)};
+}
+
 // Paper II's stickers: a crumpled ball beside the head travels out (travel 0→1 of its distance) while it
 // scales 0.15→1 and unfolds, 10–12 f ease-out; leaving, it shrinks back toward the head in 4 f
 export function unfold(frame: number, fps: number, leaving: boolean): {travel: number; scale: number} {

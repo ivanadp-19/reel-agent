@@ -74,6 +74,7 @@ export const FIELD_STAGE: Record<string, Stage[]> = {
   captions: ['captions'],
   captionStyle: ['captions'],
   captionsOff: ['captions'],
+  faceShift: ['captions'], faceHold: ['captions'], // how far and how long a caption position holds to clear the faces (src/faces.ts)
   brolls: ['broll'],
   brollAssets: ['broll'],
   graphics: ['broll'],
@@ -258,7 +259,8 @@ export const RULES: Record<Stage, string[]> = {
   audio: ['wind'], // src/audio.ts windIssues: set_audio clean wind
   captions: ['font-missing', 'font-wrong', 'glue', 'short', 'long', 'timing', 'overlap-captions', 'fast-words',
     'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing',
-    'caption-text'], // the judge's: a page word that is not the word said, edit_caption
+    'caption-text', // the judge's: a page word that is not the word said, edit_caption
+    'caption-face', 'caption-face-mixed', 'caption-face-pending', 'caption-face-unavailable'], // src/faces.ts: pages over a face, a take holding more than one position (the knobs are the captions'; a B-roll or a graphic may cause it too); mcp/checks.mjs faceGaps: a source not scanned yet, a box that cannot
   broll: ['safe-top', 'safe-bottom', 'face', 'behind-hidden', 'overlap-graphic', 'overlap-graphics', 'supers-order', 'matte', 'hook', 'layer-blocker', 'supers-blocker',
     'data-from-audio'], // src/validate.ts unbackedData: a graphic's figure / name its audio does not say, edit_graphic
   entregables: [],

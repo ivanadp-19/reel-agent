@@ -217,7 +217,13 @@ reel on concrete nouns/feelings. Never on function words; the reply echoes each
 word, check it is the one you meant. Pages you `delete_captions` stay deleted
 across restyles; `edit_caption top_pct` pins a page even in floating styles;
 `edit_caption behind: true` puts a (big, pinned) page behind the presenter (then
-`prepare_mattes`).
+`prepare_mattes`). Pages keep clear of every face on screen by themselves (the presenter's, a
+B-roll's; one position per take by default, never moving inside it): when the
+brief says how much they may move, or wants one position for the whole reel (or
+each page free), `set_captions face_shift` (± % of the height; 0 = never move) /
+`face_hold` (`toma` | `video` | `pagina`) — a client's kit carries its own;
+`validate` `caption-face` names the take and the fix. A page you pin stays where
+you put it.
 
 **Proofs**: `caption_proof` → look at the stills, fix overlaps, emphasis,
 positions, readability of accent-colored text; `motion_proof` at one key word →

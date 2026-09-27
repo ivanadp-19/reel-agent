@@ -11,8 +11,10 @@ import {isTextGraphic, projectGraphics, type Graphic} from './graphicTemplates.t
 import type {Clip} from './timeline.ts';
 import {avoidGraphics} from './validate.ts';
 import {gradeFor, lutBakes, type ProjectGrade} from './grade.ts';
+import {ms as msToFrames} from './motion.ts';
 
-type Span = {startMs: number; endMs: number};
+export type Span = {startMs: number; endMs: number};
+export type Zoom = Span & {scale: number; inMs: number; outMs: number}; // a camera push that lives with a title (Orbit)
 export type LayerProps = {clips?: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean; textOff?: boolean};
 // two ducking ramps (MultiClipVideo's MusicTrack eases 250 ms each way): in a shorter gap the music never gets fully back up
 const SPEECH_GAP_MS = 500;
@@ -41,6 +43,36 @@ export function captionLayout({clips = [], captions = [], graphics = [], caption
     else speech.push([w.startMs, w.endMs]);
   }
   return {preset, projectedGraphics, drawnGraphics, supers, zooms, shownCaptions, focus, punch, pulses, speech};
+}
+
+// What MultiClipVideo's FocusPull does to the footage at a frame: the blur and the scale (about 50 % PULL_ORIGIN_Y %)
+// of a focus pull on tier-2 words and B-roll cards, the opening's zoom-blur, Impact II's hero punch and glitch pulse
+// (g, also its chromatic split) and a title's camera push (zooms). src/faces.ts reads the scale: where a face lands.
+export const PULL_ORIGIN_Y = 38;
+const smooth = (x: number) => x * x * (3 - 2 * x);
+// 0→1 inside a span with ramps at both ends (ms)
+const inSpans = (ms: number, spans: Span[], IN: number, OUT: number) => {
+  let k = 0;
+  for (const s of spans) {
+    if (ms < s.startMs || ms > s.endMs) continue;
+    k = Math.max(k, Math.min(1, Math.max(0, Math.min((ms - s.startMs) / IN, (s.endMs - ms) / OUT, 1))));
+  }
+  return smooth(k);
+};
+export function pullAt(frame: number, fps: number, {spans, blurPx, opening = 'none', punch, pulses = [], zooms = []}: {spans: Span[]; blurPx: number; opening?: 'none' | 'zoomBlur' | 'blurIn'; punch?: {spans: Span[]; scale: number}; pulses?: Span[]; zooms?: Zoom[]}) {
+  const ms = (frame / fps) * 1000;
+  const k = inSpans(ms, spans, 150, 240); // the blur is gone by the time the span ends (the next page lands sharp)
+  const openF = msToFrames(fps, 210);
+  const o = opening !== 'none' && frame < openF ? 1 - smooth(frame / openF) : 0; // 1 at the first frame, gone by ~200 ms
+  const p = punch ? inSpans(ms, punch.spans, 125, 125) : 0; // Impact II: 1.12× in 3–4 f on the hero word
+  const g = pulses.length ? inSpans(ms, pulses, 125, 125) : 0; // Impact II: a 250 ms blur + chromatic pulse
+  let z = 0; // Orbit: 1.0 → 1.4× in 8 f from 3 f before the title, back over ~6 f when it leaves
+  for (const zm of zooms) {
+    if (ms < zm.startMs || ms > zm.endMs + zm.outMs) continue;
+    const v = ms < zm.startMs + zm.inMs ? (ms - zm.startMs) / zm.inMs : ms <= zm.endMs ? 1 : 1 - (ms - zm.endMs) / zm.outMs;
+    z = Math.max(z, zm.scale * smooth(Math.min(1, Math.max(0, v))));
+  }
+  return {blur: Math.max(k * blurPx, o * 24, g * 14), scale: 1 + 0.06 * k + (opening === 'zoomBlur' ? 0.1 * o : 0) + (punch?.scale ?? 0) * p + 0.04 * g + z, g};
 }
 
 export type RenderMode = 'full' | 'layers';

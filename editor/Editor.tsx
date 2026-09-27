@@ -3,6 +3,10 @@ import {Player, type PlayerRef} from '@remotion/player';
 import {MultiClipVideo} from '../src/MultiClipVideo';
 import {placeClips, sampleTransform} from '../src/timeline';
 import {projectCaptions, normalizeCaption} from '../src/captions';
+import {faceCacheName, faceKnobs, legacyFaceCacheName, placeCaptions, type Scans} from '../src/faces';
+import {presetOf} from '../src/captionPresets';
+import {realAdvances} from '../src/captionLayout';
+import {readFont} from '../src/sfnt';
 import {projectTiers, repage} from '../src/paging';
 import {chooseRenderMode, type RenderMode} from '../src/layers';
 import {withDeliveryFps} from '../src/renderProps';
@@ -39,7 +43,7 @@ const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, faceShift, faceHold, guion, identity, scope, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -83,7 +87,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, faceShift, faceHold, guion, identity, scope, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -102,7 +106,22 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, faceShift, faceHold, guion, identity, scope]);
+
+  // re-placed when the reach or the hold changes (the Captions tab, a kit loaded in Styles) — never on opening a project
+  const knobs = faceKnobs({faceShift, faceHold, brand});
+  const knobKey = `${projectId}|${knobs.shift}|${knobs.hold}`;
+  const lastKnobs = useRef<string | null>(null);
+  const lastRestore = useRef(0);
+  useEffect(() => {
+    const prev = lastKnobs.current, restored = useEditor.getState().restores !== lastRestore.current;
+    lastKnobs.current = knobKey;
+    lastRestore.current = useEditor.getState().restores;
+    // an undo / redo brought the knob back with its own tops (one step: store.ts snap): nothing to place
+    if (!prev || prev === knobKey || restored || prev.split('|')[0] !== String(projectId)) return;
+    const t = setTimeout(() => { placeFaces(); }, 300);
+    return () => clearTimeout(t);
+  }, [knobKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
@@ -245,6 +264,23 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     }
   };
 
+  // The pages clear of every face (src/faces.ts placeCaptions — the MCP's set_captions / set_caption_style alike): the
+  // backend's face scans (public/clips/faces/, served like the clips) and the project's reach and hold; hand-placed
+  // pages stay. The words are never touched
+  // (the scan by its path, else the first scans' basename file), measured with the pack's own font as the MCP measures
+  // them (mcp/checks.mjs packFont) — else a line counted with the estimate could land another top than the agent's
+  const placeFaces = async () => {
+    const s = useEditor.getState();
+    if (!s.meta || !s.captions.length) return;
+    const srcs = [...new Set([...s.clips, ...s.brolls].map((c) => c.src).filter((x) => !/^https?:/i.test(x)))];
+    const get = (name: string) => fetch(`/clips/faces/${encodeURIComponent(name)}?_=${Date.now()}`).then((r) => (r.ok ? r.json() : undefined)).catch(() => undefined);
+    const scans: Scans = Object.fromEntries(await Promise.all(srcs.map(async (src) => [src, (await get(faceCacheName(src))) ?? (await get(legacyFaceCacheName(src)))] as const)));
+    const custom = presetOf(s.captionStyle).font.custom;
+    if (custom) try { realAdvances(custom.family, readFont(new Uint8Array(await fetch('/' + custom.file).then((r) => r.arrayBuffer()) as ArrayBuffer)).advance); } catch { /* missing: validate says font-missing */ }
+    const now = useEditor.getState();
+    if (now.meta) now.setCaptions(placeCaptions(now, scans, now.meta.fps));
+  };
+
   // replace = re-page everything for a style (src/paging.ts repage, as the MCP's set_caption_style); a new
   // pack proposes its own key words where the old one's were only proposed
   const generateCaptions = async (replace = false, style: PresetId = captionStyle) => {
@@ -256,13 +292,15 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
-        async (s) => {
-          const freshPages = Array.isArray(s.result) ? s.result : []; // this job's own pages (jobs.ts JobStatus.result)
+        async (st) => {
+          const freshPages = Array.isArray(st.result) ? st.result : []; // this job's own pages (jobs.ts JobStatus.result)
           const {captions: merged, added, hidden} = repage(captions, freshPages, clips, {hidden: hiddenWids, replace, repropose});
           pushHistory();
           setCaptions(merged, hidden);
+          await placeFaces(); // the merged pages clear of the faces, hand-made ones included (as the MCP)
           setGenerating(false);
           notify(added ? `Captions ready (+${added})` : 'Captions up to date', 'ok');
+          if (st.warnings?.length) notify(st.warnings.join(' · ').slice(0, 400), 'error'); // what the face check could not see
         },
         (msg) => { setGenerating(false); notify('Captions failed: ' + msg, 'error'); },
       );

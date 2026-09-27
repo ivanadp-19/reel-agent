@@ -4,7 +4,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {PRESETS} from '../src/captionPresets.ts';
 import {fitPage, realAdvances} from '../src/captionLayout.ts';
-import {pageWords} from '../src/paging.ts';
+import {DEFAULT_TOP, pageWords} from '../src/paging.ts';
 import {fontFiles, validateProject} from '../src/validate.ts';
 import {applyGlossary} from '../src/guion.ts';
 
@@ -44,11 +44,11 @@ test('fitPage: a vibem word that still fits the frame keeps its size; a pack wit
   assert.equal(fitPage(comma, face).fontSize, 100);
 });
 
-test('the pager pins vibem pages at 53 % whatever face detection found; other packs follow the face', () => {
+test('the pager puts every page at the pack\'s top (vibem 53 %, else DEFAULT_TOP): moving them off a face is src/faces.ts\'s', () => {
   const w = (word, i) => ({wid: `a:${i}`, word, src: 'clips/a.mp4', clipId: 'a', startMs: i * 300, endMs: i * 300 + 250, srcStartMs: i * 300, srcEndMs: i * 300 + 250});
   const words = ['Desde', 'el', 'rooftop.'].map(w);
-  assert.equal(pageWords(words, vibem, {'clips/a.mp4': 64})[0].topPct, 53);
-  assert.equal(pageWords(words, PRESETS.caja, {'clips/a.mp4': 64})[0].topPct, 64);
+  assert.equal(pageWords(words, vibem)[0].topPct, 53);
+  assert.equal(pageWords(words, PRESETS.caja)[0].topPct, DEFAULT_TOP);
 });
 
 test('validate: a font file the pack or the brand kit loads and public/ lacks is an error', () => {

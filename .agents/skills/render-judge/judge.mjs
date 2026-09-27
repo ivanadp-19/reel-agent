@@ -47,7 +47,7 @@ import {parseEnv} from 'node:util';
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform, MIN_PIECE_SEC, FLASH_SEC} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform, MIN_PIECE_SEC, FLASH_SEC, shotsOf} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, validateIdentity, transcriptIssues, unbackedData, dataIssue, SAFE} = await import(src('validate.ts'));
 const {DUR_MS, heldScale, startScale} = await import(src('transitions.ts'));
@@ -68,6 +68,10 @@ const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
 export const {dhash, hamming} = gradeScan;
 const {projectTranscript} = await import(path.join(ROOT, 'scripts', 'transcript-cache.mjs'));
 const {threadArgs} = await import(path.join(ROOT, 'scripts', 'first-frame.mjs'));
+// captions over a face (src/faces.ts): the same band rule validate places and warns by, on faces YuNet finds in the render
+const {captionHits, facesIn} = await import(src('faces.ts'));
+const {captionLayout} = await import(src('layers.ts'));
+const {canScanFaces, scanFaces} = await import(path.join(ROOT, 'scripts', 'face-scan.mjs'));
 
 const FPS = 30; // the pure rules' default; judge() passes the project's own rate
 // the env the backend's jobs see: ROOT's .env under the process env (the transcript engine, scripts/transcript-cache.mjs)
@@ -783,20 +787,9 @@ export function colorJumpFindings(clipLooks, shots) {
 }
 
 // ---------- the edit's shots: what the viewer sees as one uninterrupted shot ----------
-// placed: placeClips. Clips joined where the source runs on (continuesPrev: a split that removed nothing — a
-// pre-edit split at its own shot change, a half-graded head split off by grade-coverage's fix) with a plain cut
-// and the same framing either side are one shot: the edit adds nothing on screen there (whatever the source
-// shows there is source-cut's). → [{clip (its first), startMs, endMs, ids}]. Every rule that counts shots uses
-// this: flash-cut, color-jump, color-burnt / dark, static and the cuts sheet
-export function shotsOf(placed) {
-  const shots = [];
-  placed.forEach((pc, k) => {
-    const prev = placed[k - 1]?.clip, a = prev && sampleTransform(prev.transform, prev.outSec), b = sampleTransform(pc.clip.transform, pc.clip.inSec);
-    if (continuesPrev(prev, pc.clip) && startScale(pc.clip) === heldScale(prev) && Math.abs(a.scale - b.scale) + Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 1e-3) Object.assign(shots.at(-1), {endMs: pc.endMs, ids: [...shots.at(-1).ids, pc.clip.id]});
-    else shots.push({clip: pc.clip, startMs: pc.startMs, endMs: pc.endMs, ids: [pc.clip.id]});
-  });
-  return shots;
-}
+// src/timeline.ts shotsOf (plainJoin: the captions' takes read the same rule). Every rule that counts shots uses
+// it: flash-cut, color-jump, color-burnt / dark, static and the cuts sheet
+export {shotsOf};
 
 // ---------- cuts: a flash, jump cuts inside one take ----------
 // a flash is a SHOT under flashMs (shotsOf: a 10-frame piece a split runs on through is no flash, two tiny pieces
@@ -964,6 +957,35 @@ export function frameZeroFindings(frames, {fades = {}, video = null} = {}) {
   const opens = f1 && !(f1.YMAX - f1.YMIN < T.frame0Flat && f1.YAVG < T.frame0Dark) ? ' y el frame 1 ya es imagen normal' : '';
   return [F('frame0-black', 'blocker', 'rule', 0, null, `el frame 0 (t = 0, la miniatura) es negro sólido: luma plana y oscura (${nums})${opens}`, ev,
     [{tool: 'frame_at', note: 'look at t = 0 and the next frame; the fix is in the renderer (a separate PR) — until then re-render or trim the first frame by hand, never automatically', args: {at_sec: 0, ...(video ? {video} : {})}}])];
+}
+
+// ---------- captions over a face, as rendered ----------
+// YuNet (scripts/face-scan.mjs, 2 frames a second, niced, cached by the file's path + size + mtime under
+// .captions-tmp/judge/faces/) on the CLEAN master — the pair's (--role captioned --pair) or the version's
+// _master.mp4 next to its snapshot — where no caption hides a face; each page as the render lays it out (the pack's
+// band, around the graphics: src/layers.ts, src/faces.ts captionHits) against the faces seen while it is up. One
+// finding per page, at its worst moment. No clean master: the captioned render itself, said in skipped (a face the
+// captions hide may not be seen); no venv or model: skipped, never a crash.
+export async function captionFaceFindings({p, rate, file, role, pair, snapshot, publicDir, skipped}) {
+  if ((process.env.REEL_FACE_AWARE ?? '1') === '0') { skipped.push('caption-face: switched off here (REEL_FACE_AWARE=0)'); return []; }
+  if (!canScanFaces()) { skipped.push('caption-face: no YuNet here (.venv / .models/yunet.onnx) — captions over a face not checked on the render'); return []; }
+  const near = snapshot && fs.existsSync(path.dirname(snapshot)) ? fs.readdirSync(path.dirname(snapshot)).filter((f) => f.endsWith('_master.mp4')).map((f) => path.join(path.dirname(snapshot), f))[0] : null;
+  const master = (role === 'captioned' && pair && fs.existsSync(pair) ? pair : null) ?? near;
+  if (!master) skipped.push('caption-face: no clean master (--role captioned --pair <…_master.mp4>) — looked at the captioned render, where a face the captions hide may not be seen');
+  const seen = master ?? file;
+  let scan;
+  try { scan = await scanFaces(publicDir, seen, {out: path.join(ROOT, '.captions-tmp', 'judge', 'faces', `${path.basename(seen).replace(/[^\w.-]+/g, '_')}.json`), cuts: false}); } catch (e) { skipped.push(`caption-face: ${String(e?.message ?? e).slice(0, 160)}`); return []; }
+  const pages = captionLayout(p, rate).shownCaptions;
+  const facesAt = (ms) => facesIn(scan, ms / 1000).map((f) => ({left: f.left * 100, top: f.top * 100, right: f.right * 100, bottom: f.bottom * 100}));
+  const worst = new Map();
+  for (const h of captionHits(pages, p.captionStyle, facesAt)) if (!(worst.get(h.i)?.area >= h.area)) worst.set(h.i, h);
+  const pc = (x) => Math.round(x);
+  return [...worst.values()].map((h) => {
+    const c = pages[h.i], at = r2(h.ms / 1000);
+    return F('caption-face', 'major', 'rule', r2(c.startMs / 1000), r2(c.endMs / 1000), `la página ${c.id} ("${c.words.map((w) => w.text).join(' ').slice(0, 40)}") tapa una cara a los ${at} s: cara ${pc(h.face.top)}–${pc(h.face.bottom)} %, subtítulos ${pc(h.top)}–${pc(h.bottom)} % de la altura (visto en ${master ? 'el master limpio' : 'el render con subtítulos'})`,
+      {page: c.id, face: h.face, band: {top: h.top, bottom: h.bottom, left: h.x[0], right: h.x[1]}, lookAt: at, frames: path.basename(seen)},
+      [{tool: 'validate', note: 'caption-face names the take and the fix: raise face_shift (set_captions), fewer lines, a smaller size, a B-roll over the face, or a position by hand (edit_caption top_pct)', args: {}}]);
+  });
 }
 
 // ---------- a cut or a whip INSIDE a source clip ----------
@@ -1450,6 +1472,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     findings.push(...offPack);
     if (profile?.captions?.accentScale && !offPack.length) findings.push(...accentScaleFindings(p.captionStyle, profile.captions.accentScale));
   }
+  if (pages.length) findings.push(...await captionFaceFindings({p, rate, file, role, pair: pair && resolve(pair), snapshot, publicDir, skipped}));
   const texts = [
     ...pages.map((c) => ({text: c.words.map((w) => w.text).join(' '), ref: c.id, at: c.startMs / 1000})),
     ...gfx.map((g) => ({text: Object.values(g.props ?? {}).flatMap((x) => (typeof x === 'string' ? [x] : Array.isArray(x) ? x.map((l) => l?.text ?? '').filter(Boolean) : [])).join(' '), ref: g.id, at: g.startMs / 1000})),
@@ -1461,7 +1484,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (role !== 'master' && firstText * 1000 > T.firstTextMs && total > 5) findings.push(F('hook-text', 'major', 'rule', 0, Number.isFinite(firstText) ? firstText : null, `nada escrito en pantalla hasta ${Number.isFinite(firstText) ? `${firstText.toFixed(1)} s` : 'el final'} — el hook no se lee sin audio`, {}, [{tool: 'add_graphic', note: 'hook-stack / big-word at the first word (reel-edit step 5)', args: {template: 'hook-stack', at_wid: words[0]?.wid}}]));
 
   // --- validate (src/validate.ts) — estimated geometry: heuristic ---
-  const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
+  const sevOf = {'caption-face': 'major', matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
   const whenOf = (ref) => { const c = pages.find((x) => x.id === ref); if (c) return [c.startMs / 1000, c.endMs / 1000]; const g = gfx.find((x) => x.id === ref); return g ? [g.startMs / 1000, g.endMs / 1000] : [null, null]; };
   for (const i of validateProject(p, rate)) {
     if (i.code === 'hook' && (role === 'master' || findings.some((f) => f.check === 'hook-text'))) continue;

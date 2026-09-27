@@ -33,7 +33,7 @@ const FIELDS = {
   guion: ['guion', ...CAPTIONS_ON],
   grade: ['color', 'entregables'],
   audio: ['audio', 'entregables'], music: ['audio', 'entregables'],
-  captions: CAPTIONS_ON, captionStyle: CAPTIONS_ON, captionsOff: CAPTIONS_ON,
+  captions: CAPTIONS_ON, captionStyle: CAPTIONS_ON, captionsOff: CAPTIONS_ON, faceShift: CAPTIONS_ON, faceHold: CAPTIONS_ON,
   brolls: ['broll', 'entregables'], brollAssets: ['broll', 'entregables'], graphics: ['broll', 'entregables'], mattes: ['broll', 'entregables'],
   accentColor: CAPTIONS_ON,
   brand: ['color', ...CAPTIONS_ON],
@@ -119,7 +119,7 @@ test('every MCP tool has its stage row (add the row when you add a tool), and ev
 });
 
 test('every code validate and the transcript checks emit belongs to a stage\'s rules (none falls to the delivery by accident)', () => {
-  const codes = ['validate.ts', 'guion.ts', 'audio.ts'].flatMap((f) => [...fs.readFileSync(path.join(ROOT, 'src', f), 'utf8').matchAll(/code: '([a-z0-9-]+)'/g)].map((m) => m[1]));
+  const codes = ['validate.ts', 'guion.ts', 'audio.ts', 'faces.ts'].flatMap((f) => [...fs.readFileSync(path.join(ROOT, 'src', f), 'utf8').matchAll(/code: '([a-z0-9-]+)'/g)].map((m) => m[1]));
   const owned = new Set(Object.values(RULES).flat());
   assert.ok(codes.length > 20);
   assert.deepEqual([...new Set(codes)].filter((c) => !owned.has(c)), []);

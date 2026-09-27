@@ -192,7 +192,7 @@ test('frame looks on one scale: a full-range clip (a render) and a limited-range
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
-// frames drawn here (27×24 yuv444p, what LOOKS_VF delivers): a picture (seed), panned dx px, in a look (lift:
+// frames drawn here (27×24 yuv444p, what looksVf delivers): a picture (seed), panned dx px, in a look (lift:
 // luma, gain: chroma); quad: only the top-left quarter takes the look. runs: [[frames, picture], …]
 const pic = ({seed = 1, dx = 0, lift = 0, gain = 1, quad = false} = {}) => {
   const W = 27, H = 24, N = W * H, b = Buffer.alloc(3 * N), cl = (x) => Math.max(0, Math.min(255, Math.round(x)));

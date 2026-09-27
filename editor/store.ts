@@ -15,10 +15,11 @@ import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cut
 import type {AudioOptions} from '../src/audio';
 import type {Identity} from '../src/validate';
 import type {Scopable} from '../src/stages';
+import type {FaceHold} from '../src/faces';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null; scope: Scopable[] | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null; scope: Scopable[] | null; faceShift: number | null; faceHold: FaceHold | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -26,7 +27,7 @@ export type OffMic = 'mark' | 'cut' | 'off';
 const HISTORY_LIMIT = 100;
 
 // one undo step = the full editable state
-type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
+type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; faceShift: number | null; faceHold: FaceHold | null};
 
 type EditorState = {
   meta: Meta | null;
@@ -52,6 +53,9 @@ type EditorState = {
   audio: AudioOptions; // voice cleanup + sfx (set_audio / Settings tab)
   plan: string; // the agent's editorial plan (set_plan); shown and editable in Settings
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
+  faceShift: number | null; // this project's reach to clear a face, ± % (set_captions face_shift); null = the kit's / the default (src/faces.ts)
+  faceHold: FaceHold | null; // how long one caption position holds: toma / video / pagina (set_captions face_hold); null = the kit's / the default
+  restores: number; // undo / redo count: a knob they bring back carries its own tops (Editor: no re-place)
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
   identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
   scope?: Scopable[] | null; // the stages the job asks for (set_scope / Settings → Stages); null or undefined = all
@@ -129,6 +133,7 @@ type EditorState = {
   setGrade: (grade: ProjectGrade | null) => void;
   setAudio: (audio: AudioOptions) => void;
   setCaptionsOff: (captionsOff: boolean) => void;
+  setFaceKnobs: (k: {faceShift?: number | null; faceHold?: FaceHold | null}) => void;
   setPlan: (plan: string) => void;
   setGuion: (guion: string) => void;
   setIdentity: (identity?: Identity | null) => void;
@@ -145,8 +150,9 @@ const withMeta = (meta: Meta | null, clips: Clip[]): Meta | null =>
   meta ? {...meta, durationInFrames: totalDurationFrames(clips, meta.fps)} : meta;
 
 // capture the undoable slice of state
-type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
-const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls, graphics: s.graphics});
+// (the face knobs with the pages: one knob change and the tops it placed are one step)
+type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; faceShift: number | null; faceHold: FaceHold | null};
+const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls, graphics: s.graphics, faceShift: s.faceShift, faceHold: s.faceHold});
 // returns the {past, future} patch to prepend to a mutation that should be undoable
 const withHistory = (s: Snappable & {past: Snapshot[]}) => ({
   past: [...s.past, snap(s)].slice(-HISTORY_LIMIT),
@@ -182,6 +188,9 @@ export const useEditor = create<EditorState>((set) => ({
   audio: null,
   plan: '',
   captionsOff: false,
+  faceShift: null,
+  faceHold: null,
+  restores: 0,
   guion: '',
   past: [],
   future: [],
@@ -210,6 +219,8 @@ export const useEditor = create<EditorState>((set) => ({
         audio: p.audio ?? null,
         plan: p.plan ?? '',
         captionsOff: p.captionsOff ?? false,
+        faceShift: p.faceShift ?? null,
+        faceHold: p.faceHold ?? null,
         guion: p.guion ?? '',
         identity: p.identity,
         scope: p.scope,
@@ -524,6 +535,7 @@ export const useEditor = create<EditorState>((set) => ({
   setGrade: (grade) => set({grade}),
   setAudio: (audio) => set({audio}),
   setCaptionsOff: (captionsOff) => set({captionsOff}),
+  setFaceKnobs: (k) => set(k),
   setPlan: (plan) => set({plan}),
   setGuion: (guion) => set({guion}),
   setScope: (scope) => set({scope}),
@@ -537,13 +549,13 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => {
       if (!s.past.length) return s;
       const prev = s.past[s.past.length - 1];
-      return {...prev, meta: withMeta(s.meta, prev.clips), past: s.past.slice(0, -1), future: [snap(s), ...s.future], selectedId: null, selectedClipId: null};
+      return {...prev, meta: withMeta(s.meta, prev.clips), past: s.past.slice(0, -1), future: [snap(s), ...s.future], selectedId: null, selectedClipId: null, restores: s.restores + 1};
     }),
 
   redo: () =>
     set((s) => {
       if (!s.future.length) return s;
       const next = s.future[0];
-      return {...next, meta: withMeta(s.meta, next.clips), past: [...s.past, snap(s)], future: s.future.slice(1), selectedId: null, selectedClipId: null};
+      return {...next, meta: withMeta(s.meta, next.clips), past: [...s.past, snap(s)], future: s.future.slice(1), selectedId: null, selectedClipId: null, restores: s.restores + 1};
     }),
 }));

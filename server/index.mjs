@@ -24,7 +24,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {renderFps, renderSec} from '../src/timeline.ts';
+import {deliveryFps, renderFps, renderSec} from '../src/timeline.ts';
 import {cube, hlgToSdr, pqToSdr} from '../src/hdr.ts';
 import {lutBakes} from '../src/grade.ts';
 import {brandSchema} from '../src/brand.ts';
@@ -48,14 +48,16 @@ import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
-import {pairIdentity, projectIssues, projectWords, savedProject, withDefaults} from '../mcp/checks.mjs';
+import {faceAware, faceGaps, facesOf, pairIdentity, placedCaptions, projectIssues, projectWords, savedProject, withDefaults} from '../mcp/checks.mjs';
 import {lockHolder, lockMessage} from '../scripts/project-lock.mjs';
+import {FACE_HOLDS, MAX_SHIFT, captionFaceIssues, faceKnobs} from '../src/faces.ts';
 import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, setStagesMode, stageView, waive, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
 import {createDrive, createDriveImport} from './drive.mjs';
 import {createGradeScans, readScan, scanSource} from '../scripts/grade-scan.mjs';
 import {readWind, scanWind} from '../scripts/wind-scan.mjs';
+import {canScanFaces, readFaces, scanFaces} from '../scripts/face-scan.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -294,11 +296,24 @@ const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
 // half-graded sources (scripts/grade-scan.mjs): every frame of a source, niced, one scan at a time in the
 // background — after an ingest, and for the unscanned sources a validate finds; never inside a request.
-// The same lane measures each source's audio for wind first (scripts/wind-scan.mjs, a few seconds): a source
-// counts as scanned once both are current
+// The same lane measures each source's audio for wind first (scripts/wind-scan.mjs, a few seconds) and its faces
+// over time (scripts/face-scan.mjs, for captions that never cover one — skipped without the venv / model): a source
+// counts as scanned once all are current
+// A B-roll takes the lane for its faces only (kind 'faces'). REEL_FACE_AWARE=0 or a box that cannot scan faces skips them
+const faceScans = () => faceAware() && canScanFaces();
 const gradeScans = createGradeScans({publicDir: PUBLIC,
-  read: (dir, src) => { const g = readScan(dir, src); return g && !readWind(dir, src) ? null : g; },
-  scan: async (src) => { await scanWind(PUBLIC, src).catch((e) => console.log(`wind scan ${src}: ${String(e?.message ?? e).slice(0, 200)}`)); return scanSource(PUBLIC, src); }});
+  read: (dir, src, kind) => {
+    if (kind === 'faces') return faceScans() ? readFaces(dir, src) : readFaces(dir, src) ?? (fs.existsSync(path.join(dir, src)) ? true : undefined);
+    const g = readScan(dir, src);
+    return g && (!readWind(dir, src) || (faceScans() && !readFaces(dir, src))) ? null : g;
+  },
+  scan: async (src, kind) => {
+    const note = (what) => (e) => console.log(`${what} scan ${src}: ${String(e?.message ?? e).slice(0, 200)}`);
+    if (kind === 'faces') return scanFaces(PUBLIC, src);
+    await scanWind(PUBLIC, src).catch(note('wind'));
+    if (faceScans()) await scanFaces(PUBLIC, src).catch(note('face'));
+    return scanSource(PUBLIC, src);
+  }});
 const freeDiskBytes = () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; };
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure,
   freeBytes: freeDiskBytes, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});
@@ -382,16 +397,18 @@ async function handle(req, res) {
     const file = path.join(PROJECTS_DIR, `${id}.json`);
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     try {
-      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env}, {kick: gradeScans.kick});
+      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env}, {kick: gradeScans.kick, kickFaces: (srcs) => gradeScans.kick(srcs, 'faces')});
       return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
     } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
   }
 
-  // the MCP's validate hands its unscanned sources here (it runs in its own process): queued, answered at once
+  // the MCP's validate hands its unscanned sources here (it runs in its own process): queued, answered at once.
+  // kind 'faces': a B-roll's face scan only (an image B-roll too)
   if (req.method === 'POST' && url.pathname === '/api/grade-scan') {
-    let srcs; try { ({srcs} = JSON.parse((await body(req)) || '{}')); } catch { return json(res, 400, {error: 'bad json'}); }
-    const ok = (Array.isArray(srcs) ? srcs : []).filter((x) => typeof x === 'string' && /\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(x) && path.resolve(PUBLIC, x).startsWith(PUBLIC + path.sep)).slice(0, 50);
-    gradeScans.kick(ok);
+    let srcs, kind; try { ({srcs, kind} = JSON.parse((await body(req)) || '{}')); } catch { return json(res, 400, {error: 'bad json'}); }
+    const faces = kind === 'faces';
+    const ok = (Array.isArray(srcs) ? srcs : []).filter((x) => typeof x === 'string' && (faces ? /\.(mp4|mov|m4v|webm|mkv|avi|mts|jpe?g|png|webp)$/i : /\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i).test(x) && path.resolve(PUBLIC, x).startsWith(PUBLIC + path.sep)).slice(0, 50);
+    gradeScans.kick(ok, faces ? 'faces' : 'all');
     return json(res, 202, {queued: ok});
   }
 
@@ -460,6 +477,31 @@ async function handle(req, res) {
       return out;
     });
     return json(res, r.status, r.body);
+  }
+  // ---- the caption pages placed clear of the faces (src/faces.ts; `reel captions generate`, `reel projects set --face-shift`) ----
+  //   POST /api/projects/<id>/place-captions {faceShift?, faceHold?} → {changed, moved, faceShift, faceHold, issues}: the knobs
+  //   given (null = back to the kit's / the default) and every page re-placed from the saved project, written in its row
+  const pl = url.pathname.match(/^\/api\/projects\/([\w-]+)\/place-captions$/);
+  if (pl) {
+    if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
+    const file = path.join(PROJECTS_DIR, `${pl[1]}.json`);
+    if (!fs.existsSync(file)) return json(res, 404, {error: `project ${pl[1]} not found`, code: 'not_found'});
+    let b;
+    try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
+    if (b.faceShift !== undefined && b.faceShift !== null && !(typeof b.faceShift === 'number' && b.faceShift >= 0 && b.faceShift <= MAX_SHIFT)) return json(res, 400, {error: `faceShift: a number 0–${MAX_SHIFT} (± % of the height) or null`, code: 'bad_request'});
+    if (b.faceHold !== undefined && b.faceHold !== null && !FACE_HOLDS.includes(b.faceHold)) return json(res, 400, {error: `faceHold: ${FACE_HOLDS.join(' | ')} or null`, code: 'bad_request'});
+    const r = await inRow(pl[1], () => {
+      const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const next = {...prev, ...(b.faceShift !== undefined ? {faceShift: b.faceShift} : {}), ...(b.faceHold !== undefined ? {faceHold: b.faceHold} : {})};
+      const p = withDefaults(structuredClone(next));
+      next.captions = placedCaptions(p, PUBLIC);
+      const moved = next.captions.filter((c, i) => c.topPct !== prev.captions?.[i]?.topPct || c.slot !== prev.captions?.[i]?.slot).length;
+      const changed = moved > 0 || next.faceShift !== prev.faceShift || next.faceHold !== prev.faceHold;
+      if (changed) { next.updatedAt = nextRev(prev); writeProject(PUBLIC, pl[1], prev, next, g.user ?? g.via); } // a new revision: an editor holding the old one gets 409, never writes its stale tops over these
+      const k = faceKnobs(next);
+      return {changed, moved, updatedAt: next.updatedAt ?? null, faceShift: k.shift, faceHold: k.hold, issues: [...captionFaceIssues({...p, captions: next.captions}, facesOf(p, PUBLIC), deliveryFps(p)), ...faceGaps(p, PUBLIC, {kick: (s) => gradeScans.kick(s, 'faces')})]};
+    });
+    return json(res, 200, {project: pl[1], ...r});
   }
   // ---- the stages of a project (scripts/stages.mjs, src/stages.ts) — records outside the project JSON ----
   //   GET  /api/projects/<id>/stages                       → {project, rev, scope, runs, mode, stages: [{stage, status, findings, waitingOn, …}]}
@@ -766,6 +808,7 @@ async function handle(req, res) {
         try { upsertAsset({id, src: asset.src, kind, label: asset.label, durationSec: asset.durationSec ?? null}); } catch {}
         json(res, 200, asset);
         brollSheets.kick(asset); // the contact sheet after the answer, in the background (never rejects)
+        gradeScans.kick(asset.src, 'faces'); // its faces, for the captions over it (src/faces.ts)
         return;
       } catch (e) {
         cleanup();
@@ -809,6 +852,7 @@ async function handle(req, res) {
     // could not start (EAGAIN / ENOMEM under memory pressure): the job fails, the backend stays up
     child.on('error', (e) => { fs.rmSync(inFile, {force: true}); job.store[id] = {status: 'error', error: `${job.name} could not start: ${e.message}`}; });
     let errTail = '';
+    const warnings = [];
     let innerMs = 0; // transcription inside the job (TIMING lines of scripts/lib-transcribe.mjs), logged as its own stage
     const onChunk = (d) => {
       for (const m of String(d).matchAll(/TIMING:transcribe:(\d+):(\d+)/g)) {
@@ -818,6 +862,7 @@ async function handle(req, res) {
       for (const m of String(d).matchAll(/PROGRESS:(\d+):([^\n]+)/g)) {
         job.store[id] = {status: 'running', progress: +m[1], label: m[2].trim()};
       }
+      for (const m of String(d).matchAll(/WARN:([^\n]+)/g)) warnings.push(m[1].trim()); // said again in the done status (the captions' faces)
     };
     child.stdout.on('data', onChunk);
     child.stderr.on('data', (d) => {
@@ -837,7 +882,7 @@ async function handle(req, res) {
       }
       fs.rmSync(outFile, {force: true});
       job.store[id] = code === 0
-        ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {})}
+        ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {}), ...(warnings.length ? {warnings} : {})}
         : {status: 'error', error: oomReason({code, signal: sig, tail: errTail, heap: 0, what: job.name}) ?? explainFailure(errTail, `${job.name} exited ${code ?? sig}`)};
     });
     return json(res, 200, {jobId: id});

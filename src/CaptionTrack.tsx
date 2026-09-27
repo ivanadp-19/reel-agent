@@ -1,7 +1,7 @@
 import React, {useLayoutEffect, useRef, useState} from 'react';
 import {useCurrentFrame, useVideoConfig, interpolate, Sequence, spring, Easing} from 'remotion';
 import {shownUntilMs, type Caption, type CaptionWord} from './captions';
-import {FLOAT_SLOTS as FLOAT, type Preset, type TierStyle} from './captionPresets';
+import {floatSlot, type Preset, type TierStyle} from './captionPresets';
 import {captionPreset, fitPage, PAGE_PAD_PX} from './captionLayout';
 import {arrive, boxTravel, leave, ms, type ArriveKind} from './motion';
 import {emojiFamily, fontFamily, type FontFamily} from './fonts';
@@ -154,7 +154,7 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
     preset.pageIn.type === 'pop' ? `scale(${interpolate(pop, [0, 1], [0.85, 1])})` : '',
   ].filter(Boolean).join(' ');
 
-  const float = preset.position === 'float' && !caption.pin ? FLOAT[index % FLOAT.length] : null;
+  const float = preset.position === 'float' && !caption.pin ? floatSlot(caption, index) : null;
 
   // karaoke box (Focus slides it, Lift/Stack jump it): one box behind the last
   // spoken word. Word boxes come from the DOM (offset*, which ignores the

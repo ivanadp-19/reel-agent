@@ -15,7 +15,7 @@
 //   reveal kinds mask the outgoing clip away over the incoming one (REVEALS): crossBlur, polyWipe,
 //     diagWipe, particles, blocks — plus card and split
 //   cardDrop lands the incoming clip on top, falling and rotating (OVER)
-import {continuesPrev, type Clip} from './timeline.ts';
+import {continuesPrev, heldScale, startScale, PUNCH_SCALE, type Clip} from './timeline.ts';
 
 export type Enter = 'cut' | 'punch' | 'zoom' | 'whip' | 'whipDiag' | 'card' | 'split'
   | 'flash' | 'crossBlur' | 'spin' | 'rgbFlash' | 'bands' | 'polyWipe' | 'clock' | 'mosaic' | 'disc' | 'blinds' | 'particles' | 'diagWipe' | 'blocks' | 'cardDrop' | 'lightLeak';
@@ -31,7 +31,7 @@ export const WHOOSH = new Set<Enter>(['whip', 'whipDiag', 'zoom', 'card', 'split
 export const DUR_MS: Partial<Record<Enter, number>> = {card: 267, split: 267, flash: 250, crossBlur: 210, spin: 333, rgbFlash: 333, bands: 667, polyWipe: 290, clock: 833, mosaic: 667, disc: 800, blinds: 625, particles: 290, diagWipe: 583, blocks: 500, cardDrop: 210, lightLeak: 400};
 export const overlapOf = (kind: Enter | undefined, fps: number) => (kind && (REVEALS.has(kind) || OVER.has(kind)) ? (kind === 'card' || kind === 'split' ? OVERLAP : Math.max(2, Math.round((fps * (DUR_MS[kind] ?? 267)) / 1000))) : 0);
 
-const PUNCH = 1.12, ZOOM_F = 8, WHIP_F = 5, WHIP_DX = 18, WHIP_BLUR = 18;
+const PUNCH = PUNCH_SCALE, ZOOM_F = 8, WHIP_F = 5, WHIP_DX = 18, WHIP_BLUR = 18;
 const WHIPD_OUT = 5, WHIPD_IN = 8, WHIPD_BLUR = 18, WHIPD_ANGLE = 60, WHIPD_SCALE = 1.3; // measured: 4 f out + 6 f in at 24 fps
 const ease = (t: number) => 1 - (1 - t) ** 3;
 const easeIn = (t: number) => t * t * t;
@@ -119,9 +119,7 @@ export function punchAlternate(clips: Clip[]): Clip[] {
 }
 // the scale a clip ends on from its entrance: a punch holds 12 % closer for the whole clip, a zoom lands there — what a
 // piece continuing it must start at (splitClip, punchAlternate; the judge's shotsOf joins pieces only on the same scale)
-export const heldScale = (c?: Clip) => (c?.enter === 'punch' || c?.enter === 'zoom' ? PUNCH : 1);
-// the scale a clip starts at when it has no transition of its own (cut or punch); null: a transition, never one shot
-export const startScale = (c: Clip) => (!c.enter || c.enter === 'cut' ? 1 : c.enter === 'punch' ? PUNCH : null);
+export {heldScale, startScale}; // src/timeline.ts (plainJoin reads them)
 
 // ---- geometry (all in % of the frame) ----
 export type P = [number, number];

@@ -1,8 +1,9 @@
 // Background jobs on the backend (captions, autocut, transcribe, grade, matte):
 // POST starts one, GET <route>/<id> reports it. Dead-job (server restart) and
 // timeout guards; network hiccups tolerated for a few polls.
-// result: the job's own output, handed back by the backend (never a file of public/ another job may have written since)
-export type JobStatus = {status?: string; label?: string; progress?: number; error?: string; etaSec?: number | null; result?: unknown};
+// result: the job's own output, handed back by the backend (never a file of public/ another job may have written since);
+// warnings: what a done job could not do (the captions' face check)
+export type JobStatus = {status?: string; label?: string; progress?: number; error?: string; etaSec?: number | null; result?: unknown; warnings?: string[]};
 
 export function pollJob(
   base: string,
