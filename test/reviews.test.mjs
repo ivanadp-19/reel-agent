@@ -667,6 +667,7 @@ test('datos por confirmar (CEO-21): kept in the version, shown on its review pag
   const html = reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [v], current: v.v, fullOf: () => null});
   assert.match(html, /<h2>Datos por confirmar<\/h2><ul><li>«&lt;80&gt;» en 0:21 — no se oye en el audio de este reel<\/li><\/ul>/);
   assert.doesNotMatch(reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [{...v, datosPorConfirmar: []}], current: v.v, fullOf: () => null}), /Datos por confirmar/);
+});
 
 // ---- the bandeja (server/review.mjs handleBandeja; its steps: scripts/review-states.mjs) ----
 import {withVersion} from '../scripts/reviews.mjs';

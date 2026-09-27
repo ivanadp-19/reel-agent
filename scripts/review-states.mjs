@@ -26,8 +26,8 @@ const fail = (status, code, message) => { throw Object.assign(new Error(message)
 export const noteClock = (sec) => { const t = Math.round(sec * 10) / 10; return `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`; };
 
 // ---- QC técnico: the ONE reader of a version's judge (the bandeja, approval, the inbox) ----
-// ponytail: every counting finding blocks today; the project's scope (etapas/backend-alcance: a captions-only job) turns
-// the out-of-scope ones advisory HERE — a captions-only version whose in-scope checks pass is then 'superado'.
+// The project's scope (#53: src/stages.ts scopeFindings) already reaches this reader through the label: the queued judge
+// leaves an omitted stage's findings out of it, so a captions-only version whose in-scope checks pass is 'superado'.
 // the label as people read it (the editor, list_versions, the bandeja): "QC técnico en curso", "QC técnico: 2 hallazgos"
 export const judgeText = (j) => (j?.label ? `QC técnico${/hallazgo/.test(j.label) ? ':' : ''} ${j.label}` : null);
 // → {state: 'en curso' | 'superado' | 'hallazgos' | 'no disponible' | 'sin QC', label, approvable, findings}
