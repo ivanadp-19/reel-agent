@@ -15,7 +15,7 @@
 //   reveal kinds mask the outgoing clip away over the incoming one (REVEALS): crossBlur, polyWipe,
 //     diagWipe, particles, blocks — plus card and split
 //   cardDrop lands the incoming clip on top, falling and rotating (OVER)
-import type {Clip} from './timeline.ts';
+import {continuesPrev, type Clip} from './timeline.ts';
 
 export type Enter = 'cut' | 'punch' | 'zoom' | 'whip' | 'whipDiag' | 'card' | 'split'
   | 'flash' | 'crossBlur' | 'spin' | 'rgbFlash' | 'bands' | 'polyWipe' | 'clock' | 'mosaic' | 'disc' | 'blinds' | 'particles' | 'diagWipe' | 'blocks' | 'cardDrop' | 'lightLeak';
@@ -108,6 +108,7 @@ export function punchAlternate(clips: Clip[]): Clip[] {
   return clips.map((c, i) => {
     const prev = clips[i - 1];
     if (!prev || prev.src !== c.src) { on = false; return {...c, enter: undefined}; }
+    if (continuesPrev(prev, c)) return {...c, enter: undefined}; // a split that removed nothing is no jump cut: a punch there would cut one shot (a 3-frame half-graded piece: a zoom flash)
     on = !on;
     return {...c, enter: on ? 'punch' : 'cut'};
   });

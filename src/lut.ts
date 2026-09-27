@@ -219,8 +219,18 @@ export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, 
     const q = [Math.min(hi, Math.max(lo, l)), u * s, v * s] as RGB, o = feat(q), qr = fromYC(q);
     return [0, 1, 2].map((c) => W[c].reduce((acc, w, j) => acc + w * o[j], 0) + p[c] - qr[c]) as RGB;
   };
+  // least squares shrinks chroma where the pairs scatter: a pop that clipped half the picture (Morantes 10's 3-frame
+  // tails) came out ×0.89 as saturated as its shot, a residual grade-coverage blocks — the fit keeps the target's mean
+  // saturation over the pairs (a gain on its chroma, 0.8–1.25) and its mean tint (an offset after the gain: the bounded
+  // fit leaves the pairs' mean off by a unit or two where it clamps); a clean fit is left alone
+  const T = [0, 0, 0], F = [0, 0, 0], fx = Array.from({length: n}, (_, i) => toYC(fit([x[i * 3], x[i * 3 + 1], x[i * 3 + 2]])));
+  for (let i = 0; i < n; i++) { const t = toYC([y[i * 3], y[i * 3 + 1], y[i * 3 + 2]]), f = fx[i]; T[0] += Math.hypot(t[1], t[2]); F[0] += Math.hypot(f[1], f[2]); T[1] += t[1]; T[2] += t[2]; }
+  const g = F[0] > 0 ? Math.min(1.25, Math.max(0.8, T[0] / F[0])) : 1;
+  for (const f of fx) { F[1] += f[1] * g; F[2] += f[2] * g; }
+  const du = (T[1] - F[1]) / n, dv = (T[2] - F[2]) / n;
+  const sat = (o: RGB): RGB => { if (Math.abs(g - 1) < 0.01 && Math.abs(du) + Math.abs(dv) < 0.002) return o; const [l, u, v] = toYC(o); return fromYC([l, u * g + du, v * g + dv]); };
   const m = size, data = new Float64Array(m ** 3 * 3), step = [1, m, m * m];
-  for (let i = 0; i < m ** 3; i++) data.set(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)]), i * 3);
+  for (let i = 0; i < m ** 3; i++) data.set(sat(fit([(i % m) / (m - 1), (Math.floor(i / m) % m) / (m - 1), Math.floor(i / (m * m)) / (m - 1)])), i * 3);
   // monotone: a channel never falls while its own input rises. Per line of the cube, the least-squares monotone
   // values (pool adjacent violators) weighted by the pairs nearest each node: where the fit dips, the nodes the pairs
   // cover keep their value and the others follow them. A running max lifted a gray node to its off-axis neighbour

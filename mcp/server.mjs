@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, nextId, placeClips, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
+import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, MIN_PIECE_SEC, nextId, placeClips, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -585,14 +585,13 @@ server.registerTool('delete_clips', {description: 'Remove clips from the timelin
   await save(project_id, p); return text(summary(project_id, p));
 });
 
-server.registerTool('split_clip', {description: 'Split a clip in two: at a timeline time (at_sec, like pressing S at the playhead) or in the pause right before a word (before_wid). To REMOVE words use cut_words instead — it snaps the boundaries for you.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds').optional(), before_wid: z.string().optional().describe('word id from get_transcript')}}, async ({project_id, at_sec, before_wid}) => {
+server.registerTool('split_clip', {description: 'Split a clip in two: at a timeline time (at_sec, like pressing S at the playhead) or in the pause right before a word (before_wid). Each piece keeps at least 3 frames; the two continue each other in the source, so they play as one shot. To REMOVE words use cut_words instead — it snaps the boundaries for you.', inputSchema: {project_id: pid, at_sec: sec('timeline time in seconds').optional(), before_wid: z.string().optional().describe('word id from get_transcript')}}, async ({project_id, at_sec, before_wid}) => {
   const p = load(project_id);
   let clip, sourceSec;
   if (before_wid) { const w = await wordAt(p, before_wid); clip = w.clip; sourceSec = (w.prev ? Math.max(w.prev.endMs + 40, w.word.startMs - SNAP_MS) : w.word.startMs - 100) / 1000; }
   else if (at_sec != null) ({clip, sourceSec} = locate(p, at_sec));
   else throw new Error('give at_sec or before_wid');
-  if (sourceSec - clip.inSec < 0.2 || clip.outSec - sourceSec < 0.2) throw new Error('too close to the clip edge (min 0.2 s each side)');
-  const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error('could not split');
+  const r = splitClip(p.clips, clip.id, sourceSec); if (!r) throw new Error(`too close to the clip edge (min 3 frames, ${MIN_PIECE_SEC.toFixed(3)} s, each side)`);
   p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); // captions follow their source on their own
   await save(project_id, p); return text(`Split ${clip.id} at source ${f1(sourceSec)}s → ${clip.id} + ${r.newId}\n\n${summary(project_id, p)}`);
 });

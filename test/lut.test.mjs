@@ -96,6 +96,24 @@ test('fitCube keeps grays gray where the pairs are, even where the fit dips next
   }
 });
 
+test('fitCube keeps the target\'s saturation where the pairs scatter (a pop: +luma, chroma ×2, clipped, off by a few pixels)', () => {
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const n = 6000, x = new Float64Array(n * 3), y = new Float64Array(n * 3);
+  const C = (r, g, b) => { const l = 0.2126 * r + 0.7152 * g + 0.0722 * b; return Math.hypot(b - l, r - l); };
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    const l = 0.15 + 0.7 * rnd(), rgb = [0, 1, 2].map(() => Math.min(1, Math.max(0, l + (rnd() - 0.5) * 0.5)));
+    const ly = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    y.set(rgb, i * 3); t += C(...rgb);
+    x.set(rgb.map((v) => Math.min(1, Math.max(0, ly + 0.1 + (v - ly) * 2 + (rnd() - 0.5) * 0.3))), i * 3);
+  }
+  const l = parseCube(fitCube(x, y));
+  let o = 0;
+  for (let i = 0; i < n; i++) o += C(...sampleCube(l, [x[i * 3], x[i * 3 + 1], x[i * 3 + 2]]));
+  assert.ok(Math.abs(o / t - 1) < 0.03, `fitted saturation ×${(o / t).toFixed(3)} of the target's`);
+});
+
 test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, its grade taken over', () => {
   const clips = [{id: 'a', src: 'clips/x.mp4', inSec: 0, outSec: 8.87}, {id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}, {id: 'rest', src: 'clips/x.mp4', inSec: 9.204, outSec: 12.47}, {id: 'other', src: 'clips/y.mp4', inSec: 0, outSec: 3}];
   assert.deepEqual(lutSpans(clips, 'head'), [{id: 'head', src: 'clips/x.mp4', inSec: 8.87, outSec: 9.204}]);

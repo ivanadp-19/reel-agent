@@ -627,6 +627,14 @@ test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split
   // two tiny pieces of one continuing shot are one flash, and the fix deletes both
   const two = cutFindings(place([clip('a', 'a', 0, 3), clip('x1', 'x', 0, 0.2), clip('x2', 'x', 0.2, 0.4), clip('b', 'b', 0, 3)], 30));
   assert.deepEqual(two.map((f) => [f.check, f.fix[0].args.clip_ids]), [['flash-cut', ['x1', 'x2']]]);
+  // Morantes 10's 3-frame tails split off (split_clip's minimum, MIN_PIECE_SEC) at 29.97 and 30: one shot with the
+  // shot they end and the one after, no flash; the same 3 frames cut out of the take are a flash
+  for (const fps of [30000 / 1001, 30]) {
+    const m = [clip('s', 'm', 5.906, 8.742), clip('t', 'm', 8.742, 8.842), clip('n', 'm', 8.842, 12)];
+    assert.deepEqual(cutFindings(place(m, fps)), []);
+    assert.equal(place(m, fps)[1].durFrames, 3);
+    assert.deepEqual(cutFindings(place([m[0], {...m[1], inSec: 8.8, outSec: 8.9}, clip('x', 'x', 0, 3)], fps)).map((f) => f.check), ['flash-cut', 'jump-cut']);
+  }
 });
 
 // ---- the queued judge on a client's version: the project's own words and its own rate ----

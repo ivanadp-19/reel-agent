@@ -46,7 +46,7 @@ import {parseEnv} from 'node:util';
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform, MIN_PIECE_SEC} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, validateIdentity, transcriptIssues, unbackedData, dataIssue, SAFE} = await import(src('validate.ts'));
 const {DUR_MS} = await import(src('transitions.ts'));
@@ -842,11 +842,11 @@ export function gradeCoverageFindings(looks, placed, spans = [], fps = FPS) {
     const a = placed[clipOf[k - 1]].clip, b = placed[clipOf[k]].clip;
     const head = k - from <= to - k; // the shorter side of the shot is the one in another grade
     const [s0, e0] = head ? [from, k] : [k, to];
-    // that part becomes its own clip: split_clip where it starts / ends inside its clip (0.2 s from an
-    // edge at least, as split_clip wants), then it takes the grade of the rest of the shot (create_lut match: a head
+    // that part becomes its own clip: split_clip where it starts / ends inside its clip (3 frames from an
+    // edge at least, MIN_PIECE_SEC as split_clip wants), then it takes the grade of the rest of the shot (create_lut match: a head
     // its continuation's, a tail the shot's before it — a, which keeps its id through the split)
     const odd = placed[clipOf[head ? k - 1 : k]], at = (f) => Math.round((f / fps) * 1000) / 1000;
-    const splits = [e0, s0].filter((f) => f - odd.fromFrame >= 0.2 * fps && odd.fromFrame + odd.durFrames - f >= 0.2 * fps); // the later first: a split moves what follows it by up to a frame (validate's halfGradedIssues)
+    const splits = [e0, s0].filter((f) => f - odd.fromFrame >= MIN_PIECE_SEC * fps && odd.fromFrame + odd.durFrames - f >= MIN_PIECE_SEC * fps); // the later first: a split moves what follows it by up to a frame (validate's halfGradedIssues)
     const piece = splits.includes(s0) ? `<the piece from ${at(s0)} s>` : odd.clip.id; // a split keeps the first piece's id
     const fix = [...splits.map((f) => ({tool: 'split_clip', args: {at_sec: at(f)}})), head
       ? {tool: 'create_lut', note: 'the head takes the grade of the clip continuing it', args: {clip_id: piece, ...(a === b ? {} : {to_clip_id: b.id}), match: true, name: `${a.id}-match`.slice(0, 40)}}

@@ -145,7 +145,7 @@ test('word times squeezed by the ASR are flagged with their ids (16 syllables/s)
 
 // ---- half-graded sources: the scan's steps (scripts/grade-scan.mjs) → a warning per clip that shows a head, with the fix ----
 import {halfGradedIssues, transcriptIssues} from '../src/validate.ts';
-import {clipTags, locateSec, splitClip} from '../src/timeline.ts';
+import {clipTags, continuesPrev, locateSec, MIN_PIECE_SEC, placeClips, splitClip} from '../src/timeline.ts';
 
 test('half-graded: a clip over the head gets split + match; the fixed head (own clip, own grade, graded) is quiet', () => {
   const scans = {'clips/g.mp4': {steps: [{at: 9.209, from: 8.876, frames: 10, dY: 36.3, sat: [1.8, 7.8]}]}};
@@ -163,10 +163,15 @@ test('half-graded: a clip over the head gets split + match; the fixed head (own 
   assert.match(halfGradedIssues({clips, grade: {overrides: {'g-s1': matched}}}, scans)[0].msg, /own grade: .* set_clip graded: true on g-s1/);
   assert.deepEqual(halfGradedIssues({clips: graded, grade: {overrides: {'g-s1': matched}}}, scans), []);
   assert.deepEqual(halfGradedIssues({clips}, {'clips/g.mp4': null}), []); // not scanned yet: validate says so apart
-  // only what split_clip accepts (0.2 s a side): 0.1 s of the shot before is trimmed off, after the split; a 5-frame head is trimmed away
-  assert.match(halfGradedIssues({clips: [c('g', 8.776, 20)]}, scans)[0].msg, /Fix: split_clip at_sec 0\.433 \(timeline\), then trim_clip g in_sec 8\.876 \(the shot before goes\), then create_lut match on the head \(clip_id g\)/);
+  // only what split_clip accepts (3 frames a side, MIN_PIECE_SEC): 2 frames of the shot before are trimmed off, after the
+  // split; 3 are a piece of their own
+  assert.match(halfGradedIssues({clips: [c('g', 8.81, 20)]}, scans)[0].msg, /Fix: split_clip at_sec 0\.399 \(timeline\), then trim_clip g in_sec 8\.876 \(the shot before goes\), then create_lut match on the head \(clip_id g\)/);
+  assert.match(halfGradedIssues({clips: [c('g', 8.776, 20)]}, scans)[0].msg, /Fix: split_clip at_sec 0\.433, then at_sec 0\.1 \(timeline\), then create_lut match on the head \(clip_id of the new piece at 0\.1 s\)/);
+  // a 5-frame head is split off and matched like a 10-frame one; one under 3 frames of the reel (60 fps footage) is trimmed away
   const short = {'clips/g.mp4': {steps: [{at: 9.043, from: 8.876, frames: 5, dY: 30, sat: [1.8, 7.8]}]}};
-  assert.match(halfGradedIssues({clips: [c('g', 2, 20)]}, short)[0].msg, /Fix: split_clip at_sec 6\.876 \(timeline\), then trim_clip in_sec 9\.043 on the new piece at 6\.876 s \(5 frames are too short/);
+  assert.match(halfGradedIssues({clips: [c('g', 2, 20)]}, short)[0].msg, /Fix: split_clip at_sec 7\.043, then at_sec 6\.876 \(timeline\), then create_lut match on the head \(clip_id of the new piece at 6\.876 s\)/);
+  const tiny = {'clips/g.mp4': {steps: [{at: 8.926, from: 8.876, frames: 3, dY: 30, sat: [1.8, 7.8]}]}};
+  assert.match(halfGradedIssues({clips: [c('g', 2, 20)]}, tiny)[0].msg, /Fix: split_clip at_sec 6\.876 \(timeline\), then trim_clip in_sec 8\.926 on the new piece at 6\.876 s \(3 frames are too short/);
   // the grade stops early (the shorter side comes after the change): the TAIL is the odd part — split it off and match IT to
   // the shot it ends (to_clip_id: never the shot to it, never the next shot by default)
   const tail = {'clips/g.mp4': {steps: [{at: 12.212, from: 10, to: 12.446, off: true, frames: 7, dY: -7.7, sat: [8, 4]}]}};
@@ -179,9 +184,12 @@ test('half-graded: a clip over the head gets split + match; the fixed head (own 
   const pieces = [c('g', 5, 12.212), c('g-s1', 12.212, 12.446), c('g-s2', 12.446, 20)];
   assert.match(halfGradedIssues({clips: pieces}, pop)[0].msg, /^g-s1: .*Fix: create_lut match on the tail \(clip_id g-s1, to_clip_id g: /);
   assert.match(halfGradedIssues({clips: pieces.slice(1)}, pop)[0].msg, /Fix: set_grade target g-s1 like the shot before it/);
-  // a tail under 0.2 s (Morantes 10's 3-frame pops) is too short for a clip: split at the cut, trim it off
+  // Morantes 10's 3-frame pops (0.1 s) are a piece of their own too: split off and matched to their shot
   const short3 = {'clips/g.mp4': {steps: [{at: 8.742, from: 5.9, to: 8.842, off: true, frames: 3, dY: 10.4, sat: [10, 19.2]}]}};
-  assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, short3)[0].msg, /Fix: split_clip at_sec 3\.842 \(timeline\), then trim_clip out_sec 8\.742 on g \(3 frames are too short for a clip of their own: the trim drops them with the voice under them — if cut-word then flags a word, leave them and tell the client instead\)$/);
+  assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, short3)[0].msg, /Fix: split_clip at_sec 3\.842, then at_sec 3\.742 \(timeline\), then create_lut match on the tail \(clip_id of the new piece at 3\.742 s, to_clip_id g: it takes the shot's grade\), then set_clip graded: true on it$/);
+  // under 3 frames of the reel (a 60 fps source's 3 frames): split at the cut, trimmed off — and the message says the voice goes too
+  const short2 = {'clips/g.mp4': {steps: [{at: 8.742, from: 5.9, to: 8.792, off: true, frames: 3, dY: 10.4, sat: [10, 19.2]}]}};
+  assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, short2)[0].msg, /Fix: split_clip at_sec 3\.792 \(timeline\), then trim_clip out_sec 8\.742 on g \(3 frames are too short for a clip of their own: the trim drops them with the voice under them — if cut-word then flags a word, leave them and tell the client instead\)$/);
   const tailFixed = [clipTags(c('g-s1', 12.212, 12.446), {graded: true})];
   assert.deepEqual(halfGradedIssues({clips: tailFixed, grade: {overrides: {'g-s1': {adjust: {saturation: 2}}}}}, tail), []);
 });
@@ -200,18 +208,36 @@ test('half-graded: the fixes followed in the order validate gives land every spl
   assert.deepEqual(clips.slice(1).map((c) => +c.inSec.toFixed(3)), [8.876, 9.209, 24.992, 25.325, 37.638, 37.971]);
 });
 
-test('half-graded: three tails in one export (Morantes 10\'s times) followed latest first land every cut on its source time', () => {
-  const steps = [[5.9, 8.742, 8.842, 3], [8.842, 12.212, 12.446, 7], [12.446, 24.591, 24.691, 3]].map(([from, at, to, frames]) => ({at, from, to, off: true, frames, dY: 8, sat: [8, 16]}));
-  let clips = [{id: 'k', src: 'clips/m.mp4', inSec: 0, outSec: 44.778, sourceDurationSec: 44.778}];
-  for (const i of halfGradedIssues({clips}, {'clips/m.mp4': {steps}}, 30000 / 1001)) {
-    for (const t of (i.msg.match(/split_clip at_sec [^(]*/)?.[0] ?? '').match(/\d+\.\d+/g) ?? []) {
-      const {clip, sourceSec} = locateSec(clips, 30000 / 1001, +t);
-      clips = splitClip(clips, clip.id, sourceSec).clips;
+test('half-graded: three tails in one export (Morantes 10\'s times: 3, 7 and 3 frames) followed latest first split each off at its source time', () => {
+  const steps = [[5.906, 8.742, 8.842, 3], [8.842, 12.212, 12.446, 7], [12.446, 24.591, 24.691, 3]].map(([from, at, to, frames]) => ({at, from, to, off: true, frames, dY: 8, sat: [8, 16]}));
+  for (const fps of [30000 / 1001, 30]) {
+    let clips = [{id: 'k', src: 'clips/m.mp4', inSec: 0, outSec: 44.778, sourceDurationSec: 44.778}];
+    const issues = halfGradedIssues({clips}, {'clips/m.mp4': {steps}}, fps);
+    assert.ok(issues.every((i) => /create_lut match on the tail/.test(i.msg)), issues.map((i) => i.msg).join('\n'));
+    for (const i of issues) {
+      for (const t of i.msg.match(/split_clip at_sec [^(]*/)[0].match(/\d+\.\d+/g)) {
+        const {clip, sourceSec} = locateSec(clips, fps, +t);
+        clips = splitClip(clips, clip.id, sourceSec).clips;
+      }
     }
-    const trim = i.msg.match(/trim_clip out_sec ([\d.]+) on (\S+)/);
-    if (trim) clips = clips.map((c) => (c.id === trim[2] ? {...c, outSec: +trim[1]} : c));
+    assert.deepEqual(clips.map((c) => [+c.inSec.toFixed(3), +c.outSec.toFixed(3)]), [[0, 8.742], [8.742, 8.842], [8.842, 12.212], [12.212, 12.446], [12.446, 24.591], [24.591, 24.691], [24.691, 44.778]], `at ${fps} fps`);
+    // each 3-frame tail keeps its 3 frames on the timeline, and every piece continues the one before: one shot per shot
+    assert.deepEqual(placeClips(clips, fps).map((pc) => pc.durFrames).filter((n) => n < 10), [3, 7, 3]);
+    assert.ok(clips.slice(1).every((c, k) => continuesPrev(clips[k], c)));
   }
-  assert.deepEqual(clips.map((c) => [+c.inSec.toFixed(3), +c.outSec.toFixed(3)]), [[0, 8.742], [8.842, 12.212], [12.212, 12.446], [12.446, 24.591], [24.691, 44.778]]);
+});
+
+test('splitClip: a piece of 3 frames (MIN_PIECE_SEC) is allowed, 2 are refused — speed counts, as the timeline shows it', () => {
+  const c = {id: 'k', src: 'clips/m.mp4', inSec: 0, outSec: 10, sourceDurationSec: 10};
+  assert.ok(MIN_PIECE_SEC > 2 / 30 && MIN_PIECE_SEC <= 3 / 30);
+  assert.ok(splitClip([c], 'k', 3 / (30000 / 1001)), '3 frames at 29.97');
+  assert.ok(splitClip([c], 'k', 10 - 3 / 30), '3 frames at 30, at the end');
+  assert.equal(splitClip([c], 'k', 2 / 30), null);
+  assert.equal(splitClip([c], 'k', 10 - 2 / (30000 / 1001)), null);
+  assert.equal(splitClip([{...c, speed: 2}], 'k', 0.15), null, '0.15 s of source at ×2 is 2 frames on screen');
+  // the pieces start plain: no transition into the continuing one, and punch-alternate leaves a continuing join alone
+  const {clips} = splitClip([{...c, enter: 'whip'}], 'k', 0.1);
+  assert.deepEqual(clips.map((x) => x.enter), ['whip', undefined]);
 });
 
 test('projectIssues: a stage the job did not ask for is advisory — a captions-only job reports the half-graded export, never fixes it', async () => {

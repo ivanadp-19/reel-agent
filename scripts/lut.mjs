@@ -79,9 +79,12 @@ export function makeLut({name, refs, clips = [], strength = 0.7}) {
 
 // the frames either side of the join, nearest it first: `from`'s last ones against `to`'s first ones (a head before
 // its continuation) — or, when `to` ends where `from` starts (a tail after its shot), from's first against to's last —
-// through the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under: a frame of motion
-// leaves ~5, another shot ~40 (least squares on unrelated pixels regresses to gray, and the mean still falls)
-const SAME_SHOT = 10;
+// through the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under — the same shot a
+// frame apart leaves 2–5 (G10's heads, Morantes 10's 7-frame tail: 2.4), 10–11 where the odd part clips half the
+// picture (Morantes 10's 3-frame neon pops: 10.2, 10.8 — what was clipped cannot come back); another shot leaves 24–40
+// across Morantes 10's cuts and 18.7 across a jump cut of one room (Morantes 10.1 at 14.7 s), least squares on
+// unrelated pixels regressing to gray while the mean still falls
+const SAME_SHOT = 14;
 const cubeAt = (lut, mix) => { const text = fs.readFileSync(inPublic(lut), 'utf8'); return parseCube(mix >= 1 ? text : mixCube(parseCube(text), mix)); };
 const firstOf = (s) => decode(inPublic(s.src), {span: {...s, outSec: Math.min(s.outSec, s.inSec + 1)}, count: 0});
 const lastOf = (s) => decode(inPublic(s.src), {span: {...s, inSec: Math.max(s.inSec, s.outSec - 1)}, count: 0}).reverse();

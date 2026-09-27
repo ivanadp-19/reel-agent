@@ -23,6 +23,10 @@ test('whip: this clip slides in, the previous one slides out, nothing in between
 test('punch-alternate: every other jump cut in a take, reset on a new source', () => {
   const r = punchAlternate([c('a'), c('b'), c('c'), c('d', 't'), c('e', 't')]);
   assert.deepEqual(r.map((x) => x.enter), [undefined, 'punch', 'cut', undefined, 'punch']);
+  // a split that removed nothing (a 3-frame half-graded tail and the shot it ends) is one shot: never punched, never counted
+  const k = (id, inSec, outSec) => ({id, src: 'clips/m.mp4', inSec, outSec, sourceDurationSec: 60});
+  const t = punchAlternate([k('a', 0, 5), k('b', 6, 8.742), k('tail', 8.742, 8.842), k('c', 9, 12)]);
+  assert.deepEqual(t.map((x) => x.enter), [undefined, 'punch', undefined, 'cut']);
 });
 
 test('card / split: the outgoing clip reports an exit over its last frames, a stepped ramp eases between speeds', async () => {

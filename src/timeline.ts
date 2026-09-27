@@ -173,11 +173,17 @@ export function reanchor<T extends {clipId?: string; startMs: number}>(items: T[
   });
 }
 
+// The shortest piece a split leaves on screen: 3 frames at the reel's rate (29.97 or 30: 0.1001 / 0.1 s — the
+// half-graded scan's shortest side), less the 2 ms of the millisecond source times validate prints. The two pieces
+// continue each other in the source (continuesPrev): one shot on screen, nothing that flashes (the judge's shotsOf
+// joins them). A trim or a cut (trimClip, cutRange) leaves a real cut behind and keeps its 0.2 s.
+export const MIN_PIECE_SEC = 3 / DELIVERY_FPS - 0.002;
 // Split a clip at a source-time into two clips back-to-back; keyframes are
-// pinned at the cut so the animation stays continuous. null = too close to an edge.
+// pinned at the cut so the animation stays continuous. null = a piece under MIN_PIECE_SEC on the timeline.
+// The one rule behind the editor's split, split_clip and every split made for it (cuts, ramps, sync_family).
 export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {clips: Clip[]; newId: string; remap: SegmentRemap} | null {
   const clip = clips.find((c) => c.id === clipId);
-  if (!clip || splitSrc - clip.inSec < 0.2 || clip.outSec - splitSrc < 0.2) return null;
+  if (!clip || (splitSrc - clip.inSec) / (clip.speed ?? 1) < MIN_PIECE_SEC || (clip.outSec - splitSrc) / (clip.speed ?? 1) < MIN_PIECE_SEC) return null;
   const newId = uniqId(clips.map((c) => c.id), clip.id.replace(/(-s\d+)+$/, ''), 's');
   const kfs = clip.transform;
   let aK = kfs?.filter((k) => k.t < splitSrc);
@@ -337,7 +343,7 @@ export function syncFamily<P extends Family>(from: P, sibling: P, {words = [], u
     let cur = id;
     for (let k = 1; k < fs.length; k++) {
       if (look(fs[k]) === look(fs[k - 1])) continue;
-      const r = splitClip(clips, cur, fs[k].inSec); // refused under 0.2 s from an edge: that piece follows the clip it shows most
+      const r = splitClip(clips, cur, fs[k].inSec); // refused under MIN_PIECE_SEC from an edge: that piece follows the clip it shows most
       if (!r) continue;
       clips = r.clips; brolls = reanchor(brolls, r.remap); sb.add(r.newId); origin.set(r.newId, id); cur = r.newId; splits++;
     }
