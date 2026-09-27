@@ -142,3 +142,43 @@ test('word times squeezed by the ASR are flagged with their ids (16 syllables/s)
   const price = [['Departamentos', 0, 850], ['desde', 850, 1180], ['1,500,000', 1180, 2350], ['pesos.', 2350, 2700]].map(([text, s, e], k) => ({wid: `a:${k}`, text, startMs: s, endMs: e}));
   assert.deepEqual(validateProject({clips: [g1], captions: cap(price)}).filter((i) => i.code === 'fast-words'), []);
 });
+
+// ---- half-graded sources: the scan's steps (scripts/grade-scan.mjs) → a warning per clip that shows a head, with the fix ----
+import {halfGradedIssues} from '../src/validate.ts';
+import {clipTags} from '../src/timeline.ts';
+
+test('half-graded: a clip over the head gets split + match; the fixed head (own clip, own grade, graded) is quiet', () => {
+  const scans = {'clips/g.mp4': {steps: [{at: 9.209, from: 8.876, frames: 10, dY: 36.3, sat: [1.8, 7.8]}]}};
+  const c = (id, inSec, outSec, x = {}) => ({id, src: 'clips/g.mp4', inSec, outSec, sourceDurationSec: 45, ...x});
+  const whole = halfGradedIssues({clips: [c('g', 2, 20)]}, scans);
+  assert.deepEqual(whole.map((i) => [i.level, i.code, i.ref]), [['warn', 'half-graded', 'g']]);
+  assert.match(whole[0].msg, /from 8\.876 s of the source the client's grade only starts at 9\.209 s \(10 ungraded frames/);
+  assert.match(whole[0].msg, /split_clip at_sec 6\.876 and at_sec 7\.209 \(timeline\), then create_lut match on the head \(clip_id of the new piece at 6\.876 s\)/);
+  // split at the cut and the change: only the head piece is named, until it has its own grade and is marked graded
+  const clips = [c('g', 2, 8.876), c('g-s1', 8.876, 9.209), c('g-s2', 9.209, 20)];
+  assert.match(halfGradedIssues({clips}, scans).map((i) => i.msg).join(), /^g-s1: .*create_lut match on the head \(clip_id g-s1\)/);
+  const graded = clips.map((x) => (x.id === 'g-s1' ? clipTags(x, {graded: true}) : x));
+  assert.equal(halfGradedIssues({clips: graded}, scans).length, 1, 'a flag alone is not a fix');
+  const matched = {lut: 'luts/g-s1-match.cube'};
+  assert.match(halfGradedIssues({clips, grade: {overrides: {'g-s1': matched}}}, scans)[0].msg, /own grade: .* set_clip graded: true on g-s1/);
+  assert.deepEqual(halfGradedIssues({clips: graded, grade: {overrides: {'g-s1': matched}}}, scans), []);
+  assert.deepEqual(halfGradedIssues({clips}, {'clips/g.mp4': null}), []); // not scanned yet: validate says so apart
+  // only what split_clip accepts (0.2 s a side): 0.1 s of the shot before is trimmed off, after the split; a 5-frame head is trimmed away
+  assert.match(halfGradedIssues({clips: [c('g', 8.776, 20)]}, scans)[0].msg, /Fix: split_clip at_sec 0\.433 \(timeline\), then trim_clip g in_sec 8\.876 \(the shot before goes\), then create_lut match on the head \(clip_id g\)/);
+  const short = {'clips/g.mp4': {steps: [{at: 9.043, from: 8.876, frames: 5, dY: 30, sat: [1.8, 7.8]}]}};
+  assert.match(halfGradedIssues({clips: [c('g', 2, 20)]}, short)[0].msg, /Fix: split_clip at_sec 6\.876 \(timeline\), then trim_clip in_sec 9\.043 on the new piece at 6\.876 s \(5 frames are too short/);
+  // the grade stops early (saturation down): the TAIL is the ungraded part — split it off and grade it like the shot, never a match of the shot to it
+  const tail = {'clips/g.mp4': {steps: [{at: 12.212, from: 10, to: 12.446, off: true, frames: 7, dY: -7.7, sat: [8, 4]}]}};
+  assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, tail)[0].msg, /grade stops at 12\.212 s: the 7 frames to 12\.446 s are ungraded \(ΔY -7\.7, saturation 8 → 4\)\. Fix: split_clip at_sec 7\.212 and at_sec 7\.446 \(timeline\), then set_grade target the new piece at 7\.212 s like the shot before it/);
+  assert.deepEqual(halfGradedIssues({clips: [c('g', 5, 12.212)]}, tail), [], 'a clip that ends where the tail starts shows none of it');
+  const tailFixed = [clipTags(c('g-s1', 12.212, 12.446), {graded: true})];
+  assert.deepEqual(halfGradedIssues({clips: tailFixed, grade: {overrides: {'g-s1': {adjust: {saturation: 2}}}}}, tail), []);
+});
+
+test('clipTags (set_clip and the editor\'s Clip tab): graded / location set, trimmed and cleared', () => {
+  const c = {id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 2, sourceDurationSec: 2};
+  const t = clipTags(c, {graded: false, location: '  Rooftop  '});
+  assert.deepEqual([t.graded, t.location], [false, 'Rooftop']);
+  assert.deepEqual(clipTags(t, {graded: null, location: ''}), c);
+  assert.equal(clipTags(t, {}).location, 'Rooftop');
+});

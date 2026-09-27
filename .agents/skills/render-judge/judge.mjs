@@ -39,9 +39,10 @@ import {spawnSync} from 'node:child_process';
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
-const {validateProject, transcriptIssues, SAFE} = await import(src('validate.ts'));
+const {validateProject, validateIdentity, transcriptIssues, SAFE} = await import(src('validate.ts'));
+const {DUR_MS} = await import(src('transitions.ts'));
 const {presetOf} = await import(src('captionPresets.ts'));
 const {captionPreset, fitPage, wrapUnits, realAdvances, MIN_FONT_PX} = await import(src('captionLayout.ts'));
 const {readFont} = await import(src('sfnt.ts'));
@@ -50,6 +51,9 @@ const {projectGraphics} = await import(src('graphicTemplates.ts'));
 const {contentWords} = await import(src('brollMatch.ts'));
 const {toDisplay, endsSentence} = await import(src('paging.ts'));
 const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
+// frame looks, the structure hash and the step rule: one implementation for the source scan and this judge
+const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
+export const {dhash, hamming} = gradeScan;
 
 const FPS = 30;
 export const SEVERITIES = ['blocker', 'major', 'minor', 'nit'];
@@ -70,6 +74,7 @@ export const T = {
   voiceJumpLU: 4, // take-to-take voice level jump
   musicUnderVoiceLU: 12, musicUnderVoiceMajorLU: 8,
   expoJump: 18, wbJump: 5, burnt: 235, dark: 45, // 8-bit YUV
+  gradeY: 2, gradeUV: 1, gradeSat: 0.8, gradeNoise: 4, gradeWin: 6, // a look step inside a shot: the residual a match leaves visible (|ΔY| 2, U/V 1, sat 0.8), ≥ 4× the local noise, levels over 6 frames each side
   hashDist: 6, // dHash bits (of 64) for "same shot"
   repeatWords: 5, // same n words said twice = a retake left in
   refY: 20, refSat: 12, refContrast: 25, refWB: 6, // render vs the client's approved color references
@@ -661,6 +666,84 @@ export function colorRefFindings(render, ref, label) {
     [{tool: 'set_grade', note: 'whole reel toward the approved look; confirm on the color-ref sheet', args: {exposure: clamp(Math.log2(ref.Y / render.Y), -1, 1), contrast: clamp(ref.C / render.C, 0.7, 1.3), saturation: clamp(ref.S / render.S, 0.7, 1.3), temperature: clamp(-d.V / 25, -0.5, 0.5)}},
      {tool: 'create_lut', note: 'or: a LUT from stills of the approved references (the profile lists them)', args: {name: 'ref-look', reference_images: ['<stills of the references>']}}])];
 }
+// the approved references of the project's development (identity.development: "Montealbán 326", "Thula",
+// "marca") — a reel of one building is never held to another's look. → the profile's colorRefs tagged
+// with it, or the note that says why color-ref did not run
+export function colorRefGroups(profile, development) {
+  const all = profile?.colorRefs ?? [];
+  if (!all.length) return {groups: []};
+  if (!development) return {groups: [], skip: 'color-ref: the project has no identity.development — set_identity development (e.g. "Montealbán 326") to compare it with that development\'s approved references'};
+  const groups = all.filter((g) => g.development && fold(g.development) === fold(development));
+  return groups.length ? {groups} : {groups: [], skip: `color-ref: profile ${profile.id} has no approved reference of "${development}" (colorRefs[].development) — not compared`};
+}
+
+// ---------- color from clip to clip: an ADVISORY (two shots may look different on purpose) ----------
+// clipLooks: [{pc, n, Y, U, V}] of the A-roll clips. Each is compared with the duration-weighted median of
+// the clips of its own location (set_clip location; clips without one are one group): a jump between two
+// places is not a jump
+export function colorJumpFindings(clipLooks, placed) {
+  const out = [];
+  const src0 = (x) => sourceOf(x.pc.clip.src);
+  const cutAt = (x) => { const k = placed.indexOf(x.pc); return [k > 0 ? r2(x.pc.startMs / 1000 - 0.3) : null, r2(x.pc.startMs / 1000 + 0.3)].filter((t) => t != null); };
+  const byPlace = new Map();
+  for (const x of clipLooks) { const l = x.pc.clip.location ?? ''; byPlace.set(l, [...(byPlace.get(l) ?? []), x]); }
+  for (const xs of byPlace.values()) {
+    if (xs.length < 2) continue;
+    const wmed = (key) => {
+      const vs = xs.map((x) => ({v: x[key], w: x.n})).filter((x) => Number.isFinite(x.v)).sort((p1, p2) => p1.v - p2.v);
+      const half = vs.reduce((n, x) => n + x.w, 0) / 2;
+      let acc = 0;
+      for (const x of vs) if ((acc += x.w) >= half) return x.v;
+      return NaN;
+    };
+    const ref = {Y: wmed('Y'), U: wmed('U'), V: wmed('V')};
+    for (const x of xs) {
+      const dY = x.Y - ref.Y, dU = x.U - ref.U, dV = x.V - ref.V;
+      if (Math.abs(dY) >= T.expoJump) out.push(F('color-jump', 'major', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id} (${src0(x)}) ${dY > 0 ? 'más claro' : 'más oscuro'} que el resto del reel (luma ${x.Y.toFixed(0)} vs ${ref.Y.toFixed(0)}) — salta en el corte`, {clip: x.pc.clip.id, lookAt: cutAt(x)}, [{tool: 'set_grade', args: {target: src0(x), exposure: r2(Math.max(-1, Math.min(1, Math.log2(ref.Y / x.Y))))}}, {tool: 'set_clip', note: 'or, when it was shot somewhere else on purpose: name its location', args: {clip_id: x.pc.clip.id, location: '<place>'}}]));
+      if (Math.abs(dU) >= T.wbJump || Math.abs(dV) >= T.wbJump) out.push(F('color-jump', 'major', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id} (${src0(x)}) con otro balance de blancos (${dV > 0 ? 'más cálido' : dV < 0 ? 'más frío' : 'otro tinte'}: ΔU ${dU.toFixed(1)}, ΔV ${dV.toFixed(1)})`, {clip: x.pc.clip.id, lookAt: cutAt(x)}, [{tool: 'set_grade', args: {target: src0(x), temperature: r2(Math.max(-0.5, Math.min(0.5, -dV / 25)))}}]));
+    }
+  }
+  return out;
+}
+
+// ---------- grade-coverage: the look must not change INSIDE a shot (blocking) ----------
+// looks: every frame of the render (analyzeVideo looks); placed: placeClips at the render's own fps;
+// spans: [{startMs, endMs}] of what is drawn over the footage (B-roll, graphics, caption pages). Frames
+// under them and around a cut with a transition are not measured. A step between two measured frames of
+// one stretch of footage — the same clip, or a clip that continues it in its source — whose structure
+// stays the same is part of a shot in another grade: a pre-edit's ungraded head, a grade that starts late.
+// Thresholds near what a fixed join leaves (T.grade*). → {findings, skipped}: a clip with no measured
+// frame is skipped with a note.
+export function gradeCoverageFindings(looks, placed, spans = [], fps = FPS) {
+  const last = placed.at(-1);
+  const n = Math.min(looks.length, last ? last.fromFrame + last.durFrames : 0);
+  const clipOf = new Int32Array(n).fill(-1);
+  placed.forEach((pc, i) => { for (let k = pc.fromFrame; k < Math.min(n, pc.fromFrame + pc.durFrames); k++) clipOf[k] = i; });
+  const frameMs = 1000 / fps;
+  const cover = [...spans.map((s) => [s.startMs - frameMs, s.endMs + frameMs]),
+    ...placed.filter((pc) => pc.clip.enter && pc.clip.enter !== 'cut').map((pc) => { const w = pc.clip.enter === 'punch' ? 1.5 * frameMs : Math.max(DUR_MS[pc.clip.enter] ?? 0, 300); return [pc.startMs - w, pc.startMs + w]; })];
+  const okA = Array.from({length: n}, (_, k) => clipOf[k] >= 0 && !cover.some(([a, b]) => k * frameMs >= a && k * frameMs < b));
+  const joined = (k) => clipOf[k] === clipOf[k - 1] || continuesPrev(placed[clipOf[k - 1]]?.clip, placed[clipOf[k]]?.clip);
+  const ch = [{key: 'luma', t: T.gradeY, of: (f) => f.y}, {key: 'U', t: T.gradeUV, of: (f) => f.u}, {key: 'V', t: T.gradeUV, of: (f) => f.v}, {key: 'sat', t: T.gradeSat, of: (f) => f.s}];
+  const findings = [];
+  for (const {k, from, to, by} of gradeScan.lookSteps(looks.slice(0, n), ch, {win: T.gradeWin, noiseK: T.gradeNoise, ok: (i) => okA[i], joined})) {
+    const a = placed[clipOf[k - 1]].clip, b = placed[clipOf[k]].clip;
+    const head = k - from <= to - k; // the shorter side of the shot is the one in another grade
+    const [s0, e0] = head ? [from, k] : [k, to];
+    // that part becomes its own clip: split_clip where it starts / ends inside its clip (0.2 s from an
+    // edge at least, as split_clip wants), then the head takes its continuation's grade (create_lut match)
+    const odd = placed[clipOf[head ? k - 1 : k]], at = (f) => Math.round((f / fps) * 1000) / 1000;
+    const splits = [s0, e0].filter((f) => f - odd.fromFrame >= 0.2 * fps && odd.fromFrame + odd.durFrames - f >= 0.2 * fps);
+    const piece = splits.includes(s0) ? `<the piece from ${at(s0)} s>` : odd.clip.id; // a split keeps the first piece's id
+    const fix = [...splits.map((f) => ({tool: 'split_clip', args: {at_sec: at(f)}})), head
+      ? {tool: 'create_lut', note: 'the head takes the grade of the clip continuing it', args: {clip_id: piece, ...(a === b ? {} : {to_clip_id: b.id}), match: true, name: `${a.id}-match`.slice(0, 40)}}
+      : {tool: 'set_grade', note: 'the tail like the rest of the shot — compare the join with caption_proof', args: {target: piece}}];
+    const moves = Object.entries(by).map(([c, m]) => `${c} ${m > 0 ? '+' : ''}${m}`).join(', ');
+    findings.push(F('grade-coverage', 'blocker', 'heuristic', s0 / fps, e0 / fps, `el color cambia dentro del plano en ${tc(k / fps)} (${a === b ? a.id : `${a.id} → ${b.id}`}): ${moves} — ${e0 - s0} cuadro(s) de ${head ? 'cabeza' : 'cola'} en otro grade`, {clip: (head ? a : b).id, frames: [from, k, to], by, lookAt: [r2((k - 1) / fps), r2(k / fps)]}, fix));
+  }
+  const bare = placed.filter((pc) => !okA.slice(pc.fromFrame, pc.fromFrame + pc.durFrames).some(Boolean)).map((pc) => pc.clip.id);
+  return {findings, skipped: bare.length ? [`grade-coverage: ${bare.join(', ')} — every frame under B-roll, a graphic, a caption page or a transition: not measured`] : []};
+}
 
 // ---------- clean master vs the captioned version ----------
 // same edit, same sound: only the captions may differ
@@ -821,14 +904,6 @@ export function claimEvidence(sentences, brolls, gfx, extraCues = []) {
   }).filter((c) => c.cues.length || c.inserts.length).sort((a, b) => (b.cues.length > 0) - (a.cues.length > 0) || a.t0 - b.t0);
 }
 
-// 64-bit difference hash of a 9×8 grayscale frame
-export function dhash(px) {
-  let h = 0n;
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) h = (h << 1n) | (px[y * 9 + x] > px[y * 9 + x + 1] ? 1n : 0n);
-  return h;
-}
-export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x & 1n); x >>= 1n; } return n; }
-
 // verdict: 0 blockers and 0 majors; 3+ minors of one check count as a major (a pattern, not a nit).
 // Candidates count only once the judge confirms them on the frame (`confirmed`).
 // The label never says "aprobado": only the client approves.
@@ -836,9 +911,10 @@ export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x 
 // judge confirms them, not as a pattern of minors. source-cut: César's rule, a whip / blur inside a
 // source clip never auto-fails. validate-guion-conflict: the audio and the client's script say different
 // things (70 vs 60 invitados) — the audio stays on screen (César: the audio wins on content) and the
-// client confirms; the judge never fails a reel for it. Matched by check name, so a finding written by
-// hand is covered too.
-export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict']);
+// client confirms; the judge never fails a reel for it. color-jump: two shots may look different on
+// purpose (CEO-15); a look that breaks INSIDE a shot is grade-coverage, which blocks. Matched by check
+// name, so a finding written by hand is covered too.
+export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict', 'color-jump']);
 export const isAdvisory = (f) => !!f.advisory || ADVISORY.has(f.check);
 export const counts = (f) => !f.dismissed && !isAdvisory(f) && (f.kind !== 'candidate' || f.confirmed);
 export function verdictOf(findings, {reduced = false} = {}) {
@@ -903,24 +979,27 @@ function readMeta(file, re) {
 }
 // video, one decode: per-frame luma/chroma at `rate` fps (signalstats), a 9×8 dHash of the same
 // frames, and — when asked — the scene cuts and the black runs at full frame rate (blackFps =
-// the file's fps: a run as short as ONE frame is caught, d = half a frame)
-export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, blackFps = null} = {}) {
+// the file's fps: a run as short as ONE frame is caught, d = half a frame), and every frame's look
+// (looks: scripts/grade-scan.mjs frameLooks — grade-coverage)
+export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, blackFps = null, looks = false} = {}) {
   const dir = tmpDir();
-  const stats = path.join(dir, 'stats.txt'), cuts = path.join(dir, 'scene.txt'), black = path.join(dir, 'black.txt');
+  const stats = path.join(dir, 'stats.txt'), cuts = path.join(dir, 'scene.txt'), black = path.join(dir, 'black.txt'), lk = path.join(dir, 'looks.raw');
   try {
-    // scene cuts and black frames need every frame; the stats and hashes only `rate` per second — thin out first
-    const full = [scenes && `[sc]select='gt(scene,0.35)',metadata=print:file=${fesc(cuts)},nullsink`, blackFps && `[bk]blackdetect=d=${(0.5 / blackFps).toFixed(4)}:pix_th=${BLACK.pix}:pic_th=${BLACK.pic},metadata=print:file=${fesc(black)},nullsink`].filter(Boolean);
-    const labels = [scenes && '[sc]', blackFps && '[bk]'].filter(Boolean).join('');
+    // scene cuts, black frames and looks need every frame; the stats and hashes only `rate` per second — thin out first
+    const full = [scenes && `[sc]select='gt(scene,0.35)',metadata=print:file=${fesc(cuts)},nullsink`, blackFps && `[bk]blackdetect=d=${(0.5 / blackFps).toFixed(4)}:pix_th=${BLACK.pix}:pic_th=${BLACK.pic},metadata=print:file=${fesc(black)},nullsink`, looks && `[lk]${gradeScan.LOOKS_VF}[looks]`].filter(Boolean);
+    const labels = [scenes && '[sc]', blackFps && '[bk]', looks && '[lk]'].filter(Boolean).join('');
     const g = (full.length
       ? [`[0:v]scale=160:-2,split=${full.length + 1}${labels}[v0]`, ...full, `[v0]fps=${rate},split=2[st][h]`]
       : [`[0:v]fps=${rate},scale=270:-2,split=2[st][h]`])
       .concat([`[st]signalstats,metadata=print:file=${fesc(stats)},nullsink`, '[h]scale=9:8:flags=area,format=gray[out]']).join(';');
-    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-'], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-', ...(looks ? ['-map', '[looks]', '-fps_mode', 'passthrough', '-f', 'rawvideo', lk] : [])], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const frames = readMeta(stats, /lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);
     const buf = r.stdout ?? Buffer.alloc(0);
     const hs = [];
     if (hashes) for (let i = 0, k = 0; i + 72 <= buf.length; i += 72, k++) hs.push({t: frames[k]?.t ?? k / rate, h: dhash(buf.subarray(i, i + 72))});
-    return {timedOut: timedOut(r), stats: frames, hashes: hs, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : [], black: blackFps ? blackRuns(readMeta(black, /lavfi\.(black_start|black_end)=([\d.]+)/)) : []};
+    let fl = [];
+    if (looks) try { fl = gradeScan.frameLooks(fs.readFileSync(lk)); } catch {}
+    return {timedOut: timedOut(r), stats: frames, hashes: hs, looks: fl, cuts: scenes ? readMeta(cuts, /^$/).map((x) => x.t).filter((t) => t > 0.05) : [], black: blackFps ? blackRuns(readMeta(black, /lavfi\.(black_start|black_end)=([\d.]+)/)) : []};
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
 // signalstats of the first `n` frames (frame 0 is the thumbnail): a decode of n frames, nothing more
@@ -1231,7 +1310,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   for (let k = 1; k < changes.length; k++) if (changes[k] - changes[k - 1] > T.staticSec) findings.push(F('static', 'nit', 'candidate', changes[k - 1], changes[k], `toma continua de ${(changes[k] - changes[k - 1]).toFixed(1)} s sin cambio de plano, B-roll ni gráfico — solo si se siente lenta`, {lookAt: r2((changes[k - 1] + changes[k]) / 2)}, [{tool: 'set_transitions', note: 'a punch inside the take, or suggest_broll for a cue', args: {pattern: 'punch-alternate'}}]));
 
   // --- B-roll: repeats, length, what is said under it, the script's inserts ---
-  const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? FPS}));
+  const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? FPS, looks: true}));
   const hashes = video.hashes;
   // black flashes from one frame, in this file's own frame rate (César: 3–5-frame blacks slipped through)
   if (video.timedOut) skipped.push(`video analysis did not finish in ${Math.round(TIMEOUT() / 1000)} s — its checks are partial`);
@@ -1276,30 +1355,27 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     return {pc, n: s0.length, Y: median(s0.map((x) => x.YAVG)), YH: median(s0.map((x) => x.YHIGH)), U: median(s0.map((x) => x.UAVG)), V: median(s0.map((x) => x.VAVG))};
   }).filter((x) => x.n >= 1);
   const src0 = (x) => sourceOf(x.pc.clip.src);
-  // the reel's look = duration-weighted median of the A-roll clips; the clip that departs from it is the one to fix
-  const wmed = (key) => {
-    const xs = clipLooks.map((x) => ({v: x[key], w: x.n})).filter((x) => Number.isFinite(x.v)).sort((p1, p2) => p1.v - p2.v);
-    const half = xs.reduce((n, x) => n + x.w, 0) / 2;
-    let acc = 0;
-    for (const x of xs) if ((acc += x.w) >= half) return x.v;
-    return NaN;
-  };
-  const ref = {Y: wmed('Y'), U: wmed('U'), V: wmed('V')};
-  const cutAt = (x) => { const k = placed.indexOf(x.pc); return [k > 0 ? r2(x.pc.startMs / 1000 - 0.3) : null, r2(x.pc.startMs / 1000 + 0.3)].filter((t) => t != null); };
-  if (clipLooks.length >= 2) for (const x of clipLooks) {
-    const dY = x.Y - ref.Y, dU = x.U - ref.U, dV = x.V - ref.V;
-    if (Math.abs(dY) >= T.expoJump) findings.push(F('color-jump', 'major', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id} (${src0(x)}) ${dY > 0 ? 'más claro' : 'más oscuro'} que el resto del reel (luma ${x.Y.toFixed(0)} vs ${ref.Y.toFixed(0)}) — salta en el corte`, {clip: x.pc.clip.id, lookAt: cutAt(x)}, [{tool: 'set_grade', args: {target: src0(x), exposure: r2(Math.max(-1, Math.min(1, Math.log2(ref.Y / x.Y))))}}]));
-    if (Math.abs(dU) >= T.wbJump || Math.abs(dV) >= T.wbJump) findings.push(F('color-jump', 'major', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id} (${src0(x)}) con otro balance de blancos (${dV > 0 ? 'más cálido' : dV < 0 ? 'más frío' : 'otro tinte'}: ΔU ${dU.toFixed(1)}, ΔV ${dV.toFixed(1)})`, {clip: x.pc.clip.id, lookAt: cutAt(x)}, [{tool: 'set_grade', args: {target: src0(x), temperature: r2(Math.max(-0.5, Math.min(0.5, -dV / 25)))}}]));
-  }
+  findings.push(...colorJumpFindings(clipLooks, placed));
+  // inside a shot, every frame (the render's own fps): a part of a shot in another grade blocks
+  if (video.looks.length) {
+    const rfps = fps ?? FPS;
+    const holdMs = presetOf(p.captionStyle).holdMs;
+    const shown = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, rfps);
+    const spans = [...projectBrolls(p.brolls, p.clips, rfps), ...projectGraphics(p.graphics, p.clips, rfps), ...shown.map((c, i) => ({startMs: c.startMs, endMs: Math.max(c.endMs, shownUntilMs(shown, i, holdMs))}))];
+    const gc = gradeCoverageFindings(video.looks, placeClips(p.clips, rfps), spans, rfps);
+    findings.push(...gc.findings); skipped.push(...gc.skipped);
+  } else skipped.push('grade-coverage: the frames of the render could not be read');
   for (const x of clipLooks) {
     // a bright sky or window trips the 90th percentile as easily as a burnt face: candidate, confirm on the frame
     if (x.YH >= T.burnt) findings.push(F('color-burnt', 'minor', 'candidate', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id}: 10% del cuadro en blanco (${x.YH.toFixed(0)}/235) — ¿piel/pared quemada ("quemado") o solo cielo/ventana?`, {clip: x.pc.clip.id, lookAt: r2((x.pc.startMs + x.pc.endMs) / 2000)}, [{tool: 'set_grade', args: {target: src0(x), highlights: 0.8, exposure: -0.3}}]));
     if (x.Y <= T.dark) findings.push(F('color-dark', 'minor', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id}: subexpuesto (luma media ${x.Y.toFixed(0)})`, {clip: x.pc.clip.id, lookAt: r2((x.pc.startMs + x.pc.endMs) / 2000)}, [{tool: 'set_grade', args: {target: src0(x), auto: true}}]));
   }
-  // against the client's approved references (profile colorRefs)
+  // against the client's approved references of this development (profile colorRefs[].development)
   const refSheets = [];
   const renderLook = lookOf(aroll);
-  for (const g of profile?.colorRefs ?? []) {
+  const refs = colorRefGroups(profile, validateIdentity(p.identity).identity?.development);
+  if (refs.skip) skipped.push(refs.skip);
+  for (const g of refs.groups) {
     const {files, missing: gone} = refFiles(g.paths ?? [], profile.base);
     if (gone.length) skipped.push(`color vs "${g.label}": no encuentro ${gone.join(', ')} — ${g.hint ?? 'put the approved references there'}`);
     if (!files.length) continue;

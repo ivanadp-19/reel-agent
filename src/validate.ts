@@ -7,7 +7,7 @@ import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {guionIssues} from './guion.ts';
-import type {Clip} from './timeline.ts';
+import {placeClips, type Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
 
@@ -297,13 +297,54 @@ export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[
   return out;
 }
 
+// ---------- half-graded sources (scripts/grade-scan.mjs) ----------
+// A pre-edit graded only in part: inside one shot the look changes. scans: src → its scan's steps (source
+// seconds: at = the first frame of the new look, from / to = the shot around it; the ungraded part is the
+// head [from, at) when the grade switches on late — César's G10 —, the tail [at, to) when it stops early,
+// `off`) — undefined = not scanned yet. Each clip that shows an ungraded part is warned with the fix: a
+// head (#47) — split_clip where the look changes (and at the cut, when the clip also holds the shot before),
+// create_lut match on it, set_clip graded: true; a tail — split it off, set_grade it like the shot before.
+// A clip that shows only that part, carries its own grade and is marked graded is fixed: nothing — a flag
+// inherited through a split is not a fix.
+export type GradeStep = {at: number; from: number; to?: number; off?: boolean; frames: number; dY: number; sat: [number, number]};
+export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<string, unknown>} | null}, scans: Record<string, {steps: GradeStep[]} | null | undefined>, fps = 30): Issue[] {
+  const out: Issue[] = [];
+  const EPS = 0.02, SPLIT = 0.2; // EPS under a frame: a split lands on the change within the printed millisecond
+  for (const pc of placeClips(p.clips, fps)) {
+    const c = pc.clip;
+    const tl = (s: number) => +((pc.startMs + ((s - c.inSec) / (c.speed ?? 1)) * 1000) / 1000).toFixed(3); // source → timeline s
+    for (const st of scans[c.src]?.steps ?? []) {
+      const [u0, u1] = st.off ? [st.at, st.to ?? c.outSec] : [st.from, st.at]; // the ungraded part
+      if (c.outSec <= u0 + EPS || c.inSec >= u1 - EPS) continue; // shows none of it
+      const before = c.inSec < u0 - EPS, own = !before && c.outSec <= u1 + EPS && !!p.grade?.overrides?.[c.id];
+      if (own && c.graded === true) continue; // fixed
+      // split_clip keeps ≥ 0.2 s a side: under that, the shot before is trimmed off (after the splits: a trim moves
+      // the timeline), and a head too short to be a clip is trimmed away.
+      // ponytail: a clip ending < 0.2 s after the change (or a tail's split that close to an edge) gets a split that split_clip refuses (and says why)
+      const pre = before && u0 - c.inSec >= SPLIT, piece = pre ? `the new piece at ${tl(u0)} s` : c.id;
+      const at = [...(pre || (st.off && before) ? [tl(u0)] : []), ...(c.outSec > u1 + EPS ? [tl(u1)] : [])];
+      const splits = at.length ? `split_clip at_sec ${at.join(' and at_sec ')} (timeline), then ` : '';
+      const fix = own ? `it is its own clip with its own grade: once the join looks right (caption_proof), set_clip graded: true on ${c.id}`
+        : st.off ? `${splits}set_grade target ${before ? `the new piece at ${tl(u0)} s` : c.id} like the shot before it (compare the join with caption_proof), then set_clip graded: true on it`
+        : c.outSec < st.at - EPS ? `the clip ends inside the head: trim it off (trim_clip) or grade it (set_grade target ${c.id})`
+        : st.at - st.from < SPLIT ? `${pre ? `split_clip at_sec ${tl(u0)} (timeline), then ` : ''}trim_clip in_sec ${st.at} on ${piece} (${st.frames} frames are too short for a clip of their own)`
+        : `${splits}${before && !pre ? `trim_clip ${c.id} in_sec ${u0} (the shot before goes), then ` : ''}create_lut match on the head (clip_id ${pre ? `of ${piece}` : c.id}), then set_clip graded: true on it`;
+      const what = st.off ? `the client's grade stops at ${st.at} s: the ${st.frames} frames to ${u1} s are ungraded` : `the client's grade only starts at ${st.at} s (${st.frames} ungraded frames`;
+      out.push({level: 'warn', code: 'half-graded', msg: `${c.id}: ${c.src} is half-graded — in the shot from ${st.from} s of the source ${what}${st.off ? ' (' : '; '}ΔY ${st.dY > 0 ? '+' : ''}${st.dY}, saturation ${st.sat[0]} → ${st.sat[1]}). Fix: ${fix}`, ref: c.id});
+    }
+  }
+  return out;
+}
+
 // ---------- identity (set_identity): whose reel this is and which cut of it ----------
 // {client, family, script, variant}: the client's slug, the script number (G2) and the variant of
 // that script — its hook and/or CTA (H1_C2) or a plain version (V2); family groups the variants of
 // one script (default <client>-G<script>). The delivered files are named from it (deliverableName).
 // One set of rules for the MCP (set_identity), the backend (POST /api/projects answers 400; the
 // uniqueness against the saved projects is claimIdentity in mcp/checks.mjs) and the editor (Settings).
-export type Identity = {client: string; family: string; script: number; variant: null | {hook?: number; cta?: number} | {v: number}};
+// development: the building / project the reel sells ("Montealbán 326", "Thula", "marca") — the render
+// judge's color-ref compares with that development's approved references only
+export type Identity = {client: string; family: string; script: number; variant: null | {hook?: number; cta?: number} | {v: number}; development?: string};
 // safe integers only: past 2^53 (1e21…) a number prints as 1e+21 and would put a '+' in a file name
 const posInt = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 1;
 const plain = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -314,20 +355,22 @@ export function validateIdentity(x: unknown): {identity: Identity | null; error?
   if (x == null) return {identity: null};
   const no = (error: string) => ({identity: null, error: `identity${error}`});
   if (!plain(x)) return no(': an object {client, script, variant?, family?}');
-  const {client, script, variant, family} = x;
+  const {client, script, variant, family, development} = x;
   if (typeof client !== 'string' || !/^[a-z0-9-]{1,32}$/.test(client)) return no('.client: a slug of a-z, 0-9 and "-", 1–32 characters (e.g. "vibem")');
   if (!posInt(script) || script > 99) return no('.script: a whole number 1–99 (the G of the script)');
   const vr = plain(variant) ? variant : null, keys = vr ? Object.keys(vr) : [];
   if (variant != null && !(vr && keys.length && keys.every((k) => posInt(vr[k]) && (vr[k] as number) <= 999) && (keys.join() === 'v' || keys.every((k) => k === 'hook' || k === 'cta')))) return no('.variant: null, {hook, cta} (one or both) or {v} — whole numbers 1–999');
   const fam = family ?? `${client}-G${script}`;
   if (typeof fam !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(fam)) return no('.family: letters, digits and "-", 1–64 characters');
-  return {identity: {client, family: fam, script, variant: vr ? Object.fromEntries(['v', 'hook', 'cta'].filter((k) => k in vr).map((k) => [k, vr[k]])) as Identity['variant'] : null}};
+  const dev = typeof development === 'string' ? development.trim() : development;
+  if (dev != null && dev !== '' && (typeof dev !== 'string' || dev.length > 60 || /[\u0000-\u001f]/.test(dev))) return no('.development: a name up to 60 characters (e.g. "Montealbán 326")');
+  return {identity: {client, family: fam, script, variant: vr ? Object.fromEntries(['v', 'hook', 'cta'].filter((k) => k in vr).map((k) => [k, vr[k]])) as Identity['variant'] : null, ...(dev ? {development: dev} : {})}};
 }
 
 // set_identity's arguments and the editor's form (flat numbers) → an identity to validate, its variant from the numbers given
-export const identityOf = ({client, script, family, hook, cta, v}: {client?: string; script?: number; family?: string; hook?: number; cta?: number; v?: number}) => {
+export const identityOf = ({client, script, family, hook, cta, v, development}: {client?: string; script?: number; family?: string; hook?: number; cta?: number; v?: number; development?: string}) => {
   const variant = Object.fromEntries(Object.entries({v, hook, cta}).filter(([, n]) => n != null));
-  return {client, script, family, variant: Object.keys(variant).length ? variant : null};
+  return {client, script, family, variant: Object.keys(variant).length ? variant : null, development};
 };
 
 // VIBEM_G2_H1_C1: client, script and variant (C for the CTA, the client's own H1_C1) — the key of one project

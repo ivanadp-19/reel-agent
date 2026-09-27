@@ -20,11 +20,11 @@ const IdentitySection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => 
   const {projectId, identity, setIdentity} = useEditor();
   const va = (identity?.variant ?? {}) as {hook?: number; cta?: number; v?: number};
   const str = (n?: number) => (n == null ? '' : String(n));
-  const [f, setF] = useState({client: identity?.client ?? '', script: str(identity?.script), hook: str(va.hook), cta: str(va.cta), v: str(va.v), family: identity && identity.family !== `${identity.client}-G${identity.script}` ? identity.family : ''});
+  const [f, setF] = useState({client: identity?.client ?? '', script: str(identity?.script), hook: str(va.hook), cta: str(va.cta), v: str(va.v), family: identity && identity.family !== `${identity.client}-G${identity.script}` ? identity.family : '', development: identity?.development ?? ''});
   const field = (k: keyof typeof f) => (x: string) => setF({...f, [k]: x});
   const num = (x: string) => (x.trim() === '' ? undefined : Number(x));
   const save = async () => {
-    const r = validateIdentity(identityOf({client: f.client.trim(), script: num(f.script), hook: num(f.hook), cta: num(f.cta), v: num(f.v), family: f.family.trim() || undefined}));
+    const r = validateIdentity(identityOf({client: f.client.trim(), script: num(f.script), hook: num(f.hook), cta: num(f.cta), v: num(f.v), family: f.family.trim() || undefined, development: f.development}));
     if (!r.identity) return notify(r.error ?? 'Fill in client and script', 'error');
     try {
       const taken = identityTaken(await fetch('/api/projects').then((x) => x.json()), projectId ?? '', r.identity);
@@ -35,7 +35,7 @@ const IdentitySection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => 
   };
   const shown = validateIdentity(identity); // a hand-edited file may hold a bad one: say so, never crash
   return (
-    <Section title="Identity" hint="Client, script (G) and variant (hook / CTA, or a plain V) — the delivered files are named from it (set_identity). One project per client, script and variant.">
+    <Section title="Identity" hint="Client, script (G) and variant (hook / CTA, or a plain V) — the delivered files are named from it (set_identity). One project per client, script and variant. Development: whose approved color the judge compares with.">
       <div className="grid grid-cols-3 gap-1">
         <div className="col-span-2"><Label>Client</Label><TextInput value={f.client} onChange={field('client')} placeholder="vibem" maxLength={32} /></div>
         <div><Label>Script G</Label><TextInput type="number" min={1} max={99} value={f.script} onChange={field('script')} placeholder="2" /></div>
@@ -45,6 +45,8 @@ const IdentitySection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => 
       </div>
       <Label>Family</Label>
       <TextInput value={f.family} onChange={field('family')} placeholder={f.client && f.script ? `${f.client.trim()}-G${f.script.trim()}` : '<client>-G<script>'} />
+      <Label>Development</Label>
+      <TextInput value={f.development} onChange={field('development')} placeholder="Montealbán 326 · Thula · marca" maxLength={60} title="The building or project the reel sells: the render judge compares its color with that development's approved references only" />
       <div className="flex gap-2">
         <Btn onClick={save} disabled={!projectId} className="flex-1">Save identity</Btn>
         <Btn onClick={() => setIdentity(null)} disabled={!identity}>Clear</Btn>

@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {normalizeCaption} from '../src/captions.ts';
 import {deliveryFps} from '../src/timeline.ts';
-import {fontFiles, identityTaken, transcriptIssues, validateIdentity, validateProject} from '../src/validate.ts';
+import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, validateIdentity, validateProject} from '../src/validate.ts';
 import {readFont} from '../src/sfnt.ts';
 import {projectTranscript} from '../scripts/transcript-cache.mjs';
+import {readScan} from '../scripts/grade-scan.mjs';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -26,12 +27,19 @@ export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => {
 export const projectWords = projectTranscript; // (p, publicDir, env)
 
 // every issue: layout / timing / emphasis (validateProject), then off-mic words left in the cut and clip
-// edges inside a word (projectWords) — at the fps the project renders at
-export async function projectIssues(p, publicDir, env) {
+// edges inside a word (projectWords), then half-graded sources (their scans) — at the fps the project
+// renders at. A source not scanned yet is said so and handed to kick(srcs): the backend's background
+// lane (scripts/grade-scan.mjs createGradeScans) — validate itself never decodes
+export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const fps = deliveryFps(p);
   // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name)
   const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { return [f, readFont(fs.readFileSync(file)).fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
-  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir, env))];
+  const scans = Object.fromEntries([...new Set(p.clips.map((c) => c.src))].map((src) => [src, readScan(publicDir, src)]));
+  const pending = Object.keys(scans).filter((src) => scans[src] === null), failed = Object.keys(scans).filter((src) => scans[src]?.error);
+  if (pending.length) try { kick?.(pending); } catch {}
+  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir, env)), ...halfGradedIssues(p, scans, fps),
+    ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
+    ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))];
 }
 
 // A project's identity (set_identity) checked against the others saved here (public/projects/*.json):

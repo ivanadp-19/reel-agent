@@ -6,7 +6,7 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
+import {applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -96,6 +96,7 @@ type EditorState = {
   setClipSpeed: (id: string, speed: number) => void;
   setClipEnter: (id: string, enter: Enter | undefined) => void;
   setClipAudioCut: (id: string, cut: {jSec?: number; lSec?: number}) => void;
+  setClipTags: (id: string, tags: {graded?: boolean | null; location?: string | null}) => void;
   setTransitionPattern: (pattern: 'punch-alternate' | 'none') => void;
   applySpeedRamp: (id: string, from: number, to: number, steps: number) => void;
   cutWords: (tr: TClip[], ranges: CutRange[]) => void; // cut_words: approved word ranges, snapped into the pauses
@@ -377,6 +378,9 @@ export const useEditor = create<EditorState>((set) => ({
       const clips = s.clips.map((c) => (c.id === id ? {...c, speed: sp} : c));
       return {clips, meta: withMeta(s.meta, clips)};
     }),
+
+  // graded / location (set_clip): the same clipTags the MCP applies
+  setClipTags: (id, tags) => set((s) => ({...withHistory(s), clips: s.clips.map((c) => (c.id === id ? clipTags(c, tags) : c))})),
 
   // how the clip starts (set_transitions items); undefined = plain cut
   setClipEnter: (id, enter) =>

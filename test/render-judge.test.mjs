@@ -557,3 +557,26 @@ test('source scan: a range that hits the deadline is skipped and not cached (a c
     fs.rmSync(dir, {recursive: true, force: true});
   }
 });
+
+// ---- color rules (CEO-15): color-jump is advisory and never compares two locations; color-ref by development ----
+import {colorJumpFindings, colorRefGroups} from '../.agents/skills/render-judge/judge.mjs';
+import {placeClips as place} from '../src/timeline.ts';
+
+test('color-jump: advisory (never fails a reel), and clips of different locations are not compared', () => {
+  const clips = [clip('a', 'a', 0, 4), clip('b', 'b', 0, 4), clip('c', 'c', 0, 4)];
+  const looks = (cs, Ys) => place(cs, 30).map((pc, i) => ({pc, n: 8, Y: Ys[i], U: 128, V: 128}));
+  const f = colorJumpFindings(looks(clips, [120, 121, 150]), place(clips, 30));
+  assert.deepEqual(f.map((x) => [x.check, x.evidence.clip]), [['color-jump', 'c']]);
+  assert.ok(f[0].fix.some((x) => x.tool === 'set_clip' && 'location' in x.args));
+  assert.equal(verdictOf(f).verdict, 'PASS');
+  const located = [{...clips[0], location: 'lobby'}, {...clips[1], location: 'lobby'}, {...clips[2], location: 'rooftop'}];
+  assert.deepEqual(colorJumpFindings(looks(located, [120, 121, 150]), place(located, 30)), []);
+});
+
+test('color-ref: only the approved references of the project\'s development; none → skipped with a note', () => {
+  const profile = {id: 'cesar', colorRefs: [{label: 'G1 v2', development: 'Montealbán 326', paths: []}, {label: 'Hechos por mí', paths: []}]};
+  assert.deepEqual(colorRefGroups(profile, 'montealban 326').groups.map((g) => g.label), ['G1 v2']);
+  assert.match(colorRefGroups(profile, 'Thula').skip, /no approved reference of "Thula"/);
+  assert.match(colorRefGroups(profile, undefined).skip, /set_identity development/);
+  assert.deepEqual(colorRefGroups({id: 'x'}, 'Thula'), {groups: []}); // a profile without references says nothing
+});

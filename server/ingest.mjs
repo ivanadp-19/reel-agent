@@ -50,10 +50,11 @@ const pctIn = (from, to, frac) => Math.round(from + (to - from) * Math.max(0, Ma
 
 // g: the gate's verdict on the request (server/http.mjs gate) — via, uid, user of a reel CLI token.
 // freeBytes() / minFreeBytes: the disk the clip lands on and its floor (the backend's REEL_RENDER_MIN_FREE_DISK_MB):
-// a clip that would leave less is refused 507 low_disk before anything is written
+// a clip that would leave less is refused 507 low_disk before anything is written. onClip(clip): after each
+// ingest that made a clip (the backend queues its half-graded scan; must not throw)
 export function createClipIngest({publicDir, root, token, uploadsDir = path.join(root, '.uploads'), openForUser = openForUserDefault,
   partFile = partFileDefault, partSize = partSizeDefault, UPLOAD_ID = UPLOAD_ID_DEFAULT,
-  hdrLut = () => null, explain = (tail, fallback) => fallback, log = console.log, freeBytes = () => Infinity, minFreeBytes = 0}) {
+  hdrLut = () => null, explain = (tail, fallback) => fallback, log = console.log, freeBytes = () => Infinity, minFreeBytes = 0, onClip = () => {}}) {
   const jobs = {}; // jobId -> {status, progress, label, clip?, error?}
   const reserved = new Set(); // clip ids of ingests in flight, so two uploads of one name never share an id
   const clipsDir = path.join(publicDir, 'clips');
@@ -184,7 +185,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       const tag = id;
       log(`ingest ${tag}: start (${local ? `path ${local}` : `upload ${upload}`})`);
       ingest({tmp, id, rawName, tag})
-        .then((clip) => { log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); json(res, 200, clip); })
+        .then((clip) => { log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); json(res, 200, clip); onClip(clip); })
         .catch((e) => { log(`ingest ${tag}: error — ${message(e)}`); json(res, 500, {error: e.message.slice(0, 200), ...(e.detail ? {detail: e.detail} : {})}); })
         .finally(cleanup);
       return true;
@@ -206,7 +207,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       log(`ingest ${tag}: start (${(ws.bytesWritten / 1048576).toFixed(1)} MB uploaded)`);
       const report = (progress, label) => { jobs[jobId] = {status: 'running', progress, label}; };
       ingest({tmp, id, rawName, tag, report})
-        .then((clip) => { jobs[jobId] = {status: 'done', progress: 100, label: 'Ready', clip}; log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); })
+        .then((clip) => { jobs[jobId] = {status: 'done', progress: 100, label: 'Ready', clip}; log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); onClip(clip); })
         .catch((e) => { jobs[jobId] = {status: 'error', error: message(e)}; log(`ingest ${tag}: error — ${message(e)}`); })
         .finally(cleanup);
     });

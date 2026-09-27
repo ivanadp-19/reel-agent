@@ -25,7 +25,7 @@ live in the client's profile on the volume (see the end of this file).
 | **nit** | Taste, or a draft-only artefact | No |
 
 **PASS**: 0 blockers, 0 majors and no minor pattern, after dismissals and
-confirmations. **Advisory** checks (`source-cut`) never count toward the
+confirmations. **Advisory** checks (`source-cut`, `color-jump`, `validate-guion-conflict`) never count toward the
 verdict, whatever their state: the client decides on them. The label is **`QC técnico superado`**, or
 `… (evidencia reducida)` when a rule check was skipped. Otherwise the label
 is `QC técnico: n hallazgos` with the prioritized list.
@@ -130,12 +130,15 @@ that case, check that the brief or the deliverable wants no subtitles.
 
 ## Color / grade
 
-Rendered frames are sampled at 2 fps with `signalstats`; B-roll spans are left out.
+Rendered frames are sampled at 2 fps with `signalstats`; B-roll spans are left out. `grade-coverage`
+reads every frame (27×24, the same frame looks and step rule as the half-graded source scan,
+`scripts/grade-scan.mjs`).
 
 | Check | Detection | Severity | Fix |
 |---|---|---|---|
-| `color-jump` | heuristic: an A-roll clip whose median luma is ≥ 18 (8-bit) off the reel's duration-weighted median, or whose U/V is ≥ 5 off (white balance). The fix targets the clip that departs | major | `set_grade target=<source> exposure` / `temperature` (script values) |
-| `color-ref` | heuristic, when the profile has `colorRefs`. The render's A-roll look (luma, contrast YHIGH−YLOW, saturation, U/V medians) is compared with the client's approved references: ±20 luma, ±25 contrast, ±12 saturation, ±6 U/V. The judge compares the `color-ref-*` sheets. Missing reference files are SKIPPED | major | `set_grade` (script values), or `create_lut` from stills of the references |
+| `grade-coverage` | heuristic: the look changes INSIDE a shot. Every frame of the render, placed on its clip with `placeClips` at the render's fps; frames under B-roll, a graphic, a caption page (+1 frame) or around a cut with a transition (the kind's length, ≥ 300 ms; a punch 1.5 frames) are not measured. Between two measured frames of one stretch of footage (the same clip, or a clip that continues it in its source) whose 9×8 structure hash stays within 6 bits, a jump of luma ≥ 2, U/V ≥ 1 or saturation ≥ 0.8 (8-bit) — at least 4× the local noise, ≥ 90 % of the level's move in that one jump, the level held on both sides (medians of 6 frames each side, their spreads ≤ half the move) and each side ≥ 3 frames — is a part of the shot in another grade (a pre-edit's ungraded head, a grade that starts late or ends early). A camera's exposure / white balance and a dissolve spread over several frames, the odd blended frame at a cut has no 3 frames: none of them is a step. The thresholds are the residual a fixed join leaves: G10's heads measured sat +1.3…2.8 before the match (3 blockers) and ≤ 0.5 after (none); G1's master, the G2 edit's clips as placed and César's exports read as one clip each find nothing at their cuts and transitions — the one step is Morantes 10's last 7 frames of a shot at 12.2 s, a real grade change inside the shot (luma +7.7, U +7.7, sat +8). A clip with no measured frame is SKIPPED with a note (a captioned render hides most frames: the clean master is where it runs) | **blocker** | head at a join: `create_lut match clip_id=<head> to_clip_id=<next>`; inside one clip: `split_clip` at the step (and at the shot's cut when the clip holds the shot before), then the match on the head |
+| `color-jump` | **advisory** (two shots may differ on purpose; never counts): an A-roll clip whose median luma is ≥ 18 (8-bit) off the duration-weighted median of the clips **of its own location** (`set_clip location`; clips without one are one group), or whose U/V is ≥ 5 off (white balance). Clips of different locations are never compared | major (advisory) | `set_grade target=<source> exposure` / `temperature` (script values), or `set_clip location` when it was shot elsewhere |
+| `color-ref` | heuristic, against the approved references **of the project's development** (`set_identity development`; the profile's `colorRefs[].development`). The render's A-roll look (luma, contrast YHIGH−YLOW, saturation, U/V medians) is compared with them: ±20 luma, ±25 contrast, ±12 saturation, ±6 U/V. The judge compares the `color-ref-*` sheets. No development, no reference of it, or missing reference files → SKIPPED with a note | major | `set_grade` (script values), or `create_lut` from stills of the references |
 | `color-burnt` | **candidate**: the 90th-percentile luma of a clip is ≥ 235. A bright sky or a window trips it as easily as burnt skin, so it counts only when the frame shows a face or an interior clipped ("quemado") | minor (major once confirmed on skin) | `set_grade target highlights 0.8 exposure −0.3` |
 | `color-dark` | heuristic: median luma ≤ 45 | minor | `set_grade target auto:true` |
 | judgment | on the overview sheet: skin orange, a cast that changes at a cut, a look the brief did not ask for | up to major | `set_grade` |
@@ -182,7 +185,7 @@ JSON keys (all optional):
 - `crewWords` — words added to the crew-talk list.
 - `blackFades` — `{startSec, endSec}`: black allowed at the head and tail (an intended fade); 0 = none, so every black frame inside the master is a flash.
 - `proofCues` — words added to the VO proof cues (`claim-image` evidence).
-- `colorRefs` — `[{label, paths: [file or folder, relative to the profile's folder, e.g. refs/approved.mp4], hint}]`.
+- `colorRefs` — `[{label, development, paths: [file or folder, relative to the profile's folder, e.g. refs/approved.mp4], hint}]`; `development` names the building / project they show ("Montealbán 326"): only projects with that `identity.development` are compared with them.
 - `requireInserts` — true: the plan must list the script's inserts.
 - `detectPhone` — false turns off phone-filter detection.
 - `reels` — the client's known reels, matched on the project name:
