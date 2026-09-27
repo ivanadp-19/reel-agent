@@ -298,6 +298,8 @@ function noteItem(r, x, n, {owner, reviewer, csrf}) {
   let actions = '';
   if (reviewer && n.state === 'resuelta') actions += step('verificar', 'Verificar: está arreglada');
   if (owner && n.state === 'clasificada') actions += step('confirmar', 'Confirmar');
+  // ponytail: the agent's clasificar has no route until phase 8 (review_notes) — say why there is no Confirmar yet
+  if (owner && n.state === 'abierta') actions += '<p class="meta">Se confirma cuando el agente la clasifique (fix, parámetro, regla o preferencia).</p>';
   if (owner && ['abierta', 'clasificada', 'confirmada'].includes(n.state)) actions += `<details><summary>Descartar</summary>${step('descartar', 'Descartar la nota', '<label>Razón (la ve el cliente)<textarea name="reason" maxlength="500" rows="2" required></textarea></label>')}</details>`;
   return `<li class="n-${cls(n.state)}"><p class="meta"><b>v${n.v} · ${esc(noteClock(n.atSec))}</b> · <span class="badge st-${cls(n.state)}">${esc(n.state)}${n.resolvedIn ? ` en v${n.resolvedIn}` : ''}</span>${n.afterApproval ? ' <span class="badge flag">nota después de aprobar</span>' : ''} · ${esc(n.by)}</p>
 <p class="text">${esc(n.text)}</p>${n.reason ? `<p class="meta">Descartada: ${esc(n.reason)}</p>` : ''}${owner && n.anchor ? `<p class="meta">clip ${esc(n.anchor.clipId)} · ${esc(n.anchor.src)} @ ${esc(n.anchor.srcSec)} s${n.anchor.wordId ? ` · palabra ${esc(n.anchor.wordId)}` : ''}</p>` : ''}${actions}</li>`;

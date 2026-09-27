@@ -857,6 +857,9 @@ test('note steps in the bandeja: the owner confirms a classified note or discard
     const state = (id) => loadReviews(dir, 'p-1').versions[0].notes.find((n) => n.id === id).state;
     assert.equal((await step('rev', rev, 'n1', 'confirmar')).status, 403, 'the reviewer never confirms');
     assert.equal((await step('boss', boss, 'n1', 'confirmar')).status, 409, 'an unclassified note is not confirmed');
+    const unclassified = (await page(srv, 'boss')).html;
+    assert.match(unclassified, /Se confirma cuando el agente la clasifique/, 'the owner is told why there is no Confirmar yet');
+    assert.doesNotMatch(unclassified, /value="confirmar"/);
     assert.equal((await step('boss', boss, 'n1', 'resolver')).status, 400, 'the agent\'s steps are not the bandeja\'s');
     const agent = actorOf({via: 'backend-token'});
     await withVersion(dir, 'p-1', 1, (x) => moveNote(x, 'n1', 'clasificar', agent, {at: 'now', kind: 'fix'})); // the agent's side (phase 8: review_notes)
