@@ -7,7 +7,7 @@ import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {guionIssues} from './guion.ts';
-import {placeClips, type Clip} from './timeline.ts';
+import {continuesPrev, placeClips, type Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
 
@@ -271,7 +271,8 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
 }
 
 // Checks that need the project's words (mcp/checks.mjs projectWords: its sources' transcript caches):
-// off-mic words still inside the cut, and clip edges that fall inside a word.
+// off-mic words still inside the cut, and clip edges that fall inside a word — never an edge the next piece
+// continues (continuesPrev: a split with nothing cut out plays the word whole)
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
 export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[]): Issue[] {
@@ -280,10 +281,11 @@ export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[
   for (const t of tr) { const m = byIdx.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); byIdx.set(t.source, m); }
   const bySource = new Map([...byIdx].map(([k, m]) => [k, [...m.values()]]));
   const out: Issue[] = [];
-  for (const c of p.clips) {
+  for (const [k, c] of p.clips.entries()) {
     const source = sourceOf(c.src);
     const words = bySource.get(source) ?? [];
     for (const [edge, ms] of [['starts', c.inSec * 1000], ['ends', c.outSec * 1000]] as const) {
+      if (edge === 'starts' ? continuesPrev(p.clips[k - 1], c) : continuesPrev(c, p.clips[k + 1])) continue;
       const w = words.find((x) => x.startMs + 60 < ms && ms < x.endMs - 60);
       if (w) out.push({level: 'warn', code: 'cut-word', msg: `${c.id} ${edge} in the middle of "${w.word}" (${(ms / 1000).toFixed(2)} s) — ${edge === 'starts' ? `trim_clip in_sec ${((w.startMs - 40) / 1000).toFixed(2)}` : `trim_clip out_sec ${((w.endMs + 40) / 1000).toFixed(2)}`} or cut_words the word`, ref: c.id});
     }
@@ -299,9 +301,10 @@ export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[
 
 // ---------- half-graded sources (scripts/grade-scan.mjs) ----------
 // A pre-edit graded only in part: inside one shot the look changes. scans: src → its scan's steps (source
-// seconds: at = the first frame of the new look, from / to = the shot around it; the ungraded part is the
-// head [from, at) when the grade switches on late — César's G10 —, the tail [at, to) when it stops early,
-// `off`) — undefined = not scanned yet. Each clip that shows an ungraded part is warned with the fix: a
+// seconds: at = the first frame of the new look, from / to = the footage around it; the odd part — the
+// shorter side — is the head [from, at) when the grade switches on late — César's G10 —, the tail [at, to)
+// when it stops early or pops, `off`; ungraded when it is the flatter side, else in another grade) —
+// undefined = not scanned yet. Each clip that shows an odd part is warned with the fix: a
 // head (#47) — split_clip where the look changes (and at the cut, when the clip also holds the shot before),
 // create_lut match on it, set_clip graded: true; a tail — split it off, set_grade it like the shot before.
 // A clip that shows only that part, carries its own grade and is marked graded is fixed: nothing — a flag
@@ -329,7 +332,8 @@ export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<
         : c.outSec < st.at - EPS ? `the clip ends inside the head: trim it off (trim_clip) or grade it (set_grade target ${c.id})`
         : st.at - st.from < SPLIT ? `${pre ? `split_clip at_sec ${tl(u0)} (timeline), then ` : ''}trim_clip in_sec ${st.at} on ${piece} (${st.frames} frames are too short for a clip of their own)`
         : `${splits}${before && !pre ? `trim_clip ${c.id} in_sec ${u0} (the shot before goes), then ` : ''}create_lut match on the head (clip_id ${pre ? `of ${piece}` : c.id}), then set_clip graded: true on it`;
-      const what = st.off ? `the client's grade stops at ${st.at} s: the ${st.frames} frames to ${u1} s are ungraded` : `the client's grade only starts at ${st.at} s (${st.frames} ungraded frames`;
+      const flat = (st.sat[0] < st.sat[1]) !== !!st.off, who = flat ? "the client's grade" : "the shot's look"; // the odd part the flatter side: ungraded
+      const what = st.off ? `${who} stops at ${st.at} s: the ${st.frames} frames to ${u1} s are ${flat ? 'ungraded' : 'in another grade'}` : `${who} only starts at ${st.at} s (${st.frames} ${flat ? 'ungraded frames' : 'frames in another grade'}`;
       out.push({level: 'warn', code: 'half-graded', msg: `${c.id}: ${c.src} is half-graded — in the shot from ${st.from} s of the source ${what}${st.off ? ' (' : '; '}ΔY ${st.dY > 0 ? '+' : ''}${st.dY}, saturation ${st.sat[0]} → ${st.sat[1]}). Fix: ${fix}`, ref: c.id});
     }
   }

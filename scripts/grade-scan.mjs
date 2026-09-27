@@ -20,12 +20,16 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 
-export const SCAN_VERSION = 1;
+export const SCAN_VERSION = 2; // 2: stretches link over camera motion, the shorter side is the odd one, the whole picture moves
 const W = 27, H = 24, N = W * H; // 3×3 blocks → the judge's 9×8 hash grid
-export const MAX_HASH = 6; // dHash bits (of 64) apart = the same shot (the judge's hashDist)
+export const MAX_HASH = 6; // dHash bits (of 64) apart = the same picture (the judge's hashDist)
+export const CUT_HASH = 12; // … and still the same shot: camera motion reaches 7–11 bits in César's footage, his real cuts ≥ 14
+export const GLOBAL = 0.5; // how much of the frame's move the median block must share (lookSteps)
+// ponytail: a contrast-only residual (shadows one way, highlights the other) has a median block near 0 and is
+// not seen on its own; its saturation or chroma, which moves everywhere, usually is
 // the source rule (ΔY ≥ 12 or saturation ×2, log2 of it floored at 1 so grey footage never divides by ~0):
 // G10's three heads step ΔY +32..37 and ×4.4–5.0 with 3–4 hash bits; its real cuts are 19–35 bits apart
-// (fast camera motion 7–10); G1, G2's takes and César's finished exports (Morantes 2.1 / 3.3 / 10) find
+// (fast camera motion 7–11); G1, G2's takes and César's finished exports (Morantes 2.1 / 3.3 / 10) find
 // nothing — the closest is Morantes 10's last 7 frames of a shot at 12.2 s (ΔY +7.7, ×1.97: under the bar
 // here; the render judge's grade-coverage, at a fixed join's residual, flags it in a reel)
 export const SOURCE_CHANNELS = [{key: 'y', t: 12, of: (f) => f.y}, {key: 'sat', t: 1, of: (f) => Math.log2(Math.max(f.s, 1))}];
@@ -38,20 +42,22 @@ export function dhash(px) {
 }
 export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x & 1n); x >>= 1n; } return n; }
 
-// raw 27×24 yuv444p frames → [{y, u, v, s, h}]: mean luma / chroma, mean saturation (signalstats' SATAVG:
-// |U−128, V−128|) and the dHash of the 4×4-block means (8-bit, as ffmpeg delivers them)
+// raw 27×24 yuv444p frames → [{y, u, v, s, h, b}]: mean luma / chroma, mean saturation (signalstats' SATAVG:
+// |U−128, V−128|), the dHash of the 3×3-block means (8-bit, as ffmpeg delivers them) and those 72 blocks'
+// own means (b: y, u, v, s × 72 — lookSteps' check that a step moves the whole picture)
 export function frameLooks(buf) {
   const out = [];
-  const g = new Float64Array(72);
   for (let o = 0; o + 3 * N <= buf.length; o += 3 * N) {
+    const g = new Float64Array(4 * 72);
     let y = 0, u = 0, v = 0, s = 0;
-    g.fill(0);
     for (let i = 0; i < N; i++) {
-      const a = buf[o + i], b = buf[o + N + i] - 128, c = buf[o + 2 * N + i] - 128;
-      y += a; u += b; v += c; s += Math.hypot(b, c);
-      g[Math.floor(i / W / 3) * 9 + Math.floor((i % W) / 3)] += a;
+      const a = buf[o + i], p = buf[o + N + i] - 128, q = buf[o + 2 * N + i] - 128, r = Math.hypot(p, q);
+      const j = Math.floor(i / W / 3) * 9 + Math.floor((i % W) / 3);
+      y += a; u += p; v += q; s += r;
+      g[j] += a; g[72 + j] += p; g[144 + j] += q; g[216 + j] += r;
     }
-    out.push({y: y / N, u: 128 + u / N, v: 128 + v / N, s: s / N, h: dhash(g)});
+    const b = Float32Array.from(g, (x, i) => x / 9 + (i >= 72 && i < 216 ? 128 : 0));
+    out.push({y: y / N, u: 128 + u / N, v: 128 + v / N, s: s / N, h: dhash(g), b});
   }
   return out;
 }
@@ -67,19 +73,29 @@ const spread = (xs) => (xs.length ? Math.max(...xs) - Math.min(...xs) : 0);
 // ≥ t, ≥ `once` of it in that one jump (a grade switches between two frames; a camera's exposure or
 // white balance and a dissolve spread over several: G2's takes 0.6–0.85, G10's heads 0.96–1.03); both
 // sides steady (their spreads together ≤ half the move — no drift, no flicker) and ≥ minSide frames
-// long (the odd blended frame right at a cut is not a head).
+// long (the odd blended frame right at a cut is not a head); the whole picture moving — the median of the
+// 72 blocks' own level moves ≥ `global` × the frame's (a grade moves every region: G10's heads 0.8–1.3, a
+// half-fixed join's residual 0.7–0.9; a screen, a lamp or a window behind the presenter moves one: ≤ 0.25,
+// even punched in close enough to share the structure hash).
+// Frames k−1 and k show the same picture (hash ≤ maxHash); the same-shot stretch around it links frames
+// up to cutHash apart (camera motion 7–11 bits in César's footage, real cuts ≥ 14).
 // ok(k): frame k may be measured (the judge: not under B-roll, text or a transition); joined(k): frames
 // k−1 and k are one stretch of footage (the judge: the same clip, or a clip that continues it).
-// → [{k, from, to, by: {key: move}}], from / to = the same-shot stretch around the step (from = the cut
-// that starts the shot, the head's first frame)
+// → [{k, from, to, by: {key: move}}], from / to = the footage the step splits: back to the cut that starts
+// the shot (or the step before it), on to the next step (or the cut that ends it) — the shorter side is
+// the part in another grade
 // ponytail: a look change shorter than minSide frames (a 1–2-frame flash) is not seen here
-export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, minSide = 3, maxHash = MAX_HASH, ok = () => true, joined = () => true} = {}) {
-  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && hamming(frames[k - 1].h, frames[k].h) <= maxHash;
+export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, minSide = 3, maxHash = MAX_HASH, cutHash = CUT_HASH, global = GLOBAL, ok = () => true, joined = () => true} = {}) {
+  const hd = (k) => hamming(frames[k - 1].h, frames[k].h);
+  const link = (k) => k > 0 && k < frames.length && ok(k - 1) && ok(k) && joined(k) && hd(k) <= cutHash;
+  const block = (f, j) => ({y: f.b[j], u: f.b[72 + j], v: f.b[144 + j], s: f.b[216 + j]});
   const out = [];
   for (let a = 0; a < frames.length;) {
     let b = a + 1; // [a, b): one same-shot stretch
     while (b < frames.length && link(b)) b++;
+    const here = [];
     for (let k = a + minSide; k <= b - minSide; k++) {
+      if (hd(k) > maxHash) continue;
       const before = frames.slice(Math.max(a, k - win), k), after = frames.slice(k, Math.min(b, k + win));
       const by = {};
       for (const c of channels) {
@@ -90,10 +106,13 @@ export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, mi
         if (Math.abs(move) < c.t || jump / move < once || spread(bv) + spread(av) > Math.abs(move) / 2) continue;
         const d = (xs) => xs.slice(1).map((x, i) => Math.abs(x - xs[i]));
         if (Math.abs(jump) < noiseK * median([...d(bv), ...d(av)])) continue;
+        const blocks = Array.from({length: 72}, (_, j) => (median(after.map((f) => c.of(block(f, j)))) - median(before.map((f) => c.of(block(f, j))))) / move);
+        if (median(blocks) < global) continue;
         by[c.key] = Math.round(move * 100) / 100;
       }
-      if (Object.keys(by).length) out.push({k, from: a, to: b, by});
+      if (Object.keys(by).length) here.push({k, by});
     }
+    here.forEach(({k, by}, i) => out.push({k, from: here[i - 1]?.k ?? a, to: here[i + 1]?.k ?? b, by}));
     a = b;
   }
   return out;
@@ -120,8 +139,10 @@ export function readScan(publicDir, src) {
   } catch { return null; }
 }
 
-// one decode of the whole file at its own frame rate → its frames; niced, one thread, a deadline
-function decode(file) {
+// one decode of the whole file at its own frame rate → its frames; niced, one thread, a deadline. Errors
+// name the source by `name` (its path under public/: the message reaches remote agents); one that is
+// not the file's fault (killed at the deadline, ffmpeg missing) is `retry`
+function decode(file, name) {
   return new Promise((resolve, reject) => {
     const c = spawn('ffmpeg', ['-hide_banner', '-v', 'error', '-threads', THREADS(), '-i', file, '-an', '-fps_mode', 'passthrough', '-vf', LOOKS_VF, '-f', 'rawvideo', '-']);
     try { if (NICE() > 0) os.setPriority(c.pid, Math.min(19, NICE())); } catch {}
@@ -134,8 +155,9 @@ function decode(file) {
       rest = buf.subarray(whole);
     });
     c.stderr.on('data', (d) => (err = (err + d).slice(-2000)));
-    c.on('error', (e) => { clearTimeout(timer); reject(e); });
-    c.on('close', (code, sig) => { clearTimeout(timer); code === 0 ? resolve(looks) : reject(new Error(sig ? `grade scan of ${file} stopped (${sig}: over ${TIMEOUT() / 1000} s?)` : `grade scan of ${file}: ${err.trim().split('\n').pop() || `ffmpeg exit ${code}`}`)); });
+    const fail = (msg, retry) => reject(Object.assign(new Error(`grade scan of ${name}${msg}`), {retry}));
+    c.on('error', (e) => { clearTimeout(timer); fail(`: ${e.code ?? e.message}`, true); });
+    c.on('close', (code, sig) => { clearTimeout(timer); code === 0 ? resolve(looks) : sig ? fail(` stopped (${sig}: over ${TIMEOUT() / 1000} s?)`, true) : fail(`: ${err.trim().split('\n').pop().split(file).join(name) || `ffmpeg exit ${code}`}`, false); });
   });
 }
 const probeFps = (file) => new Promise((resolve) => {
@@ -147,21 +169,23 @@ const probeFps = (file) => new Promise((resolve) => {
 });
 
 // frames + fps → the half-graded steps, in source seconds: at = the first frame with the new look, from / to =
-// the same-shot stretch around it (from = the cut that starts the shot); dY and the saturation either side
-// for the message. The flatter side (less saturated) is the ungraded one: saturation up = the grade switches
-// on late (a head, [from, at) — César's G10), down = it stops early (off: a tail, [at, to)); frames = its length.
+// the footage the step splits (from = the cut that starts the shot, or the step before); dY and the saturation
+// either side for the message. The shorter side is the part in another grade (as the judge's grade-coverage):
+// before the step = the grade switches on late (a head, [from, at) — César's G10), after it = it stops early
+// (off: a tail, [at, to)); frames = its length. Which side is flatter says nothing: a pop can be over-graded.
 // ponytail: frame k at k / fps — exact for CFR (César's exports, the ingest's transcodes); a VFR phone
 // remux drifts by its jitter (pts from the decode if one ever lands a split on the wrong frame)
 export function sourceSteps(frames, fps) {
   const r3 = (x) => Math.round(x * 1000) / 1000;
   return lookSteps(frames, SOURCE_CHANNELS).map(({k, from, to}) => {
-    const off = frames[k].s < frames[k - 1].s;
+    const off = to - k < k - from;
     return {frame: k, at: r3(k / fps), from: r3(from / fps), to: r3(to / fps), ...(off ? {off} : {}), frames: off ? to - k : k - from, dY: Math.round((frames[k].y - frames[k - 1].y) * 10) / 10, sat: [frames[k - 1].s, frames[k].s].map((x) => Math.round(x * 10) / 10)};
   });
 }
 
-// scan one source (cached): {version, src, size, mtimeMs, fps, frames, steps}. A failed decode is cached
-// too ({error}, no steps) and thrown: the same file is not decoded again on every validate (--force retries)
+// scan one source (cached): {version, src, size, mtimeMs, fps, frames, steps}. A file that does not decode is
+// cached too ({error}, no steps) and thrown: it is not decoded again on every validate (--force retries); a
+// scan stopped for any other reason (its deadline on a busy box, no ffmpeg) is only thrown: the next kick retries
 export async function scanSource(publicDir, src, {force = false} = {}) {
   const hit = !force && readScan(publicDir, src);
   if (hit) return hit;
@@ -176,7 +200,7 @@ export async function scanSource(publicDir, src, {force = false} = {}) {
     return entry;
   };
   let fps, frames;
-  try { [fps, frames] = [await probeFps(file), await decode(file)]; } catch (e) { save({error: String(e?.message ?? e).slice(0, 300), steps: []}); throw e; }
+  try { [fps, frames] = [await probeFps(file), await decode(file, relOf(publicDir, src))]; } catch (e) { if (!e.retry) save({error: String(e?.message ?? e).slice(0, 300), steps: []}); throw e; }
   return save({fps: Math.round(fps * 1000) / 1000, frames: frames.length, steps: sourceSteps(frames, fps)});
 }
 

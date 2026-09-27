@@ -559,7 +559,7 @@ test('source scan: a range that hits the deadline is skipped and not cached (a c
 });
 
 // ---- color rules (CEO-15): color-jump is advisory and never compares two locations; color-ref by development ----
-import {colorJumpFindings, colorRefGroups} from '../.agents/skills/render-judge/judge.mjs';
+import {colorJumpFindings, colorRefGroups, cutFindings} from '../.agents/skills/render-judge/judge.mjs';
 import {placeClips as place} from '../src/timeline.ts';
 
 test('color-jump: advisory (never fails a reel), and clips of different locations are not compared', () => {
@@ -573,10 +573,19 @@ test('color-jump: advisory (never fails a reel), and clips of different location
   assert.deepEqual(colorJumpFindings(looks(located, [120, 121, 150]), place(located, 30)), []);
 });
 
-test('color-ref: only the approved references of the project\'s development; none → skipped with a note', () => {
+test('color-ref: only the approved references of the project\'s development; none, or one that names no development → skipped with a note', () => {
   const profile = {id: 'cesar', colorRefs: [{label: 'G1 v2', development: 'Montealbán 326', paths: []}, {label: 'Hechos por mí', paths: []}]};
-  assert.deepEqual(colorRefGroups(profile, 'montealban 326').groups.map((g) => g.label), ['G1 v2']);
-  assert.match(colorRefGroups(profile, 'Thula').skip, /no approved reference of "Thula"/);
-  assert.match(colorRefGroups(profile, undefined).skip, /set_identity development/);
-  assert.deepEqual(colorRefGroups({id: 'x'}, 'Thula'), {groups: []}); // a profile without references says nothing
+  const m = colorRefGroups(profile, 'montealban 326');
+  assert.deepEqual(m.groups.map((g) => g.label), ['G1 v2']);
+  assert.deepEqual(m.skip, ['color-ref: "Hechos por mí" names no development (colorRefs[].development) — not compared']); // never dropped silently
+  assert.match(colorRefGroups(profile, 'Thula').skip[0], /no approved reference of "Thula"/);
+  assert.match(colorRefGroups(profile, undefined).skip[0], /set_identity development/);
+  assert.deepEqual(colorRefGroups({id: 'x'}, 'Thula'), {groups: [], skip: []}); // a profile without references says nothing
+});
+
+test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split) is one shot — no flash-cut, no jump-cut; cut out of the take, it is both', () => {
+  const checks = (clips) => cutFindings(place(clips, 30)).map((f) => [f.check, f.evidence.clip ?? f.evidence.clips]);
+  assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
+  assert.deepEqual(checks([clip('x', 'x', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
+  assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3.5, 3.833), clip('x', 'x', 0, 3)]), [['flash-cut', 'h'], ['jump-cut', ['h']]]);
 });

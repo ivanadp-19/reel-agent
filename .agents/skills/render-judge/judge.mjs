@@ -667,14 +667,15 @@ export function colorRefFindings(render, ref, label) {
      {tool: 'create_lut', note: 'or: a LUT from stills of the approved references (the profile lists them)', args: {name: 'ref-look', reference_images: ['<stills of the references>']}}])];
 }
 // the approved references of the project's development (identity.development: "Montealbán 326", "Thula",
-// "marca") — a reel of one building is never held to another's look. → the profile's colorRefs tagged
-// with it, or the note that says why color-ref did not run
+// "marca") — a reel of one building is never held to another's look. → {groups: the profile's colorRefs
+// tagged with it, skip: the notes on what was not compared — no development, none of it, and every
+// reference that names no development (never compared: it could show any building)}
 export function colorRefGroups(profile, development) {
   const all = profile?.colorRefs ?? [];
-  if (!all.length) return {groups: []};
-  if (!development) return {groups: [], skip: 'color-ref: the project has no identity.development — set_identity development (e.g. "Montealbán 326") to compare it with that development\'s approved references'};
+  if (!development) return {groups: [], skip: all.length ? ['color-ref: the project has no identity.development — set_identity development (e.g. "Montealbán 326") to compare it with that development\'s approved references'] : []};
   const groups = all.filter((g) => g.development && fold(g.development) === fold(development));
-  return groups.length ? {groups} : {groups: [], skip: `color-ref: profile ${profile.id} has no approved reference of "${development}" (colorRefs[].development) — not compared`};
+  const untagged = all.filter((g) => !g.development).map((g) => `color-ref: "${g.label}" names no development (colorRefs[].development) — not compared`);
+  return {groups, skip: [...(all.length && !groups.length ? [`color-ref: profile ${profile.id} has no approved reference of "${development}" (colorRefs[].development) — not compared`] : []), ...untagged]};
 }
 
 // ---------- color from clip to clip: an ADVISORY (two shots may look different on purpose) ----------
@@ -703,6 +704,23 @@ export function colorJumpFindings(clipLooks, placed) {
       if (Math.abs(dU) >= T.wbJump || Math.abs(dV) >= T.wbJump) out.push(F('color-jump', 'major', 'heuristic', x.pc.startMs / 1000, x.pc.endMs / 1000, `${x.pc.clip.id} (${src0(x)}) con otro balance de blancos (${dV > 0 ? 'más cálido' : dV < 0 ? 'más frío' : 'otro tinte'}: ΔU ${dU.toFixed(1)}, ΔV ${dV.toFixed(1)})`, {clip: x.pc.clip.id, lookAt: cutAt(x)}, [{tool: 'set_grade', args: {target: src0(x), temperature: r2(Math.max(-0.5, Math.min(0.5, -dV / 25)))}}]));
     }
   }
+  return out;
+}
+
+// ---------- cuts: a flash, jump cuts inside one take ----------
+// placed: placeClips. A clip joined to its neighbour with nothing cut out (continuesPrev — a pre-edit split
+// at its own shot change, a half-graded head split off by grade-coverage's fix) is one uninterrupted shot on
+// screen: neither a flash nor a jump cut
+// ponytail: a run of continuing clips under flashMs altogether (two tiny pieces) is not called a flash
+export function cutFindings(placed) {
+  const out = [], jumps = [];
+  placed.forEach((pc, k) => {
+    const c = pc.clip, dur = (pc.endMs - pc.startMs) / 1000, prevClip = placed[k - 1]?.clip;
+    const joined = continuesPrev(prevClip, c);
+    if (dur * 1000 < T.flashMs && (c.speed ?? 1) === 1 && placed.length > 1 && !joined && !continuesPrev(c, placed[k + 1]?.clip)) out.push(F('flash-cut', 'major', 'rule', pc.startMs / 1000, pc.endMs / 1000, `${c.id} dura ${dur.toFixed(2)} s — un parpadeo`, {clip: c.id}, [{tool: 'delete_clips', args: {clip_ids: [c.id]}}]));
+    if (prevClip && !joined && prevClip.src === c.src && (!c.enter || c.enter === 'cut') && !c.transform?.length && Math.abs(c.inSec - prevClip.outSec) < 4) jumps.push(pc);
+  });
+  if (jumps.length) out.push(F('jump-cut', jumps.length >= 3 ? 'major' : 'minor', 'rule', jumps[0].startMs / 1000, null, `${jumps.length} jump cut(s) del mismo plano sin punch/transición: ${jumps.slice(0, 5).map((x) => `${x.clip.id} @${tc(x.startMs / 1000)}`).join(', ')}`, {clips: jumps.map((x) => x.clip.id)}, [{tool: 'set_transitions', args: {pattern: 'punch-alternate'}}]));
   return out;
 }
 
@@ -1296,14 +1314,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   }
 
   // --- cuts ---
-  const jumps = [];
-  placed.forEach((pc, k) => {
-    const c = pc.clip, dur = (pc.endMs - pc.startMs) / 1000;
-    if (dur * 1000 < T.flashMs && (c.speed ?? 1) === 1 && placed.length > 1) findings.push(F('flash-cut', 'major', 'rule', pc.startMs / 1000, pc.endMs / 1000, `${c.id} dura ${dur.toFixed(2)} s — un parpadeo`, {clip: c.id}, [{tool: 'delete_clips', args: {clip_ids: [c.id]}}]));
-    const prevClip = placed[k - 1]?.clip;
-    if (prevClip && prevClip.src === c.src && (!c.enter || c.enter === 'cut') && !c.transform?.length && Math.abs(c.inSec - prevClip.outSec) < 4) jumps.push(pc);
-  });
-  if (jumps.length) findings.push(F('jump-cut', jumps.length >= 3 ? 'major' : 'minor', 'rule', jumps[0].startMs / 1000, null, `${jumps.length} jump cut(s) del mismo plano sin punch/transición: ${jumps.slice(0, 5).map((x) => `${x.clip.id} @${tc(x.startMs / 1000)}`).join(', ')}`, {clips: jumps.map((x) => x.clip.id)}, [{tool: 'set_transitions', args: {pattern: 'punch-alternate'}}]));
+  findings.push(...cutFindings(placed));
   // a long continuous take is a choice more often than a flaw: candidate nit
   const brolls = projectBrolls(p.brolls, p.clips, FPS);
   const changes = [0, ...placed.map((x) => x.startMs / 1000), ...brolls.flatMap((b) => [b.startMs / 1000, b.endMs / 1000]), ...gfx.map((g) => g.startMs / 1000), total].sort((x, y) => x - y);
@@ -1374,7 +1385,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const refSheets = [];
   const renderLook = lookOf(aroll);
   const refs = colorRefGroups(profile, validateIdentity(p.identity).identity?.development);
-  if (refs.skip) skipped.push(refs.skip);
+  skipped.push(...refs.skip);
   for (const g of refs.groups) {
     const {files, missing: gone} = refFiles(g.paths ?? [], profile.base);
     if (gone.length) skipped.push(`color vs "${g.label}": no encuentro ${gone.join(', ')} — ${g.hint ?? 'put the approved references there'}`);
