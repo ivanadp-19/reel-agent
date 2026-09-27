@@ -199,7 +199,7 @@ export const RULES: Record<Stage, string[]> = {
 // a finding belongs to when the job did not ask for it (scopeFindings). test/stages.test.mjs fails when the
 // judge gains a check with no row here or in RULES; the QC gate's other tech-* checks are the delivery's too.
 export const JUDGE_STAGE: Record<string, Stage> = {
-  'read-through': 'corte', 'crew-talk': 'corte', repeat: 'corte', 'repeated-footage': 'corte', 'jump-cut': 'corte', 'flash-cut': 'corte',
+  'read-through': 'corte', repeat: 'corte', 'repeated-footage': 'corte', 'jump-cut': 'corte', 'flash-cut': 'corte',
   'source-cut': 'corte', 'hook-dead-start': 'corte', 'audio-silence': 'corte',
   'grade-coverage': 'color', 'color-jump': 'color', 'color-ref': 'color', 'color-burnt': 'color', 'color-dark': 'color',
   clipping: 'audio', 'voice-level': 'audio', 'music-vs-voice': 'audio', 'phone-filter': 'audio',
