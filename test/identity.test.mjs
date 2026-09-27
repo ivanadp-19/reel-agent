@@ -148,7 +148,10 @@ async function withMcp(api, fn) {
   const made = [];
   try { await fn({call, saved, ids, made, client: `t${process.pid}`}); } finally {
     await client.close(); await backend?.close();
-    for (const id of [...ids, ...made]) for (const ext of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(path.join(PROJECTS, id + ext), {force: true});
+    for (const id of [...ids, ...made]) {
+      for (const ext of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(path.join(PROJECTS, id + ext), {force: true});
+      for (const ext of ['.json', '.jsonl']) fs.rmSync(path.join('public', 'stages', id + ext), {force: true}); // a first identity logs stagesMode
+    }
   }
 }
 

@@ -49,7 +49,7 @@ import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
-import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, stageView, writeProject} from '../scripts/stages.mjs';
+import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, setStagesMode, stageView, waive, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
 import {createDrive, createDriveImport} from './drive.mjs';
@@ -460,11 +460,13 @@ async function handle(req, res) {
     });
     return json(res, r.status, r.body);
   }
-  // ---- the stages of a project (scripts/stages.mjs, src/stages.ts; advisory) — records outside the project JSON ----
+  // ---- the stages of a project (scripts/stages.mjs, src/stages.ts) — records outside the project JSON ----
   //   GET  /api/projects/<id>/stages                       → {project, rev, scope, runs, mode, stages: [{stage, status, findings, waitingOn, …}]}
   //   POST /api/projects/<id>/stages/<stage>/check         → the gate run on the project as saved now, bound to its revision
   //   POST /api/projects/<id>/stages/<stage>/proof {kind, rev} → a proof of that revision (the MCP's caption_proof, motion_proof)
-  const st = url.pathname.match(/^\/api\/projects\/([\w-]+)\/stages(?:\/([a-z]+)\/(check|proof))?$/);
+  //   POST /api/projects/<id>/stages/<stage>/waive {rule, ref?, reason} → a finding waived: a warning by any caller, a blocker by the owner's login
+  //   POST /api/projects/<id>/stages/mode {mode}           → off | advisory | enforce: the owner's login only (humanOnly), logged
+  const st = url.pathname.match(/^\/api\/projects\/([\w-]+)\/stages(?:\/([a-z]+)(?:\/(check|proof|waive))?)?$/);
   if (st) {
     const [, id, stage, action] = st;
     const actor = g.user ?? g.via;
@@ -472,13 +474,13 @@ async function handle(req, res) {
       const p = readProject(PUBLIC, id);
       return p ? json(res, 200, stageView(PUBLIC, id, p)) : json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     }
-    if (req.method !== 'POST' || !stage) return json(res, 405, {error: 'method not allowed'});
+    if (req.method !== 'POST' || !stage || (!action && stage !== 'mode')) return json(res, 405, {error: 'method not allowed'});
     if (action === 'check') {
       const [status, out] = await checkStage(PUBLIC, id, stage, {actor, env: {...readEnvFile(), ...process.env}});
       return json(res, status, out);
     }
     let b; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
-    const [status, out] = await recordProof(PUBLIC, id, stage, b, actor);
+    const [status, out] = !action ? await setStagesMode(PUBLIC, id, b.mode, g) : action === 'waive' ? await waive(PUBLIC, id, stage, b, g) : await recordProof(PUBLIC, id, stage, b, actor);
     return json(res, status, out);
   }
   if (url.pathname.startsWith('/api/projects/')) {

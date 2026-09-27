@@ -24,11 +24,11 @@ if [ -n "$REPLY" ]; then
     PROMPT="$REPLY"; RESUME=(--resume "$(cat "$SESSION_FILE")")
   else
     PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. You presented this project's plan earlier (get_project shows it and whether it is approved). The user's answer to it: ${REPLY}
-Work only through the reel MCP tools. Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
+Work only through the reel MCP tools. Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
   fi
 else
   PROMPT="Use the reel-edit skill. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools. After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers in the next message. Finish with validate + caption_proof, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+Work only through the reel MCP tools. Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers in the next message. Finish with validate + caption_proof + stage_status, then render a draft and say what you did, where you departed from the plan and what you would still improve."
 fi
 
 claude -p "$PROMPT" ${RESUME[@]+"${RESUME[@]}"} \

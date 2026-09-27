@@ -28,8 +28,24 @@ export const cacheName = (key, lang, dg = useDeepgram()) => `${key}.${lang}${dg 
 // REEL_DIARIZE=0 turns it off.
 export const diarizeOn = (env = process.env) => Boolean(env.HF_TOKEN) && env.REEL_DIARIZE !== '0';
 
-// who says each word (the diarizer's turns) and which are the quiet voice off the mic (the loudness track)
+// ASR word times as every reader gets them: in order, each word ending by the time the next one starts. Deepgram
+// stretches a word over the short ones after it (Morantes4.1: "rápido" 13.52–14.88 s over "y" at 14.03 s), and the
+// pager then made overlapping caption pages (validate overlap-captions). The cache keeps what the engine said;
+// indices (word ids) never move.
+export function monotonic(words) {
+  let last = -Infinity;
+  const starts = words.map((w) => (last = Math.max(w.startMs, last)));
+  return words.map((w, i) => {
+    const s = starts[i], e = Math.max(s, Math.min(w.endMs, starts[i + 1] ?? Infinity));
+    return s === w.startMs && e === w.endMs ? w : {...w, startMs: s, endMs: e};
+  });
+}
+
+// A source cache's words as every reader gets them (transcribeClip → the captions, cuts and B-roll pipelines;
+// projectTranscript → the checks and the render judge): monotonic times, who says each word (the diarizer's turns)
+// and which are the quiet voice off the mic (the loudness track)
 export function voices(words, turns, loud, env = process.env) {
+  words = monotonic(words);
   if (turns) words = assignSpeakers(words, turns);
   return loud ? flagOffMicBySpeaker(words, loud, +(env.REEL_OFFMIC_DB || DROP_DB)) : words;
 }

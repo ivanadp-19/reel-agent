@@ -1,12 +1,15 @@
 // Metrics of one headless agent run (scripts/claude-edit.sh or scripts/codex-edit.sh):
 //   node scripts/run-report.mjs <log.jsonl> <project_id> [--json]
-// Reads the JSONL log (Claude stream-json or Codex exec events) and the project as it
-// ended (public/projects/<id>.json).
+// Reads the JSONL log (Claude stream-json or Codex exec events), the project as it
+// ended (public/projects/<id>.json) and its stages (public/stages/<id>.json + .jsonl:
+// each stage green / waived / its status, and every tool started or refused on a red
+// or stale stage — scripts/stages.mjs stageReport).
 import fs from 'node:fs';
 import path from 'node:path';
 import {validateProject} from '../src/validate.ts';
 import {placeClips} from '../src/timeline.ts';
 import {transcribeClip} from './lib-transcribe.mjs';
+import {stageReport} from './stages.mjs';
 
 const [logFile, id, flag] = process.argv.slice(2);
 if (!logFile || !id) { console.error('usage: node scripts/run-report.mjs <log.jsonl> <project_id> [--json]'); process.exit(1); }
@@ -71,6 +74,7 @@ const out = {
   errors,
   captionStyle: p.captionStyle,
   graphics: (p.graphics ?? []).map((g) => `${g.template}${g.behind ? ' (behind)' : ''}`),
+  stages: stageReport(PUBLIC, id, p),
 };
 if (flag === '--json') console.log(JSON.stringify(out, null, 2));
 else {
@@ -78,6 +82,14 @@ else {
   for (const k of ['brain', 'durationSec', 'clips', 'offMicWordsKept', 'cutsBySeconds', 'cutWords', 'schemaRejections', 'toolErrors', 'shellAttempts', 'validateWarnings', 'turns', 'minutes', 'costUsd', 'toolCalls', 'captionStyle']) row(k, out[k]);
   if (out.tokens) row('tokens', `in ${out.tokens.input} out ${out.tokens.output}`);
   row('graphics', out.graphics.join(', '));
+  const st = out.stages;
+  row('stages', `${st.allGreenOrWaived ? 'all green or waived' : 'NOT all green or waived'} (mode ${st.mode}${st.scope ? `, scope ${st.scope.join(' + ')}` : ''})`);
+  for (const [s, v] of Object.entries(st.stages)) row(`  ${s}`, v);
+  row('startsOnRedOrStale', st.startsOnRedOrStale.length);
+  for (const x of st.startsOnRedOrStale) row('  started', x);
+  row('refused', st.refused.length);
+  for (const x of st.refused) row('  refused', x);
+  for (const x of st.waivers) row('  waiver', x);
   for (const v of out.validate) row('  validate', v);
   for (const e of out.errors) row('  error', e);
 }
