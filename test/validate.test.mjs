@@ -226,13 +226,13 @@ const reel = (src, graphics, over = {}) => ({clips: [{id: src, src: `clips/${src
 const gfx = (id, src, startMs, template, props) => ({id, src: `clips/${src}.mp4`, startMs, endMs: startMs + 2000, template, props});
 const datos = (p, tr) => unbackedData(p, tr).map((d) => d.dato);
 
-test('data-from-audio: a figure said near the graphic passes (digits or words); one not said blocks', () => {
+test('data-from-audio: a figure said near the graphic passes (digits or words); one not said is a warning', () => {
   const tr = [said('s', 'El jardín recibe hasta cuarenta personas y tiene 2 asadores.')];
   const ok = reel('s', [gfx('g0', 's', 1200, 'label-2tone', {top: 'JARDÍN', bottom: 'Hasta 40 personas'}), gfx('g1', 's', 2000, 'stat', {value: '2', label: 'asadores'})]);
   assert.deepEqual(unbackedData(ok, tr), []);
   const bad = reel('s', [gfx('g0', 's', 1200, 'label-2tone', {top: 'JARDÍN', bottom: 'Hasta 45 personas'})]);
   const i = transcriptIssues(bad, tr).filter((x) => x.code === 'data-from-audio');
-  assert.deepEqual(i.map((x) => [x.level, x.ref]), [['error', 'g0']]);
+  assert.deepEqual(i.map((x) => [x.level, x.ref]), [['warn', 'g0']]); // a question for the client (datosPorConfirmar), never a stop
   assert.match(i[0].msg, /"45" — dato sin respaldo en el audio de este reel/);
 });
 
@@ -243,34 +243,76 @@ test('data-from-audio: only this reel\'s own audio backs it — the same fact wi
   assert.deepEqual(datos(reel('b', [g('b')]), [trA, trB]), ['30']); // reel b says 20; reel a's 30 does not count
 });
 
-test('data-from-audio: far from the graphic, cut out of the reel, or under a chapter number does not count; a sentence that reaches it does', () => {
+test('data-from-audio: far from the graphic, cut out of the reel, or under a chapter number does not count — by time, never by the ASR\'s punctuation', () => {
   const tr = [said('s', 'Son 12 lofts. Y ahora hablemos de otra cosa muy distinta con calma y sin prisa ninguna hoy.')];
-  const late = gfx('g0', 's', 6000, 'stat', {value: '12', label: 'lofts'}); // 12 is said at 0.4 s: over 3 s away, another sentence
+  const late = gfx('g0', 's', 6000, 'stat', {value: '12', label: 'lofts'}); // 12 is said at 0.4 s: over 3 s away
   assert.deepEqual(datos(reel('s', [late]), tr), ['12']);
-  const reach = gfx('g0', 's', 3900, 'stat', {value: '12', label: 'lofts'}); // "12" ends 3.15 s before it; "lofts." reaches the window, and its sentence says 12
-  assert.deepEqual(datos(reel('s', [reach]), tr), []);
+  const edge = gfx('g0', 's', 3700, 'stat', {value: '12', label: 'lofts'}); // "12" ends 2.95 s before it
+  assert.deepEqual(datos(reel('s', [edge]), tr), []);
+  const reach = gfx('g0', 's', 3900, 'stat', {value: '12', label: 'lofts'}); // 3.15 s: out, even though "lofts." reaches the window
+  assert.deepEqual(datos(reel('s', [reach]), tr), ['12']);
+  assert.deepEqual(datos(reel('s', [reach]), [said('s', 'Son 12 lofts y ahora hablemos de otra cosa muy distinta con calma y sin prisa ninguna hoy.')]), ['12']); // the same without the period
   const cut = reel('s', [gfx('g0', 's', 1200, 'stat', {value: '12', label: 'lofts'})], {clips: [{id: 's', src: 'clips/s.mp4', inSec: 0.9, outSec: 30, sourceDurationSec: 30}]});
   assert.deepEqual(datos(cut, tr), ['12']); // "12" (0.4–0.75 s) is cut out of the reel
   assert.deepEqual(datos(reel('s', [gfx('g0', 's', 1200, 'chapter', {label: 'Parte', number: '07'})]), tr), []);
 });
 
-test('data-from-audio: names — glossary terms (folded both ways), capitalized words past a sentence start, a location tag\'s place', () => {
+test('data-from-audio: an end card restates the reel — backed by any word the reel keeps, a period between the title figure and the CTA or not', () => {
+  const card = gfx('g0', 's', 9000, 'end-card', {title: 'Casa Brisa 418', cta: 'Agenda por WhatsApp', handle: '@casa_326'});
+  for (const text of ['Esto es Casa Brisa 418. Te espero para que la conozcas, escríbeme hoy.', 'Esto es Casa Brisa 418, te espero para que la conozcas, escríbeme hoy.']) {
+    assert.deepEqual(datos(reel('s', [card]), [said('s', text)]), [], text); // 418 said 7 s before the card
+  }
+  assert.deepEqual(datos(reel('s', [card]), [said('s', 'Esto es Casa Brisa. Te espero para que la conozcas, escríbeme hoy.')]), ['418']); // the CTA and the handle are the brief's
+  // a reel of two takes: the title said in the other one
+  const two = {...reel('a', [{...card, src: 'clips/b.mp4', startMs: 1000}]), clips: [{id: 'a', src: 'clips/a.mp4', inSec: 0, outSec: 30, sourceDurationSec: 30}, {id: 'b', src: 'clips/b.mp4', inSec: 0, outSec: 30, sourceDurationSec: 30}]};
+  assert.deepEqual(datos(two, [said('a', 'Esto es Casa Brisa 418.'), said('b', 'Te espero, escríbeme hoy.')]), []);
+});
+
+test('data-from-audio: prices and ordinals in the templates\' own formats match the words said', () => {
+  const at = (props, text, template = 'price') => datos(reel('s', [gfx('g0', 's', 400, template, props)]), [said('s', text)]);
+  assert.deepEqual(at({label: 'DESDE', value: '$2.5M'}, 'El precio es de dos millones y medio de pesos'), []);
+  assert.deepEqual(at({label: 'DESDE', value: '$2.5M'}, 'Cuesta dos punto cinco millones'), []);
+  assert.deepEqual(at({label: 'DESDE', value: '$2.5 MDP'}, 'Cuesta 2.5 millones'), []);
+  assert.deepEqual(at({label: 'DESDE', value: '$1.1M'}, 'Cuesta un millón cien mil pesos'), []);
+  assert.deepEqual(at({label: 'DESDE', value: '$3.5M'}, 'El precio es de dos millones y medio de pesos'), ['3.5M']);
+  assert.deepEqual(at({value: '800K', label: ''}, 'Son ochocientos mil'), []);
+  assert.deepEqual(at({top: 'Terraza en el 3er piso', bottom: ''}, 'La terraza está en el tercer piso', 'label-2tone'), []);
+  assert.deepEqual(at({top: 'Terraza en el 3er piso', bottom: ''}, 'La terraza está en el piso tres', 'label-2tone'), []);
+  assert.deepEqual(at({top: 'Terraza en el 4to piso', bottom: ''}, 'La terraza está en el tercer piso', 'label-2tone'), ['4to']);
+  assert.deepEqual(at({top: 'A 500 M DE LA PLAYA', bottom: ''}, 'Estás a quinientos metros de la playa', 'label-2tone'), []); // M: millions, or the figure itself
+});
+
+test('data-from-audio: names — glossary terms (folded both ways), a location tag\'s place, and as a guess capitalized words past the start of sentence-case text', () => {
   const glossary = [{term: 'Solmar', variants: ['Sol Mar']}];
   const tr = [said('s', 'Vive en Sol Mar, al norte de Valtierra.')];
   const p = (props, template = 'label-2tone') => ({...reel('s', [gfx('g0', 's', 800, template, props)]), brand: {glossary}});
   assert.deepEqual(datos(p({top: 'SOLMAR', bottom: 'Al norte de Valtierra'}), tr), []); // "Sol Mar" said = the term Solmar
-  assert.deepEqual(datos(p({top: 'Vive en Solmar', bottom: 'Cerca de Puerto Azul'}), tr), ['Puerto', 'Azul']);
+  assert.deepEqual(datos(p({top: 'Vive en Solmar', bottom: 'Cerca de la playa de Puerto Azul'}), tr), ['Puerto', 'Azul']);
+  assert.deepEqual(unbackedData(p({top: 'Cerca de la playa de Puerto Azul', bottom: 'Solmar'}), [said('s', 'Vive cerca de la playa.')]).map((d) => [d.dato, !!d.guess]), [['Puerto', true], ['Azul', true], ['Solmar', false]]);
+  // Title Case and ALL CAPS are styling: no word of theirs is taken for a name (a glossary term still is)
+  for (const top of ['Terraza Privada', 'Salón de Eventos', 'The Biggest Lie About Money', '¿Cansado Del Garrafón?', 'Cerca de Puerto Azul']) assert.deepEqual(datos(p({top, bottom: ''}), tr), [], top);
+  assert.deepEqual(datos(p({top: 'Vive En Solmar Norte', bottom: ''}), [said('s', 'Vive al norte.')]), ['Solmar']);
+  // one word said for two shown, or two for one (the ASR's segmentation)
+  const q = (top, text) => datos({...reel('s', [gfx('g0', 's', 400, 'label-2tone', {top, bottom: ''})]), brand: {glossary: [{term: 'Pet Park'}, {term: 'Solmar'}]}}, [said('s', text)]);
+  assert.deepEqual(q('PET PARK', 'Ahora ves el PetPark, para tu perro.'), []);
+  assert.deepEqual(q('SOLMAR', 'Vive en Sol Mar hoy.'), []);
+  assert.deepEqual(q('SOLMAR', 'Vive en el mar hoy.'), ['Solmar']);
   assert.deepEqual(datos(p({top: 'Terraza', bottom: 'Con vista'}), tr), []); // a capital that opens a text is not a name
   assert.deepEqual(datos(p({place: 'Montecielo', sub: ''}, 'location-tag'), tr), ['Montecielo']);
   assert.deepEqual(datos({...p({top: 'SOLMAR', bottom: ''}), brand: null}, tr), []); // all caps, no glossary: not taken as a name
   assert.deepEqual(datos({...p({top: 'SKYPOOL', bottom: ''}), brand: {glossary: [{term: 'skypool', variants: ['sky pool']}]}}, tr), []); // an amenity's spelling is no name
 });
 
-test('data-from-audio: the kit\'s glossary reads a figure said in words ("cuatro dieciocho" = 418)', () => {
+test('data-from-audio: a figure said in words by pairs ("cuatro dieciocho" = 418), by the kit\'s glossary or by itself', () => {
   const tr = [said('s', 'Te espero en Solmar cuatro dieciocho.')];
   const p = {...reel('s', [gfx('g0', 's', 1200, 'end-card', {title: 'Solmar 418', cta: 'Escríbeme'})]), brand: {glossary: [{term: '418', variants: ['cuatro dieciocho']}]}};
   assert.deepEqual(datos(p, tr), []);
-  assert.deepEqual(datos({...p, brand: null}, tr), ['418']);
+  assert.deepEqual(datos({...p, brand: null}, tr), []); // a number read in pairs is the number (WhisperX writes 418, Deepgram the words)
+  assert.deepEqual(datos({...p, brand: null}, [said('s', 'Te espero en Solmar cuatro diez.')]), ['418']);
+  // the kit's own name on its end card is the client, not a fact — even when the glossary spells it
+  const brand = {name: 'Solmar', glossary: [{term: 'Solmar', variants: ['Sol Mar']}]};
+  assert.deepEqual(datos({...reel('s', [gfx('g0', 's', 1200, 'end-card', {title: 'Solmar', cta: 'Escríbeme'})]), brand}, [said('s', 'Te espero, escríbeme.')]), []);
+  assert.deepEqual(datos({...reel('s', [gfx('g0', 's', 1200, 'end-card', {title: 'Solmar', cta: 'Escríbeme'})]), brand: {...brand, name: 'Otra'}}, [said('s', 'Te espero, escríbeme.')]), ['Solmar']);
 });
 
 // ---- script-coverage: the guion against the cut, before there are captions ----

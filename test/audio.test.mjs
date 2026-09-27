@@ -11,19 +11,26 @@ const tmps = [];
 after(() => { for (const d of tmps) fs.rmSync(d, {recursive: true, force: true}); });
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 
-// a scan of `sec` seconds: `floor` dB in the pauses with its band under 150 Hz `share` dB under it, a voice at −15 dB where words are
+// a scan of `sec` seconds: `floor` dB in the pauses with its band under 150 Hz `share` dB under it, a voice at −15 dB where `voiced` are
 const words = [[500, 2000], [3000, 4500], [6000, 7500]].map(([startMs, endMs]) => ({startMs, endMs}));
-function scan(floor, share, sec = 9) {
-  const t = (k) => (k + 0.5) * 100, inWord = (k) => words.some((w) => t(k) >= w.startMs && t(k) < w.endMs);
+function scan(floor, share, sec = 9, voiced = words) {
+  const t = (k) => (k + 0.5) * 100, inWord = (k) => voiced.some((w) => t(k) >= w.startMs && t(k) < w.endMs);
   const full = Array.from({length: sec * WIND.fps}, (_, k) => (inWord(k) ? -15 : floor + (k % 3))); // a little movement
   return {fps: WIND.fps, full, low: full.map((x, k) => (inWord(k) ? -30 : x + share))};
 }
-test('wind: a loud floor under 150 Hz in the pauses of the take; not a quiet room with rumble, not a loud mid-band floor', () => {
+// Deepgram's word times touch end to end: the pauses sit inside its words' bounds (WhisperX leaves them out)
+const endToEnd = [[500, 2000], [2000, 3000], [3000, 4500], [4500, 6000], [6000, 7500]].map(([startMs, endMs]) => ({startMs, endMs}));
+test('wind: a loud floor under 150 Hz in the quiet of the take; not a quiet room with rumble, not a loud mid-band floor', () => {
   assert.ok(windy(windOf(scan(-25, -0.5), words)));
   assert.ok(!windy(windOf(scan(-52, -0.5), words))); // HVAC rumble: the floor is quiet
   assert.ok(!windy(windOf(scan(-30, -11), words))); // an outdoor take whose floor is mostly above 150 Hz
-  assert.equal(windOf(scan(-25, -0.5), [{startMs: 0, endMs: 1000}, {startMs: 1300, endMs: 9000}]), null); // under a second of pause: nothing to tell
-  assert.equal(windOf(scan(-25, -0.5), words.slice(0, 1)), null); // before the first word and after the last are not pauses (a slate, handling)
+  assert.ok(!windy(windOf(scan(-33, -4.7), words))); // a voice over a music bed (César's finished exports)
+  // the floor comes from the audio, not from gaps between words: the same take reads the same with either engine's times
+  assert.deepEqual(windOf(scan(-25, -0.5), endToEnd), windOf(scan(-25, -0.5), words));
+  assert.ok(windy(windOf(scan(-25, -0.5), endToEnd)));
+  // before the first word and after the last are not read (a slate, handling): a take that talks through gives its voice
+  assert.ok(!windy(windOf(scan(-25, -0.5, 9, [{startMs: 500, endMs: 7500}]), [{startMs: 500, endMs: 7500}])));
+  assert.equal(windOf(scan(-25, -0.5), words.slice(0, 1)), null); // a 1.5 s take: too short to tell
   assert.equal(windOf(scan(-25, -0.5), []), null);
 });
 
@@ -51,6 +58,7 @@ test('wind scan (ffmpeg): brown noise under 100 Hz beneath a voice fires, the sa
   const of = async (name) => windOf(await scanWind(pub, `clips/${name}`), words);
   const [wind, calm, cleaned] = [await of('wind.m4a'), await of('calm.m4a'), await of('wind-clean.m4a')];
   assert.ok(windy(wind), JSON.stringify(wind));
+  assert.ok(windy(windOf(readWind(pub, 'clips/wind.m4a'), endToEnd))); // Deepgram-style word times: the same
   assert.ok(!windy(calm), JSON.stringify(calm));
   assert.ok(cleaned.floorDb < wind.floorDb - 10, `${wind.floorDb} → ${cleaned.floorDb}`);
   // cached by path + size + mtime: current until the file changes

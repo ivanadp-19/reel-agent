@@ -279,7 +279,7 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
 // glossary: the kit's (the render judge adds its profile's)
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
-type WordsProject = {clips: Clip[]; offMic?: string; guion?: string; captions?: Caption[]; captionsOff?: boolean; graphics?: Graphic[]; brand?: {glossary?: GlossaryEntry[]} | null};
+type WordsProject = {clips: Clip[]; offMic?: string; guion?: string; captions?: Caption[]; captionsOff?: boolean; graphics?: Graphic[]; brand?: {name?: string; glossary?: GlossaryEntry[]} | null};
 export function transcriptIssues(p: WordsProject, tr: TClip[], glossary: GlossaryEntry[] = p.brand?.glossary ?? []): Issue[] {
   // one entry per word index: a word on the edge of two pieces of one source is listed in both
   const byIdx = new Map<string, Map<number, TClip['words'][number]>>();
@@ -310,39 +310,77 @@ export function transcriptIssues(p: WordsProject, tr: TClip[], glossary: Glossar
       .map((w) => ({text: w.word, wid: `${sourceOf(c.src)}:${w.i}`, startMs: w.startMs, endMs: w.endMs}))}));
     for (const i of guionIssues(p.guion, pages, [], 'cut')) if (i.code === 'guion-missing') out.push({...i, code: 'script-coverage'});
   }
-  for (const d of unbackedData(p, tr, glossary)) out.push({level: 'error', code: 'data-from-audio', msg: `graphic ${d.ref} (${d.template}) at ${d.atSec} s shows "${d.dato}" — dato sin respaldo en el audio de este reel: ${d.untranscribed ? `${d.src} has no transcript to check it against (get_transcript)` : `${d.src} does not say it within ${DATA_NEAR_MS / 1000} s of the graphic (nor in a sentence that reaches it)`}. Say it on camera, correct the graphic (edit_graphic), or leave it for the client to confirm (datosPorConfirmar of the version); a name the ASR spells otherwise goes in the brand kit's glossary`, ref: d.ref});
+  out.push(...unbackedData(p, tr, glossary).map(dataIssue));
   return out;
 }
 
 // ---------- data on screen backed by this reel's audio (CEO-21) ----------
-// Every figure (number, price, capacity, date, distance) and name a text graphic shows must be said in this
+// Every figure (number, price, capacity, date, distance) and name a text graphic shows should be said in this
 // reel's own audio: by a word the cut keeps, in the graphic's own source, within DATA_NEAR_MS of the graphic
-// (source time) or in a sentence that reaches that window — never another reel, the guion or the brief, so
-// two reels that say 70 and 60 each keep their own. Figures match by value (the words run through the
-// glossary and joinFigures: 'setenta' = 70, 'cincuenta y cuatro' = 54, the kit's 'tres veintiséis' = 326),
-// names by spelling, folded, after the glossary on both sides ('Montalban' said, 'Montealbán' shown).
-// ponytail: names are capitalized glossary terms, capitalized words of mixed-case text past its sentence start, and a
-// location-tag's one-word place / sub — capitals are a poor signal, so no more than that; a false block on a
-// brand name is fixed with a glossary term (its variants = what the ASR writes), never a waiver
+// (source time) — an end card, which restates the reel's title and CTA, anywhere in the reel's kept audio. By
+// time only, never by the ASR's punctuation (WhisperX and Deepgram end sentences in different places). Never
+// another reel, the guion or the brief, so two reels that say 70 and 60 each keep their own. Figures match by
+// value (the words run through the glossary and joinFigures: 'setenta' = 70, 'cincuenta y cuatro' = 54, the kit's
+// 'tres veintiséis' = 326; '$2.5M' = "dos millones y medio", '3er' = "tercer"), names by spelling, folded, after
+// the glossary on both sides ('Montalban' said, 'Montealbán' shown). Names: capitalized glossary terms and a
+// location-tag's one-word place / sub; and, as a guess (`guess`: the judge confirms it on the frame), a capitalized
+// word past the start of sentence-case text — a Title Case or ALL CAPS label is styling, not names. The contact
+// props (cta, handle) come from the brief. A warning, never a stop: what is left goes to the client to confirm
+// (datosPorConfirmar of the version); the broll stage gate is where it will block, scoped and waivable.
+// ponytail: capitals are a poor signal, so no more than that; a name the ASR spells otherwise → a glossary term
+// (its variants = what the ASR writes); the kit's own name is skipped (the client, not a fact)
 export const DATA_NEAR_MS = 3000;
-export type Unbacked = {ref: string; template: string; dato: string; src: string; atSec: number; untranscribed?: true};
-// the figures in a text: '70', '1,500,000' / '1.500.000' (thousands), '2.5' / '2,5' (decimals), '30%'
-const figuresOf = (s: string) => (s.match(/\d+(?:[.,]\d+)*/g) ?? []).map((n) => Number(/^\d{1,3}([.,]\d{3})+$/.test(n) ? n.replace(/[.,]/g, '') : n.replace(',', '.')));
+export type Unbacked = {ref: string; template: string; dato: string; src: string; atSec: number; guess?: true; untranscribed?: true};
+export const dataIssue = (d: Unbacked): Issue => ({level: 'warn', code: 'data-from-audio', ref: d.ref, msg: `graphic ${d.ref} (${d.template}) at ${d.atSec} s shows "${d.dato}"${d.guess ? ' (a capitalized word taken for a name)' : ''} — dato sin respaldo en el audio de este reel: ${d.untranscribed ? `${d.src} has no transcript to check it against (get_transcript)` : d.template === 'end-card' ? 'the reel does not say it' : `${d.src} does not say it within ${DATA_NEAR_MS / 1000} s of the graphic`}. Say it on camera, correct the graphic (edit_graphic), or leave it for the client to confirm (datosPorConfirmar of the version); a name the ASR spells otherwise goes in the brand kit's glossary`});
+// a number as written: '70', '1,500,000' / '1.500.000' (thousands), '2.5' / '2,5' (decimals)
+const numOf = (n: string) => Number(/^\d{1,3}([.,]\d{3})+$/.test(n) ? n.replace(/[.,]/g, '') : n.replace(',', '.'));
+const val = (x: number) => String(Math.round(x * 1000) / 1000); // 1.1 × 1e6 is not 1100000 in floating point
+const SCALE = (suffix: string) => (/^(M|MM|MDP|mdp|mill[oó]n(es)?|MILL[OÓ]N(ES)?)$/u.test(suffix) ? 1e6 : /^(K|k|mil|MIL)$/.test(suffix) ? 1e3 : 1); // 'M' only upper: 'm' is metres
+// the figures a text shows, each with the values said that back it: '70', '30%'; '$2.5M' / '3 mil' / '800K'
+// scaled (or bare: "dos punto cinco" said); '3er' / '2do' / '1º' an ordinal ("tercer", or the figure)
+const figuresOf = (s: string) => [...s.matchAll(/(\d+(?:[.,]\d+)*)(?:\s?([\p{L}°ºª]+))?/gu)].map(([m, n, suffix = '']) => {
+  const v = numOf(n), scale = SCALE(suffix), ord = /^(er|ro|ra|do|da|to|ta|vo|va|no|na|mo|ma|[°ºª])$/i.test(suffix);
+  return {shown: scale > 1 || ord ? m : n, ok: [val(v * scale), ...(scale > 1 ? [val(v)] : []), ...(ord ? [`${val(v)}º`] : [])]};
+});
+const ORDINAL: Record<string, number> = {primer: 1, primero: 1, primera: 1, segundo: 2, segunda: 2, tercer: 3, tercero: 3, tercera: 3, cuarto: 4, cuarta: 4, quinto: 5, quinta: 5, sexto: 6, sexta: 6, septimo: 7, septima: 7, octavo: 8, octava: 8, noveno: 9, novena: 9, decimo: 10, decima: 10};
+// the values said in a run of words (glossed, figures joined): each figure, the ones Spanish says in pieces —
+// "dos millones y medio" / "dos punto cinco millones" (2500000), "2.5 millones", "dos punto cinco" (2.5), a number
+// read in pairs ("tres veintiséis" = 326, "veinte veintisiete" = 2027: WhisperX writes the digits, Deepgram the
+// words) — and ordinals as 'Nº' ("tercer" = 3º: a '3er' shown, never a '3')
+function heardValues(ws: string[]): Set<string> {
+  const keys = ws.map(normKey);
+  const at = (i: number) => { const d = ws[i]?.match(/\d+(?:[.,]\d+)*/); return d ? numOf(d[0]) : keys[i] ? numberOf([keys[i]]) : undefined; };
+  const out = new Set<string>();
+  for (let i = 0; i < ws.length; i++) {
+    if (ORDINAL[keys[i]]) out.add(`${ORDINAL[keys[i]]}º`);
+    const v = at(i);
+    if (v == null) continue;
+    out.add(val(v));
+    const [k1, k2] = [keys[i + 1], keys[i + 2]];
+    if (/^\d/.test(ws[i]) && (k1 === 'millon' || k1 === 'millones' || k1 === 'mil')) out.add(val(v * (k1 === 'mil' ? 1e3 : 1e6))); // "2.5 millones" as the ASR wrote it
+    if (v >= 1e6 && v % 1e6 === 0 && k1 === 'y' && k2 === 'medio') out.add(val(v + 5e5));
+    const pair = at(i + 1);
+    if (Number.isInteger(v) && v >= 1 && v <= 99 && pair != null && Number.isInteger(pair) && pair >= 10 && pair <= 99) out.add(`${v}${pair}`);
+    const b = k1 === 'punto' || k1 === 'coma' ? at(i + 2) : undefined;
+    if (b != null && Number.isInteger(b)) { const m = b >= 1e6 && b % 1e6 === 0, d = m ? b / 1e6 : b; out.add(val((v + d / 10 ** String(d).length) * (m ? 1e6 : 1))); }
+  }
+  return out;
+}
 const SENT_END = /[.!?…]["')\]]*$/;
-const NOT_DATA = new Set(['number']); // a chapter's number is the reel's structure, not a fact
+const NOT_DATA = new Set(['number', 'cta', 'handle']); // a chapter's number is the reel's structure; the CTA and the handle come from the brief
 export function unbackedData(p: WordsProject, tr: TClip[], glossary: GlossaryEntry[] = p.brand?.glossary ?? []): Unbacked[] {
   const out: Unbacked[] = [];
   const shown = new Map(projectGraphics(p.graphics ?? [], p.clips, 30).map((g) => [g.id, g])); // on the timeline (30 fps: the second is for people)
   const glossed = (ws: {word: string; startMs: number; endMs: number}[]) => joinFigures(applyGlossary(ws, glossary).words);
   const termKeys = new Set(glossary.filter((g) => /^\p{Lu}/u.test(g.term)).flatMap((g) => g.term.split(/\s+/).map(normKey))); // a name's spelling ('Montealbán'), not an amenity's ('skypool')
-  const spoken = new Map<string, {word: string; startMs: number; endMs: number; sent: number}[]>();
+  const brandKeys = new Set((p.brand?.name ?? '').split(/\s+/).map(normKey)); // the client's own name on its end card is no fact to confirm
+  const spoken = new Map<string, {word: string; startMs: number; endMs: number}[]>();
   const heard = (src: string) => {
     if (!spoken.has(src)) {
       const kept = p.clips.filter((c) => c.src === src);
       const byI = new Map<number, TClip['words'][number]>();
       for (const t of tr) if (t.source === sourceOf(src)) for (const w of t.words) if (kept.some((c) => w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000)) byI.set(w.i, w);
-      let sent = 0;
-      spoken.set(src, glossed([...byI.values()].sort((a, b) => a.startMs - b.startMs)).map((w) => ({...w, sent: SENT_END.test(w.word) ? sent++ : sent})));
+      spoken.set(src, glossed([...byI.values()].sort((a, b) => a.startMs - b.startMs)));
     }
     return spoken.get(src)!;
   };
@@ -350,26 +388,27 @@ export function unbackedData(p: WordsProject, tr: TClip[], glossary: GlossaryEnt
     const at = shown.get(g.id);
     if (!at || !isTextGraphic(g.template)) continue;
     const texts = Object.entries(g.props ?? {}).filter(([k]) => !NOT_DATA.has(k)).flatMap(([k, v]) => textsOf(v).map((text) => ({k, text})));
-    const figures = new Set<number>(), names = new Map<string, string>(); // key → as shown
+    const figures = new Map<string, string[]>(), names = new Map<string, {core: string; guess: boolean; joined: string[]}>(); // as shown → what backs it; key → as shown
     for (const {k, text} of texts) {
-      for (const n of figuresOf(text)) figures.add(n);
+      for (const f of figuresOf(text)) figures.set(f.shown, f.ok);
       const toks = glossed(text.split(/[\s/]+/).filter(Boolean).map((word) => ({word, startMs: 0, endMs: 0}))).map((w) => w.word);
-      const mixed = text !== text.toUpperCase();
+      const letters = text.match(/\p{L}{2,}/gu) ?? [];
+      const sentenceCase = letters.filter((w) => /^\p{Lu}/u.test(w)).length * 2 <= letters.length; // Title Case / ALL CAPS: styling
       toks.forEach((raw, i) => {
-        const core = coreOf(raw), key = normKey(core);
-        if (!key || /\d/.test(core)) return;
-        const capital = mixed && /^\p{Lu}/u.test(core) && core.length > 1;
-        if (termKeys.has(key) || (capital && i > 0 && !SENT_END.test(toks[i - 1])) || (capital && g.template === 'location-tag' && toks.length === 1 && (k === 'place' || k === 'sub'))) names.set(key, core);
+        const core = coreOf(raw), key = normKey(core), joined = [normKey(toks[i - 1] ?? '') + key, key + normKey(toks[i + 1] ?? '')]; // 'Pet Park' shown, "PetPark" said
+        if (!key || /\d/.test(core) || brandKeys.has(key)) return;
+        const capital = /^\p{Lu}/u.test(core) && core.length > 1;
+        if (termKeys.has(key) || (capital && text !== text.toUpperCase() && g.template === 'location-tag' && toks.length === 1 && (k === 'place' || k === 'sub'))) names.set(key, {core, guess: false, joined});
+        else if (capital && sentenceCase && i > 0 && !SENT_END.test(toks[i - 1]) && !names.has(key)) names.set(key, {core, guess: true, joined});
       });
     }
     if (!figures.size && !names.size) continue;
-    const near = heard(g.src).filter((w) => w.endMs > g.startMs - DATA_NEAR_MS && w.startMs < g.endMs + DATA_NEAR_MS);
-    const sents = new Set(near.map((w) => w.sent));
-    const said = heard(g.src).filter((w) => sents.has(w.sent));
-    const keys = new Set(said.map((w) => normKey(w.word)));
-    const values = new Set(said.flatMap((w) => (/\d/.test(w.word) ? figuresOf(w.word) : [numberOf([normKey(w.word)])]).filter((n): n is number => n != null)));
-    const miss = [...[...figures].filter((n) => !values.has(n)).map(String), ...[...names].filter(([key]) => !keys.has(key)).map(([, core]) => core)];
-    for (const dato of miss) out.push({ref: g.id, template: g.template, dato, src: sourceOf(g.src), atSec: Math.round(at.startMs / 100) / 10, ...(heard(g.src).length ? {} : {untranscribed: true as const})});
+    // the end card restates the reel: all it keeps; anything else: its own source, near it
+    const said = g.template === 'end-card' ? [...new Set(p.clips.map((c) => c.src))].flatMap(heard) : heard(g.src).filter((w) => w.endMs > g.startMs - DATA_NEAR_MS && w.startMs < g.endMs + DATA_NEAR_MS);
+    const keys = new Set(said.flatMap((w, i) => [normKey(w.word), normKey(w.word) + normKey(said[i + 1]?.word ?? '')])); // and "Alta Brisa" said for 'Altabrisa'
+    const values = heardValues(said.map((w) => w.word));
+    const miss = [...[...figures].filter(([, ok]) => !ok.some((v) => values.has(v))).map(([dato]) => ({dato, guess: false})), ...[...names].filter(([key, n]) => !keys.has(key) && !n.joined.some((j) => keys.has(j))).map(([, n]) => ({dato: n.core, guess: n.guess}))];
+    for (const {dato, guess} of miss) out.push({ref: g.id, template: g.template, dato, src: sourceOf(g.src), atSec: Math.round(at.startMs / 100) / 10, ...(guess ? {guess: true as const} : {}), ...(heard(g.src).length ? {} : {untranscribed: true as const})});
   }
   return out;
 }

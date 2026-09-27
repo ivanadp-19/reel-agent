@@ -5,6 +5,7 @@
 // keep the right words on screen — and words inside a removed range disappear.
 
 import {continuesPrev, nextId, placeClips, type Clip, type PlacedClip} from './timeline.ts';
+import {normKey} from './guion.ts';
 
 export type CaptionWord = {
   wid?: string; // `${source}:${index}` from the transcript; absent on hand-typed words
@@ -133,10 +134,12 @@ function handPage(c: Caption, words: CaptionWord[], elsewhere: CaptionWord[] = [
 
 // New text. Same word count → each word keeps its id, time and tier (a spelling fix stays
 // anchored); otherwise the words are re-timed evenly over the page, a word that was there keeps its tier.
+// A word whose text changes beyond case, accents and punctuation is the hand's now, no longer the pipeline's
+// respelling of what the ASR heard: it drops `asr`, so the render judge's caption-text checks it against the audio.
 export function retext(cap: Caption, text: string): Caption {
   const words = text.split(/\s+/).filter(Boolean);
   if (!words.length) throw new Error('empty caption text');
-  if (words.length === cap.words.length) return handPage(cap, cap.words.map((w, i) => ({...w, text: words[i]})));
+  if (words.length === cap.words.length) return handPage(cap, cap.words.map((w, i) => { const {asr, ...rest} = w; return {...(normKey(words[i]) === normKey(w.text) ? w : rest), text: words[i]}; }));
   const tiers = new Map(cap.words.filter((w) => w.tier).map((w) => [w.text.toLowerCase(), w.tier]));
   const step = (cap.endMs - cap.startMs) / words.length;
   return handPage(cap, words.map((t, i) => ({text: t, startMs: Math.round(cap.startMs + i * step), endMs: Math.round(cap.startMs + (i + 1) * step), tier: tiers.get(t.toLowerCase()) ?? 0})));

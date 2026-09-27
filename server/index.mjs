@@ -245,7 +245,7 @@ const RENDER_JOBS = jobsDir(PUBLIC);
 // full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version;
 // a client's version is then judged in the background (QC técnico en curso → superado | n hallazgos | no disponible)
 const judge = ({projectId, v}, o = {}) => judgeVersion({dir: REVIEWS, publicDir: PUBLIC, projectId, v, ...o});
-const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage, judge});
+const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage, judge, env: () => ({...readEnvFile(), ...process.env})});
 const renderJobs = createRenderJobs({
   dir: RENDER_JOBS,
   workers: PLAN.workers,

@@ -49,7 +49,7 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null);
   if (kicked.length) try { kick?.(kicked); } catch {}
   const words = await projectWords(p, publicDir, env);
-  // wind is the take's: the pauses of each whole source, not only what the cut keeps (next to none after autocut)
+  // wind is the take's: the quiet of each whole source (between its first and last word), not only what the cut keeps
   const takes = Object.fromEntries((await projectWords({...p, clips: srcs.map((src) => ({id: src, src, inSec: 0, outSec: Infinity}))}, publicDir, env)).map((t) => [t.clipId, t.words]));
   return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),

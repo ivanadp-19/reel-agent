@@ -701,8 +701,11 @@ test('caption-text: a page word that is not the word said is flagged; pipeline r
   assert.equal(f.length, 1); // one per page
   assert.deepEqual([f[0].severity, f[0].kind, f[0].evidence.wids], ['major', 'rule', ['a:1', 'a:2']]);
   assert.deepEqual(f[0].fix[0].args, {caption_id: 'c0', text: 'Caben setenta personas'});
-  // without the glossary, "Costaluz" is not what was said at a:4
-  assert.equal(captionTextFindings(ok, w).filter((x) => x.check === 'caption-text').length, 1);
+  // "Costaluz" for "Costa Luz" is the same letters (segmentation): said, glossary or not; a spelling the glossary alone allows
+  assert.deepEqual(captionTextFindings(ok, w).filter((x) => x.check === 'caption-text'), []);
+  const spelled = [page('c0', 'a', [CW('a:0', 'Kaben', 0, 300)])];
+  assert.deepEqual(captionTextFindings(spelled, w, new Set(), [{term: 'Kaben', variants: ['Caben']}]).filter((x) => x.check === 'caption-text'), []);
+  assert.equal(captionTextFindings(spelled, w).filter((x) => x.check === 'caption-text').length, 1);
   const digits = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Caben', 0, 300), TW(1, '70', 350, 800)]}]);
   assert.deepEqual(captionTextFindings([page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', 'setenta', 350, 800)])], digits), []);
 });
@@ -713,4 +716,58 @@ test('crew talk in the judge is src/cuts.ts isCrewRun, with the profile\'s crew 
   const tr = [{clipId: 'a', source: 'a', words: [W2(0, 'gracias', 0), W2(1, 'gracias', 400)]}];
   assert.deepEqual(offMicFindings(words(clips, tr)).map((x) => x.check), ['off-mic']);
   assert.deepEqual(offMicFindings(words(clips, tr), ['gracias']).map((x) => x.check), ['crew-talk']);
+});
+
+test('caption-text: a glossary allows its term where a variant was said — never one variant token for another', () => {
+  const clips = [clip('a', 'a', 0, 10)];
+  const w = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Son', 0, 300), TW(1, 'tres', 350, 600), TW(2, 'pisos', 650, 1000)]}]);
+  const gloss = [{term: '418', variants: ['cuatro dieciocho', 'cuatrocientos dieciocho']}, {term: 'Solmar', variants: ['Sol Mar', 'Tres Mares']}];
+  const text = (shown) => captionTextFindings([page('c0', 'a', [CW('a:0', 'Son', 0, 300), CW('a:1', shown, 350, 600), CW('a:2', 'pisos', 650, 1000)])], w, new Set(), gloss).filter((x) => x.check === 'caption-text').length;
+  assert.equal(text('Solmar'), 0); // the term where "tres" (a token of its variant "Tres Mares") was said
+  assert.equal(text('dieciocho'), 1); // a variant token for another: not what was said
+  assert.equal(text('cuatrocientos'), 1);
+  assert.equal(text('Mares'), 1);
+});
+
+test('caption-text: words timed on another transcript run are sync\'s finding, not a text to copy', () => {
+  const clips = [clip('a', 'a', 0, 10)];
+  // the ids moved by one: "Alta Brisa" became one word in the other run ("y" → "City" starts only 150 ms later)
+  const w = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'En', 0, 200), TW(1, 'Altabrisa', 250, 900), TW(2, 'y', 950, 1050), TW(3, 'City', 1100, 1400), TW(4, 'Center', 1450, 1800)]}]);
+  const pages = [page('c0', 'a', [CW('a:0', 'En', 0, 200), CW('a:1', 'Alta', 250, 500), CW('a:2', 'Brisa', 550, 900)]), page('c1', 'a', [CW('a:3', 'y', 950, 1050), CW('a:4', 'City', 1100, 1400)])];
+  const f = captionTextFindings(pages, w);
+  assert.deepEqual(f.filter((x) => x.check === 'caption-text'), []);
+  assert.deepEqual(f.filter((x) => x.check === 'sync').map((x) => [x.ref, x.fix[0].tool]), [['c0', 'run_ai_step'], ['c1', 'run_ai_step']]);
+});
+
+test('caption-text: a hand edit of a pipeline-made word (edit_caption / the editor: retext) is checked against the audio', async () => {
+  const {retext} = await import('../src/captions.ts');
+  const clips = [clip('a', 'a', 0, 10)];
+  const w = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Solmar', 0, 400), TW(1, 'cuatro', 450, 700), TW(2, 'dieciocho,', 750, 1100), TW(3, 'hasta', 1200, 1500), TW(4, 'setenta', 1550, 1900)]}]);
+  // what the captions pipeline made: "cuatro dieciocho" joined into 418 (the glossary), "setenta" into 70
+  const cap = {id: 'c0', src: 'clips/a.mp4', startMs: 0, endMs: 1900, topPct: 58, words: [CW('a:0', 'Solmar', 0, 400), {...CW('a:1', '418', 450, 1100), asr: 'cuatro dieciocho,'}, CW('a:3', 'hasta', 1200, 1500), {...CW('a:4', '70', 1550, 1900), asr: 'setenta'}]};
+  const gloss = [{term: '418', variants: ['cuatro dieciocho']}];
+  const judged = (c) => captionTextFindings([{...c, clipId: 'a'}], w, new Set(), gloss).filter((x) => x.check === 'caption-text');
+  assert.deepEqual(judged(cap), []);
+  assert.deepEqual(judged(retext(cap, 'SOLMAR 418 Hasta 70')), []); // case only: still the pipeline's words
+  const edited = retext(cap, 'Solmar 481 hasta 60');
+  assert.deepEqual(edited.words.map((x) => x.asr ?? null), [null, null, null, null]);
+  const f = judged(edited);
+  assert.equal(f.length, 1);
+  assert.match(f[0].msg, /"481" \(se oye "cuatro dieciocho"\), "60" \(se oye "setenta"\)/);
+  assert.deepEqual(f[0].fix[0].args, {caption_id: 'c0', text: 'Solmar cuatro dieciocho hasta setenta'});
+});
+
+test('data-from-audio in the judge is an advisory (the client confirms the datum); the kit that names a profile lends its spellings', async () => {
+  const {kitOf} = await import('../.agents/skills/render-judge/judge.mjs');
+  const f = {id: 'data-from-audio@3.0', check: 'data-from-audio', severity: 'major', kind: 'rule', at: 3, msg: 'x'};
+  assert.deepEqual([verdictOf([f]).verdict, verdictOf([f]).advisories], ['PASS', 1]);
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-kit-'));
+  try {
+    fs.mkdirSync(path.join(pub, 'brands'));
+    fs.writeFileSync(path.join(pub, 'brands', 'otra.json'), JSON.stringify({name: 'Otra', style: {judgeProfile: 'otro'}, glossary: [{term: 'Nube'}]}));
+    fs.writeFileSync(path.join(pub, 'brands', 'solmar.json'), JSON.stringify({name: 'Solmar', style: {judgeProfile: 'cliente'}, glossary: [{term: 'Solmar', variants: ['Sol Mar']}]}));
+    assert.equal(kitOf(pub, 'cliente')?.name, 'Solmar');
+    assert.equal(kitOf(pub, 'nadie'), null);
+    assert.equal(kitOf(pub, undefined), null);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });

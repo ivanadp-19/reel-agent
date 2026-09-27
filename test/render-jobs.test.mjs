@@ -74,7 +74,7 @@ if (process.argv[3] === 'hang') {
 
 // a public/ + root with the fakes, a job store and a runner over them
 // (more: extra command fakes; unrecord null: the runner's own, over the real reviews store)
-function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner, more = {}, projects = {}, judge} = {}) {
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner, more = {}, projects = {}, judge, env} = {}) {
   const root = tmpdir();
   const pub = path.join(root, 'public');
   fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
@@ -96,7 +96,7 @@ function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unre
     ...more,
   };
   const run = runner ?? createRenderRunner({
-    root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}), ...(judge ? {judge} : {}),
+    root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}), ...(judge ? {judge} : {}), ...(env ? {env} : {}),
     logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
     record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
     ...(unrecord === null ? {} : {unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; })}),
@@ -1140,4 +1140,16 @@ test('a final records the data its graphics show that its own audio does not say
   s.jobs.submit({props: props({}, {clips, graphics: [g('g0', '3'), g('g1', '4')]}), draft: false, projectId: 'p1', expectSec: 1});
   await s.jobs.idle();
   assert.deepEqual(s.calls.record[0].datosPorConfirmar, [{graphic: 'g1', dato: '4', src: 'toma', atSec: 0.4}]);
+});
+
+test('datosPorConfirmar reads the transcript with the env it is given (the backend: its ROOT .env + process env, as validate does)', async () => {
+  const s = setup({projects: {p1: {lang: 'es'}}, env: () => ({DEEPGRAM_API_KEY: 'x'})});
+  const dir = path.join(s.pub, 'clips', 'transcripts');
+  fs.mkdirSync(dir, {recursive: true});
+  fs.writeFileSync(path.join(dir, 'toma.es.json'), JSON.stringify([{word: 'Tiene', startMs: 0, endMs: 300}, {word: '3', startMs: 350, endMs: 600}]));
+  fs.writeFileSync(path.join(dir, 'toma.es.dg.json'), JSON.stringify([{word: 'Tiene', startMs: 0, endMs: 300}, {word: 'cuatro', startMs: 350, endMs: 600}]));
+  const clips = [{id: 'c0', src: 'clips/toma.mp4', inSec: 0, outSec: 4, sourceDurationSec: 4}];
+  s.jobs.submit({props: props({}, {clips, graphics: [{id: 'g0', src: 'clips/toma.mp4', startMs: 400, endMs: 2000, template: 'stat', props: {value: '3', label: 'recámaras'}}]}), draft: false, projectId: 'p1', expectSec: 1});
+  await s.jobs.idle();
+  assert.deepEqual(s.calls.record[0].datosPorConfirmar?.map((d) => d.dato), ['3']); // the Deepgram cache says "cuatro"
 });

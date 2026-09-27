@@ -55,33 +55,33 @@ export function musicGain(music: NonNullable<Music>, f: number, fps: number, tot
 }
 
 // ---------- wind (T16): scripts/wind-scan.mjs measures a source, this decides ----------
-// In the pauses of a take (windows between its first and last word, at least padMs from every word — the whole
-// source: a cut reel keeps next to no pause, and the wind is the take's, not the edit's), the noise floor (median
-// whole-band dB of the quieter half) and how far the band under 150 Hz sits under it (median of low − full there):
-// wind is a loud floor that lives under 150 Hz. It only warns and names the preset — never applies it.
-// Calibrated (floor dB / share under 150 Hz dB): César's takes G1 −27 / −18, G2 hook −30 / −12, body −35 / −10,
-// close −23 / −12 (G10 and his finished exports have < 1 s of pause: nothing to tell); an indoor take with HVAC
-// rumble −50 / −0.5 (a quiet floor: not wind); synthetic brown noise under 100 Hz beneath a voice −25 / −0.3
-// (wind; −42 / −1.3 after the preset), pink room tone −66 / −3.
-// ponytail: a loud pinkish floor (traffic, −40 dB) passes the share too and gets the "wind?" question — the preset
-// helps there as well; a spectral-slope test if that turns out noisy
-export const WIND = {fps: 10, padMs: 250, minGapSec: 1, floorDb: -45, lowDb: -5};
+// The floor of a take: its quietest QUIET_SHARE of 100 ms windows between the first and the last word (the whole
+// source — a cut reel keeps next to no pause, and the wind is the take's, not the edit's), found by the audio's own
+// energy, never by word bounds: Deepgram's words touch end to end (no gap between them to measure), WhisperX's
+// leave the pauses out — the same take reads the same either way. There: the noise floor (median whole-band dB)
+// and how far the band under 150 Hz sits under it (median of low − full): wind is a loud floor that lives under
+// 150 Hz. It only warns and names the preset — never applies it.
+// Calibrated (floor dB / low − full dB): César's raw takes G1 −30 / −16, G2 hook −35 / −12, body −39 / −11, close
+// −29 / −12, G10 −39 / −17; his finished exports (voice over a music bed) Morantes1 −33 / −4.7, 2.x −33 / −6.5,
+// 4.x −36 / −7.4, 3.x −36 / −14 — the negatives next to the line; an indoor take with HVAC rumble −50 / −0.7 (a
+// quiet floor: not wind); G1 with brown noise under 100 Hz mixed in −21 / −1.0 and a synthetic voice over it
+// −25 / −0.3 (wind).
+// ponytail: a loud floor with half its energy under 150 Hz (a music bed heavy on bass, traffic) also gets the
+// "wind?" question — a spectral-slope test if that turns out noisy
+export const WIND = {fps: 10, quietShare: 0.15, minSec: 1, floorDb: -45, lowDb: -3};
 export type WindScan = {fps: number; full: number[]; low: number[]; error?: string};
 type Span = {startMs: number; endMs: number};
 const median = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : NaN; };
-// words: everything said in the source (any voice)
-export function windOf(scan: WindScan, words: Span[]): {floorDb: number; lowDb: number; gapSec: number} | null {
+// words: everything said in the source (any voice) — only its first and last word are read: before and after them
+// is a slate, handling, silence
+export function windOf(scan: WindScan, words: Span[]): {floorDb: number; lowDb: number; quietSec: number} | null {
   if (!words.length) return null;
-  const first = Math.min(...words.map((w) => w.startMs)), last = Math.max(...words.map((w) => w.endMs));
-  const gap: number[] = [];
-  for (let k = 0; k < scan.full.length; k++) {
-    const t = ((k + 0.5) / scan.fps) * 1000;
-    if (t > first && t < last && !words.some((w) => t > w.startMs - WIND.padMs && t < w.endMs + WIND.padMs)) gap.push(k);
-  }
-  if (gap.length < WIND.minGapSec * scan.fps) return null; // too little pause to tell
-  // the quieter half of the pauses: a breath, a word the ASR missed or a door is louder than the floor it sits on
-  const quiet = [...gap].sort((a, b) => scan.full[a] - scan.full[b]).slice(0, Math.ceil(gap.length / 2));
-  return {floorDb: median(quiet.map((k) => scan.full[k])), lowDb: median(quiet.map((k) => scan.low[k] - scan.full[k])), gapSec: gap.length / scan.fps};
+  const a = Math.max(0, Math.floor((Math.min(...words.map((w) => w.startMs)) / 1000) * scan.fps));
+  const b = Math.min(scan.full.length, Math.ceil((Math.max(...words.map((w) => w.endMs)) / 1000) * scan.fps));
+  const span = Array.from({length: Math.max(0, b - a)}, (_, k) => a + k);
+  const quiet = span.sort((x, y) => scan.full[x] - scan.full[y]).slice(0, Math.ceil(span.length * WIND.quietShare));
+  if (quiet.length < WIND.minSec * scan.fps) return null; // too short a take to tell
+  return {floorDb: median(quiet.map((k) => scan.full[k])), lowDb: median(quiet.map((k) => scan.low[k] - scan.full[k])), quietSec: quiet.length / scan.fps};
 }
 export const windy = (w: ReturnType<typeof windOf>) => !!w && w.floorDb > WIND.floorDb && w.lowDb >= WIND.lowDb;
 
@@ -96,7 +96,7 @@ export function windIssues(p: {clips: {id: string; src: string}[]; audio?: Audio
     const w = scan && !scan.error ? windOf(scan, words[src] ?? []) : null;
     if (!windy(w)) continue;
     const ids = p.clips.filter((c) => c.src === src).map((c) => c.id);
-    out.push({level: 'warn', code: 'wind', ref: ids[0], msg: `${src} (${ids.join(', ')}): wind? In the pauses of the take the noise floor is ${w!.floorDb.toFixed(0)} dB and ${Math.round(10 ** (w!.lowDb / 10) * 100)} % of it is under 150 Hz — set_audio clean: wind (low cut at 130 Hz + denoise on the final mix, music bass too; listen before and after), or leave it`});
+    out.push({level: 'warn', code: 'wind', ref: ids[0], msg: `${src} (${ids.join(', ')}): wind? In the quietest moments of the take the noise floor is ${w!.floorDb.toFixed(0)} dB and ${Math.round(10 ** (w!.lowDb / 10) * 100)} % of it is under 150 Hz — set_audio clean: wind (low cut at 130 Hz + denoise on the final mix, music bass too; listen before and after), or leave it`});
   }
   return out;
 }

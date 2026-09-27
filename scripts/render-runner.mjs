@@ -278,8 +278,9 @@ export function createRenderRunner({
   unrecord = ({projectId, v}) => inReviewsRow(reviewsDir, projectId, () => removeVersion(reviewsDir, projectId, v, publicDir)), // a version recorded by a job cancelled meanwhile
   identityNow = (projectId) => pairIdentity(path.join(publicDir, 'projects'), projectId), // the saved project's identity when the pair is recorded
   judge = null, // ({projectId, v}) → the judge on a client's new version, not awaited (the backend: scripts/reviews.mjs judgeVersion)
+  env = () => process.env, // the transcript engine's env: the backend passes its ROOT .env + process env, as validate reads it
   // the rendered graphics' data its own audio does not say (the saved project's language and off-mic mode pick the transcript)
-  toConfirm = (projectId, props) => datosPorConfirmar({...savedProject(path.join(publicDir, 'projects'), projectId), ...props}, publicDir, process.env),
+  toConfirm = (projectId, props) => datosPorConfirmar({...savedProject(path.join(publicDir, 'projects'), projectId), ...props}, publicDir, env()),
   writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,

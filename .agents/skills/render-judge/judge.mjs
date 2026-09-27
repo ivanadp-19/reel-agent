@@ -48,7 +48,7 @@ const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
 const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
-const {validateProject, validateIdentity, transcriptIssues, SAFE} = await import(src('validate.ts'));
+const {validateProject, validateIdentity, transcriptIssues, unbackedData, dataIssue, SAFE} = await import(src('validate.ts'));
 const {DUR_MS} = await import(src('transitions.ts'));
 const {presetOf} = await import(src('captionPresets.ts'));
 const {captionPreset, fitPage, wrapUnits, realAdvances, MIN_FONT_PX} = await import(src('captionLayout.ts'));
@@ -134,6 +134,15 @@ export function pickProfile(p, name, all = listProfiles()) {
   }
   const brand = fold(p.brand?.name ?? '');
   return all.find((x) => (x.match?.captionStyle ?? []).includes(p.captionStyle) || (brand && (x.match?.brand ?? []).some((b) => brand.includes(fold(b))))) ?? null;
+}
+// the brand kit (public/brands/*.json) whose style.judgeProfile is this profile: the client's kit
+export function kitOf(publicDir, profileId) {
+  if (!profileId) return null;
+  const dir = path.join(publicDir, 'brands');
+  for (const f of (() => { try { return fs.readdirSync(dir).filter((x) => x.endsWith('.json')).sort(); } catch { return []; } })()) {
+    try { const k = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); if (k?.style?.judgeProfile === profileId) return k; } catch {}
+  }
+  return null;
 }
 // the known reel of a profile this project is (by project name), e.g. César's G1 / G7
 export const reelOf = (profile, name = '') => Object.entries(profile?.reels ?? {}).find(([k, r]) => new RegExp(r.name ?? `\\b${k}\\b`, 'i').test(name))?.[1] ?? null;
@@ -331,16 +340,22 @@ export function overflowFindings(pages, style, brandFont) {
 // caption ↔ audio sync, coverage, spelling and text against the aligned transcript.
 // caption-text: a page word that is not the word said at its id (folded: case, accents, punctuation aside) —
 // the audio wins (César). Allowed: what the captions pipeline made, which keeps what the ASR heard in `asr` —
-// a guion adoption (#35), a glossary respelling, a figure joined into digits, the pieces of a split word — and,
-// by hand, a glossary spelling (the profile's and the kit's, `glossary`) or a figure in digits said in words.
+// a guion adoption (#35), a glossary respelling, a figure joined into digits, the pieces of a split word (a hand
+// edit that changes one drops its `asr`: src/captions.ts retext) — and, by hand, a glossary spelling (the
+// profile's and the kit's, `glossary`: the term shown where one of its variants was said) or a figure in digits
+// said in words. Only on a page whose timing agrees with the transcript's: a page timed on another transcript
+// run has its ids on other words (a short word shifted by one still starts within the sync tolerance, so the
+// page decides, not the word) — that is sync's finding (regenerate), not a text to copy.
 export function captionTextFindings(pages, words, hidden = new Set(), glossary = []) {
   const out = [];
   const byWid = new Map(words.map((w) => [`${takeOf(w)}|${w.wid}`, w]));
   const covered = new Set();
   const seen = new Set(); // a word the guion split ("acomodan" → "acomoda" "a") shares its id: only its first piece starts with it
-  const terms = glossary.map((g) => new Set([g.term, ...(g.variants ?? [])].flatMap((f) => String(f).split(/\s+/)).map(fold)));
+  const forms = (f) => [fold(f), ...String(f).split(/\s+/).map(fold)]; // a form whole and its tokens
+  const terms = glossary.map((g) => ({term: new Set(forms(g.term)), variants: new Set((g.variants ?? []).flatMap(forms))}));
   const figure = (digits, words) => /^\d+$/.test(digits) && numberOf([words]) === +digits;
-  const sameWord = (shown, said) => shown === said || terms.some((t) => t.has(shown) && t.has(said)) || figure(shown, said) || figure(said, shown);
+  const sameWord = (shown, said) => shown === said || terms.some((t) => t.term.has(shown) && t.variants.has(said)) || figure(shown, said) || figure(said, shown);
+  const shownWids = new Set(pages.flatMap((c) => c.words.map((w) => w.wid).filter(Boolean)));
   for (const c of pages) {
     const hand = c.words.filter((w) => !w.wid);
     let worst = null;
@@ -355,12 +370,17 @@ export function captionTextFindings(pages, words, hidden = new Set(), glossary =
       const d = w.startMs - s.t0 * 1000;
       if (Math.abs(d) >= T.syncMajorMs && (!worst || Math.abs(d) > Math.abs(worst.d))) worst = {w, s, d};
       const said = toDisplay(s.word);
-      if (w.asr == null && fold(w.text) && !sameWord(fold(w.text), fold(said))) other.set(w, said);
+      if (w.asr == null && fold(w.text)) {
+        // a word the pipeline joined ("tres veintiséis" → 326) spans the ones it swallowed (shown on no page): all of them were said there
+        const under = words.filter((x) => x.clipId === c.clipId && x !== s && !shownWids.has(x.wid) && x.t0 >= s.t0 && x.t0 * 1000 < w.endMs - 30);
+        const all = [said, ...under.map((x) => toDisplay(x.word))].join(' ');
+        if (!sameWord(fold(w.text), fold(all))) other.set(w, all);
+      }
       // a diacritic pair (esta/está) is grammar the ASR also gets wrong: the judge reads it in context
       if (fold(said) === fold(w.text) && said.toLowerCase() !== w.text.toLowerCase() && /[áéíóúñü]/i.test(said) && !/[áéíóúñü]/i.test(w.text))
         out.push(F('spelling', DIACRITIC.has(fold(said)) ? 'minor' : 'major', DIACRITIC.has(fold(said)) ? 'candidate' : 'rule', s.t0, s.t1, `"${w.text}" (${c.id}) sin tilde — el transcript dice "${said}"`, {page: c.id, wid: w.wid}, [{tool: 'edit_caption', args: {caption_id: c.id, text: c.words.map((x) => (x === w ? said : x.text)).join(' ')}}]));
     }
-    if (other.size) {
+    if (other.size && !worst) { // a page off sync has its ids on another transcript run's words: sync says regenerate
       const list = [...other].map(([w, said]) => `"${w.text}" (se oye "${said}")`).join(', ');
       out.push(F('caption-text', 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} "${c.words.map((x) => x.text).join(' ')}" no dice lo que se oye: ${list} — el audio manda`, {page: c.id, wids: [...other.keys()].map((w) => w.wid)},
         [{tool: 'edit_caption', note: 'the words as said (same word count: ids and timing stay); a client spelling goes in the glossary, not here', args: {caption_id: c.id, text: c.words.map((x) => other.get(x) ?? x.text).join(' ')}}]));
@@ -982,9 +1002,11 @@ export function claimEvidence(sentences, brolls, gfx, extraCues = []) {
 // source clip never auto-fails. validate-guion-conflict: the audio and the client's script say different
 // things (70 vs 60 invitados) — the audio stays on screen (César: the audio wins on content) and the
 // client confirms; the judge never fails a reel for it. color-jump: two shots may look different on
-// purpose (CEO-15); a look that breaks INSIDE a shot is grade-coverage, which blocks. Matched by check
-// name, so a finding written by hand is covered too.
-export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict', 'color-jump']);
+// purpose (CEO-15); a look that breaks INSIDE a shot is grade-coverage, which blocks. data-from-audio: a
+// figure or name the reel's audio does not say goes to the client to confirm (datosPorConfirmar of the version,
+// CEO-21) — the brief or the client may have given it; the broll stage gate is where it blocks, scoped and
+// waivable. Matched by check name, so a finding written by hand is covered too.
+export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict', 'color-jump', 'data-from-audio']);
 export const isAdvisory = (f) => !!f.advisory || ADVISORY.has(f.check);
 export const counts = (f) => !f.dismissed && !isAdvisory(f) && (f.kind !== 'candidate' || f.confirmed);
 export function verdictOf(findings, {reduced = false} = {}) {
@@ -1242,6 +1264,13 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (role === 'captioned') p.captionsOff = false;
   const profile = pickProfile(p, profileName, listProfiles(publicDir));
   Object.assign(T, DEFAULT_T, profile?.thresholds ?? {});
+  const glossary = [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])]; // the profile's and the project's brand kit's
+  // what caption-text and data-from-audio ALLOW as the client's spelling: a project with no kit glossary (César's G1 /
+  // G2 predate the kit) also reads the kit that names this profile (style.judgeProfile), so a name the ASR spells
+  // otherwise is never "corrected" back to the ASR's spelling.
+  // ponytail: only as allowed, not as required (glossary / consistency keep the project's own) — a kit-less project
+  // is not failed on the kit's terms; copy them into the profile (design §4: the glossary's home) to require them
+  const spellings = p.brand?.glossary?.length ? glossary : [...glossary, ...(kitOf(publicDir, profile?.id)?.glossary ?? [])];
   const reel = reelOf(profile, p.name);
   const resolve = (f) => (path.isAbsolute(f) ? f : fs.existsSync(f) ? path.resolve(f) : path.join(publicDir, f.replace(/^\//, '')));
   const file = resolve(render);
@@ -1330,19 +1359,20 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
       const fix = first.clipIndex === 0 ? [{tool: 'trim_clip', args: {clip_id: first.clipId, in_sec: r2(Math.max(0, first.srcStartMs / 1000 - 0.1))}}] : [{tool: 'delete_clips', note: 'clips before the first word carry no speech', args: {clip_ids: placed.slice(0, first.clipIndex).map((x) => x.clip.id)}}];
       findings.push(F('hook-dead-start', 'major', 'rule', 0, first.t0, `la primera palabra llega a los ${first.t0.toFixed(2)} s — el reel arranca muerto`, {wid: first.wid}, fix));
     }
-    // the kit's glossary and the profile's: a name the client spells otherwise is still said
-    for (const i of transcriptIssues(p, tr, [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])])) {
-      if (i.code === 'off-mic') continue; // classified below: off-mic vs crew talk vs a read-through
-      if (i.code === 'data-from-audio') { // CEO-21: a figure or name on screen this reel's audio does not say
-        const g = projectGraphics(p.graphics ?? [], p.clips, FPS).find((x) => x.id === i.ref);
-        findings.push(F(i.code, 'blocker', 'rule', g ? g.startMs / 1000 : null, g ? g.endMs / 1000 : null, i.msg, {graphic: i.ref}, [{tool: 'edit_graphic', note: 'what the audio says; or the client confirms the figure (datosPorConfirmar)', args: {graphic_id: i.ref}}]));
-        continue;
-      }
+    for (const i of transcriptIssues(p, tr, spellings)) { // a name the client spells otherwise is still said
+      if (i.code === 'off-mic' || i.code === 'data-from-audio') continue; // classified below
       const pc = placed.find((x) => x.clip.id === i.ref);
       // script-coverage (no captions to check the guion on): a line may be cut on purpose — confirm against the brief
       const cov = i.code === 'script-coverage';
       findings.push(F(i.code, 'major', cov ? 'candidate' : 'rule', pc ? pc.startMs / 1000 : null, pc ? pc.endMs / 1000 : null, i.msg, {clip: i.ref},
         [cov ? {tool: 'get_transcript', note: 'the take that says the line (a retake cut away?) — or the brief drops it', args: {project_id: projectId}} : {tool: 'cut_words', note: 'or the trim_clip value in the message', args: {}}]));
+    }
+    // CEO-21: a figure or name on screen this reel's audio does not say — an advisory: it goes to the client as
+    // datosPorConfirmar (the agent never decides a figure), never fails the verdict; a capitalized word taken for
+    // a name is a candidate (is it one? on the frame), figures and glossary names are rule
+    for (const d of unbackedData(p, tr, spellings)) {
+      const g = projectGraphics(p.graphics ?? [], p.clips, FPS).find((x) => x.id === d.ref);
+      findings.push(F('data-from-audio', 'major', d.guess ? 'candidate' : 'rule', g ? g.startMs / 1000 : null, g ? g.endMs / 1000 : null, dataIssue(d).msg, {graphic: d.ref, dato: d.dato}, [{tool: 'edit_graphic', note: 'what the audio says; or the client confirms it (datosPorConfirmar)', args: {graphic_id: d.ref}}]));
     }
     if (p.offMic !== 'off') findings.push(...offMicFindings(words, profile?.crewWords ?? []));
     const expect = parsePhone(p.plan) ?? (reel?.phone ? parsePhone(`PHONE: ${reel.phone}`) : null);
@@ -1356,7 +1386,6 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- captions ---
   const pages = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, rate);
   const gfx = projectGraphics(p.graphics, p.clips, rate);
-  const glossary = [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])]; // the profile's and the project's brand kit's
   if (p.captionsOff) skipped.push(role === 'master' ? 'captions (clean master: none on screen by design)' : 'captions (switched off with set_captions — check the brief wants that)');
   else {
     // the pack's font file, as the renderer reads it (src/projectFont.ts): pages are sized by its real widths
@@ -1366,7 +1395,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     const rawOf = (w) => (w.wid && rawWord.get(w.wid)) || w.text; // the transcript keeps the periods captions drop
     const namesMaySplit = !!profile?.captions?.namesMaySplit; // the client's look splits names across lines and pages (César v11)
     findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf, namesMaySplit), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body).filter((f) => !(namesMaySplit && f.check === 'split-name')));
-    if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? []), glossary));
+    if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? []), spellings));
     if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle, rawOf));
     const offPack = packFindings(p.captionStyle, profile, p.brand?.style?.pack);
     findings.push(...offPack);
