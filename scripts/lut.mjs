@@ -145,7 +145,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       result.baked[b.key] = bake(b);
     });
   }
-  // argv[3]: where to write the result (the render bakes into its own file; jobs use public/lut.json)
+  // argv[3]: where to write the result (a job's or a render's bake: its own file; by hand: public/lut.json)
   fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'lut.json'), JSON.stringify(result, null, 2));
   progress(100, 'Done');
 }

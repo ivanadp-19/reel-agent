@@ -33,8 +33,7 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/captions' && req.method === 'POST') { S.captionsBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '17'}); }
   if (p === '/api/captions/17') return send(res, 200, ++S.captionsCalls < 2 ? {status: 'running', progress: 50, label: 'Transcribing'} : {status: 'done', progress: 100, label: 'Ready', result: [{id: 'n0', src: 'clips/take1.mp4', startMs: 1000, endMs: 1600, topPct: 62, words: [{wid: 'take1:5', text: 'nuevo', startMs: 1000, endMs: 1600}]}]});
   if (p === '/api/trim-silence' && req.method === 'POST') { S.trimBody = JSON.parse(await readBody(req)); return send(res, 200, {jobId: '23'}); }
-  if (p === '/api/trim-silence/23') return send(res, 200, S.trimFile !== undefined ? {status: 'done', progress: 100, label: 'Ready'} : {status: 'done', progress: 100, label: 'Ready', result: {plan: [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]}});
-  if (p === '/trim-silence.json') { S.trimFileToken = req.headers['x-reel-token'] === TOKEN; return S.trimFile ? send(res, 200, S.trimFile) : send(res, 404, {error: 'not found'}); }
+  if (p === '/api/trim-silence/23') return send(res, 200, {status: 'done', progress: 100, label: 'Ready', ...(S.noTrimResult ? {} : {result: {plan: [{id: 'take1', segments: [{inSec: 0.2, outSec: 0.9}, {inSec: 1.2, outSec: 1.8}]}]}})});
   if ((m = p.match(/^\/api\/projects\/([\w-]+)\/captions$/))) { // the backend's route, over its revision logic
     const cur = S.projects.get(m[1]);
     if (!cur) return send(res, 404, {error: 'not found', code: 'not_found'});
@@ -285,18 +284,11 @@ test('autocut: --dry-run prints the plan and saves nothing; then the clips are r
   const cut = await reel(['autocut', 'promo', '--json']);
   assert.deepEqual([cut.code, cut.out.changed], [0, true]);
   assert.deepEqual(S.projects.get('promo').clips.map((c) => [c.id, c.inSec, c.outSec]), [['take1', 0.2, 0.9], ['take1-c1', 1.2, 1.8]]);
-  // a backend whose job status has no result: the plan is read from /trim-silence.json, like the editor does
-  S.trimFile = {plan: [{id: 'take1-c1', segments: [{inSec: 1.3, outSec: 1.7}]}]};
-  const fromFile = await reel(['autocut', 'promo', '--json']);
-  assert.deepEqual([fromFile.code, fromFile.out.changed, S.trimFileToken], [0, true, true], fromFile.stdout);
-  assert.deepEqual(S.projects.get('promo').clips.map((c) => [c.id, c.inSec, c.outSec]), [['take1', 0.2, 0.9], ['take1-c1', 1.3, 1.7]]);
-  S.trimFile = {plan: [{id: 'other-project-clip', segments: []}]};
-  const other = await reel(['autocut', 'promo', '--json']);
-  assert.deepEqual([other.code, other.out.code], [5, 'conflict'], 'a plan for clips of another project is never applied');
-  S.trimFile = null;
+  // a status without the job's own plan: failed — never a file of public/ that another autocut wrote (T21)
+  S.noTrimResult = true;
   const none = await reel(['autocut', 'promo', '--json']);
   assert.deepEqual([none.code, none.out.code], [1, 'job_failed']);
-  S.trimFile = undefined;
+  S.noTrimResult = false;
 });
 
 test('captions revision: get prints it, set --expected-revision is refused with 409 revision_mismatch (exit 5) once the pages moved, and writes nothing', async () => {

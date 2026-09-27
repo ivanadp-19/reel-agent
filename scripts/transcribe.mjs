@@ -2,7 +2,7 @@
 // dump the words of each clip's trim window for the agent (get_transcript).
 //
 // Input : JSON (argv[2]) = {clips:[...], lang:'auto'|'es'|'en'}
-// Output: public/transcript.json = [{clipId, source, words:[{i, word, startMs, endMs, off?, speaker?, was?}]}]
+// Output: argv[3] (the backend's job: its own file; by hand: public/transcript.json) = [{clipId, source, words:[{i, word, startMs, endMs, off?, speaker?, was?}]}]
 //         off = a quieter second voice away from the mic; speaker = spk1, spk2… from diarization (see src/speech.ts);
 //         was = its index in the source's other engine's transcript, when both are cached (lib-transcribe)
 //         (times are SOURCE-relative ms; i = index into the source's transcript,
@@ -30,5 +30,5 @@ for (const clip of clips) {
     words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs),
   });
 }
-fs.writeFileSync(path.join(PUBLIC, 'transcript.json'), JSON.stringify(out));
+fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'transcript.json'), JSON.stringify(out));
 progress(100, `Done — ${out.reduce((n, c) => n + c.words.length, 0)} words`);

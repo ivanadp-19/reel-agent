@@ -3,7 +3,7 @@ import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {placeClips} from '../src/timeline';
 import {findCutCandidates, planWordCuts, type Candidate, type CutRange, type TClip} from '../src/cuts';
-import {runJob, readPublic} from './jobs';
+import {runJob} from './jobs';
 import {Btn} from './ui';
 
 // Left column, "Transcript": the words of every clip in timeline order with
@@ -31,8 +31,7 @@ export const TranscriptPanel: React.FC<{playerRef: React.RefObject<PlayerRef | n
     if (!clips.length) { setTr([]); return; }
     const id = ++runId.current;
     setBusy('Transcribing…');
-    runJob('/api/transcribe', {clips, lang, offMic}, (s) => setBusy(`${s.label ?? 'Transcribing'} ${s.progress ?? 0}%`))
-      .then(() => readPublic<TClip[]>('transcript.json'))
+    runJob<TClip[]>('/api/transcribe', {clips, lang, offMic}, (s) => setBusy(`${s.label ?? 'Transcribing'} ${s.progress ?? 0}%`))
       .then((t) => { if (id === runId.current) { setTr(Array.isArray(t) ? t : []); setSel(null); setCands(null); } })
       .catch((e) => notify('Transcription failed: ' + (e as Error).message, 'error'))
       .finally(() => { if (id === runId.current) setBusy(null); });

@@ -241,7 +241,13 @@ async function runJobUntimed(route, body, maxSec) {
     await new Promise((r) => setTimeout(r, 1500));
   }
 }
-const readPublic = (f) => JSON.parse(fs.readFileSync(path.join(PUBLIC, f), 'utf8'));
+// a pipeline job's own result, from its status (the backend hands it back) — never a file of public/ that every job of the
+// kind wrote: two agents' jobs at once each read the one that finished last (T21)
+async function jobResult(route, body) {
+  const {result} = await runJob(route, body);
+  if (result === undefined) throw new Error(`${route} finished without its result — is the backend up to date? (npm run stop; npm start)`);
+  return result;
+}
 
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9%$]/gi, '');
 
@@ -925,8 +931,7 @@ server.registerTool('set_speed_ramp', {description: 'Speed ramp across a clip, a
 
 // words of every clip (trim window), source-relative; `${source}:${i}` is a stable word id
 async function transcript(p) {
-  await runJob('/api/transcribe', {clips: p.clips, lang: p.lang ?? 'auto', offMic: p.offMic});
-  return readPublic('transcript.json');
+  return jobResult('/api/transcribe', {clips: p.clips, lang: p.lang ?? 'auto', offMic: p.offMic});
 }
 // a transcript word by id → the clip whose trim window holds it, with its neighbours on that clip
 async function wordAt(p, wid, tr) {
@@ -1055,13 +1060,11 @@ async function settleGrade(p) {
   const g = p.grade;
   const need = autoSources(g, p.clips).filter((s) => !g.bySrc?.[s]);
   if (need.length) {
-    await runJob('/api/grade', {clips: need.map((src) => ({src}))});
-    g.bySrc = {...g.bySrc, ...(readPublic('grade.json').bySrc ?? {})};
+    g.bySrc = {...g.bySrc, ...((await jobResult('/api/grade', {clips: need.map((src) => ({src}))})).bySrc ?? {})};
   }
   const bakes = lutBakes(g, p.clips, p.mattes).filter((b) => !g.baked?.[b.key] || !fs.existsSync(path.join(PUBLIC, g.baked[b.key])));
   if (bakes.length) {
-    await runJob('/api/lut', {bake: bakes});
-    g.baked = {...g.baked, ...(readPublic('lut.json').baked ?? {})};
+    g.baked = {...g.baked, ...((await jobResult('/api/lut', {bake: bakes})).baked ?? {})};
   }
 }
 const f2s = (v) => (v > 0 ? `+${f2(v)}` : f2(v));
@@ -1099,8 +1102,7 @@ server.registerTool('create_lut', {description: 'Make a .cube LUT, two ways. Fro
   if (match) {
     if (!clip_id) throw new Error('match needs clip_id: the clip to fix');
     const {from, to} = matchPair(p.clips, clip_id, to_clip_id, p.grade);
-    await runJob('/api/lut', {match: {name, from, to}});
-    const r = readPublic('lut.json');
+    const r = await jobResult('/api/lut', {match: {name, from, to}});
     const w = r.worst, sgn = (v) => (v > 0 ? `+${v}` : `${v}`);
     const said = `LUT ${r.lut} fitted on ${r.pairs} frame pair(s) ${from.id} → ${to.id}: mean difference ${r.before} → ${r.after} (of 255); the luma band left most off, ${w.luma.join('–')}, by R ${sgn(w.rgb[0])} G ${sgn(w.rgb[1])} B ${sgn(w.rgb[2])} (a frame of motion leaves a few; one channel far from the others = a cast there)`;
     if (!apply) return text(`${said}. Apply it with set_grade target: "${from.id}", lut: "${name}", lut_mix: 1.`);
@@ -1117,8 +1119,7 @@ server.registerTool('create_lut', {description: 'Make a .cube LUT, two ways. Fro
     if (path.isAbsolute(f)) { hostFile(f); const dest = path.join(dir, path.basename(f).replace(/[^\w.\-]/g, '_')); fs.copyFileSync(f, dest); return path.relative(PUBLIC, dest); }
     const abs = path.resolve(PUBLIC, f); if (!abs.startsWith(PUBLIC + path.sep) || !fs.existsSync(abs)) throw new Error(`not found under public/: ${f}`); return path.relative(PUBLIC, abs);
   });
-  await runJob('/api/lut', {make: {name, refs, clips, strength}});
-  const lut = readPublic('lut.json').lut;
+  const {lut} = await jobResult('/api/lut', {make: {name, refs, clips, strength}});
   if (!apply) return text(`LUT ${lut} made from ${refs.length} reference(s). Apply it with set_grade lut: "${name}"${clip_id ? `, target: "${clip_id}"` : ''}.`);
   p.grade = withLut(p.grade, lut, clip_id);
   await settleGrade(p);
@@ -1130,8 +1131,7 @@ server.registerTool('prepare_mattes', {description: 'Cut the presenter out of th
   const p = load(project_id);
   const spans = spansWithoutMatte([...p.graphics, ...p.captions], p.mattes, p.clips);
   if (!spans.length) return text('Nothing to matte: every behind-span already has a matte (or no graphic is marked behind).');
-  await runJob('/api/matte', {spans});
-  const done = readPublic('mattes.json');
+  const done = await jobResult('/api/matte', {spans});
   p.mattes = [...p.mattes, ...(Array.isArray(done) ? done : [])];
   await save(project_id, p);
   return text(`Matted ${done.length} span(s): ${done.map((m) => `${path.basename(m.src)} ${f1(m.startMs / 1000)}–${f1(m.endMs / 1000)}s`).join(', ')}`);
@@ -1158,8 +1158,7 @@ async function applyPack(p, style) {
   const repropose = style !== p.captionStyle;
   p.captionStyle = style;
   if (!p.clips.length || !p.captions.length) return;
-  await runJob('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions, repropose), guion: p.guion, glossary: p.brand?.glossary ?? []}); // the pager sees the project's emphasis (a highlighted name stays one unit)
-  const fresh = readPublic('captions.multi.json');
+  const fresh = await jobResult('/api/captions', {clips: p.clips, lang: p.lang ?? 'auto', style, offMic: p.offMic, tiers: projectTiers(p.captions, repropose), guion: p.guion, glossary: p.brand?.glossary ?? []}); // the pager sees the project's emphasis (a highlighted name stays one unit)
   const r = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids, replace: true, repropose});
   p.captions = r.captions; p.hiddenWids = r.hidden;
 }
@@ -1193,12 +1192,12 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
   let p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   const lang = p.lang ?? 'auto';
   if (step === 'autocut') {
-    await runJob('/api/trim-silence', {clips: p.clips, lang, offMic: p.offMic}); const {plan} = readPublic('trim-silence.json');
+    const {plan} = await jobResult('/api/trim-silence', {clips: p.clips, lang, offMic: p.offMic});
     if (!Array.isArray(plan) || !plan.length) return text('Nothing to cut');
     const r = applyAutocut(p.clips, plan); p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); await save(project_id, p);
     return text(`Autocut: ${plan.reduce((n, x) => n + (x.segments?.length ?? 0), 0)} segments${p.offMic === 'cut' ? ' (off-mic voice removed)' : ''}\n\n${summary(project_id, p)}`);
   }
-  await runJob('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion, glossary: p.brand?.glossary ?? []}); const fresh = readPublic('captions.multi.json');
+  const fresh = await jobResult('/api/captions', {clips: p.clips, lang, style: p.captionStyle, offMic: p.offMic, tiers: projectTiers(p.captions), guion: p.guion, glossary: p.brand?.glossary ?? []});
   const {captions, added, hidden} = repage(p.captions, Array.isArray(fresh) ? fresh : [], p.clips, {hidden: p.hiddenWids}); p.captions = captions; p.hiddenWids = hidden; await save(project_id, p);
   return text(`Captions: +${added} new (${p.captions.length} total)\n\n${summary(project_id, p)}`);
 });
@@ -1495,6 +1494,7 @@ export function createReelServer() {
   return s;
 }
 
-// run as a program (`node mcp/server.mjs`, .mcp.json): stdio; imported (server/mcp-http.mjs): nothing starts
-const main = (() => { try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+// run as a program (`node mcp/server.mjs`, .mcp.json): stdio; imported (server/mcp-http.mjs): nothing starts. Both paths
+// resolved: under --preserve-symlinks-main (a root of symlinks to the code, test/concurrency.test.mjs) import.meta.url keeps the link
+const main = (() => { try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } })();
 if (main) await createReelServer().connect(new StdioServerTransport());

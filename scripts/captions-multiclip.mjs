@@ -5,7 +5,8 @@
 // Steps : 1) transcribe each source clip with WhisperX (cached per source),
 //         2) map words onto the assembled/trimmed timeline,
 //         3) face-aware vertical placement (local YuNet),
-//         4) page words per the caption preset (src/paging.ts) → public/captions.multi.json
+//         4) page words per the caption preset (src/paging.ts) → argv[3] (the backend's job: its own file; by hand:
+//            public/captions.multi.json)
 // Yellow words: the project's own tiers (`tiers`, every word it shows) apply exactly; only words it does
 // not show yet get the pack's rule-based proposal (src/highlights.ts yellowWords). The agent adjusts them.
 // Output: PROGRESS:<pct>:<label> lines on stdout for the server to relay.
@@ -145,5 +146,5 @@ progress(88, 'Finding faces');
 const faces = detectFaces(clips);
 const topBySrc = Object.fromEntries(clips.map((c) => [c.src, faceToTop(faces[sourceKey(c)])]));
 const captions = pageWords(words, presetOf(style), topBySrc);
-fs.writeFileSync(path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2));
+fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2));
 progress(100, `Done — ${captions.length} captions`);

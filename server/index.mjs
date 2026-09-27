@@ -32,7 +32,7 @@ import {FONT_FILE, clientFont} from '../src/fonts.ts';
 import {ensureSfx} from '../scripts/sfx.mjs';
 import {renderPlan} from '../scripts/render-queue.mjs';
 import {localizeRemoteBrolls, runCmd} from '../scripts/remote-broll.mjs';
-import {admitRender, aheadOf, createRenderJobs, jobsDir} from '../scripts/render-jobs.mjs';
+import {admitRender, aheadOf, createRenderJobs, jobsDir, newJobId} from '../scripts/render-jobs.mjs';
 import {createRenderRunner, planRender} from '../scripts/render-runner.mjs';
 import {oomReason} from '../scripts/render-memory.mjs';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
@@ -137,7 +137,7 @@ const json = (res, code, obj) => {
 
 const musicRows = new Map(); // /api/music/search results by id, so /api/music/pick downloads only URLs Openverse gave us
 const JOBS = {
-  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs, result: 'captions.multi.json'},
+  '/api/captions': {route: '/api/captions', stage: 'captions-paging', name: 'Captions', prefix: 'clips', script: 'scripts/captions-multiclip.mjs', store: captionJobs},
   '/api/trim-silence': {route: '/api/trim-silence', stage: 'autocut', name: 'Autocut', prefix: 'trim', script: 'scripts/trim-silence.mjs', store: trimJobs},
   '/api/transcribe': {route: '/api/transcribe', stage: 'transcribe', name: 'Transcribe', prefix: 'transcribe', script: 'scripts/transcribe.mjs', store: transcribeJobs},
   '/api/matte': {route: '/api/matte', stage: 'matte', name: 'Matte', prefix: 'matte', script: 'scripts/matte.mjs', store: {}},
@@ -790,18 +790,22 @@ async function handle(req, res) {
   // ---- pipeline jobs: transcribe / captions / autocut ----
   // Each spawns one pipeline script with the request body as its input file and
   // relays PROGRESS lines; on failure the LAST meaningful stderr line is returned
-  // to the UI instead of "see server logs".
+  // to the UI instead of "see server logs". Its result is its own: the script writes it to the job's
+  // output file (argv[3]) and the status hands it back (`result`) — the MCP, the editor and the reel CLI read
+  // it there. It was a file of public/ every job of the kind wrote (captions.multi.json, trim-silence.json…):
+  // two agents' jobs at once each read the one that finished last, another project's pages (T21). The id is
+  // unique too: two jobs started in one millisecond shared an id, an input file and a status.
   const job = JOBS[url.pathname];
   if (req.method === 'POST' && job) {
-    const id = String(Date.now());
-    const inFile = path.join(ROOT, `.${job.prefix}-${id}.json`);
+    const id = newJobId();
+    const inFile = path.join(ROOT, `.${job.prefix}-${id}.json`), outFile = path.join(ROOT, `.${job.prefix}-${id}.out.json`);
     const raw = await body(req);
     fs.writeFileSync(inFile, raw);
     let project = null;
     try { const p = JSON.parse(raw).project_id; if (typeof p === 'string') project = p; } catch {}
     const t0 = Date.now();
     job.store[id] = {status: 'running', progress: 0, label: 'Starting'};
-    const child = spawn('node', [job.script, inFile], {cwd: ROOT, env: process.env});
+    const child = spawn('node', [job.script, inFile, outFile], {cwd: ROOT, env: process.env});
     // could not start (EAGAIN / ENOMEM under memory pressure): the job fails, the backend stays up
     child.on('error', (e) => { fs.rmSync(inFile, {force: true}); job.store[id] = {status: 'error', error: `${job.name} could not start: ${e.message}`}; });
     let errTail = '';
@@ -826,12 +830,12 @@ async function handle(req, res) {
       // a transcribe job is all transcription; another job logs its own part apart from the transcription it ran
       const ms = Date.now() - t0 - (job.stage === 'transcribe' ? 0 : innerMs);
       logStage(project, job.stage, ms, {job: id, ...(code === 0 ? {} : {ok: false})});
-      // a job with a result file hands it back in its status (the reel CLI cannot read public/)
       let result;
-      if (code === 0 && job.result) {
-        try { result = JSON.parse(fs.readFileSync(path.join(PUBLIC, job.result), 'utf8')); } catch {}
-        for (const k of Object.keys(job.store).slice(0, -20)) delete job.store[k].result; // the pages of the latest jobs only (read once, right away)
+      if (code === 0) {
+        try { result = JSON.parse(fs.readFileSync(outFile, 'utf8')); } catch {}
+        for (const k of Object.keys(job.store).slice(0, -20)) delete job.store[k].result; // the results of the latest jobs only (read once, right away)
       }
+      fs.rmSync(outFile, {force: true});
       job.store[id] = code === 0
         ? {status: 'done', progress: 100, label: 'Ready', ...(result ? {result} : {})}
         : {status: 'error', error: oomReason({code, signal: sig, tail: errTail, heap: 0, what: job.name}) ?? explainFailure(errTail, `${job.name} exited ${code ?? sig}`)};

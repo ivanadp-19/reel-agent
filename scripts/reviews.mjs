@@ -116,9 +116,15 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // A deliverable left out (null: supers and master_supers of a reel with no text graphic) is named in `omitted`
 // {key: why}; `original` {src, sha256, bytes}: the master is the client's own file (a captions-only job);
 // `audioHash`: the sha256 of the final audio the master was remuxed with (priorMaster).
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc, datosPorConfirmar, omitted, original, audioHash}) {
+// `pause` (tests only, test/concurrency.test.mjs): awaited between the read and the write — inside the caller's
+// reviews row, the window a writer outside the row would lose its write in; the version then comes as a promise.
+// Production never passes it: read, numbered and written in one synchronous step, as above.
+export function recordVersion(dir, projectId, o) {
   const r = loadReviews(dir, projectId, {strict: true});
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
+  return o.pause ? Promise.resolve(o.pause(v)).then(() => writeVersion(dir, projectId, r, v, o)) : writeVersion(dir, projectId, r, v, o);
+}
+function writeVersion(dir, projectId, r, v, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc, datosPorConfirmar, omitted, original, audioHash}) {
   const sub = path.join(dir, projectId);
   fs.mkdirSync(sub, {recursive: true});
   const proxyAbs = path.join(sub, `v${v}.mp4`), posterAbs = path.join(sub, `v${v}.jpg`), vdir = path.join(sub, `v${v}`);
@@ -424,8 +430,8 @@ export function addColorRef(publicDir, projectId, x) {
 // signal: the render job's — a cancel kills the proxy's ffmpeg and records nothing.
 // deliverables / identity / snapshot / masterKey / qc: the pair of a project with an identity (recordVersion).
 // verify: run in the row right before the version is numbered — throws to record nothing (the
-// runner checks the pair's identity is still the project's).
-export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, datosPorConfirmar, omitted, original, audioHash, makeProxy: proxy = makeProxy}) {
+// runner checks the pair's identity is still the project's). pause: recordVersion's (tests only).
+export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, datosPorConfirmar, omitted, original, audioHash, makeProxy: proxy = makeProxy, pause}) {
   if (draft || !qcOk || !projectId) return null;
   if (signal?.aborted) throw signal.reason;
   const tmp = path.join(dir, projectId, `.tmp-${jobId}`);
@@ -438,7 +444,7 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
     return await inReviewsRow(dir, projectId, () => {
       if (signal?.aborted) throw signal.reason;
       verify?.();
-      return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, datosPorConfirmar, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc, omitted, original, audioHash} : {})});
+      return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, datosPorConfirmar, pause, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc, omitted, original, audioHash} : {})});
     });
   } finally {
     fs.rmSync(`${tmp}.mp4`, {force: true}); fs.rmSync(`${tmp}.jpg`, {force: true});
