@@ -515,6 +515,18 @@ export const identityOf = ({client, script, family, hook, cta, v, development}: 
 export const identityStem = ({client, script, variant}: Identity) =>
   [client.toUpperCase(), `G${script}`, ...(!variant ? [] : 'v' in variant ? [`V${variant.v}`] : [variant.hook && `H${variant.hook}`, variant.cta && `C${variant.cta}`])].filter(Boolean).join('_');
 
+// 'G2_H1' → {script: 2, variant: {hook: 1}}: the take part of identityStem read back — a Drive file's take as the
+// editor's import dialog and `reel drive import --file <id>=G2_H1` write it (G2 = the body every variant shares); null
+// when it is not one (the variant rules of validateIdentity)
+export function parseStem(stem: string): {script: number; variant: Identity['variant']} | null {
+  const m = String(stem ?? '').trim().match(/^G(\d{1,2})((?:[_-]?[HCV]\d{1,3})*)$/i);
+  if (!m) return null;
+  const variant: Record<string, number> = {};
+  for (const [, k, n] of m[2].matchAll(/([HCV])(\d{1,3})/gi)) variant[({h: 'hook', c: 'cta', v: 'v'} as Record<string, string>)[k.toLowerCase()]] = +n;
+  const r = validateIdentity({client: 'x', script: +m[1], variant: Object.keys(variant).length ? variant : null});
+  return r.identity && {script: r.identity.script, variant: r.identity.variant};
+}
+
 // another project (rows: {id, identity}) already holding this client + script + variant → why, else null
 export function identityTaken(rows: {id: string; identity?: unknown}[], id: string, identity: Identity): string | null {
   const stem = identityStem(identity);

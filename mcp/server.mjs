@@ -291,7 +291,7 @@ const sec = (d) => z.number().describe(d);
 // and draft renders (render and start_render check draft themselves).
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_guion', 'set_identity', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
-  'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
+  'add_clips', 'import_drive', 'list_drive', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
   'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge', 'set_scope', 'check_stage', 'stage_status',
 ]);
 // Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
@@ -305,6 +305,7 @@ const READ_ONLY = new Set([
   'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
   'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link', 'rejudge',
   'check_stage', 'stage_status', // they write the stage records only (the backend's), never the project
+  'list_drive',
 ]);
 const queues = new Map(); // project id → its last queued call
 const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
@@ -509,6 +510,28 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   }
   await save(id, p);
   return text(`Project ${id}: ${added.length ? `added ${added.join(', ')}` : 'nothing added'}${already.map((a) => `\n${a}`).join('')}\n\n${summary(id, p)}`);
+});
+
+// Google Drive (server/drive.mjs): the backend lists and downloads with its service account; these tools take a
+// folder id and file ids only — the key never reaches them. The mapping file → take is stated explicitly (R2-27).
+const takeLine = (t) => (t ? t.stem ?? 'no script in the name' : '?');
+server.registerTool('list_drive', {description: 'List the videos of a Google Drive folder shared with the backend\'s service account (drive.readonly) — the folder id or its URL; project_id marks which files fit that project\'s identity. Each file comes with the take its NAME suggests (g02-hook / G2 H1 = script 2 hook 1; CTA1 = a CTA; Guion3_2 = G3 V2; g02-body = G2, the body every variant shares) — a PROPOSAL: show the mapping to the user and let them confirm or correct it before import_drive; never import on your own guess.', inputSchema: {folder: z.string().min(1).max(300).describe('Drive folder id, or its URL'), project_id: pid.optional()}}, async ({folder, project_id}) => {
+  await needBackend();
+  const r = await fetch(`${API}/api/drive/list?${new URLSearchParams({folder, ...(project_id ? {project: project_id} : {})})}`);
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(b.error ?? `Drive list failed (${r.status})`);
+  const lines = b.files.map((f) => `  ${f.id}  ${f.name}  ${f1(f.size / 2 ** 20)} MB  ${f.modifiedTime ?? ''}  → proposed ${takeLine(f.proposed)}${f.fits === undefined ? '' : f.fits ? ` (does not fit: ${f.fits})` : ' (fits)'}`);
+  return text(`Drive folder ${b.folder}: ${b.files.length} video${b.files.length === 1 ? '' : 's'}${b.others ? ` (+${b.others} other files)` : ''}\n${lines.join('\n') || '  none'}\n\nConfirm the mapping with the user, then import_drive with file_id + script (+ hook / cta / v) per file.`);
+});
+
+server.registerTool('import_drive', {description: 'Import videos from Google Drive into a project (after list_drive and the user\'s confirmation of the mapping): each file with its take stated explicitly — script (the G) and hook / cta / v when it is a variant\'s part (none = the body every variant shares), the way set_identity names them. A take of another script or variant than the project\'s identity is refused. The backend downloads (resuming a cut download), ingests like add_clips and appends the clips; a file already imported (same Drive file, modifiedTime and size) is skipped. Waits for the job. New project if project_id is omitted (then set_identity); a failed import names the project — import_drive into it again and a cut download goes on where it stopped.', inputSchema: {project_id: pid.optional(), name: z.string().optional(), files: z.array(z.object({file_id: z.string().min(1).max(200), script: z.number().int().min(1).max(99).describe('the G of the script'), hook: z.number().int().min(1).optional(), cta: z.number().int().min(1).optional(), v: z.number().int().min(1).optional().describe('a plain version instead of hook / cta')}).strict()).min(1).max(100)}}, async ({project_id: given, name, files}) => {
+  const project_id = given || `p-${Date.now()}`;
+  if (given) { load(given); lock(given); } else await save(project_id, newProject(name));
+  let s;
+  try { s = await runJob('/api/drive/import', {project_id, files: files.map((f) => ({fileId: f.file_id, script: f.script, variant: identityOf(f).variant}))}, 4 * 3600); }
+  catch (e) { throw new Error(`Drive → ${project_id}: ${e.message}`); }
+  const row = (x) => `${x.name} (${x.take})${x.clip ? ` → ${x.clip}` : ''}${x.why ? `: ${x.why}` : ''}${x.ingest ? `, ${x.ingest}` : ''}`;
+  return text(`Drive → ${project_id}: ${s.added.length ? `added ${s.added.map(row).join(', ')}` : 'nothing added'}${s.skipped.length ? `\nskipped ${s.skipped.map(row).join(', ')}` : ''}\n\n${summary(project_id, load(project_id))}`);
 });
 
 server.registerTool('reorder_clips', {description: 'Set the timeline order. Clips not listed keep their relative order after the listed ones.', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {

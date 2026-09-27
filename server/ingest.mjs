@@ -4,6 +4,7 @@
 //   ?upload=<id>&size=n (the reel CLI) — a part it uploaded in chunks (server/uploads.mjs), taken whole and
 //     removed once ingested; synchronous too — the CLI and the MCP wait for the clip in the answer
 //   ?upload=<id>&size=n&async=1 (the editor, editor/upload.ts) — the same part, as a job (below)
+//   ingestPart(part, name) — the same, in process: the Drive import's downloaded part (server/drive.mjs)
 //   a body (the browser upload)           — asynchronous: once the upload is on disk it answers 202 {jobId} and
 //     works in the background; GET /api/add-clip/<jobId> → {status: running|done|error, progress, label, clip | error}.
 //     The job does not depend on the upload's connection: a browser that goes away after uploading still gets
@@ -170,6 +171,40 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     return (why ? `${e.message}: ${why}` : e.message || String(e)).slice(0, 300);
   };
 
+  // a clip id from the file's name, unique among the clips and the ingests in flight (released by the caller)
+  function reserveId(rawName) {
+    const base = rawName.replace(/\.[^.]+$/, '').replace(/[^\w\-]/g, '_').slice(0, 40) || 'clip';
+    let id = base;
+    for (let n = 2; reserved.has(id) || fs.existsSync(path.join(clipsDir, `${id}.mp4`)); n++) id = `${base}-${n}`;
+    reserved.add(id);
+    return id;
+  }
+  const mb = (n) => Math.round(n / 2 ** 20);
+  const lowDisk = (free, need) => `not enough free disk for this clip: ${mb(free)} MB free, it needs ${mb(need)} MB over the ${mb(minFreeBytes)} MB floor`;
+
+  // a whole upload part → its clip, in this process: what POST /api/add-clip?upload= answers, for the Drive import
+  // (server/drive.mjs). The part is removed once ingested; low disk throws {code: 'low_disk'} before anything is
+  // written, a failed ingest {code: 'ingest_failed'} with the reason. report(progress, label): the job's progress
+  async function ingestPart(part, rawName, report) {
+    const need = fs.statSync(part).size, free = freeBytes();
+    if (free - need < minFreeBytes) throw Object.assign(new Error(lowDisk(free, need)), {code: 'low_disk'});
+    fs.mkdirSync(thumbsDir, {recursive: true});
+    const id = reserveId(rawName), tag = id;
+    log(`ingest ${tag}: start (drive part, ${(need / 1048576).toFixed(1)} MB)`);
+    try {
+      const clip = await ingest({tmp: part, id, rawName, tag, report});
+      log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`);
+      onClip(clip);
+      return clip;
+    } catch (e) {
+      log(`ingest ${tag}: error — ${message(e)}`);
+      throw Object.assign(new Error(message(e)), {code: 'ingest_failed'});
+    } finally {
+      reserved.delete(id);
+      fs.rmSync(part, {force: true});
+    }
+  }
+
   // an ingest as a job: 202 {jobId} at once, then GET /api/add-clip/<jobId> (a browser body, the editor's upload part)
   function startJob(res, {tmp, id, rawName, cleanup, what}) {
     const jobId = crypto.randomUUID();
@@ -193,7 +228,6 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     }
     if (!(req.method === 'POST' && url.pathname === '/api/add-clip')) return false;
     const rawName = url.searchParams.get('name') || 'clip.mp4';
-    const base = rawName.replace(/\.[^.]+$/, '').replace(/[^\w\-]/g, '_').slice(0, 40) || 'clip';
     fs.mkdirSync(thumbsDir, {recursive: true});
     const refuse = (code, obj) => { json(res, code, obj); return true; };
 
@@ -233,15 +267,11 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     const free = freeBytes();
     if (free - need < minFreeBytes) {
       opened?.close(); req.resume(); // the body is not taken
-      const mb = (n) => Math.round(n / 2 ** 20);
-      return refuse(507, {error: `not enough free disk for this clip: ${mb(free)} MB free, it needs ${mb(need)} MB over the ${mb(minFreeBytes)} MB floor`, code: 'low_disk', hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'});
+      return refuse(507, {error: lowDisk(free, need), code: 'low_disk', hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'});
     }
 
     // unique id (avoid clobbering existing clips and ingests still running)
-    let id = base;
-    let n = 2;
-    while (reserved.has(id) || fs.existsSync(path.join(clipsDir, `${id}.mp4`))) id = `${base}-${n++}`;
-    reserved.add(id);
+    const id = reserveId(rawName);
     // the source: the checked descriptor, the MCP's path, the uploaded part, or the browser's body written here.
     // Removed afterwards unless it is a path of the caller's (a finished upload part goes too)
     const tmp = opened?.path ?? local ?? uploaded ?? path.join(root, `.upload-${id}.bin`);
@@ -272,5 +302,5 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     return true;
   }
 
-  return {handle, jobs};
+  return {handle, jobs, ingestPart};
 }

@@ -2,6 +2,7 @@
 //   projects   — multi-project library (list/get/save/delete); a save reopens the stages it reaches, and
 //                the stages' records and checks live outside the project JSON (scripts/stages.mjs)
 //   add-clip   — upload video → remux/encode + thumbnail → a clip (browser uploads as a job, server/ingest.mjs)
+//   drive      — a Drive folder's videos (service account) → clips on a project, the take mapping confirmed (server/drive.mjs)
 //   music      — upload an audio track
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
 //   captions   — words → caption pages + face-aware placement (job)
@@ -51,6 +52,7 @@ import {pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/ch
 import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, stageView, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
+import {createDrive, createDriveImport} from './drive.mjs';
 import {createGradeScans, readScan, scanSource} from '../scripts/grade-scan.mjs';
 import {readWind, scanWind} from '../scripts/wind-scan.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
@@ -296,8 +298,16 @@ const UPLOADS = path.join(ROOT, '.uploads');
 const gradeScans = createGradeScans({publicDir: PUBLIC,
   read: (dir, src) => { const g = readScan(dir, src); return g && !readWind(dir, src) ? null : g; },
   scan: async (src) => { await scanWind(PUBLIC, src).catch((e) => console.log(`wind scan ${src}: ${String(e?.message ?? e).slice(0, 200)}`)); return scanSource(PUBLIC, src); }});
+const freeDiskBytes = () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; };
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure,
-  freeBytes: () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; }, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});
+  freeBytes: freeDiskBytes, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});
+// Import from Google Drive (server/drive.mjs): a service account's key where REEL_DRIVE_SA_KEY names it (outside public/,
+// chmod 600; read only to mint a token, which stays in memory) → the folder's files, downloaded as upload parts and
+// ingested like POST /api/add-clip?upload=. REEL_DRIVE_API / REEL_DRIVE_TOKEN_URL: a fake Drive, for tests only
+const DRIVE_ENV = {...readEnvFile(), ...process.env};
+const driveImport = createDriveImport({
+  drive: createDrive({keyFile: DRIVE_ENV.REEL_DRIVE_SA_KEY, publicDir: PUBLIC, api: DRIVE_ENV.REEL_DRIVE_API || undefined, tokenUrl: DRIVE_ENV.REEL_DRIVE_TOKEN_URL || undefined}),
+  publicDir: PUBLIC, uploadsDir: UPLOADS, ingestPart: clipIngest.ingestPart, freeBytes: freeDiskBytes, minFreeBytes: MIN_DISK_MB * 2 ** 20, logStage});
 // B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
 const brollSheets = createSheetJobs();
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || Infinity) * 2 ** 20; // no cap unless set: the disk floor decides (the editor's uploads never had one)
@@ -760,6 +770,8 @@ async function handle(req, res) {
   //   ?path= (the MCP, the reel CLI) and ?upload= (the CLI's chunked part) answer with the clip; a browser upload
   //   answers 202 {jobId}, polled at /api/add-clip/<jobId>
   if (clipIngest.handle(req, res, url, g)) return;
+  // ---- import from Drive (server/drive.mjs): GET /api/drive/list, POST /api/drive/import → a job at /api/drive/import/<jobId> ----
+  if (await driveImport.handle(req, res, url, g)) return;
 
   // ---- pipeline jobs: transcribe / captions / autocut ----
   // Each spawns one pipeline script with the request body as its input file and

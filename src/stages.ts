@@ -88,13 +88,14 @@ export const CLIP_FIELD_STAGE: Record<string, Stage[]> = {
   volume: ['audio'], muted: ['audio'],
   transform: ['broll'], // framing: zoom / pan keyframes
   graded: ['color'], location: ['color'], // a head's grade fixed by hand; where the shot is (color-jump compares only within one)
-  label: [], srcKey: [], // the reel CLI's key of the file it came from
+  label: [], srcKey: [], // the reel CLI's key of the file it came from (the Drive import's: drive:<fileId>:<modifiedTime>:<size>)
+  take: [], // the Drive import's {script, variant} the user confirmed for the file (server/drive.mjs)
 };
 
 // the stage(s) each MCP tool (mcp/server.mjs) works in; [] = reads, searches, libraries, the plan, project
 // admin and render jobs. test/stages.test.mjs fails when a tool is added without a row here.
 export const TOOL_STAGE: Record<string, Stage[]> = {
-  add_clips: ['ingest'], set_language: ['ingest'], set_identity: ['ingest'], get_transcript: ['ingest'],
+  add_clips: ['ingest'], import_drive: ['ingest'], set_language: ['ingest'], set_identity: ['ingest'], get_transcript: ['ingest'],
   reorder_clips: ['corte'], trim_clip: ['corte'], delete_clips: ['corte'], split_clip: ['corte'], cut_words: ['corte'], set_audio_cut: ['corte'],
   set_transitions: ['corte'], set_speed_ramp: ['corte'], set_off_mic: ['corte'], duplicate_project: ['corte'], // variants are made in corte
   set_guion: ['guion'],
@@ -112,7 +113,7 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   list_projects: [], get_project: [], rename_project: [], set_plan: [], approve_plan: [], request_plan_changes: [], set_plan_mode: [], style_kits: [],
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
   search_catalog: [], search_music: [], search_asset: [], list_assets: [], generate_asset: [], timing_report: [], validate: [], frame_at: [], qc: [],
-  render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [],
+  render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [], list_drive: [],
   set_scope: [], check_stage: [], stage_status: [], // what the job asks for, and the gates themselves
 };
 
