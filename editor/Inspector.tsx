@@ -41,7 +41,7 @@ export const Inspector: React.FC<{
     meta, captions, clips, brolls, brollAssets, accentColor, captionStyle, selectedId, selectedClipId, currentFrame,
     select, selectClip, setText, movePageStart, shiftCaption, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
-    setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setTransitionPattern, applySpeedRamp,
+    setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setClipTags, setTransitionPattern, applySpeedRamp,
     captionsOff, setCaptionsOff, guion, setGuion,
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
@@ -166,6 +166,22 @@ export const Inspector: React.FC<{
                   <div title="L-cut: this clip's audio keeps playing this many seconds after its picture ends, under the next clip">
                     <Label>L-cut (s){placedSel && placedSel.lFrames / meta.fps < (selClip.lSec ?? 0) - 0.02 ? ` · clamped ${(placedSel.lFrames / meta.fps).toFixed(2)}` : ''}</Label>
                     <NumberInput value={selClip.lSec ?? 0} min={0} max={4} step={0.1} onChange={(v) => setClipAudioCut(selClip.id, {lSec: Math.min(4, Math.max(0, v))})} />
+                  </div>
+                </div>
+
+                {/* the footage, as the user says it is (set_clip graded / location) */}
+                <div className="grid grid-cols-2 gap-2 mt-3">
+                  <div title="Already graded = it carries the client's grade (don't regrade it); needs grading = color it. Validate warns when a source's grade starts a few frames into a shot (half-graded).">
+                    <Label>Grade</Label>
+                    <Select value={selClip.graded == null ? '' : String(selClip.graded)} onChange={(v) => setClipTags(selClip.id, {graded: v === '' ? null : v === 'true'})}
+                      options={[{value: '', label: 'not said'}, {value: 'true', label: 'already graded'}, {value: 'false', label: 'needs grading'}]} />
+                  </div>
+                  <div title="Where it was shot: the render judge never compares the color of clips of two locations">
+                    <Label>Location</Label>
+                    <input key={`${selClip.id}|${selClip.location ?? ''}`} defaultValue={selClip.location ?? ''} maxLength={60} placeholder="—"
+                      onBlur={(e) => { if (e.target.value.trim() !== (selClip.location ?? '')) setClipTags(selClip.id, {location: e.target.value}); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      className="w-full bg-surface-container-lowest text-on-surface border border-outline-variant/40 focus:border-primary focus:outline-none rounded px-2 py-1 text-[12px]" />
                   </div>
                 </div>
 

@@ -20,7 +20,22 @@ export type Clip = {
   enter?: import('./transitions.ts').Enter; // transition from the previous clip (src/transitions.ts)
   jSec?: number; // J-cut: the audio leads this many seconds under the previous clip's tail
   lSec?: number; // L-cut: the audio trails this many seconds under the next clip's head
+  graded?: boolean; // the footage already carries the client's grade (true) or needs one (false); unset = not said
+  location?: string; // where it was shot: color-jump never compares clips of two locations
 };
+
+// graded / location as the user sets them (set_clip, the editor's Clip tab): null or '' clears one
+export function clipTags(c: Clip, t: {graded?: boolean | null; location?: string | null}): Clip {
+  const out = {...c};
+  if (t.graded === null) delete out.graded;
+  else if (t.graded !== undefined) out.graded = t.graded;
+  if (t.location !== undefined) {
+    const l = (t.location ?? '').trim().slice(0, 60);
+    if (l) out.location = l;
+    else delete out.location;
+  }
+  return out;
+}
 
 const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
 const smooth = (f: number) => f * f * (3 - 2 * f); // smoothstep ease-in-out

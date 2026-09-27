@@ -42,6 +42,13 @@ test('validateIdentity: rejects a bad client, script, variant or family with a c
   bad([], /^identity: an object/);
 });
 
+test('validateIdentity: development (color-ref\'s references) is optional, trimmed, a name up to 60 characters', () => {
+  assert.equal(ok({client: 'acme', script: 2, development: '  Montealbán 326 '}).development, 'Montealbán 326');
+  assert.equal('development' in ok({client: 'acme', script: 2, development: ' '}), false);
+  for (const development of ['x'.repeat(61), 'a\nb', 7]) bad({client: 'acme', script: 2, development}, /^identity\.development:/);
+  assert.equal(identityOf({client: 'acme', script: 2, development: 'Thula'}).development, 'Thula');
+});
+
 test('identityOf: the flat fields of set_identity and the editor form → the variant from the numbers given', () => {
   assert.deepEqual(ok(identityOf({client: 'acme', script: 2, hook: 1, cta: 2})).variant, {hook: 1, cta: 2});
   assert.deepEqual(ok(identityOf({client: 'acme', script: 10, v: 2})).variant, {v: 2});

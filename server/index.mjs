@@ -47,6 +47,7 @@ import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.
 import {identityWrite, pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
+import {createGradeScans} from '../scripts/grade-scan.mjs';
 // sourcing, shared with the MCP tools: stock (Pexels), music (Openverse), decorative assets, the own B-roll library
 import {searchStock} from '../mcp/stock.mjs';
 import {creditOf, downloadMusic, loadMusicLibrary, searchMusic} from '../mcp/music.mjs';
@@ -276,8 +277,11 @@ const USERS = createTokenStore(process.env.REEL_TOKENS_FILE || path.join(ROOT, '
 const REQUIRE_TOKEN = process.env.REEL_REQUIRE_TOKEN === '1';
 const UPLOADS = path.join(ROOT, '.uploads');
 // clip ingest: POST /api/add-clip (+ its job status for browser uploads); the reel CLI's path and upload ingest too
+// half-graded sources (scripts/grade-scan.mjs): every frame of a source, niced, one scan at a time in the
+// background — after an ingest, and for the unscanned sources a validate finds; never inside a request
+const gradeScans = createGradeScans({publicDir: PUBLIC});
 const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN, uploadsDir: UPLOADS, openForUser, hdrLut: (trc) => (trc in HDR_TRC ? hdrLut(trc) : null), explain: explainFailure,
-  freeBytes: () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; }, minFreeBytes: MIN_DISK_MB * 2 ** 20});
+  freeBytes: () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; }, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});
 // B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
 const brollSheets = createSheetJobs();
 const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
@@ -350,9 +354,17 @@ async function handle(req, res) {
     const file = path.join(PROJECTS_DIR, `${id}.json`);
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
     try {
-      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env});
+      const issues = await projectIssues(withDefaults(JSON.parse(fs.readFileSync(file, 'utf8'))), PUBLIC, {...readEnvFile(), ...process.env}, {kick: gradeScans.kick});
       return json(res, 200, {ok: !issues.some((i) => i.level === 'error'), issues});
     } catch (e) { return json(res, 500, {error: `validate: ${e?.message ?? e}`.slice(0, 300)}); }
+  }
+
+  // the MCP's validate hands its unscanned sources here (it runs in its own process): queued, answered at once
+  if (req.method === 'POST' && url.pathname === '/api/grade-scan') {
+    let srcs; try { ({srcs} = JSON.parse((await body(req)) || '{}')); } catch { return json(res, 400, {error: 'bad json'}); }
+    const ok = (Array.isArray(srcs) ? srcs : []).filter((x) => typeof x === 'string' && /\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i.test(x) && path.resolve(PUBLIC, x).startsWith(PUBLIC + path.sep)).slice(0, 50);
+    gradeScans.kick(ok);
+    return json(res, 202, {queued: ok});
   }
 
   // ---- resumable uploads (server/uploads.mjs): a part per token user, ingested by /api/add-clip?upload= ----

@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, clipDurationSec, cutRange, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
+import {applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -171,7 +171,7 @@ const oneEmoji = (s) => [...new Intl.Segmenter('en', {granularity: 'grapheme'}).
 // the files an identity names (version 1 shown), or why it is not valid
 const identityLine = (identity) => {
   const r = validateIdentity(identity);
-  return r.identity ? `${DELIVERABLES.map(({kind, ext}) => deliverableName({identity: r.identity, v: 1, kind, ext})).join(' + ')} (family ${r.identity.family}; v<n> = the review version; renders at ${+deliveryFps({identity: r.identity}).toFixed(3)} fps)` : `not valid — ${r.error}`;
+  return r.identity ? `${DELIVERABLES.map(({kind, ext}) => deliverableName({identity: r.identity, v: 1, kind, ext})).join(' + ')} (family ${r.identity.family}${r.identity.development ? `; development ${r.identity.development}` : ''}; v<n> = the review version; renders at ${+deliveryFps({identity: r.identity}).toFixed(3)} fps)` : `not valid — ${r.error}`;
 };
 // the music's level in dB (the project keeps a gain), its fades and ducking — set_music and get_project
 const musicLine = (m) => `vol ${fmtDb(m.volume)} (gain ${+m.volume.toFixed(4)}), fade in ${m.fadeInSec ?? 0}s / out ${m.fadeOutSec ?? 0}s, duck ${m.duck ? 'on' : 'off'}`;
@@ -185,7 +185,7 @@ function summary(id, p) {
   out.push('', 'CLIPS (timeline order):');
   place(p).forEach((pc, i) => {
     const c = pc.clip;
-    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : ''].filter(Boolean).join(', ');
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : '', c.graded != null ? (c.graded ? 'graded' : 'needs grading') : '', c.location ? `at ${c.location}` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -501,10 +501,11 @@ server.registerTool('trim_clip', {description: 'Change where a clip starts/ends 
   await save(project_id, p); return text(`${clip_id}: ${f1(c.inSec)}–${f1(c.outSec)}s (${f1(clipDurationSec(c))}s on the timeline)`);
 });
 
-server.registerTool('set_clip', {description: 'Per-clip playback: speed (0.25–4), volume (0–2), muted.', inputSchema: {project_id: pid, clip_id: z.string(), speed: z.number().min(0.25).max(4).optional(), volume: z.number().min(0).max(2).optional(), muted: z.boolean().optional()}}, async ({project_id, clip_id, speed, volume, muted}) => {
-  const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
+server.registerTool('set_clip', {description: 'Per clip: playback — speed (0.25–4), volume (0–2), muted — and what the user says about its footage: graded = true when it already carries the client\'s grade (César\'s pre-edits usually do: do not regrade it), false when it needs one; location = where it was shot (color-jump never compares clips of two locations). null clears graded; "" clears location.', inputSchema: {project_id: pid, clip_id: z.string(), speed: z.number().min(0.25).max(4).optional(), volume: z.number().min(0).max(2).optional(), muted: z.boolean().optional(), graded: z.boolean().nullable().optional(), location: z.string().max(60).nullable().optional()}}, async ({project_id, clip_id, speed, volume, muted, graded, location}) => {
+  const p = load(project_id); const i = p.clips.findIndex((x) => x.id === clip_id); if (i < 0) throw new Error(`no clip ${clip_id}`);
+  const c = p.clips[i] = clipTags(p.clips[i], {graded, location}); // the editor's Clip tab sets them through the same function
   if (speed != null) c.speed = speed; if (volume != null) c.volume = volume; if (muted != null) c.muted = muted;
-  await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}`);
+  await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}, ${c.graded == null ? 'grade not said' : c.graded ? 'already graded' : 'needs grading'}${c.location ? `, shot at ${c.location}` : ''}`);
 });
 
 server.registerTool('set_audio_cut', {description: 'J-cuts and L-cuts (per clip, seconds of TIMELINE time; 0 clears). j_sec = J-cut: this clip\'s audio starts that early, under the previous clip\'s tail — you hear the next take before you see it (its first j seconds of audio lead; they are muted in place so the sound flows straight through the cut). l_sec = L-cut: this clip\'s audio keeps playing after its video ends, under the next clip — the voice walks the viewer into the next shot. Classic use: 0.5–1.5 s on a change of take/place; j on the clip you enter, l on the one you leave. A J-cut is clamped to the clip\'s own length and the previous clip\'s, an L-cut to the audio left in the source after out_sec and the next clip\'s length. Muted clips stay silent. Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, clip_id: z.string(), j_sec: z.number().min(0).max(4).optional(), l_sec: z.number().min(0).max(4).optional()}}, async ({project_id, clip_id, j_sec, l_sec}) => {
@@ -622,7 +623,7 @@ server.registerTool('set_guion', {description: 'Attach the client\'s script (gui
   return text(`Guion set (${p.guion.split(/\s+/).length} words). ${p.captions.length ? 'Regenerate captions to reconcile them with it (run_ai_step captions).' : 'Captions generated from now on are reconciled with it.'}${conflicts.length ? '\n' + issuesText(conflicts) : ''}`);
 });
 
-server.registerTool('set_identity', {description: 'Name whose reel this is and which cut of it: client (a slug, e.g. "vibem"), script (the G number, 1–99) and the variant — hook and/or cta numbers (H1_C2) or v for a plain version (V2); family groups the variants of one script (default <client>-G<script>). Take them from the user or the brief, never invent them. The delivered files are named from it (VIBEM_G2_H1_C1_v3_master.mp4). One project per client + script + variant: a repeated one is refused. Setting it replaces the whole identity; clear removes it.', inputSchema: {project_id: pid, client: z.string().optional(), script: z.number().optional().describe('the G of the script, 1–99'), hook: z.number().optional(), cta: z.number().optional(), v: z.number().optional().describe('a plain version instead of hook / cta'), family: z.string().optional(), clear: z.boolean().optional()}}, async ({project_id, clear, ...a}) => {
+server.registerTool('set_identity', {description: 'Name whose reel this is and which cut of it: client (a slug, e.g. "vibem"), script (the G number, 1–99) and the variant — hook and/or cta numbers (H1_C2) or v for a plain version (V2); family groups the variants of one script (default <client>-G<script>). Take them from the user or the brief, never invent them. The delivered files are named from it (VIBEM_G2_H1_C1_v3_master.mp4). One project per client + script + variant: a repeated one is refused. development = the building or project the reel sells ("Montealbán 326", "Thula", "marca"): the render judge compares its color with that development\'s approved references only. Setting it replaces the whole identity; clear removes it.', inputSchema: {project_id: pid, client: z.string().optional(), script: z.number().optional().describe('the G of the script, 1–99'), hook: z.number().optional(), cta: z.number().optional(), v: z.number().optional().describe('a plain version instead of hook / cta'), family: z.string().optional(), development: z.string().max(60).optional(), clear: z.boolean().optional()}}, async ({project_id, clear, ...a}) => {
   const p = load(project_id);
   if (clear) { p.identity = null; await save(project_id, p); return text('Identity removed — the project has no delivered names'); }
   const r = claimIdentity(PROJECTS, project_id, identityOf(a));
@@ -1123,7 +1124,8 @@ server.registerTool('run_ai_step', {description: 'Run one deterministic pipeline
 
 // ---------- verification ----------
 const issuesText = (issues) => (issues.length ? issues.map((i) => `${i.level === 'error' ? 'ERR ' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') : 'OK — no issues');
-const allIssues = (p) => projectIssues(p, PUBLIC, JOB_ENV); // mcp/checks.mjs, also GET /api/validate/<id> (async: a promise)
+// mcp/checks.mjs, also GET /api/validate/<id> (async: a promise); unscanned sources go to the backend's background scan
+const allIssues = (p) => projectIssues(p, PUBLIC, JOB_ENV, {kick: (srcs) => fetch(`${API}/api/grade-scan`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({srcs})}).catch(() => {})});
 const projectProps = projectRenderProps; // src/renderProps.ts: the same props the render CLI sends
 
 server.registerTool('timing_report', {description: 'Where the time of this project went: agent decisions (the gaps between tool calls = model turns), inspection (proofs, frames, validate), transcription, render by stage (full, or master / captions layer / composite), loudness + QC, other tools, idle. From public/projects/<id>.timing.jsonl, which every tool call and backend job appends to.', inputSchema: {project_id: pid}}, async ({project_id}) => {
@@ -1131,7 +1133,7 @@ server.registerTool('timing_report', {description: 'Where the time of this proje
   return text(timingText(summarize(readTiming(PROJECTS, project_id))));
 });
 
-server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook, and with a guion (set_guion) its coverage: guion-conflict (audio and script disagree — the audio stays; ask the human), guion-missing, guion-altered, guion-extra, guion-timing. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('validate', {description: 'Deterministic checks before rendering: Reels safe zones, captions ending on function words, timing, emphasis density, caption/graphic overlaps, graphics on screen at the same time, behind-graphics without a matte, missing hook, and with a guion (set_guion) its coverage: guion-conflict (audio and script disagree — the audio stays; ask the human), guion-missing, guion-altered, guion-extra, guion-timing, and half-graded: a source whose grade starts a few frames into a shot (a pre-edit graded only in part — every frame of each source is scanned in the backend\'s background; half-graded-pending until then), with the fix. Geometry is estimated — confirm visually with caption_proof.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   const p = load(project_id);
   return text(issuesText(await allIssues(p)));
 });

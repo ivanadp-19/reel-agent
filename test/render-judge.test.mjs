@@ -19,6 +19,14 @@ test('timelineSpeech places transcript words on the timeline through the clips',
   assert.deepEqual(timelineSpeech(clips, []).missing, ['a', 'b']);
 });
 
+test('timelineSpeech: a word a continuing split runs through (a half-graded head) is heard once — no cut-tight, no repeat', () => {
+  const clips = [clip('a', 'a', 0, 9.209), clip('b', 'a', 9.209, 12)];
+  const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'por', 8900, 9100), TW(1, 'eso,', 9150, 9500)]}, {clipId: 'b', source: 'a', words: [TW(1, 'eso,', 9150, 9500), TW(2, 'nuestros', 9600, 10000)]}];
+  const w = words(clips, tr);
+  assert.deepEqual(w.map((x) => [x.wid, +(x.t1 - x.t0).toFixed(2)]), [['a:0', 0.2], ['a:1', 0.34], ['a:2', 0.4]]); // "eso," whole (the second clip lands 9 ms early at 30 fps)
+  assert.deepEqual(pauseFindings(w, clips), []);
+});
+
 test('pauses: mid-sentence gap is major, after a full stop only past the longer threshold', () => {
   const clips = [clip('a', 'a', 0, 10)];
   const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'tiene', 0, 300), TW(1, 'noventa', 1000, 1300), TW(2, 'metros.', 1320, 1600), TW(3, 'Y', 2300, 2400), TW(4, 'cuesta', 2420, 2800)]}];
@@ -556,4 +564,36 @@ test('source scan: a range that hits the deadline is skipped and not cached (a c
     if (before == null) delete process.env.REEL_JUDGE_TIMEOUT_MS; else process.env.REEL_JUDGE_TIMEOUT_MS = before;
     fs.rmSync(dir, {recursive: true, force: true});
   }
+});
+
+// ---- color rules (CEO-15): color-jump is advisory and never compares two locations; color-ref by development ----
+import {colorJumpFindings, colorRefGroups, cutFindings} from '../.agents/skills/render-judge/judge.mjs';
+import {placeClips as place} from '../src/timeline.ts';
+
+test('color-jump: advisory (never fails a reel), and clips of different locations are not compared', () => {
+  const clips = [clip('a', 'a', 0, 4), clip('b', 'b', 0, 4), clip('c', 'c', 0, 4)];
+  const looks = (cs, Ys) => place(cs, 30).map((pc, i) => ({pc, n: 8, Y: Ys[i], U: 128, V: 128}));
+  const f = colorJumpFindings(looks(clips, [120, 121, 150]), place(clips, 30));
+  assert.deepEqual(f.map((x) => [x.check, x.evidence.clip]), [['color-jump', 'c']]);
+  assert.ok(f[0].fix.some((x) => x.tool === 'set_clip' && 'location' in x.args));
+  assert.equal(verdictOf(f).verdict, 'PASS');
+  const located = [{...clips[0], location: 'lobby'}, {...clips[1], location: 'lobby'}, {...clips[2], location: 'rooftop'}];
+  assert.deepEqual(colorJumpFindings(looks(located, [120, 121, 150]), place(located, 30)), []);
+});
+
+test('color-ref: only the approved references of the project\'s development; none, or one that names no development → skipped with a note', () => {
+  const profile = {id: 'cesar', colorRefs: [{label: 'G1 v2', development: 'Montealbán 326', paths: []}, {label: 'Hechos por mí', paths: []}]};
+  const m = colorRefGroups(profile, 'montealban 326');
+  assert.deepEqual(m.groups.map((g) => g.label), ['G1 v2']);
+  assert.deepEqual(m.skip, ['color-ref: "Hechos por mí" names no development (colorRefs[].development) — not compared']); // never dropped silently
+  assert.match(colorRefGroups(profile, 'Thula').skip[0], /no approved reference of "Thula"/);
+  assert.match(colorRefGroups(profile, undefined).skip[0], /set_identity development/);
+  assert.deepEqual(colorRefGroups({id: 'x'}, 'Thula'), {groups: [], skip: []}); // a profile without references says nothing
+});
+
+test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split) is one shot — no flash-cut, no jump-cut; cut out of the take, it is both', () => {
+  const checks = (clips) => cutFindings(place(clips, 30)).map((f) => [f.check, f.evidence.clip ?? f.evidence.clips]);
+  assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
+  assert.deepEqual(checks([clip('x', 'x', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
+  assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3.5, 3.833), clip('x', 'x', 0, 3)]), [['flash-cut', 'h'], ['jump-cut', ['h']]]);
 });
