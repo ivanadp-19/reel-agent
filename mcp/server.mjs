@@ -188,9 +188,10 @@ function summary(id, p) {
   if (inScope(p.scope).length < STAGES.length) out.push('', `SCOPE (set_scope): ${scopeLine(p)}`);
   if (p.guion) out.push('', `GUION (set_guion): ${p.guion.trim().split(/\s+/).length} words — captions take its wording where it aligns with the audio; validate reports guion-conflict / guion-missing / guion-altered`);
   out.push('', 'CLIPS (timeline order):');
+  const pieces = inferPieces(p.clips, p.identity?.variant); // what sync_family takes for the body
   place(p).forEach((pc, i) => {
-    const c = pc.clip;
-    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : '', c.graded != null ? (c.graded ? 'graded' : 'needs grading') : '', c.location ? `at ${c.location}` : '', c.piece ? `${c.piece} piece` : ''].filter(Boolean).join(', ');
+    const c = pc.clip, piece = pieces[i]?.piece;
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : '', c.graded != null ? (c.graded ? 'graded' : 'needs grading') : '', c.location ? `at ${c.location}` : '', piece ? `${piece} piece${c.piece ? '' : ' (by the identity)'}` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -886,14 +887,15 @@ function writeTarget(id, tool, edit) {
 // A fix to the body of a script reaches its other variants (CEO-5, D17): src/timeline.ts syncFamily on each sibling
 // (familyTargets, src/validate.ts: its family and client only — the editor's Sync body runs the same two), written by
 // writeTarget. No project_id: like set_music's targets, nothing is queued or gated for `from`, which is only read.
-server.registerTool('sync_family', {description: 'Copy what sits on the body of `from` onto the other variants of its script (its identity family, same client only): caption pages (key words, hand edits), graphics, B-roll cues, grade overrides and per-clip audio (speed and ramps, volume, J/L). Body clips are matched by source and time range, never by id, and everything lands on each sibling\'s own timeline (its hook may be longer); hooks and CTAs are never touched. Body = the clips whose piece is body (set_clip piece; inferred from the identity when a project has none — check get_project). A graphic whose figure or name the sibling\'s own audio does not say is left out. Each sibling is saved on its own and its stages go stale; one another agent is editing (its project lock) or saved meanwhile is reported and left as it is. targets = {family} or {project_ids} of that family only (default: the whole family); except = ids to leave out. Run it after fixing the body on one variant.', inputSchema: {from: pid.describe('the variant whose body is right'), targets: z.object({family: z.string().optional(), project_ids: z.array(pid).min(1).optional()}).strict().optional().describe('default {family: from\'s}; except goes beside it, not inside'), except: z.array(z.string()).optional().describe('project ids to leave out')}}, async ({from, targets, except}) => {
+server.registerTool('sync_family', {description: 'Copy what sits on the body of `from` onto the other variants of its script (its identity family, same client only): caption pages (key words, hand edits), graphics, B-roll cues, grade overrides and per-clip audio (speed and ramps, volume, J/L between body clips). Body clips are matched by source and time range, never by id, and everything lands on each sibling\'s own timeline (its hook may be longer); hooks and CTAs are never touched, nor the J/L at their seams. Each sibling\'s line names what of its own the copy replaced. Body = the clips whose piece is body (set_clip piece; inferred from the identity when a project has none — check get_project). A graphic whose figure or name the sibling\'s own audio does not say is left out. Each sibling is saved on its own and its stages go stale; one another agent is editing (its project lock) or saved meanwhile is reported and left as it is. targets = {family} or {project_ids} of that family only (default: the whole family); except = ids to leave out. Run it after fixing the body on one variant.', inputSchema: {from: pid.describe('the variant whose body is right'), targets: z.object({family: z.string().optional(), project_ids: z.array(pid).min(1).optional()}).strict().optional().describe('default {family: from\'s}; except goes beside it, not inside'), except: z.array(z.string()).optional().describe('project ids to leave out')}}, async ({from, targets, except}) => {
   const p = load(from);
   const picked = familyTargets(projectRows(PROJECTS), from, targets, except);
   if (picked.error) throw new Error(picked.error);
   const {failed, lines} = await eachTarget(picked.ids, (id) => writeTarget(id, 'sync_family', (q) => {
-    const r = syncFamily(p, q, {unbacked: (x) => unbackedData(x, projectWords(x, PUBLIC, JOB_ENV))});
+    const tr = projectWords(q, PUBLIC, JOB_ENV);
+    const r = syncFamily(p, q, {words: tr, unbacked: (x) => unbackedData(x, tr)});
     if ('error' in r) throw new Error(r.error);
-    Object.assign(q, r.project);
+    Object.assign(q, r.project, {sync: {from, replaced: r.replaced}}); // logged on its stages by the backend's write
     return r.said;
   }));
   return text(`${picked.ids.length - failed} of ${picked.ids.length} sibling(s) of ${from} synced:\n${lines.map((l) => `  ${l}`).join('\n')}${failed ? '\nThe ones with an error were left as they are: sync again once they are free.' : ''}`);

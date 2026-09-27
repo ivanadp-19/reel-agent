@@ -49,6 +49,7 @@ import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {pairIdentity, projectIssues, projectWords, savedProject, withDefaults} from '../mcp/checks.mjs';
+import {lockHolder, lockMessage} from '../scripts/project-lock.mjs';
 import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, setStagesMode, stageView, waive, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
@@ -490,6 +491,10 @@ async function handle(req, res) {
     const p = readProject(PUBLIC, wd[1]);
     return p ? json(res, 200, projectWords(withDefaults(p), PUBLIC, {...readEnvFile(), ...process.env})) : json(res, 404, {error: `project ${wd[1]} not found`, code: 'not_found'});
   }
+  // who holds a project's agent lock (scripts/project-lock.mjs): the editor's Sync body leaves a sibling another agent
+  // is editing as it is, as the MCP's sync_family does
+  const lk = url.pathname.match(/^\/api\/projects\/([\w-]+)\/lock$/);
+  if (lk && req.method === 'GET') { const h = lockHolder(PROJECTS_DIR, lk[1]); return json(res, 200, h ? {holder: h, message: lockMessage(lk[1], h)} : {holder: null}); }
   if (url.pathname.startsWith('/api/projects/')) {
     const id = url.pathname.split('/').pop();
     if (!id || !/^[\w-]+$/.test(id)) return json(res, 400, {error: 'bad id'});

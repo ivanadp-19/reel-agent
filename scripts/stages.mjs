@@ -110,6 +110,8 @@ export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
   if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return [409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt}];
   const dropped = SERVER_FIELDS.filter((k) => Object.hasOwn(incoming, k));
   for (const k of dropped) delete incoming[k];
+  const {sync} = incoming; // sync_family's note (the MCP's and the editor's Sync body): a line of the stage log, never a field
+  delete incoming.sync;
   // a new or changed identity must be valid and not another project's client + script + variant
   const badIdentity = identityWrite(path.join(publicDir, 'projects'), id, prev, incoming);
   if (badIdentity) return [400, {error: badIdentity, code: 'bad_identity'}];
@@ -128,6 +130,7 @@ export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
     logStage(publicDir, id, {event: 'scope', from: prev.scope ?? null, to: saved.scope ?? null, actor, rev: now,
       dropped: Object.fromEntries(inScope(prev.scope).filter((s) => !to.includes(s)).map((s) => [s, recs[s]?.status ?? 'pendiente']))});
   }
+  if (sync && typeof sync === 'object') logStage(publicDir, id, {event: 'sync_family', from: String(sync.from).slice(0, 64), replaced: (Array.isArray(sync.replaced) ? sync.replaced : []).slice(0, 200).map((x) => String(x).slice(0, 300)), actor, rev: now});
   return [200, {ok: true, updatedAt: now, stale, ...kept, ...(enforce ? {stagesMode: 'enforce'} : {})}];
 }
 

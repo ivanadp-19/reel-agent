@@ -76,8 +76,9 @@ export const Inspector: React.FC<{
 
   const family = validateIdentity(identity).identity?.family;
   // sync_family: this variant's body onto the other variants of its script — the MCP's selection (familyTargets) and
-  // copy (syncFamily); each sibling read with its words (the graphics' data against its own audio, unbackedData) and
-  // saved by its own CAS route (GET then POST with its updatedAt: one saved meanwhile is a 409, reported, never overwritten)
+  // copy (syncFamily); each sibling read with its words (the graphics' data against its own audio, unbackedData) and its
+  // lock (one another agent holds is left as it is), saved by its own CAS route (GET then POST with its updatedAt: one
+  // saved meanwhile is a 409, reported, never overwritten)
   const syncBody = async () => {
     if (!projectId) return;
     setSyncing(true);
@@ -88,12 +89,13 @@ export const Inspector: React.FC<{
       const from = {clips: s.clips, captions: s.captions, brolls: s.brolls, graphics: s.graphics, mattes: s.mattes, grade: s.grade, hiddenWids: s.hiddenWids, identity: validateIdentity(s.identity).identity};
       const {failed, lines} = await eachTarget(r.ids, async (id) => {
         const at = `/api/projects/${encodeURIComponent(id)}`;
-        const [cur, words] = await Promise.all([fetch(at), fetch(`${at}/words`)]);
-        if (!cur.ok || !words.ok) throw new Error(`could not read it (${cur.ok ? words.status : cur.status})`);
-        const tr = await words.json();
-        const out = syncFamily(from, await cur.json(), {unbacked: (q) => unbackedData(q, tr)});
+        const got = await Promise.all([fetch(at), fetch(`${at}/words`), fetch(`${at}/lock`)]), bad = got.find((x) => !x.ok);
+        if (bad) throw new Error(`could not read it (${bad.status})`);
+        const [cur, tr, lock] = await Promise.all(got.map((x) => x.json()));
+        if (lock.message) throw new Error(lock.message); // another agent is editing it: left as it is, as the MCP does
+        const out = syncFamily(from, cur, {words: tr, unbacked: (q) => unbackedData(q, tr)});
         if ('error' in out) throw new Error(out.error);
-        const w = await fetch(at, {method: 'POST', body: JSON.stringify(out.project)});
+        const w = await fetch(at, {method: 'POST', body: JSON.stringify({...out.project, sync: {from: projectId, replaced: out.replaced}})});
         if (w.status === 409) throw new Error('it changed meanwhile — sync again');
         if (!w.ok) throw new Error((await w.json().catch(() => ({}))).error ?? `save failed (${w.status})`);
         return out.said;

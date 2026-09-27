@@ -78,8 +78,8 @@ test('master key: a caption edit keeps the master', () => {
   assert.equal(key(reel({audio: {clean: 'strong'}})), key(reel({audio: {}})), 'voice cleanup runs after the composite');
   assert.equal(key({...reel(), mode: 'layers', draft: false}), k, 'render options are not inputs');
   assert.equal(key(JSON.parse(JSON.stringify(reel()))), k, 'stable across serialization');
-  const tagged = structuredClone(clips); tagged[0].graded = true; tagged[1].location = 'Rooftop';
-  assert.equal(key(reel({clips: tagged})), k, 'set_clip graded / location draws nothing');
+  const tagged = structuredClone(clips); tagged[0].graded = true; tagged[1].location = 'Rooftop'; tagged[1].piece = 'body';
+  assert.equal(key(reel({clips: tagged})), k, 'set_clip graded / location / piece draws nothing');
 });
 
 test('master key: what the master draws makes a new one', () => {
