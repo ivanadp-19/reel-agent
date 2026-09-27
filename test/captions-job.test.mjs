@@ -36,6 +36,17 @@ test('the kit glossary comes from the saved project when the caller sends none (
   assert.equal(shown(run({style: 'vibem', project_id: 'p1', glossary: []}, files).pages), 'Son 54* departamentos* en Alta* Brisa*'); // [] = none
 });
 
+test('the kit glossary reaches the pager: a multi-word term respelled and kept on one page (the caller\'s kit, or the saved project\'s)', () => {
+  const glossary = [{term: 'Pet Park', variants: ['Pit Bark']}];
+  const files = {'public/clips/transcripts/a.es.json': said('Aquí tienes el Pit Bark, la alberca y el gym.'), 'public/projects/p1.json': {brand: {glossary}}};
+  const texts = (r) => r.pages.map((c) => c.words.map((w) => w.text).join(' '));
+  for (const r of [run({style: 'vibem', glossary}, files), run({style: 'vibem', project_id: 'p1'}, files)]) {
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(texts(r), ['Aquí tienes', 'el Pet Park, la alberca', 'y el gym']);
+  }
+  assert.deepEqual(texts(run({style: 'vibem', project_id: 'p1', glossary: []}, files)), ['Aquí tienes el Pit', 'Bark, la alberca', 'y el gym']); // [] = none
+});
+
 test('Deepgram configured: its own cache, each word naming its id in the WhisperX one; Deepgram down fails the job', () => {
   const files = {
     'public/clips/transcripts/a.es.json': said('Son 54 departamentos.'),

@@ -116,6 +116,8 @@ test('golden Layer A: the pager on pinned words matches its expected pages, and 
   const rows = layerA(words, exp); // no font file: lines from the width estimate
   assert.ok(rows.every((r) => r.ok), JSON.stringify(rows.filter((r) => !r.ok)));
   assert.deepEqual([...new Set(rows.map((r) => r.check))], ['pages', 'range', 'text', 'yellow', 'lines~']);
+  // the kit's glossary pages with it (npm run golden reads the kit): a term inside a page, or one a sentence end cuts, changes nothing
+  assert.deepEqual(layerA(words, exp, {glossary: [{term: 'Tenemos 54'}, {term: 'Ana Tenemos'}]}).filter((r) => !r.ok), []);
   const fails = (e) => layerA(words, {...exp, pages: e}).filter((r) => !r.ok).map((r) => `${r.page} ${r.check}: ${r.got}`);
   assert.deepEqual(fails([pages[0], {...pages[1], yellow: ['s:5']}, {...pages[2], lines: ['LLAMA', 'HOY']}]), ['P2 yellow: s:4 s:5', 'P3 lines~: LLAMA HOY']);
   assert.deepEqual(fails([{...pages[0], wids: ['s:0', 's:1']}, ...pages.slice(1)]), ['P1 range: HOLA, SOY ANA'], 'a page break elsewhere names what was paged');

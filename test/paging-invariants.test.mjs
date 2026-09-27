@@ -10,6 +10,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {pageWords, endsSentence, isGlue, toDisplay} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
+import {normKey} from '../src/guion.ts';
 
 const mulberry32 = (seed) => () => {
   seed |= 0;
@@ -92,8 +93,11 @@ test('pager invariants hold across 2000 random streams and packs', () => {
     const {words, kept} = stream(rand);
     const p = preset(rand);
     const L = p.layout;
-    const pages = pageWords(words, p);
-    const label = `seed ${seed} ${p.id} ${JSON.stringify(L)}`;
+    // a kit glossary of 2–4 consecutive words of the stream itself, taken anywhere (across a clip, a parenthesis
+    // or a sentence end too): a term is bonded where it runs inside one clip with no parenthesis or sentence end
+    const glossary = kept.length > 1 ? [2, 3, 4].map((n) => { const i = Math.floor(rand() * (kept.length - 1)); return {term: kept.slice(i, i + n).map((w) => w.word).join(' ')}; }) : [];
+    const pages = pageWords(words, p, glossary);
+    const label = `seed ${seed} ${p.id} ${JSON.stringify(L)} ${JSON.stringify(glossary.map((g) => g.term))}`;
     const out = pages.flatMap((c) => c.words);
 
     // every word in, every word out, once, in order — by position: the guion's split pieces share a wid
@@ -113,7 +117,14 @@ test('pager invariants hold across 2000 random streams and packs', () => {
     }
     const k = (i) => kept[i];
     const glue = (i) => isGlue(out[i].text, L.glueExcept);
-    const bond = (i, j) => !!L.unbreakable && (((k(i).tier ?? 0) > 0 && (k(j).tier ?? 0) > 0) || (/^[A-ZÁÉÍÓÚÑ]/.test(out[i].text) && /^[A-ZÁÉÍÓÚÑ0-9]/.test(k(j).word.replace(/^[.,;:¿¡]+/, ''))));
+    const terms = glossary.map((g) => g.term.split(/\s+/).map(normKey).filter(Boolean)).filter((t) => t.length > 1).sort((a, b) => b.length - a.length);
+    const run = [];
+    for (let i = 0; i < kept.length; i++) {
+      const t = terms.find((t) => t.every((key, n) => k(i + n) && normKey(k(i + n).word) === key && (!n || (k(i + n).clipId === k(i).clipId && !k(i + n).cut && !endsSentence(k(i + n - 1).word, k(i + n).word)))));
+      if (t) { t.forEach((_, n) => (run[i + n] = i)); i += t.length - 1; }
+    }
+    const inTerm = (i, j) => run[i] != null && run[i] === run[j];
+    const bond = (i, j) => inTerm(i, j) || !!L.unbreakable && (((k(i).tier ?? 0) > 0 && (k(j).tier ?? 0) > 0) || (/^[A-ZÁÉÍÓÚÑ]/.test(out[i].text) && /^[A-ZÁÉÍÓÚÑ0-9]/.test(k(j).word.replace(/^[.,;:¿¡]+/, ''))));
     const sentence = (i) => endsSentence(k(i).word, k(i + 1)?.word);
     const boundary = (i) => k(i + 1).clipId !== k(i).clipId || k(i + 1).cut; // a clip change or a parenthesis
     const joinable = (a, b, gap) => !boundary(a[1]) && !sentence(a[1]) && k(b[0]).startMs - k(a[1]).endMs < gap;
@@ -131,6 +142,8 @@ test('pager invariants hold across 2000 random streams and packs', () => {
       // a hard cap (maxChars / maxMs) is passed only by one word, or by a bond that must not split
       if (!withinCaps(a, b)) assert.ok(a === b || out.slice(a, b).some((_, i) => bond(a + i, a + i + 1)), `${label}: page ${n} passes a hard cap`);
       if (b === out.length - 1) return;
+      // a glossary term is never split, in any pack
+      assert.ok(!inTerm(b, b + 1), `${label}: glossary term split between "${out[b].text}" | "${out[b + 1].text}"`);
       // a bond is never split, except by a sentence end, a clip or a parenthesis (or a word-at-a-time pack)
       if (L.maxWords > 1 && !sentence(b) && !boundary(b)) assert.ok(!bond(b, b + 1), `${label}: bond split between "${out[b].text}" | "${out[b + 1].text}"`);
       // a page ends on a function word only where it must: its trailing function words could not open the

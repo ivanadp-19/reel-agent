@@ -12,6 +12,7 @@
 // across a sentence end, a clip or a parenthesis, and never split a bond.
 
 import {mergeCaptions, type Caption, type CaptionWord} from './captions.ts';
+import {normKey, type GlossaryEntry} from './guion.ts';
 import type {Clip} from './timeline.ts';
 import type {Preset} from './captionPresets.ts';
 
@@ -99,12 +100,14 @@ export const isGlue = (text: string, except?: string[]) => { const t = noComma(t
 export const DEFAULT_TOP = 58;
 
 // one kept transcript word: word = as said (trimmed), text = as shown. cut: a page starts here (a
-// parenthesis was skipped before it). Pages are runs of these by position, never looked up by word id
-type Item = {w: TimelineWord; word: string; text: string; cut: boolean};
+// parenthesis was skipped before it). term: the index of the glossary term run it belongs to.
+// Pages are runs of these by position, never looked up by word id
+type Item = {w: TimelineWord; word: string; text: string; cut: boolean; term?: number};
 type Page = Item[];
 
-// every page at the pack's top (layout.topPct, else DEFAULT_TOP); src/faces.ts placeCaptions then moves them off the faces
-export function pageWords(words: TimelineWord[], preset: Preset): Caption[] {
+// every page at the pack's top (layout.topPct, else DEFAULT_TOP); src/faces.ts placeCaptions then moves them off the faces.
+// glossary: the brand kit's (the captions job's, after applyGlossary respelled the words) — its multi-word terms stay on one page
+export function pageWords(words: TimelineWord[], preset: Preset, glossary: GlossaryEntry[] = []): Caption[] {
   const {maxWords, maxCharsLine, unbreakable, topPct, keepCommas, figurePages, glueExcept, silenceMs = GAP_MS, maxChars = Infinity, maxMs = Infinity, minMs = 0, minWords} = preset.layout;
   const glue = (t: string) => isGlue(t, glueExcept);
 
@@ -123,11 +126,28 @@ export function pageWords(words: TimelineWord[], preset: Preset): Caption[] {
     cut = false;
   }
 
+  // The kit's multi-word glossary terms ('Pet Park', 'Star Médica') are one unit in EVERY pack: a page never
+  // breaks inside one (the render judge's split-name rule). Read on the words as applyGlossary left them,
+  // longest first; inside one clip, never across a parenthesis or a sentence end (which always ends the
+  // page) — a guion sentence start inside a name is an alignment slip: the name wins, as a bond does.
+  // Not the pack's name bonds: vibem still pages MONTEALBÁN | 326 (a term and a figure, not one term)
+  const terms = glossary.map((g) => g.term.split(/\s+/).map(normKey).filter(Boolean)).filter((t) => t.length > 1).sort((a, b) => b.length - a.length);
+  for (let i = 0; i < items.length; i++) {
+    const t = terms.find((t) => t.every((k, n) => {
+      const x = items[i + n];
+      return x && normKey(x.word) === k && (!n || (x.w.clipId === items[i].w.clipId && !x.cut && !endsSentence(items[i + n - 1].word, x.word)));
+    }));
+    if (t) { for (let n = 0; n < t.length; n++) items[i + n].term = i; i += t.length - 1; }
+  }
+
   // layout.unbreakable: a highlight span or a proper name + number ('Montealbán 326') is ONE unit —
   // never let a page boundary fall inside it (3 lines or a smaller size instead). No pack bonds
   // since César's v11 (MONTEALBÁN | 326 are two pages there: v11 video wins, user decision 2026-09-26)
+  const inTerm = (a: Item, b?: Item) => a.term != null && a.term === b?.term;
   const bonded = (a: Item, b?: Item) => {
-    if (!unbreakable || !b) return false;
+    if (!b) return false;
+    if (inTerm(a, b)) return true;
+    if (!unbreakable) return false;
     if ((a.w.tier ?? 0) > 0 && (b.w.tier ?? 0) > 0) return true;
     const bn = b.word.replace(/^[.,;:¿¡]+/, '');
     return /^[A-ZÁÉÍÓÚÑ]/.test(a.text) && (/^[A-ZÁÉÍÓÚÑ]/.test(bn) || /^\d/.test(bn));
@@ -164,9 +184,11 @@ export function pageWords(words: TimelineWord[], preset: Preset): Caption[] {
   items.forEach((it, i) => {
     if (cur.length && (it.w.clipId !== cur[0].w.clipId || it.cut)) flush(); // never span two clips or a parenthesis
     if (cur.length && it.w.sentenceStart && !bonded(cur[cur.length - 1], it)) flush(); // guion sentence boundary
+    // ponytail: a bond (a glossary term too) is checked against the caps a word at a time, so a page may pass them by the
+    // rest of its term — measure the whole term at its first word if a capped pack ever shows that
     if (capped && cur.length && !bonded(cur[cur.length - 1], it) && !withinLimits([...cur, it])) forcedBreak(it);
     cur.push(it);
-    if (maxWords <= 1) { flush(); return; } // word-at-a-time preset
+    if (maxWords <= 1) { if (!inTerm(it, items[i + 1])) flush(); return; } // word-at-a-time preset: a glossary term is one page
 
     const next = items[i + 1];
     const sameClipNext = !!next && next.w.clipId === it.w.clipId && !next.cut;
@@ -182,18 +204,21 @@ export function pageWords(words: TimelineWord[], preset: Preset): Caption[] {
     // v11 (keepCommas): a comma is text, not a page break; with caps a clause end is only where a forced
     // break goes back to (Fats403)
     else if (!glue(it.text) && !bonded(it, next) && (full || gapAfter || (!keepCommas && !capped && CLAUSE_END.test(it.word)))) flush();
-    else if (full && glue(it.text)) {
-      // full on a function word: break BEFORE the trailing function words so
-      // they open the next page ("They all lied to us / about this one thing")
+    else if (full && (glue(it.text) || bonded(it, next))) {
+      // full on a function word, or inside a glossary term: break BEFORE the trailing function words and
+      // the term so they open the next page ("They all lied to us / about this one thing", "Aquí está / el
+      // Pet Park" — where the judge's split-name fix used to move the break by hand)
       let k = cur.length;
-      while (k > 0 && glue(cur[k - 1].text)) k--;
+      while (k > 0 && (inTerm(cur[k - 1], cur[k] ?? next) || (cur[k - 1].term == null && glue(cur[k - 1].text)))) k--; // a finished term stays
       // ...but never carry-split inside a bonded unit: a highlight span like
       // "salón para sesenta" has glue in the middle and must stay one page
       while (k > 0 && k < cur.length && bonded(cur[k - 1], cur[k])) k++;
+      if (k === 1 && inTerm(it, next)) k = cur.length; // one word left behind: the page takes the term (a word over beats an orphan)
       if (k === cur.length) {
         // the whole page is one bonded unit: let it grow past maxWords (3 lines
-        // or a smaller size beat splitting it)
-      } else if (k > 0) breakAt(k);
+        // or a smaller size beat splitting it) — unless a term just ended on its function word ('Hotel de la')
+        if (it.term != null && !bonded(it, next)) flush();
+      } else if (k > 0) breakAt(k); // a term longer than the page opens its own page and grows past maxWords
       else if (cur.length >= maxWords + 2 && !bonded(it, next)) flush();
     }
   });

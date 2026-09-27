@@ -299,11 +299,16 @@ export function splitNameFindings(pages, glossary = [], style, rawOf = rawText, 
     // tiers (projectTiers → captions job) BEFORE it pages: highlight the whole name, re-page.
     // a pack that does not bond names: move the page break (edit_caption starts_at_wid — every word keeps its id and
     // time) before the name, or after it when the name opens page A; a name that fills both pages escalates
+    // a glossary term: the pager keeps the kit's multi-word terms on one page in every pack (src/paging.ts), so what
+    // is left is a hand edit, pages made before, or a term the project's kit lacks (the profile's) — move the break
+    const term = why.startsWith('término');
     const head = A.words.indexOf(span[0]) > 0 ? span[0] : B.words[span.filter((w) => B.words.includes(w)).length];
-    const fix = preset.layout.unbreakable
+    const kitNote = 'the pager keeps the kit\'s multi-word glossary terms on one page: a hand edit split this one, or the term is not in the project\'s kit (set_brand glossary, then set_caption_style re-pages)';
+    const fix = preset.layout.unbreakable && !term
       ? [{tool: 'annotate_captions', note: 'the whole name as one highlighted span (names are key words anyway)', args: {items: span.map((w) => ({wid: w.wid, tier: Math.max(1, w.tier ?? 0)}))}},
          {tool: 'set_caption_style', note: 're-pages with the shared pager, which now sees those tiers; keeps word ids, emoji, real timing and hand-made pages', args: {style: preset.id}}]
-      : head?.wid ? [{tool: 'edit_caption', note: `pack "${preset.id}" does not bond names: move the page break so the name is on one page (every word keeps its id and the time it is said)`, args: {caption_id: B.id, starts_at_wid: head.wid}}]
+      : head?.wid ? [{tool: 'edit_caption', note: `${term ? kitNote : `pack "${preset.id}" does not bond names`}: move the page break so the ${term ? 'term' : 'name'} is on one page (every word keeps its id and the time it is said)`, args: {caption_id: B.id, starts_at_wid: head.wid}}]
+      : term ? [{tool: 'set_caption_style', note: `the term fills both pages — ${kitNote}: re-page with the same pack`, args: {style: preset.id}}]
       : [{tool: 'escalate', note: `pack "${preset.id}" does not bond names across pages and the name fills both pages; last resort: edit_caption both pages (re-times them evenly, drops their word ids — re-judge sync)`, args: {}}];
     out.push(F('split-name', 'major', kind, A.startMs / 1000, B.endMs / 1000, `${why} entre páginas: "${A.words.map((w) => w.text).join(' ')}" | "${B.words.map((w) => w.text).join(' ')}"${kind === 'candidate' ? ' — confirmar en el frame del cambio de página' : ''}`, {pages: [A.id, B.id], words: span.map((w) => w.wid), lookAt: [r2(A.endMs / 1000 - 0.1), r2(B.startMs / 1000 + 0.1)]}, fix));
   }
