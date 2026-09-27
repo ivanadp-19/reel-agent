@@ -14,10 +14,11 @@ import {DEFAULT_TOP} from '../src/paging';
 import {applyWordCuts, planWordCuts, type CutRange, type TClip} from '../src/cuts';
 import type {AudioOptions} from '../src/audio';
 import type {Identity} from '../src/validate';
+import type {Scopable} from '../src/stages';
 
 export type Meta = {durationInFrames: number; fps: number; width: number; height: number};
 // what a project file holds (besides name/timestamps)
-export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null};
+export type ProjectData = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; mattes: Matte[]; brollAssets: BrollAsset[]; accentColor: string; lang: Lang; captionStyle: PresetId; offMic: OffMic; hiddenWids: string[]; brand: Brand | null; grade: ProjectGrade | null; audio: AudioOptions; plan: string; captionsOff: boolean; guion: string; identity: Identity | null; scope: Scopable[] | null};
 export type Lang = 'auto' | 'es' | 'en';
 // a quieter second voice away from the mic (a director feeding lines): flag it in the transcript, cut it, or ignore it
 export type OffMic = 'mark' | 'cut' | 'off';
@@ -53,6 +54,7 @@ type EditorState = {
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
   identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
+  scope?: Scopable[] | null; // the stages the job asks for (set_scope / Settings → Stages); null or undefined = all
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
@@ -129,6 +131,7 @@ type EditorState = {
   setPlan: (plan: string) => void;
   setGuion: (guion: string) => void;
   setIdentity: (identity?: Identity | null) => void;
+  setScope: (scope: Scopable[] | null) => void;
   addMattes: (mattes: Matte[]) => void;
 
   pushHistory: () => void;
@@ -208,6 +211,7 @@ export const useEditor = create<EditorState>((set) => ({
         captionsOff: p.captionsOff ?? false,
         guion: p.guion ?? '',
         identity: p.identity,
+        scope: p.scope,
         past: [],
         future: [],
       };
@@ -526,6 +530,7 @@ export const useEditor = create<EditorState>((set) => ({
   setCaptionsOff: (captionsOff) => set({captionsOff}),
   setPlan: (plan) => set({plan}),
   setGuion: (guion) => set({guion}),
+  setScope: (scope) => set({scope}),
   setIdentity: (identity) => set((s) => ({identity, meta: withMeta(s.meta && {...s.meta, fps: deliveryFps({identity})}, s.clips)})),
   addMattes: (mattes) => set((s) => ({mattes: [...s.mattes, ...mattes]})),
 

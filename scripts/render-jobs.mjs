@@ -16,8 +16,10 @@
 //                    writes never overwrite it)
 //
 // JOB: {id, seq, status, stage, label, progress, frames?, etaSec?, draft, projectId,
-//       user? (who submitted it with a per-user token), identity? (a final of a project with one: its delivered pair, scripts/render-runner.mjs), propsHash?, expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
-//       owner? (backend pid), pid? (render process pid), attempts, result?, error?}
+//       user? (who submitted it with a per-user token), identity? (a final of a project with one: its delivered pair, scripts/render-runner.mjs), propsHash?,
+//       stageHash? (the saved project it renders: scripts/stages.mjs sliceHash of entregables — which revision the delivery's gate may count it for),
+//       expectSec, clean, createdAt, startedAt?, finishedAt?, heartbeatAt?, progressAt?,
+//       owner? (backend pid), pid? (render process pid), attempts, result?, error?, errorCode? (OOM | STALLED | DIED | INTERRUPTED: the machine's, not the reel's)}
 //   status   queued → running → done | failed | cancelled
 //   progress 0–100 over the whole job (stage weights in scripts/render-runner.mjs)
 //   mode     full | layers (scripts/render-runner.mjs; a reel layers cannot carry runs full, result.fallback says why)
@@ -313,14 +315,14 @@ export function createRenderJobs({
     return null;
   }
 
-  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null, identity = null} = {}) {
+  function submit({props, draft = false, projectId = null, expectSec = null, clean = 'off', mode = 'full', label, user = null, identity = null, stageHash = null} = {}) {
     if (typeof props !== 'string') props = JSON.stringify(props ?? {});
     const t = now();
     const id = newJobId(t);
     // seq orders the queue: time-based so the order holds across backends and restarts
     const seq = Math.max(t * 1000, seqLast + 1); seqLast = seq;
     fs.writeFileSync(fileOf(dir, id, '.props.json'), props);
-    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, ...(user ? {user} : {}), ...(identity ? {identity} : {}), propsHash: propsHash(props, mode), expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
+    const job = save({id, seq, status: 'queued', stage: 'queued', label: label ?? 'Queued', progress: 0, draft: !!draft, projectId: projectId ?? null, ...(user ? {user} : {}), ...(identity ? {identity} : {}), ...(stageHash ? {stageHash} : {}), propsHash: propsHash(props, mode), expectSec, clean, mode: mode === 'layers' ? 'layers' : 'full', createdAt: iso(), attempts: 0});
     pump();
     const jobs = listJobs(dir);
     return {job: readJob(dir, id) ?? job, ahead: aheadOf(jobs, id)};
@@ -373,7 +375,9 @@ export function createRenderJobs({
         const cur = readJob(dir, job.id);
         if (cur && ACTIVE.has(cur.status)) {
           const oom = !cancelled && e?.code === 'OOM';
-          finish(job.id, {status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', label: cancelled ? 'Cancelled' : oom ? 'Failed — out of memory' : 'Failed', error: String(cancelled ? why.detail ?? '' : e?.message ?? e).slice(0, 400) || undefined, ...(oom ? {errorCode: 'OOM'} : {}), ...(e?.result ? {result: e.result} : {})});
+          // the machine's failures, not the reel's (scripts/stages.mjs: infra, outside the 3-reds escalation)
+          const errorCode = oom ? 'OOM' : !cancelled && ['STALLED', 'DIED'].includes(why?.code) ? why.code : undefined;
+          finish(job.id, {status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', label: cancelled ? 'Cancelled' : oom ? 'Failed — out of memory' : 'Failed', error: String(cancelled ? why.detail ?? '' : e?.message ?? e).slice(0, 400) || undefined, ...(errorCode ? {errorCode} : {}), ...(e?.result ? {result: e.result} : {})});
         }
         log(`render ${job.id} ${cancelled ? 'cancelled' : `failed: ${String(why?.message ?? why).slice(0, 200)}`}`);
       })
@@ -411,7 +415,7 @@ export function createRenderJobs({
         save({...j, status: 'queued', stage: 'queued', label: 'Queued (restarted after the backend stopped)', progress: 0, frames: undefined, etaSec: undefined, pid: null, owner: undefined, requeuedAt: iso()});
         log(`render ${j.id} re-queued: its backend (pid ${holder}) stopped mid-render`);
       } else {
-        end(j.id, {status: 'failed', stage: 'failed', label: 'Failed', error: `interrupted: the backend (pid ${holder}) stopped during the render${hasProps ? ` — ${j.attempts} attempts` : ''}`});
+        end(j.id, {status: 'failed', stage: 'failed', label: 'Failed', errorCode: 'INTERRUPTED', error: `interrupted: the backend (pid ${holder}) stopped during the render${hasProps ? ` — ${j.attempts} attempts` : ''}`});
         log(`render ${j.id} failed: interrupted`);
       }
     }

@@ -1,5 +1,6 @@
 // Editor backend (port 3333):
-//   projects   — multi-project library (list/get/save/delete)
+//   projects   — multi-project library (list/get/save/delete); a save reopens the stages it reaches, and
+//                the stages' records and checks live outside the project JSON (scripts/stages.mjs)
 //   add-clip   — upload video → remux/encode + thumbnail → a clip (browser uploads as a job, server/ingest.mjs)
 //   music      — upload an audio track
 //   transcribe — per-source WhisperX, words per clip for the agent (job)
@@ -45,7 +46,8 @@ import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
-import {identityWrite, pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
+import {pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
+import {checkStage, inRow, nextRev, readProject, recordProof, saveProject, sliceHash, stageView, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
 import {createGradeScans, readScan, scanSource} from '../scripts/grade-scan.mjs';
@@ -421,23 +423,48 @@ async function handle(req, res) {
   // ---- the caption pages alone, with a revision (server/captions-revision.mjs; `reel captions get | set`) ----
   //   GET /api/projects/<id>/captions                          → {project, revision, captionsOff, captionStyle, captions, updatedAt}
   //   PUT /api/projects/<id>/captions {captions, expectedRevision?} → {changed, revision, updatedAt}; 409 revision_mismatch
-  // Read, check and write in one synchronous step: no other request of this backend runs in between.
+  // Read, check and write in one synchronous step inside the project's row (scripts/stages.mjs): the pages it
+  // changes reopen their stages like any other project write.
   const cap = url.pathname.match(/^\/api\/projects\/([\w-]+)\/captions$/);
   if (cap) {
     const file = path.join(PROJECTS_DIR, `${cap[1]}.json`);
     if (req.method !== 'GET' && req.method !== 'PUT') return json(res, 405, {error: 'method not allowed'});
     const incoming = req.method === 'PUT' ? await body(req) : null;
     if (!fs.existsSync(file)) return json(res, 404, {error: `project ${cap[1]} not found`, code: 'not_found'});
-    const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (req.method === 'GET') return json(res, 200, {project: cap[1], revision: captionsRevision(prev.captions), captionsOff: !!prev.captionsOff, captionStyle: prev.captionStyle ?? null, captions: prev.captions ?? [], updatedAt: prev.updatedAt ?? null});
+    if (req.method === 'GET') {
+      const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return json(res, 200, {project: cap[1], revision: captionsRevision(prev.captions), captionsOff: !!prev.captionsOff, captionStyle: prev.captionStyle ?? null, captions: prev.captions ?? [], updatedAt: prev.updatedAt ?? null});
+    }
     let b;
     try { b = JSON.parse(incoming || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
-    const r = replaceCaptions(prev, b);
-    if (r.next) {
-      fs.writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(r.next, null, 2));
-      fs.renameSync(`${file}.${process.pid}.tmp`, file);
-    }
+    const r = await inRow(cap[1], () => {
+      const prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const out = replaceCaptions(prev, b, nextRev(prev));
+      if (out.next) writeProject(PUBLIC, cap[1], prev, out.next, g.user ?? g.via);
+      return out;
+    });
     return json(res, r.status, r.body);
+  }
+  // ---- the stages of a project (scripts/stages.mjs, src/stages.ts; advisory) — records outside the project JSON ----
+  //   GET  /api/projects/<id>/stages                       → {project, rev, scope, runs, mode, stages: [{stage, status, findings, waitingOn, …}]}
+  //   POST /api/projects/<id>/stages/<stage>/check         → the gate run on the project as saved now, bound to its revision
+  //   POST /api/projects/<id>/stages/<stage>/proof {kind, rev} → a proof of that revision (the MCP's caption_proof, motion_proof)
+  const st = url.pathname.match(/^\/api\/projects\/([\w-]+)\/stages(?:\/([a-z]+)\/(check|proof))?$/);
+  if (st) {
+    const [, id, stage, action] = st;
+    const actor = g.user ?? g.via;
+    if (req.method === 'GET' && !stage) {
+      const p = readProject(PUBLIC, id);
+      return p ? json(res, 200, stageView(PUBLIC, id, p)) : json(res, 404, {error: `project ${id} not found`, code: 'not_found'});
+    }
+    if (req.method !== 'POST' || !stage) return json(res, 405, {error: 'method not allowed'});
+    if (action === 'check') {
+      const [status, out] = await checkStage(PUBLIC, id, stage, {actor, env: {...readEnvFile(), ...process.env}});
+      return json(res, status, out);
+    }
+    let b; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
+    const [status, out] = await recordProof(PUBLIC, id, stage, b, actor);
+    return json(res, status, out);
   }
   if (url.pathname.startsWith('/api/projects/')) {
     const id = url.pathname.split('/').pop();
@@ -454,27 +481,12 @@ async function handle(req, res) {
       } catch {
         return json(res, 400, {error: 'bad json'});
       }
-      let prev = {};
-      try {
-        prev = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
-      } catch {
-        /* corrupt previous file — overwrite */
-      }
-      // compare-and-swap: a writer that read an older version (editor vs agent)
-      // is rejected instead of silently overwriting the other's work
-      if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return json(res, 409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt});
-      // a new or changed identity must be valid and not another project's client + script + variant
-      // (mcp/checks.mjs); checked and written with no await between, so two saves cannot both take one
-      const badIdentity = identityWrite(PROJECTS_DIR, id, prev, incoming);
-      if (badIdentity) return json(res, 400, {error: badIdentity, code: 'bad_identity'});
-      const now = new Date().toISOString();
-      // merge: a writer that does not know a field (an older editor, a new
-      // project setting) must not wipe it; clearing is done with null / []
-      const saved = {...prev, ...incoming, createdAt: prev.createdAt || now, updatedAt: now};
-      // write + rename: the MCP server and the editor read this file while it is saved — never half of it
-      fs.writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(saved, null, 2));
-      fs.renameSync(`${file}.${process.pid}.tmp`, file);
-      return json(res, 200, {ok: true, updatedAt: now});
+      // the one project write (scripts/stages.mjs saveProject): compare-and-swap on updatedAt, the identity
+      // checked and written with no await between (two saves cannot both take one), the server's own fields
+      // (stages, approval, notes, stagesMode) dropped, merge, write + rename, and the stages it reopens stale —
+      // inside the project's row
+      const [status, out] = await inRow(id, () => saveProject(PUBLIC, id, incoming, {actor: g.user ?? g.via}));
+      return json(res, status, out);
     }
     if (req.method === 'DELETE') {
       fs.rmSync(file, {force: true});
@@ -900,7 +912,9 @@ async function handle(req, res) {
     if (admit?.reuse) return json(res, 200, {jobId: admit.reuse.id, status: admit.reuse.status, ahead: renderJobs.ahead(admit.reuse.id), reused: true, plan});
     if (admit) return json(res, admit.status, admit);
     // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
-    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null, identity});
+    // which revision of the saved project it renders: the delivery's gate counts it only for that one (scripts/stages.mjs)
+    const stageHash = projectId && !draft ? sliceHash(savedProject(PROJECTS_DIR, projectId), 'entregables') : null;
+    const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null, identity, stageHash});
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {}), plan});
   }

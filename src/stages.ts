@@ -1,6 +1,7 @@
 // The stages of a reel (docs/designs/cesar-etapas-bandeja.md §3, CEO-13): which stage owns each project
-// field and each MCP tool, what an edit leaves stale, and the rules each stage's gate reads. Pure data and
-// functions — nothing here is enforced yet: the backend and the MCP wire it in (plan phases 10–11).
+// field and each MCP tool, what an edit leaves stale, the rules each stage's gate reads and what the job asks
+// for (scope). Pure data and functions: the backend keeps each stage's state with them (scripts/stages.mjs,
+// advisory — plan phase 10); refusing tools comes with phase 11.
 //
 //   ingest → corte → guion (the client's script against the ASR, #35: only captions and script coverage
 //                    depend on it, so set_guion never reopens the cut, the color or the audio)
@@ -27,6 +28,33 @@ export const DEPS: Record<Stage, Stage[]> = {
 };
 const dependsOn = (d: Stage, s: Stage): boolean => DEPS[d].some((x) => x === s || dependsOn(x, s));
 export const dependents = (s: Stage): Stage[] => STAGES.filter((d) => dependsOn(d, s));
+export const upstream = (s: Stage): Stage[] => STAGES.filter((d) => dependsOn(s, d));
+
+// What the job asks for (Felipe, 2026-09-26: the tool stays open — "solo captions" is a whole job):
+// project.scope lists the stages the brief requests. ingest and entregables always run (the footage, the
+// delivery) and guion goes with captions (it feeds only them). No scope — every project before it — is all.
+// A stage outside it is 'omitida': never red, never a blocking dependency, its gate does not run, and what
+// the checks or the render judge find about it is advisory (stageFindings, scopeFindings).
+export const SCOPABLE = ['corte', 'color', 'audio', 'captions', 'broll'] as const;
+export type Scopable = (typeof SCOPABLE)[number];
+const scopable = (s: unknown): s is Scopable => (SCOPABLE as readonly unknown[]).includes(s);
+// set_scope and the editor's Stages section: the stages asked → what project.scope stores (null = all) or why not
+export function scopeInput(asked: unknown): {scope: Scopable[] | null; error?: string} {
+  if (!Array.isArray(asked) || !asked.length) return {scope: null, error: `scope: a list of stages (${SCOPABLE.join(', ')}), at least one`};
+  const bad = asked.filter((s) => !scopable(s));
+  if (bad.length) return {scope: null, error: `scope: ${bad.join(', ')} is not a stage a job asks for (${SCOPABLE.join(', ')}; ingest and the delivery always run)`};
+  const scope = SCOPABLE.filter((s) => asked.includes(s));
+  return {scope: scope.length === SCOPABLE.length ? null : scope};
+}
+// the stages that run for a project's scope, in STAGES order (a hand-edited bad entry is ignored)
+export function inScope(scope: unknown): Stage[] {
+  const asked: unknown[] = Array.isArray(scope) ? scope.filter(scopable) : [];
+  if (!asked.length) return [...STAGES];
+  return STAGES.filter((s) => s === 'ingest' || s === 'entregables' || asked.includes(s) || (s === 'guion' && asked.includes('captions')));
+}
+// the stages upstream of `stage` that hold it back: in scope, and red or stale (records: stage → {status})
+export const waitingOn = (records: Partial<Record<Stage, {status?: string}>>, scope: unknown, stage: Stage): Stage[] =>
+  upstream(stage).filter((d) => inScope(scope).includes(d) && ['rojo', 'stale'].includes(records[d]?.status ?? ''));
 
 // the stage(s) a changed project field reopens; [] = context, nothing to re-check. A field not listed
 // here reopens everything after ingest and is reported (invalidate → unmapped). `clips` goes by what
@@ -50,6 +78,7 @@ export const FIELD_STAGE: Record<string, Stage[]> = {
   accentColor: ['captions', 'broll'],
   brand: ['captions', 'broll', 'color'],
   name: [], plan: [], planMode: [], planModeLog: [], planApproved: [], planReviews: [], createdAt: [], updatedAt: [],
+  scope: [], // what the job asks for changes no content: a stage it brings back in shows the state it had
 };
 // inside a clip (matched by id). A source the project did not have is ingest; a clip added, removed or moved is corte
 export const CLIP_FIELD_STAGE: Record<string, Stage[]> = {
@@ -84,6 +113,7 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
   search_catalog: [], search_music: [], search_asset: [], list_assets: [], generate_asset: [], timing_report: [], validate: [], frame_at: [], qc: [],
   render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [],
+  set_scope: [], check_stage: [], stage_status: [], // what the job asks for, and the gates themselves
 };
 
 // the defaults a writer fills into a project that lacks them (mcp/checks.mjs withDefaults / newProject; a test
@@ -124,6 +154,22 @@ export function invalidate(prev: Fields | null | undefined, next: Fields | null 
   return {stale: STAGES.filter((s) => stale.has(s)), unmapped: [...new Set(unmapped)]};
 }
 
+// What a stage reads of a project: every field whose edit reopens it (the rows above; an unmapped field reopens
+// everything after ingest), defaults and "nothing" left out, keys sorted. A proof or a render of the stage is of
+// this slice — its hash (scripts/stages.mjs) — so an edit elsewhere leaves it valid and one here does not.
+// ponytail: the clips' order counts for ingest too; no ingest proof exists
+export function stageSlice(p: Fields | null | undefined, stage: Stage): Fields {
+  const reads = (owners: Stage[] | null) => (owners ?? dependents('ingest')).some((o) => o === stage || dependsOn(stage, o));
+  const out: Fields = {};
+  for (const k of Object.keys(p ?? {}).sort()) {
+    const v = p![k];
+    if (nothing(v, row(DEFAULTS, k) ?? undefined)) continue;
+    if (k === 'clips' && Array.isArray(v)) out.clips = v.map((c: Fields) => Object.fromEntries(Object.keys(c).sort().filter((f) => !nothing(c[f]) && reads(row(CLIP_FIELD_STAGE, f))).map((f) => [f, c[f]])));
+    else if (reads(row(FIELD_STAGE, k))) out[k] = v;
+  }
+  return JSON.parse(canon(out));
+}
+
 // The rules each stage's gate reads, by the code of their findings: src/validate.ts (validateProject,
 // transcriptIssues), the judge's rules on the words as heard (mcp/checks.mjs stageChecks) and the ones made
 // here. entregables reads the judge's findings on the final render. A code in no list lands in entregables.
@@ -145,16 +191,53 @@ export const RULES: Record<Stage, string[]> = {
   entregables: [],
 };
 
+// The stage whose work each check of the render judge (.agents/skills/render-judge/judge.mjs) is about, for
+// the ones not in RULES. They are all read on the final render (entregables' gate); this only says which stage
+// a finding belongs to when the job did not ask for it (scopeFindings). test/stages.test.mjs fails when the
+// judge gains a check with no row here or in RULES; the QC gate's other tech-* checks are the delivery's too.
+export const JUDGE_STAGE: Record<string, Stage> = {
+  'read-through': 'corte', 'crew-talk': 'corte', repeat: 'corte', 'repeated-footage': 'corte', 'jump-cut': 'corte', 'flash-cut': 'corte',
+  'source-cut': 'corte', 'hook-dead-start': 'corte', 'audio-silence': 'corte',
+  'grade-coverage': 'color', 'color-jump': 'color', 'color-ref': 'color', 'color-burnt': 'color', 'color-dark': 'color',
+  clipping: 'audio', 'voice-level': 'audio', 'music-vs-voice': 'audio', 'phone-filter': 'audio',
+  sync: 'captions', coverage: 'captions', pagination: 'captions', overflow: 'captions', 'split-name': 'captions', 'accent-size': 'captions',
+  glossary: 'captions', spelling: 'captions', 'reading-speed': 'captions', 'wrong-pack': 'captions',
+  'insert-missing': 'broll', 'broll-fit': 'broll', 'broll-hook': 'broll', 'broll-length': 'broll', 'claim-image': 'broll', black: 'broll',
+  static: 'broll', 'hook-text': 'broll',
+  'black-flash': 'entregables', 'frame0-black': 'entregables', parity: 'entregables', version: 'entregables', evidence: 'entregables',
+  'tech-fps': 'entregables', 'tech-audio': 'entregables',
+};
+// the stage a finding code belongs to: a gate's rule (RULES; the judge's validate-<code> too), else the judge's row, else the delivery
+export const findingStage = (code: string): Stage => {
+  const c = code.replace(/^validate-/, '');
+  return STAGES.find((s) => RULES[s].includes(c)) ?? row(JUDGE_STAGE, code) ?? 'entregables';
+};
+// The findings (the render judge's {check}, or the gates' {code}) split by the project's scope: one about a
+// stage the job did not ask for is advisory — marked `advisory` (judge.mjs isAdvisory: it never counts toward
+// the verdict nor the version's QC label) and `omitted: <stage>`. No scope: nothing is advisory.
+export function scopeFindings<T extends {check?: string; code?: string}>(findings: T[], scope: unknown): {inScope: T[]; advisory: (T & {advisory: true; omitted: Stage})[]} {
+  const on = inScope(scope);
+  const out = {inScope: [] as T[], advisory: [] as (T & {advisory: true; omitted: Stage})[]};
+  for (const f of findings) {
+    const s = findingStage(f.check ?? f.code ?? '');
+    if (on.includes(s)) out.inScope.push(f);
+    else out.advisory.push({...f, advisory: true, omitted: s});
+  }
+  return out;
+}
+
 export type StageInput = {
-  p: {clips: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean; identity?: unknown};
+  p: {clips: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean; identity?: unknown; scope?: unknown};
   fps: number;
   issues: Issue[]; // validateProject + transcriptIssues + the judge's J rules
   untranscribed?: string[]; // sources with no transcript cache yet
   judged?: Issue[]; // the judge on the final render
 };
-// every finding of the project by stage; a stage with an error is red
-export function stageFindings({p, fps, issues, untranscribed = [], judged = []}: StageInput): Record<Stage, Issue[]> {
-  const out = Object.fromEntries(STAGES.map((s) => [s, [] as Issue[]])) as Record<Stage, Issue[]>;
+export type StageIssue = Issue & {omitted?: Stage};
+// every finding of the project by stage; a stage with an error is red. A stage outside the project's scope has
+// none: what its rules found is handed to the delivery as a warning naming it (advisory, never red)
+export function stageFindings({p, fps, issues, untranscribed = [], judged = []}: StageInput): Record<Stage, StageIssue[]> {
+  const out = Object.fromEntries(STAGES.map((s) => [s, [] as StageIssue[]])) as Record<Stage, StageIssue[]>;
   const id = validateIdentity(p.identity);
   // a client's deliverables: the captions and the text graphics are layers of their own, or the render fails
   const layers = {clips: p.clips, captions: p.captions, graphics: p.graphics, captionStyle: p.captionStyle, captionsOff: p.captionsOff};
@@ -166,5 +249,10 @@ export function stageFindings({p, fps, issues, untranscribed = [], judged = []}:
     ...issues,
   ]) out[STAGES.find((s) => RULES[s].includes(i.code)) ?? 'entregables'].push(i);
   out.entregables.push(...judged);
+  const on = inScope(p.scope);
+  for (const s of STAGES.filter((x) => !on.includes(x))) {
+    out.entregables.push(...out[s].map((i) => ({...i, level: 'warn' as const, omitted: s})));
+    out[s] = [];
+  }
   return out;
 }

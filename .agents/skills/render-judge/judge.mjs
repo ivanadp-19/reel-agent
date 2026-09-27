@@ -59,6 +59,7 @@ const {contentWords} = await import(src('brollMatch.ts'));
 const {CREW_WORDS, isCrewRun} = await import(src('cuts.ts'));
 const {numberOf} = await import(src('guion.ts'));
 const {toDisplay, endsSentence} = await import(src('paging.ts'));
+const {scopeFindings} = await import(src('stages.ts'));
 const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 // frame looks, the structure hash and the step rule: one implementation for the source scan and this judge
 const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
@@ -1554,7 +1555,9 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   evidence.tech = {size: v ? `${v.width}x${v.height}` : null, fps, vcodec: v?.codec_name, pix_fmt: v?.pix_fmt, acodec: a?.codec_name, sampleRate: a?.sample_rate, channels: a?.channels, durationSec: r2(+info?.format?.duration), expectedSec: r2(total)};
 
   const order = (f) => (counts(f) ? 0 : 1e8) + SEVERITIES.indexOf(f.severity) * 1e6 + (f.at ?? -1);
-  const uniq = [...new Map(findings.map((f) => [`${f.id}|${f.msg}`, f])).values()];
+  // a finding about a stage the job did not ask for (project.scope, src/stages.ts) is advisory: reported, never in the verdict
+  const scoped = scopeFindings(findings, p.scope);
+  const uniq = [...new Map([...scoped.inScope, ...scoped.advisory].map((f) => [`${f.id}|${f.msg}`, f])).values()];
   findings.length = 0; findings.push(...uniq);
   findings.sort((x, y) => order(x) - order(y));
   const diff = diffWithPrev(findings, prev);
@@ -1590,7 +1593,7 @@ export function reportText(r) {
   }
   if (advice.length) {
     L.push('', 'AVISOS PARA EL CLIENTE (nunca cuentan para el veredicto, ni confirmados: él decide):');
-    for (const f of advice) { L.push(`  ${line(f)}${f.confirmed ? ' — confirmado en el frame' : ''}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'if he wants it changed')}`); }
+    for (const f of advice) { L.push(`  ${line(f)}${f.confirmed ? ' — confirmado en el frame' : ''}${f.omitted ? ` — fuera del alcance del trabajo (${f.omitted})` : ''}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'if he wants it changed')}`); }
   }
   if (r.skipped.length) L.push('', 'SKIPPED (no evidence — not checked, so not passed):', ...r.skipped.map((s) => `  - ${s}`));
   L.push('', 'EVIDENCE FOR THE JUDGE (snapshot of the project when the render was judged' + (r.projectUpdatedAt ? `, updatedAt ${r.projectUpdatedAt}` : '') + ')');

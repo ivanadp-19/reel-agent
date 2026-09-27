@@ -39,7 +39,7 @@ const META_RELOAD = {durationInFrames: 1, fps: 30, width: 1080, height: 1920};
 export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) => {
   const {
     meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, accentColor, selectedId, currentFrame, past, future,
-    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
+    brollAssets, lang, offMic, setOffMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope, captionStyle, setCaptionStyle, selectedClipId, select, selectClip, setCurrentFrame, setTopPct, setCaptionScale, setBrollScale, setKeyframe, removeKeyframe, setCaptions, setClipOrder, applyAutocut, setLang, setProjectName, pushHistory, undo, redo,
   } = useEditor();
   const playerRef = useRef<PlayerRef>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -83,7 +83,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
     const t = setTimeout(() => {
       fetch('/api/projects/' + projectId, {
         method: 'POST',
-        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, updatedAt: lastSeenUpdate.current ?? undefined}),
+        body: JSON.stringify({name: projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope, updatedAt: lastSeenUpdate.current ?? undefined}),
       })
         .then(async (r) => {
           if (r.status === 409) { notify('Project was changed outside the editor — reloading, your last edit was dropped', 'error'); return; }
@@ -102,7 +102,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
         .catch(() => {});
     }, 600);
     return () => clearTimeout(t);
-  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity]);
+  }, [meta, projectId, projectName, clips, music, captions, brolls, graphics, mattes, brollAssets, accentColor, lang, captionStyle, offMic, hiddenWids, brand, grade, audio, plan, captionsOff, guion, identity, scope]);
 
   // Live reload: the MCP server (Claude) writes the same project file. Poll its
   // updatedAt and pull the new state in when someone else saved it.
