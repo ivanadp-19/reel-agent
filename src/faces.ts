@@ -227,21 +227,25 @@ export const meets = (top: number, h: number, x: [number, number], f: Rect) =>
   f.left - FACE_MARGIN < x[1] && x[0] < f.right + FACE_MARGIN && f.top - Math.max(FACE_MARGIN, HAIR * (f.bottom - f.top)) < top + h && top < f.bottom + FACE_MARGIN;
 
 // ---- the search: one position for one span ----
-type Moment = {ms: number; faces: Rect[]};
-type Group = {idx: number[]; home: {top: number; align: string; slot: number | null}; h: number; w: number; up: number; moments: Moment[]; gfx: {h: number; blocks: {band: Band}[]}[]};
+// a moment of a span: the faces then, and the ink of the page up then (its own lines: a short page is not the tallest)
+type Block = {h: number; w: number; up: number};
+type Moment = {ms: number; faces: Rect[]; b: Block};
+// the span: its pages, the pack's position, the ink of all of them over one top (the largest rise over it + the largest
+// drop under it), every moment, and per page what avoidGraphics measures against the text graphics up with it
+type Group = {idx: number[]; home: {top: number; align: string; slot: number | null}; h: number; w: number; up: number; moments: Moment[]; gfx: {up: number; below: number; blocks: {band: Band}[]}[]};
 type Choice = {top: number; slot?: number; cost: number; dist: number; gfx: boolean};
 const r1 = (t: number) => Math.round(t * 10) / 10;
 function search(g: Group, shift: number, preset: Preset, float: boolean): Choice {
-  const {home, h, up, w} = g;
-  const costOf = (top: number, align: string) => { const x = spanOf(preset, w, align, float); return g.moments.filter((m) => m.faces.some((f) => meets(top - up, h, x, f))).length; };
-  const gfxOk = (top: number) => g.gfx.every((p) => !p.blocks.some((b) => overlap({top, bottom: top + p.h}, b.band)));
+  const {home, h, up} = g;
+  // each moment by the page on screen then; the graphics by each page's ink and avoidGraphics' estimate, whichever is larger
+  const costOf = (top: number, align: string) => g.moments.filter((m) => { const x = spanOf(preset, m.b.w, align, float); return m.faces.some((f) => meets(top - m.b.up, m.b.h, x, f)); }).length;
+  const gfxOk = (top: number) => g.gfx.every((p) => !p.blocks.some((b) => overlap({top: top - p.up, bottom: top + p.below}, b.band)));
   const safe = (top: number) => top >= SAFE.topPct - 1e-9 && top - up + h <= SAFE.bottomPct + 1e-9;
-  // every top where the cost or the graphics can change: the pack's, the reach's ends, a face's edges, a graphic's
-  // edges (avoidGraphics' own 2 % steps and flush) — rounded outwards, so the rounding never eats the margin
-  const zone = g.moments.flatMap((m) => m.faces);
+  // every top where the cost or the graphics can change: the pack's, the reach's ends, a face's edges against the page
+  // up then, a graphic's edges (avoidGraphics' own 2 % steps and flush) — rounded outwards, so rounding never eats the margin
   const edges = [home.top, home.top - shift, home.top + shift, SAFE.topPct, SAFE.bottomPct - h + up,
-    ...zone.flatMap((f) => [Math.ceil((f.bottom + FACE_MARGIN + up) * 10) / 10, Math.floor((f.top - Math.max(FACE_MARGIN, HAIR * (f.bottom - f.top)) - h + up) * 10) / 10]),
-    ...g.gfx.flatMap((p) => p.blocks.flatMap((b) => [b.band.bottom + 2, b.band.bottom, b.band.top - 2 - p.h, b.band.top - p.h]))].map(r1);
+    ...g.moments.flatMap((m) => m.faces.flatMap((f) => [Math.ceil((f.bottom + FACE_MARGIN + m.b.up) * 10) / 10, Math.floor((f.top - Math.max(FACE_MARGIN, HAIR * (f.bottom - f.top)) - m.b.h + m.b.up) * 10) / 10])),
+    ...g.gfx.flatMap((p) => p.blocks.flatMap((b) => [b.band.bottom + 2 + p.up, b.band.bottom + p.up, b.band.top - 2 - p.below, b.band.top - p.below]))].map(r1);
   const tops = [...new Set(edges)];
   const choice = (top: number, align: string, slot?: number): Choice => ({top, ...(slot != null ? {slot} : {}), cost: costOf(top, align), dist: Math.abs(top - home.top), gfx: gfxOk(top)});
   const own = tops.filter((t) => t === home.top || (Math.abs(t - home.top) <= shift + 1e-9 && safe(t))).map((t) => choice(t, home.align, home.slot ?? undefined));
@@ -275,11 +279,13 @@ function plan(p: Proj & Knobs, scans: Scans, fps: number, hold: FaceHold) {
   const groups: Group[] = [...keyed].map(([k, idx]) => {
     const slot = float ? Number(k.split('|')[1]) : null;
     const blocks = idx.map((i) => captionBlock(shown[i], preset, float));
+    const up = Math.max(...blocks.map((b) => b.up)), below = Math.max(...blocks.map((b) => b.h - b.up));
     return {idx, home: slot != null ? {...FLOAT_SLOTS[slot], slot} : {top: preset.layout.topPct ?? DEFAULT_TOP, align: 'center', slot: null},
-      h: Math.max(...blocks.map((b) => b.h)), w: Math.max(...blocks.map((b) => b.w)), up: Math.max(...blocks.map((b) => b.up)),
-      moments: idx.flatMap((i) => timesOf(shown, i, preset.holdMs).map((ms) => ({ms, faces: facesAt(ms)}))),
-      // what avoidGraphics measures a page by (placeBand: characters, never a font) against the text graphics up with it
-      gfx: idx.map((i) => { const c = shown[i], b = placeBand(c, p.captionStyle, i); return {h: b.bottom - b.top, blocks: blockers.filter(({g}) => c.startMs < g.endMs && g.startMs < c.endMs)}; })};
+      h: up + below, w: Math.max(...blocks.map((b) => b.w)), up,
+      moments: idx.flatMap((i, k) => timesOf(shown, i, preset.holdMs).map((ms) => ({ms, faces: facesAt(ms), b: blocks[k]}))),
+      // a page against the text graphics up with it: its ink, and what avoidGraphics measures it by (placeBand:
+      // characters, never a font) — clear of both, the render moves nothing
+      gfx: idx.map((i, k) => { const c = shown[i], b = placeBand(c, p.captionStyle, i); return {up: blocks[k].up, below: Math.max(b.bottom - b.top, blocks[k].h - blocks[k].up), blocks: blockers.filter(({g}) => c.startMs < g.endMs && g.startMs < c.endMs)}; })};
   });
   return {preset, float, shown, groups, facesAt, takes, pinned};
 }
@@ -322,27 +328,42 @@ export function captionHits(pages: Caption[], style: string | undefined, facesAt
 const pct = (x: number) => Math.round(x);
 const s1 = (ms: number) => (ms / 1000).toFixed(1);
 // One warning per take whose captions meet a face at some moment: its clips, its pages, the worst moment, and the fix
-// the placement's own search finds for the spans those pages hold with (the reach that clears them, or that none does)
+// the placement's own search finds for the spans those pages hold with — where the pages are now and for how long they
+// cover, the reach that clears them, or, when nothing in the safe zone does, the reach of the least covered top. And one
+// per span whose pages sit at more than one position (the take changed after they were placed: a sync, a cut, a
+// transition): a span holds one, so they are re-placed
 export function captionFaceIssues(p: Proj & Knobs & {captionsOff?: boolean}, scans: Scans, fps: number): Issue[] {
   if (p.captionsOff || !p.captions?.length) return [];
   const {shownCaptions: pages} = captionLayout(p, fps);
   const {shift, hold} = faceKnobs(p);
-  const {preset, float, groups, facesAt, takes, pinned} = plan(p, scans, fps, hold);
+  const {preset, float, shown, groups, facesAt, takes, pinned} = plan(p, scans, fps, hold);
+  const where = (i: number) => (float ? floatSlot(shown[i], i) : {top: shown[i].topPct, align: 'center'});
+  const span = hold === 'toma' ? 'take' : hold === 'video' ? 'reel' : 'page';
   const byTake = new Map<number, Hit[]>();
   for (const h of captionHits(pages, p.captionStyle, facesAt)) { const k = takeAt(takes, pages[h.i].startMs); byTake.set(k, [...(byTake.get(k) ?? []), h]); }
-  return [...byTake].map(([k, hits]) => {
+  const covering = [...byTake].map(([k, hits]) => {
     const take = takes[k], worst = hits.reduce((a, b) => (b.area > a.area ? b : a)), ids = [...new Set(hits.map((h) => pages[h.i].id))];
     const covered = new Set(hits.map((h) => `${h.i}:${h.ms}`)).size * STEP_MS;
     const byHand = ids.filter((id) => pinned.has(id));
     const mine = groups.filter((g) => g.idx.some((i) => hits.some((h) => h.i === i)));
     const now = mine.map((g) => search(g, shift, preset, float)), all = mine.map((g) => search(g, MAX_SHIFT, preset, float));
-    const need = all.every((c) => c.cost === 0) ? Math.ceil(Math.max(0, ...all.map((c) => c.dist)) - 1e-9) : null;
+    const reachOf = (cs: Choice[]) => Math.ceil(Math.max(0, ...cs.map((c) => c.dist)) - 1e-9);
+    const kept = `kept at ${[...new Set(mine.map((g) => `${where(g.idx[0]).top} %`))].join(' / ')}, covering for ${s1(covered)} s`;
+    const better = all.filter((c, j) => c.cost < now[j].cost);
     const it = (n: number) => `${n > 1 ? 'them' : 'it'}`;
     const reach = byHand.length === ids.length ? `${byHand.join(', ')} ${byHand.length > 1 ? 'were' : 'was'} placed by hand: move ${it(byHand.length)} (edit_caption top_pct) or leave ${it(byHand.length)}`
-      : now.length && now.every((c) => c.cost === 0) ? `the ${hold === 'toma' ? 'take' : hold === 'video' ? 'reel' : 'page'}'s placement is out of date — a clear position is within ±${shift} %: re-place the captions (set_captions face_shift ${shift})`
-      : need != null ? `no position within ±${shift} % clears it (the least covered is kept); ±${need} % would: set_captions face_shift ${need}`
-      : `no position inside the safe zone clears it (the least covered is kept${all.length ? `, at ${all.map((c) => `${c.top} %`).join(' / ')}` : ''})`;
+      : now.length && now.every((c) => c.cost === 0) ? `the ${span}'s placement is out of date — a clear position is within ±${shift} %: re-place the captions (set_captions face_shift ${shift})`
+      : all.every((c) => c.cost === 0) ? `no position within ±${shift} % clears it (${kept}); ±${reachOf(all)} % would: set_captions face_shift ${reachOf(all)}`
+      : `no position inside the safe zone clears it (${kept})${better.length ? `; the least covered, at ${[...new Set(better.map((c) => `${c.top} %`))].join(' / ')} (${better.some((c) => c.cost) ? `${s1(better.reduce((n, c) => n + c.cost, 0) * STEP_MS)} s` : 'clear'}), is ±${reachOf(better)} % away: set_captions face_shift ${reachOf(better)}` : ''}`;
     return {level: 'warn' as const, code: 'caption-face', ref: ids[0],
       msg: `captions ${ids.join(', ')} on the take ${take?.ids.join(' + ') ?? '?'} (${s1(take?.startMs ?? 0)}–${s1(take?.endMs ?? 0)} s) cover a face for ${s1(covered)} s — worst at ${s1(worst.ms)} s: face ${pct(worst.face.top)}–${pct(worst.face.bottom)} %, captions ${pct(worst.top)}–${pct(worst.bottom)} % of the height. Fix: ${reach}; or fewer lines (edit_caption starts_at_wid), a smaller size (edit_caption scale), a B-roll over the face (add_broll), or a position by hand (edit_caption top_pct)`};
   });
+  const mixed = groups.flatMap((g) => {
+    const at = [...new Set(g.idx.map((i) => { const w = where(i); return `${w.top} %${float ? ` ${w.align}` : ''}`; }))];
+    if (at.length < 2) return [];
+    const ids = [...new Set(g.idx.map((i) => shown[i].id))], take = takes[takeAt(takes, shown[g.idx[0]].startMs)];
+    return [{level: 'warn' as const, code: 'caption-face-mixed', ref: ids[0],
+      msg: `captions ${ids.join(', ')} ${span === 'take' ? `on the take ${take?.ids.join(' + ') ?? '?'} (${s1(take?.startMs ?? 0)}–${s1(take?.endMs ?? 0)} s)` : span === 'reel' ? 'of the reel' : ''} sit at ${at.length} positions (${at.join(', ')}) where the ${span} holds one — the ${span}s changed after they were placed (a sync, a cut, a transition): re-place them (set_captions face_shift ${shift})`}];
+  });
+  return [...covering, ...mixed];
 }

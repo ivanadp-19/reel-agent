@@ -283,7 +283,11 @@ test('sync_family (MCP): each sibling saved with its lock; one another agent hol
     assert.match(said, new RegExp(`${ids.held}: error — project ${ids.held} is being edited by another agent \\(another agent`));
     const s = saved(ids.sib);
     assert.deepEqual(onSrc(s.captions, /sft-body/).map((c) => c.words.map((w) => w.text).join(' ')), ['Una cava', 'en Montealbán']);
-    assert.deepEqual(onSrc(s.captions, /hook2|close/), onSrc(before[ids.sib].captions, /hook2|close/));
+    // its own hook and close keep their words; every page is re-placed on the sibling's own takes (src/faces.ts: no faces
+    // scanned here → the pack's top), so a take never holds two positions after a sync
+    const words = (cs) => cs.map(({topPct: _, slot: __, ...c}) => c);
+    assert.deepEqual(words(onSrc(s.captions, /hook2|close/)), words(onSrc(before[ids.sib].captions, /hook2|close/)));
+    assert.deepEqual([...new Set(s.captions.map((c) => c.topPct))], [58]);
     assert.deepEqual(s.clips.find((c) => c.id === 'h2'), before[ids.sib].clips.find((c) => c.id === 'h2'));
     const st = JSON.parse(fs.readFileSync(path.join(STAGE_DIR, `${ids.sib}.json`), 'utf8')).stages;
     assert.deepEqual(STAGES.filter((k) => st[k].status === 'stale'), ['color', 'audio', 'captions', 'broll', 'entregables'], 'volume and mute moved too; the J at the from\'s own hook seam did not');

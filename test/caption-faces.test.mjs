@@ -319,3 +319,62 @@ test('the render judge: caption-face on what was rendered — the faces of the c
     assert.match(f[0].msg, /tapa una cara a los 3(\.\d+)? s: cara 50–62 %.*master limpio/);
   } finally { fs.rmSync(pub, {recursive: true, force: true}); fs.rmSync(cache, {force: true}); }
 });
+
+test('each moment by the page on screen then: a short page is not judged by the tall one, and the span stays in the safe zone', async () => {
+  const {validateProject, captionBlock: block} = await import('../src/validate.ts');
+  const V = presetOf('vibem');
+  const words = (id, a, b, texts) => ({id, src: A, startMs: a * 1000, endMs: b * 1000, topPct: 53, words: texts.map((text, k) => ({wid: `${A}:${id}.${k}`, text, startMs: a * 1000 + k * 200, endMs: a * 1000 + k * 200 + 180}))});
+  const tall = words('c0', 0, 2, ['DEPARTAMENTOS', 'CON', 'ROOF', 'GARDEN', 'Y', 'ALBERCA', 'PRIVADA']), short = words('c1', 3, 4.5, ['ÁREA']);
+  const [ht, hs] = [tall, short].map((c) => block(c, V, false));
+  // a face just under the short page, up only while the short page is: the tall page's band would reach it, the short one's does not
+  const y = (53 - hs.up + hs.h + 2.5) / 100;
+  assert.ok(y * 100 < 53 + ht.h - ht.up, 'inside the tall page\'s band');
+  const s = {[A]: scan(10, (t) => (t >= 3 && t < 5 ? [box(y, y + 0.05)] : []))};
+  const p = project({captionStyle: 'vibem', captions: [tall, short]});
+  assert.deepEqual(tops(placeCaptions(p, s, FPS)), [53, 53]);
+  // pushed down to the bottom of the reach, every page's ink stays over the Reels strip (no safe-bottom)
+  const low = {[A]: scan(10, () => [box(0.4, 0.62)])};
+  const q = {...p, faceShift: 40};
+  const placed = placeCaptions(q, low, FPS);
+  assert.notEqual(placed[0].topPct, 53);
+  assert.deepEqual(validateProject({...q, captions: placed}, FPS).filter((i) => i.code === 'safe-bottom'), []);
+});
+
+test('a graphic is blocked space by the page\'s ink, not only by the render\'s estimate: no overlap-graphic', async () => {
+  const {validateProject, placeBand, captionBand} = await import('../src/validate.ts');
+  const page = {id: 'c0', src: A, startMs: 0, endMs: 2000, topPct: 53, words: ['HOY', 'ESTO', 'ESTÁ', 'EN', 'CONSTRUCCIÓN'].map((text, k) => ({wid: `${A}:c0.${k}`, text, startMs: k * 300, endMs: k * 300 + 250}))};
+  const est = placeBand(page, 'vibem', 0), ink = captionBand(page, 'vibem', 0);
+  assert.ok(ink.bottom > est.bottom + 1, 'the ink runs past the estimate (a line at the wrap width)');
+  // a label just under where the render's estimate ends — inside the ink
+  const label = {id: 'g0', template: 'label-2tone', src: A, startMs: 0, endMs: 3000, yPct: Math.round((est.bottom + 0.5) * 10) / 10, props: {top: 'CAVA', bottom: 'PRIVADA'}};
+  const p = project({captionStyle: 'vibem', captions: [page], graphics: [label]});
+  assert.equal(validateProject(p, FPS).filter((i) => i.code === 'overlap-graphic').length, 1, 'at the pack\'s top: the ink on the label');
+  const placed = placeCaptions(p, {[A]: scan(10, () => [ABOVE])}, FPS);
+  assert.deepEqual(validateProject({...p, captions: placed}, FPS).filter((i) => i.code === 'overlap-graphic'), []);
+});
+
+test('a take holding more than one position (the takes changed after placing) is reported, and a re-place mends it', () => {
+  const s = {[A]: scan(20, () => [box(0.48, 0.555)])}; // clear unpunched, on the band punched in
+  const clips = [clip('a1', A, 0, 4), clip('a2', A, 5, 9, {enter: 'punch'})];
+  const caps = [page('c0', A, 0.5, 2), page('c1', A, 2.2, 3.3), page('c2', A, 5.5, 7), page('c3', A, 7.2, 8.5)];
+  const p = {clips, captions: caps, captionStyle: 'palabra'};
+  const placed = placeCaptions(p, s, FPS);
+  assert.notEqual(placed[0].topPct, placed[2].topPct, 'two takes, two positions');
+  // set_transitions: the punch becomes a plain cut — one take now, at two positions
+  const plain = {...p, clips: [clips[0], {...clips[1], enter: 'cut'}], captions: placed};
+  const [mixed] = captionFaceIssues(plain, s, FPS).filter((i) => i.code === 'caption-face-mixed');
+  assert.match(mixed.msg, /captions c0, c1, c2, c3 on the take a1 \+ a2 .* sit at 2 positions .* re-place them \(set_captions face_shift 15\)/);
+  const again = placeCaptions(plain, s, FPS);
+  assert.equal(new Set(tops(again)).size, 1);
+  assert.deepEqual(captionFaceIssues({...plain, captions: again}, s, FPS).filter((i) => i.code === 'caption-face-mixed'), []);
+  assert.ok(RULES.captions.includes('caption-face-mixed'));
+});
+
+test('the advice says where the page is and the reach of the least covered top when nothing clears', () => {
+  // the face covers the band for good, and a second one the top of the safe zone: nothing in the safe zone is clear
+  const s = {[A]: scan(10, (t) => [box(0.1, 0.35), box(0.45, t < 5 ? 0.9 : 0.62)])};
+  const p = project({faceShift: 5, faceHold: 'video'});
+  const out = placeCaptions(p, s, FPS);
+  const [i] = issues({...p, captions: out}, s);
+  assert.match(i.msg, new RegExp(`no position inside the safe zone clears it \\(kept at ${out[0].topPct} %, covering for [\\d.]+ s\\); the least covered, at [\\d.]+ % \\([\\d.]+ s\\), is ±(\\d+) % away: set_captions face_shift \\1`));
+});

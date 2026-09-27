@@ -919,6 +919,7 @@ server.registerTool('sync_family', {description: 'Copy what sits on the body of 
     const r = syncFamily(p, q, {words: tr, unbacked: (x) => unbackedData(x, tr)});
     if ('error' in r) throw new Error(r.error);
     Object.assign(q, r.project, {sync: {from, replaced: r.replaced}}); // logged on its stages by the backend's write
+    q.captions = placedCaptions(q, PUBLIC); // its own takes hold one position each, clear of its own faces (src/faces.ts)
     return r.said;
   }));
   return text(`${picked.ids.length - failed} of ${picked.ids.length} sibling(s) of ${from} synced:\n${lines.map((l) => `  ${l}`).join('\n')}${failed ? '\nThe ones with an error were left as they are: sync again once they are free.' : ''}`);

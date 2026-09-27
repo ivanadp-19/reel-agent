@@ -100,6 +100,8 @@ export const Inspector: React.FC<{
         const w = await fetch(at, {method: 'POST', body: JSON.stringify({...out.project, sync: {from: projectId, replaced: out.replaced}})});
         if (w.status === 409) throw new Error('it changed meanwhile — sync again');
         if (!w.ok) throw new Error((await w.json().catch(() => ({}))).error ?? `save failed (${w.status})`);
+        // its pages placed on its own takes, clear of its own faces — the backend's placement (src/faces.ts), as the MCP's sync_family
+        await fetch(`${at}/place-captions`, {method: 'POST', body: '{}'}).catch(() => {});
         return out.said;
       });
       notify(`Body of the family ${family}: ${r.ids.length - failed} of ${r.ids.length} synced — ${lines.join('; ')}`, failed ? 'error' : 'ok');
