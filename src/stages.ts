@@ -83,7 +83,7 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   list_projects: [], get_project: [], rename_project: [], set_plan: [], approve_plan: [], request_plan_changes: [], set_plan_mode: [], style_kits: [],
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
   search_catalog: [], search_music: [], search_asset: [], list_assets: [], generate_asset: [], timing_report: [], validate: [], frame_at: [], qc: [],
-  render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], revoke_review_link: [], health: [],
+  render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [],
 };
 
 // the defaults a writer fills into a project that lacks them (mcp/checks.mjs withDefaults / newProject; a test
