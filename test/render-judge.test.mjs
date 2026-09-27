@@ -76,6 +76,10 @@ test('a compound name or name + number split across pages is flagged, unrelated 
   // César v11 splits names across pages (profile namesMaySplit): only a glossary term still counts
   assert.deepEqual(splitNameFindings(pages, [], 'vibem', undefined, true), []);
   assert.deepEqual(splitNameFindings(pages, [{term: 'Playa del Carmen'}], 'vibem', undefined, true).map((x) => x.evidence.pages), [['c0', 'c1']]);
+  // no bonding (vibem): the break moves before the name — or after it, when the name opens the page before
+  assert.deepEqual(splitNameFindings(pages, [{term: 'Playa del Carmen'}], 'vibem', undefined, true)[0].fix.map((x) => [x.tool, x.args]), [['edit_caption', {caption_id: 'c1', starts_at_wid: 'a:1'}]]);
+  const opens = [page('c0', 'a', [CW('a:1', 'Pet', 0, 200)]), page('c1', 'a', [CW('a:2', 'Park,', 220, 500), CW('a:3', 'el', 520, 600)])];
+  assert.deepEqual(splitNameFindings(opens, [{term: 'Pet Park'}], 'vibem', undefined, true)[0].fix[0].args, {caption_id: 'c1', starts_at_wid: 'a:3'});
 });
 
 test('caption sync is one finding per page, with the worst word', () => {
