@@ -322,20 +322,22 @@ server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name)
       const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
       if (why) throw new Error(why);
     }
-    if (args?.project_id && !((name === 'render' || name === 'start_render') && args.draft)) stageGate(name, args.project_id);
+    if (args?.project_id) stageGate(name, args.project_id, args);
     return cb(args, extra);
   };
   return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
 });
 
-// Stages (src/stages.ts toolGate, project.stagesMode — plan phase 11): a tool of stage S called while a stage S depends
-// on is red or stale (in the project's scope: an omitted stage never holds anything back) is logged to
-// public/stages/<id>.jsonl (advisory, the default) or refused with the reason (enforce, logged `refused`); off: nothing.
-// A tool with no TOOL_STAGE row is refused in enforce. Draft renders are for looking, like frame_at: never gated. A log
-// that cannot be written never stops the tool; a project or record that cannot be read refuses nothing.
-function stageGate(name, id) {
+// Stages (src/stages.ts toolGate, project.stagesMode — plan phase 11): a call working in stage S (callStages: by its
+// arguments where the tool spans several) while a stage S depends on is red, stale or being checked (in the project's
+// scope: an omitted stage never holds anything back) — a final render while a stage before it is not green, a set_scope
+// that would drop a red one — is logged to public/stages/<id>.jsonl (advisory, the default) or refused with the reason
+// (enforce, logged `refused`); off: nothing. A tool with no TOOL_STAGE row is refused in enforce. Draft renders are for
+// looking, like frame_at: never gated. A tool that writes several projects (set_music targets) calls it per project. A
+// log that cannot be written never stops the tool; a project or record that cannot be read refuses nothing.
+function stageGate(name, id, args) {
   let r = null;
-  try { r = toolGate(name, load(id), readStages(PUBLIC, id)); } catch {}
+  try { r = toolGate(name, load(id), readStages(PUBLIC, id), args); } catch {}
   if (!r) return;
   const tag = callCtx.getStore()?.tag;
   try { logStage(PUBLIC, id, {event: 'dependency', tool: name, stages: r.stages, deps: r.deps, mode: r.mode, ...(r.refuse ? {refused: true} : {}), actor: tag ? `mcp http session ${tag}` : OWNER}); } catch {}
@@ -675,7 +677,7 @@ server.registerTool('set_identity', {description: 'Name whose reel this is and w
   const r = claimIdentity(PROJECTS, project_id, identityOf(a));
   if (r.error) throw new Error(r.error);
   p.identity = r.identity; await save(project_id, p);
-  const enforce = stagesModeOf(load(project_id)) === 'enforce' ? '\nStages: enforce — a tool whose stage depends on a red or stale stage is refused until that stage is checked (check_stage between the stages; stage_status shows them).' : '';
+  const enforce = stagesModeOf(load(project_id)) === 'enforce' ? '\nStages: enforce — a tool whose stage depends on a red or stale stage is refused until that stage is checked, and a final render until every stage before it is verde (check_stage between the stages; stage_status shows them).' : '';
   return text(`Identity set: ${identityLine(p.identity)}${enforce}`);
 });
 
@@ -862,6 +864,7 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
       const q = load(id);
       const why = planGate(q, 'set_music', planMode(q));
       if (why) throw new Error(why);
+      stageGate('set_music', id, {});
       q.music = music; await save(id, q);
     } finally {
       if (!had) { releaseLock(PROJECTS, id, process.pid, tag || undefined); held.get(tag)?.delete(id); }
@@ -1230,13 +1233,13 @@ const stageProof = async (id, kind, rev) => {
   catch (e) { return `\n(${kind} not recorded for check_stage captions: ${e.message})`; }
 };
 const findingLine = (f) => `  ${f.waived ? 'WAIVED' : f.level === 'error' ? 'ERR ' : 'WARN'} ${f.code}${f.ref ? ` [ref ${f.ref}]` : ''}${f.omitted ? ` (${f.omitted} omitida: advisory)` : ''}: ${f.msg ?? ''}${f.waived ? ` — waived by ${f.waived.by}: ${f.waived.reason}` : ''}`;
-server.registerTool('set_scope', {description: `What the job asks for: the stages of the reel the brief requests — ${SCOPABLE.join(', ')}. ["captions"] = captions only (a finished export, e.g. César's Morantes: no cut, no color, no B-roll), ["corte","captions"] = cut and captions, all five = everything (the default when the brief does not narrow it). ingest and the delivery always run; the script (guion) goes with captions. A stage left out is omitida: its checks do not run, it never blocks another, and what the checks or the render judge find about it is advisory (reported, never counted in the QC label) — and you skip its steps (reel-edit step 0). Set it first, from the brief's own words; never narrow what the brief did not.`, inputSchema: {project_id: pid, stages: z.array(z.enum(SCOPABLE)).min(1).describe('the stages the brief asks for')}}, async ({project_id, stages}) => {
+server.registerTool('set_scope', {description: `What the job asks for: the stages of the reel the brief requests — ${SCOPABLE.join(', ')}. ["captions"] = captions only (a finished export, e.g. César's Morantes: no cut, no color, no B-roll), ["corte","captions"] = cut and captions, all five = everything (the default when the brief does not narrow it). ingest and the delivery always run; the script (guion) goes with captions. A stage left out is omitida: its checks do not run, it never blocks another, and what the checks or the render judge find about it is advisory (reported, never counted in the QC label) — and you skip its steps (reel-edit step 0). Set it first, from the brief's own words; never narrow what the brief did not. In stages mode enforce, leaving out a stage that is red, stale or being checked is refused: it would hide what that stage holds — only Felipe drops one.`, inputSchema: {project_id: pid, stages: z.array(z.enum(SCOPABLE)).min(1).describe('the stages the brief asks for')}}, async ({project_id, stages}) => {
   const r = scopeInput(stages);
   if (r.error) throw new Error(r.error);
   const p = load(project_id); p.scope = r.scope; await save(project_id, p);
   return text(`Scope ${r.scope ? r.scope.join(' + ') : 'everything'}: ${scopeLine(p)}.`);
 });
-server.registerTool('check_stage', {description: `Run the gate of one stage (${STAGES.join(' → ')}) on the project as saved now and record the result: verde (no error; warnings listed), rojo (errors to fix, each with its code), trabajando (its final render is still running, or retrying after a backend restart), pendiente (entregables: no final render of this version yet), stale (the project changed while it ran: its result was discarded — check again), omitida (outside the scope, set_scope: nothing runs). captions needs a caption_proof and a motion_proof of the captions as they are now; entregables reads the newest final render of this version of the project. A red from the machine (out of memory, a stall, a restart) says so and does not count toward the 3 reds in a row that mean: stop and ask Felipe (one per version of the stage: checking the same edit again is no new attempt). Each finding has its code (and ref): fix it, or waive_finding a warning with the reason; a waived finding never makes the stage red. In stages mode enforce (a project with an identity), a tool whose stage depends on a red or stale stage is refused until that stage is checked green: check the stage the refusal names. stage_status shows every stage.`, inputSchema: {project_id: pid, stage: z.enum(STAGES)}}, async ({project_id, stage}) => {
+server.registerTool('check_stage', {description: `Run the gate of one stage (${STAGES.join(' → ')}) on the project as saved now and record the result: verde (no error; warnings listed), rojo (errors to fix, each with its code), trabajando (its final render is still running, or retrying after a backend restart), pendiente (entregables: no final render of this version yet), stale (the project changed while it ran: its result was discarded — check again), omitida (outside the scope, set_scope: nothing runs). captions needs a caption_proof and a motion_proof of the captions as they are now; entregables reads the newest final render of this version of the project. A red from the machine (out of memory, a stall, a restart) says so and does not count toward the 3 reds in a row that mean: stop and ask Felipe (one per version of the stage: checking the same edit again is no new attempt). Each finding has its code (and ref): fix it, or waive_finding a warning with the reason; a waived finding never makes the stage red. In stages mode enforce (a project with an identity), a tool whose stage depends on a red, stale or still-checking stage is refused until that stage is checked green, and a final render until every stage before it is: check the stage the refusal names. stage_status shows every stage.`, inputSchema: {project_id: pid, stage: z.enum(STAGES)}}, async ({project_id, stage}) => {
   projFile(project_id);
   const r = await stagesApi(`${project_id}/stages/${stage}/check`, {method: 'POST', body: '{}'});
   const f = r.findings ?? [];
@@ -1248,7 +1251,7 @@ server.registerTool('stage_status', {description: 'Where each stage of the reel 
   projFile(project_id);
   const v = await stagesApi(`${project_id}/stages`);
   const lines = v.stages.map((s) => `  ${s.stage.padEnd(12)}${s.status}${s.infra ? ' (infra)' : ''}${s.findings?.length ? `  ${s.findings.filter((x) => x.level === 'error' && !x.waived).length} err / ${s.findings.filter((x) => x.level !== 'error' && !x.waived).length} warn${s.findings.some((x) => x.waived) ? ` / ${s.findings.filter((x) => x.waived).length} waived` : ''}` : ''}${s.waitingOn?.length ? `  — waits on ${s.waitingOn.join(', ')}` : ''}${s.escalate ? `  — ${s.reds} reds in a row: stop and ask Felipe` : ''}`);
-  const how = {off: 'nothing logged nor refused', advisory: 'a tool started on a red or stale stage is logged, not refused', enforce: 'a tool whose stage depends on a red or stale stage is refused'}[v.mode];
+  const how = {off: 'nothing logged nor refused', advisory: 'a tool started on a red or stale stage is logged, not refused', enforce: 'a tool whose stage depends on a red, stale or still-checking stage is refused, and a final render until every stage before it is verde'}[v.mode];
   return text([`Stages of ${project_id} (mode ${v.mode}: ${how}; ${v.scope ? `scope ${v.scope.join(' + ')}` : 'scope: everything'}):`, ...lines].join('\n'));
 });
 server.registerTool('waive_finding', {description: 'Waive one finding of a stage\'s last check_stage, with the reason the reel is right as it is: rule = its code, ref = its ref when it has one (check_stage lists both). Warnings (the heuristics: off-mic, read-through, crew-talk, fillers, script-coverage, color-ref, broll-fit, claim-image, wind…) are yours to decide: fix them, or waive them saying why. A blocker (ERR) is not yours: only Felipe waives it, with his login — here the backend refuses it; fix it, or stop and ask him. Recorded in the stage\'s log with who and why; check_stage the stage again to apply it (a waived finding stays listed and never makes the stage red).', inputSchema: {project_id: pid, stage: z.enum(STAGES), rule: z.string().min(1).describe('the finding\'s code, e.g. "off-mic"'), ref: z.string().optional().describe('the finding\'s ref, as check_stage lists it'), reason: z.string().min(3).max(500).describe('why the reel is right as it is')}}, async ({project_id, stage, rule, ref, reason}) => {

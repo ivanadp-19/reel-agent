@@ -17,11 +17,11 @@
 //                               the owner's login only
 //   setStagesMode               project.stagesMode, the owner's login only (saveProject writes enforce on a first identity)
 // and the MCP appends its dependency lines (logStage: a tool started, or refused in enforce, on a red / stale stage).
-//   .jsonl events: {stage, from, to, …} (a status change), UnmappedField, proof, dependency, waiver, stagesMode
+//   .jsonl events: {stage, from, to, …} (a status change), UnmappedField, proof, dependency, waiver, stagesMode, scope
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {STAGES, STAGES_MODES, canon, changedFields, inScope, invalidate, stageSlice, stagesModeOf, waitingOn, withWaivers} from '../src/stages.ts';
+import {BLOCKING, STAGES, STAGES_MODES, canon, changedFields, inScope, invalidate, stageSlice, stagesModeOf, waitingOn, withWaivers} from '../src/stages.ts';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {identityWrite, stageChecks, withDefaults} from '../mcp/checks.mjs';
 import {ACTIVE, jobsDir, listJobs} from './render-jobs.mjs';
@@ -121,6 +121,13 @@ export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
   if (enforce) saved.stagesMode = 'enforce';
   const {stale} = writeProject(publicDir, id, prev, saved, actor);
   if (enforce) logStage(publicDir, id, {event: 'stagesMode', from: null, to: 'enforce', actor, rev: now, why: 'first identity'});
+  // every change of what the job asks for, with the state each stage it leaves out had (stageReport: one dropped while
+  // red or stale never counts as done)
+  if (changedFields({scope: prev.scope}, {scope: saved.scope}).length) {
+    const recs = readStages(publicDir, id), to = inScope(saved.scope);
+    logStage(publicDir, id, {event: 'scope', from: prev.scope ?? null, to: saved.scope ?? null, actor, rev: now,
+      dropped: Object.fromEntries(inScope(prev.scope).filter((s) => !to.includes(s)).map((s) => [s, recs[s]?.status ?? 'pendiente']))});
+  }
   return [200, {ok: true, updatedAt: now, stale, ...kept, ...(enforce ? {stagesMode: 'enforce'} : {})}];
 }
 
@@ -159,7 +166,7 @@ async function gate(publicDir, id, p, stage, env) {
     const have = rec?.proofs ?? {}, hash = sliceHash(p, 'captions');
     for (const kind of PROOFS.captions) if (have[kind]?.hash !== hash) findings.push({level: 'error', code: 'proof-missing', msg: `no ${kind} of the captions as they are now — take one${kind === 'motion_proof' ? ' at a key word' : ''}, then check_stage captions`});
   }
-  findings = withWaivers(findings, rec?.waivers); // a waived finding stays listed and never makes the stage red
+  findings = withWaivers(findings, rec?.waivers, sliceHash(p, stage)); // a waived finding stays listed and never makes the stage red
   const red = findings.some((f) => f.level === 'error' && !f.waived);
   if (stage !== 'entregables') return {status: red ? 'rojo' : 'verde', findings};
   const finals = listJobs(jobsDir(publicDir), {projectId: id}).filter((j) => !j.draft);
@@ -217,7 +224,8 @@ export function waive(publicDir, id, stage, {rule, ref, reason} = {}, g = null) 
     const blocker = hits.some((f) => f.level === 'error');
     const who = blocker ? humanOnly(g, {role: 'owner'}) : {ok: true, by: g?.user ?? g?.via ?? null};
     if (!who.ok) return [403, {error: `${rule} is a blocker: only Felipe waives it, with his login (${who.error})`, code: who.code}];
-    const w = {rule, ...(ref != null ? {ref} : {}), reason: reason.trim().slice(0, 500), by: who.by, level: blocker ? 'error' : 'warn', at: new Date().toISOString()};
+    // bound to what the check said (src/stages.ts waiverOf): its messages, and without a ref the slice it was found in
+    const w = {rule, ...(ref != null ? {ref} : {hash: rec.hash}), msgs: [...new Set(hits.map((f) => f.msg ?? ''))], reason: reason.trim().slice(0, 500), by: who.by, level: blocker ? 'error' : 'warn', at: new Date().toISOString()};
     all[stage] = {...rec, waivers: [...(rec.waivers ?? []).filter((x) => !(x.rule === rule && (x.ref ?? null) === (ref ?? null))), w]};
     writeStages(publicDir, id, all);
     logStage(publicDir, id, {event: 'waiver', stage, ...w, actor: who.by});
@@ -254,9 +262,15 @@ export function stageView(publicDir, id, p) {
 // enforce, was refused — while a stage it depends on was red or stale, and the waivers
 export function stageReport(publicDir, id, p) {
   const v = stageView(publicDir, id, p);
-  const stages = Object.fromEntries(v.stages.map((s) => [s.stage, s.status !== 'verde' ? s.status : s.findings?.some((f) => f.waived) ? 'waived' : 'green']));
   let log = [];
   try { log = fs.readFileSync(fileOf(publicDir, id, '.jsonl'), 'utf8').split('\n').flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } }); } catch {}
+  // an omitted stage the scope dropped while it was red, stale or being checked (and never brought back): not done
+  const hid = {};
+  for (const e of log.filter((x) => x.event === 'scope')) for (const s of STAGES) {
+    if (inScope(e.to).includes(s)) delete hid[s];
+    else if (BLOCKING.includes(e.dropped?.[s])) hid[s] = e.dropped[s];
+  }
+  const stages = Object.fromEntries(v.stages.map((s) => [s.stage, s.status === 'omitida' && hid[s.stage] ? `omitida (dropped ${hid[s.stage]})` : s.status !== 'verde' ? s.status : s.findings?.some((f) => f.waived) ? 'waived' : 'green']));
   const dep = log.filter((e) => e.event === 'dependency'), on = (e) => `${e.tool} on ${Object.entries(e.deps ?? {}).map(([d, st]) => `${d} ${st}`).join(', ')}`;
   return {mode: v.mode, scope: v.scope, stages, allGreenOrWaived: Object.values(stages).every((s) => ['green', 'waived', 'omitida'].includes(s)),
     startsOnRedOrStale: dep.filter((e) => !e.refused).map(on), refused: dep.filter((e) => e.refused).map(on),

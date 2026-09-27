@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, inScope, invalidate, scopeFindings, scopeInput, scopeSkips, stageFindings, stageSlice, toolGate, waitingOn, waiverOf} from '../src/stages.ts';
+import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, callStages, inScope, invalidate, scopeFindings, scopeInput, scopeSkips, stageFindings, stageSlice, toolGate, waitingOn, waiverOf} from '../src/stages.ts';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
 import {normalizeCaption} from '../src/captions.ts';
 import {splitClip, trimClip} from '../src/timeline.ts';
@@ -220,6 +220,7 @@ test('scope: an omitted stage never holds another back', () => {
   assert.deepEqual(waitingOn(recs, null, 'captions'), ['corte', 'guion']);
   assert.deepEqual(waitingOn(recs, ['captions'], 'captions'), ['guion'], 'corte is not the job\'s');
   assert.deepEqual(waitingOn(recs, ['captions'], 'entregables'), ['guion']);
+  assert.deepEqual(waitingOn({corte: {status: 'chequeando'}}, null, 'broll'), ['corte'], 'a check in flight (or one a restart cut short) is no green');
 });
 
 test('scope: what the gates find in an omitted stage is a warning of the delivery naming it — never red; no scope changes nothing', () => {
@@ -654,14 +655,59 @@ test('toolGate: off says nothing; advisory (the default) logs; enforce refuses a
   assert.equal(r.refuse, 'edit_caption refused (stages enforce): it works in captions, which waits on corte (stale), guion (rojo). Fix what guion reports, then check_stage corte (then guion) and call edit_caption again; stage_status shows every stage. A warning you keep: waive_finding with the reason; a blocker only Felipe waives.');
   assert.equal(toolGate('edit_caption', {stagesMode: 'enforce'}, {captions: {status: 'rojo'}, corte: {status: 'pendiente'}}), null, 'its own stage red is how it gets fixed; never checked holds nothing');
   assert.equal(toolGate('get_project', {stagesMode: 'enforce'}, recs), null, 'a tool of no stage');
-  assert.deepEqual(toolGate('set_clip', {stagesMode: 'enforce'}, {ingest: {status: 'stale'}, corte: {status: 'stale'}}).deps, {ingest: 'stale'}, 'a tool of several stages waits only on what none of them is');
+  assert.deepEqual(toolGate('add_broll', {stagesMode: 'enforce'}, {corte: {status: 'chequeando'}}).deps, {corte: 'chequeando'}, 'a check in flight lets nothing through');
+});
+
+test('toolGate gates a call by the work it does (callStages): run_ai_step by its step, set_clip by its fields, set_brand fonts as captions; one of its stages waiting on another counts', () => {
+  const E = {stagesMode: 'enforce'};
+  assert.deepEqual([callStages('run_ai_step', {step: 'autocut'}), callStages('run_ai_step', {step: 'captions'})], [['corte'], ['captions']]);
+  assert.deepEqual(toolGate('run_ai_step', E, {corte: {status: 'rojo'}, guion: {status: 'verde'}}, {step: 'captions'}).deps, {corte: 'rojo'}, 'a captions pass on a red cut');
+  assert.equal(toolGate('run_ai_step', E, {corte: {status: 'verde'}, guion: {status: 'stale'}}, {step: 'autocut'}), null, 'autocut never waits on the guion after it');
+  assert.equal(toolGate('run_ai_step', E, {corte: {status: 'rojo'}}, {step: 'autocut'}), null, 'autocut is how a red cut gets fixed');
+  assert.deepEqual([callStages('set_clip', {clip_id: 'a', speed: 2}), callStages('set_clip', {clip_id: 'a', volume: 0.5, muted: true}), callStages('set_clip', {clip_id: 'a', graded: null}), callStages('set_clip', {clip_id: 'a'})], [['corte'], ['audio'], ['color'], []]);
+  assert.deepEqual(toolGate('set_clip', E, {corte: {status: 'rojo'}}, {clip_id: 'a', volume: 0.5}).deps, {corte: 'rojo'}, 'audio work on a red cut');
+  assert.equal(toolGate('set_clip', E, {corte: {status: 'rojo'}}, {clip_id: 'a', speed: 2}), null);
+  assert.deepEqual(toolGate('set_clip', E, {corte: {status: 'rojo'}}, {clip_id: 'a', speed: 2, volume: 1}).deps, {corte: 'rojo'}, 'speed + volume: the audio part waits');
+  const Z = {apply_style: true, clear: false}; // zod's defaults reach the wrapper
+  assert.deepEqual([callStages('set_brand', {...Z, font_files: [{path: 'f.ttf'}], caption_font: 'F'}), callStages('set_brand', {...Z, glossary: []})], [['captions'], ['captions']]);
+  assert.deepEqual([callStages('set_brand', {...Z, from: 'vibem'}), callStages('set_brand', {...Z}), callStages('set_brand', {apply_style: true, clear: true})].map((x) => x.length), [4, 4, 4]);
+  assert.equal(toolGate('set_brand', E, {captions: {status: 'rojo'}}, {...Z, font_files: [{path: 'f.ttf'}]}), null, 'the fix for font-missing');
+  assert.deepEqual(toolGate('set_brand', E, {captions: {status: 'rojo'}}, {...Z, from: 'vibem'}).deps, {captions: 'rojo'}, 'a kit\'s broll / color / audio work waits on the red captions');
+  assert.deepEqual(toolGate('set_accent_color', E, {captions: {status: 'rojo'}}, {color: '#FFFFFF'}).deps, {captions: 'rojo'}, 'broll waits on captions');
+  assert.equal(toolGate('edit_caption', E, {captions: {status: 'rojo'}}), null, 'a call working only in the red stage: its fix');
+});
+
+test('toolGate: a final render needs every in-scope stage before the delivery verde — a never-checked one too; drafts are never gated', () => {
+  const E = {stagesMode: 'enforce'}, green = Object.fromEntries(['ingest', 'corte', 'guion', 'color', 'audio', 'captions', 'broll'].map((s) => [s, {status: 'verde'}]));
+  const r = toolGate('start_render', E, {});
+  assert.deepEqual(r.deps, {ingest: 'pendiente', corte: 'pendiente', guion: 'pendiente', color: 'pendiente', audio: 'pendiente', captions: 'pendiente', broll: 'pendiente'});
+  assert.match(r.refuse, /^start_render refused \(stages enforce\): it works in entregables, which waits on ingest \(pendiente\), .* — a final render needs every stage it delivers checked green\. check_stage ingest \(then corte, guion, color, audio, captions, broll\) and call start_render again/);
+  assert.equal(toolGate('render', E, green, {draft: false}), null);
+  assert.equal(toolGate('start_render', E, {}, {draft: true}), null, 'a draft is for looking');
+  assert.deepEqual(toolGate('render', E, {...green, captions: {status: 'chequeando'}}).deps, {captions: 'chequeando'});
+  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce', scope: ['captions']}, {ingest: {status: 'verde'}, guion: {status: 'verde'}, captions: {status: 'verde'}}), null, 'omitted stages are not the delivery\'s');
+  assert.equal(toolGate('start_render', {}, {}), null, 'advisory: nothing checked is no log line (every project before the stages)');
+  assert.deepEqual(toolGate('start_render', {}, {...green, captions: {status: 'stale'}}).deps, {captions: 'stale'}, 'advisory logs a red or stale one');
+});
+
+test('toolGate: set_scope may not drop a red, stale or still-checking stage in enforce (a blocker\'s waiver: Felipe\'s); a pendiente or verde one it may', () => {
+  const E = {stagesMode: 'enforce'}, recs = {corte: {status: 'rojo'}, color: {status: 'verde'}, audio: {status: 'stale'}};
+  const r = toolGate('set_scope', E, recs, {stages: ['captions', 'broll']});
+  assert.deepEqual(r.deps, {corte: 'rojo', audio: 'stale'});
+  assert.match(r.refuse, /^set_scope refused \(stages enforce\): it leaves out corte \(rojo\), audio \(stale\): .*only Felipe does that/);
+  assert.equal(toolGate('set_scope', E, recs, {stages: ['corte', 'audio', 'captions']}), null, 'keeps them');
+  assert.equal(toolGate('set_scope', E, {}, {stages: ['captions']}), null, 'nothing checked yet: scope first');
+  assert.equal(toolGate('set_scope', {...E, scope: ['captions']}, recs, {stages: ['captions']}), null, 'already out');
+  assert.deepEqual(toolGate('set_scope', {}, recs, {stages: ['captions']}).deps, {corte: 'rojo', audio: 'stale'}, 'advisory logs it');
 });
 
 test('toolGate enforce: an omitted stage never blocks (Felipe\'s rule) — only the dependencies the job asked for', () => {
   const recs = {corte: {status: 'rojo'}, color: {status: 'stale'}, captions: {status: 'stale'}};
   assert.equal(toolGate('edit_caption', {stagesMode: 'enforce', scope: ['captions']}, recs), null, 'corte omitted');
-  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce', scope: ['captions']}, recs).deps, {captions: 'stale'}, 'the delivery: color and corte omitted');
-  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce'}, recs).deps, {corte: 'rojo', color: 'stale', captions: 'stale'}, 'no scope: all of them');
+  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce', scope: ['captions']}, recs).deps, {ingest: 'pendiente', guion: 'pendiente', captions: 'stale'}, 'the delivery: color and corte omitted');
+  assert.deepEqual(toolGate('share_version', {stagesMode: 'enforce', scope: ['captions']}, recs).deps, {captions: 'stale'});
+  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce'}, recs).deps, {ingest: 'pendiente', corte: 'rojo', guion: 'pendiente', color: 'stale', audio: 'pendiente', captions: 'stale', broll: 'pendiente'}, 'no scope: all of them');
+  assert.deepEqual(toolGate('start_render', {scope: ['captions']}, recs).deps, {captions: 'stale'}, 'advisory');
 });
 
 test('toolGate: a tool with no TOOL_STAGE row is refused in enforce (default-deny, like the plan gate), let through in advisory and off', () => {
@@ -763,13 +809,30 @@ test('waivers: the agent waives a warning with a reason; a blocker only the owne
     const [, c] = await checkStage(pub, 'p1', 'captions', ENV);
     assert.deepEqual(c.findings.map((f) => [f.code, !!f.waived]), [['guion-missing', true], ['proof-missing', false], ['proof-missing', false]]);
     assert.equal(c.status, 'rojo', 'the blockers it did not waive still count');
-    // one finding by code and ref; an agent's waiver of a warning never covers that rule as a blocker
-    assert.ok(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'warn'}));
-    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c2', level: 'warn'}), undefined);
-    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'error'}), undefined);
+    // one finding by code, ref and what it said; an agent's waiver of a warning never covers that rule as a blocker
+    const said = c.findings[0].msg;
+    assert.deepEqual(rw.waiver.msgs, [said]);
+    assert.ok(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'warn', msg: said}));
+    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c2', level: 'warn', msg: said}), undefined);
+    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'warn', msg: 'another line'}), undefined, 'a later finding on a reused ref');
+    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'error', msg: said}), undefined);
     const l = log(pub, 'p1');
     assert.deepEqual(l.filter((e) => e.event === 'waiver').map((e) => [e.stage, e.rule, e.ref, e.by, e.level]), [['corte', 'pause', 'a:1', 'boss', 'error'], ['captions', 'guion-missing', 'c1', 'backend-token', 'warn']]);
     assert.deepEqual(l.filter((e) => e.stage === 'corte' && e.to === 'verde').map((e) => e.findings), [[{level: 'error', code: 'pause', ref: 'a:1', waived: true}]]);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('a waiver without a ref holds only for the version of the stage it was given on: proof-missing waived, the captions edited → back', async () => {
+  const pub = pubDir();
+  try {
+    const [, a] = saveProject(pub, 'p1', PROJ());
+    await checkStage(pub, 'p1', 'captions', ENV);
+    const [code, r] = await waive(pub, 'p1', 'captions', {rule: 'proof-missing', reason: 'Felipe watched it in the editor'}, OWNER);
+    assert.deepEqual([code, r.waiver.ref, typeof r.waiver.hash, r.waiver.msgs.length], [200, undefined, 'string', 2]);
+    const proofs = async () => (await checkStage(pub, 'p1', 'captions', ENV))[1].findings.filter((f) => f.code === 'proof-missing').map((f) => !!f.waived);
+    assert.deepEqual(await proofs(), [true, true]);
+    saveProject(pub, 'p1', {captions: [page('c1', [w('hola', 100, 450, {wid: 'a:0'}), w('amigos', 500, 900, {wid: 'a:1'})])], updatedAt: a.updatedAt});
+    assert.deepEqual(await proofs(), [false, false], 'other captions: the owner decides again');
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
@@ -792,6 +855,15 @@ test('run-report stage metrics: each stage green, waived or its status, and ever
     saveProject(pub, 'p1', {scope: ['captions'], updatedAt: readProject(pub, 'p1').updatedAt});
     assert.deepEqual(Object.entries(stageReport(pub, 'p1', readProject(pub, 'p1')).stages).filter(([, v]) => v === 'omitida').map(([k]) => k), ['corte', 'color', 'audio', 'broll']);
     assert.deepEqual(stageReport(pub, 'nolog', {}).startsOnRedOrStale, [], 'no log yet');
+    // a stage the scope dropped while red (the editor, or anyone past the MCP's refusal) is logged and never counts as done
+    saveProject(pub, 'p2', PROJ());
+    assert.equal((await checkStage(pub, 'p2', 'corte', ENV))[1].status, 'rojo');
+    saveProject(pub, 'p2', {scope: ['captions'], updatedAt: readProject(pub, 'p2').updatedAt}, {actor: 'editor'});
+    assert.deepEqual(log(pub, 'p2').filter((e) => e.event === 'scope').map((e) => [e.from, e.to, e.actor, e.dropped]), [[null, ['captions'], 'editor', {corte: 'rojo', color: 'pendiente', audio: 'pendiente', broll: 'pendiente'}]]);
+    const hid = stageReport(pub, 'p2', readProject(pub, 'p2'));
+    assert.deepEqual([hid.stages.corte, hid.stages.color, hid.allGreenOrWaived], ['omitida (dropped rojo)', 'omitida', false]);
+    saveProject(pub, 'p2', {scope: null, updatedAt: readProject(pub, 'p2').updatedAt});
+    assert.equal(stageReport(pub, 'p2', readProject(pub, 'p2')).stages.corte, 'rojo', 'back in the job: its own status again');
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
@@ -799,8 +871,9 @@ test('MCP enforce: a tool on a red dependency is refused with the reason and log
   const id = `p-stagetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, id2 = `${id}-b`;
   const file = (x) => path.join('public', 'projects', `${x}.json`);
   fs.mkdirSync(path.dirname(file(id)), {recursive: true});
+  const KEEP = {src: 'music/keep.mp3', volume: 0.25, startSec: 0, fadeOutSec: 1.5, duck: true, duckLevel: 0.25};
   const base = {...PROJ(), name: 'stage enforce test', clips: [clip({src: 'clips/stagetest-none.mp4', outSec: 5})], captions: []};
-  fs.writeFileSync(file(id), JSON.stringify({...base, stagesMode: 'enforce'}));
+  fs.writeFileSync(file(id), JSON.stringify({...base, stagesMode: 'enforce', music: KEEP}));
   fs.writeFileSync(file(id2), JSON.stringify(base));
   const backend = await backendStub();
   const client = new Client({name: 'test', version: '0'});
@@ -815,15 +888,24 @@ test('MCP enforce: a tool on a red dependency is refused with the reason and log
     assert.match(no.text, /set_accent_color refused \(stages enforce\): it works in captions \+ broll, which waits on ingest \(rojo\)\. Fix what ingest reports, then check_stage ingest/);
     assert.notEqual(saved().accentColor, '#00FF00', 'nothing written');
     assert.deepEqual(deps().map((e) => [e.tool, e.deps, e.mode, e.refused]), [['set_accent_color', {ingest: 'rojo'}, 'enforce', true]]);
-    assert.equal((await call('get_project', {})).err, false, 'reads stay open');
-    assert.match((await call('stage_status', {})).text, /mode enforce: a tool whose stage depends on a red or stale stage is refused/);
+    { const gp = await call('get_project', {}); assert.equal(gp.err, false, gp.text); }
+    assert.match((await call('stage_status', {})).text, /mode enforce: a tool whose stage depends on a red, stale or still-checking stage is refused, and a final render until every stage before it is verde/);
+    // gated by what the call does (its arguments reach the gate): set_clip volume is audio work, a bare set_clip reads
+    assert.match((await call('set_clip', {clip_id: 'a', volume: 0.5})).text, /^set_clip refused \(stages enforce\): it works in audio, which waits on ingest \(rojo\)/);
+    assert.equal((await call('set_clip', {clip_id: 'a'})).err, false);
+    // a tool that writes several projects gates each one: set_music targets is audio work on a red ingest too
+    const many = await client.callTool({name: 'set_music', arguments: {targets: {project_ids: [id]}, file: null}});
+    const said = many.content.map((c) => c.text ?? '').join('\n');
+    assert.match(said, /0 of 1 project\(s\) set:\n {2}p-stagetest-\S+: error — set_music refused \(stages enforce\): it works in audio, which waits on ingest \(rojo\)/);
+    assert.deepEqual(saved().music, KEEP, 'the music stays');
+    assert.deepEqual(deps().map((e) => [e.tool, e.refused]), [['set_accent_color', true], ['set_clip', true], ['set_music', true]]);
     const w = await call('waive_finding', {stage: 'ingest', rule: 'untranscribed', ref: 'stagetest-none', reason: 'no audio in this clip'});
     assert.equal(w.err, true);
     assert.match(w.text, /untranscribed is a blocker: only Felipe waives it, with his login \(solo con login en la VM\)/);
     // off (what the owner's login sets): the same tool runs and nothing is logged
     fs.writeFileSync(file(id), JSON.stringify({...saved(), stagesMode: 'off'}));
     assert.equal((await call('set_accent_color', {color: '#00FF00'})).err, false);
-    assert.equal(deps().length, 1);
+    assert.equal(deps().length, 3);
     // a first identity through the MCP: the backend writes enforce and the tool says so
     const si = await call('set_identity', {client: `zzst${process.pid % 100000}`, script: 7, hook: 1}, id2);
     assert.equal(si.err, false, si.text);

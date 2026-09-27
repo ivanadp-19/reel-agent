@@ -52,9 +52,12 @@ export function inScope(scope: unknown): Stage[] {
   if (!asked.length) return [...STAGES];
   return STAGES.filter((s) => s === 'ingest' || s === 'entregables' || asked.includes(s) || (s === 'guion' && asked.includes('captions')));
 }
-// the stages upstream of `stage` that hold it back: in scope, and red or stale (records: stage → {status})
+// a stage that holds back the ones after it: red, stale, or being checked (its result is not in: a check in flight — or
+// one a backend restart cut short — never lets a tool through)
+export const BLOCKING = ['rojo', 'stale', 'chequeando'];
+// the stages upstream of `stage` that hold it back: in scope, and BLOCKING (records: stage → {status})
 export const waitingOn = (records: Partial<Record<Stage, {status?: string}>>, scope: unknown, stage: Stage): Stage[] =>
-  upstream(stage).filter((d) => inScope(scope).includes(d) && ['rojo', 'stale'].includes(records[d]?.status ?? ''));
+  upstream(stage).filter((d) => inScope(scope).includes(d) && BLOCKING.includes(records[d]?.status ?? ''));
 
 // the stage(s) a changed project field reopens; [] = context, nothing to re-check. A field not listed
 // here reopens everything after ingest and is reported (invalidate → unmapped). `clips` goes by what
@@ -106,10 +109,10 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   annotate_captions: ['captions'], caption_proof: ['captions'], motion_proof: ['captions'], // the proofs its gate asks for
   add_broll: ['broll'], edit_broll: ['broll'], delete_brolls: ['broll'], add_graphic: ['broll'], edit_graphic: ['broll'], delete_graphics: ['broll'],
   set_keyframes: ['broll'], prepare_mattes: ['broll'],
-  set_clip: ['corte', 'audio'], // speed; volume, muted
+  set_clip: ['corte', 'audio', 'color'], // speed; volume, muted; graded, location — by its arguments (callStages)
   set_accent_color: ['captions', 'broll'],
-  set_brand: ['captions', 'broll', 'color', 'audio'], // a kit brings its captions, color and audio
-  run_ai_step: ['corte', 'captions'], // autocut; captions
+  set_brand: ['captions', 'broll', 'color', 'audio'], // a kit brings its captions, color and audio; its fonts / glossary alone: captions
+  run_ai_step: ['corte', 'captions'], // autocut; captions — by its step (callStages)
   render: ['entregables'], start_render: ['entregables'], share_version: ['entregables'],
   list_projects: [], get_project: [], rename_project: [], set_plan: [], approve_plan: [], request_plan_changes: [], set_plan_mode: [], style_kits: [],
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
@@ -126,31 +129,59 @@ export const STAGES_MODES = ['off', 'advisory', 'enforce'] as const;
 export type StagesMode = (typeof STAGES_MODES)[number];
 export const stagesModeOf = (p: {stagesMode?: unknown} | null | undefined): StagesMode =>
   (STAGES_MODES as readonly unknown[]).includes(p?.stagesMode) ? (p!.stagesMode as StagesMode) : 'advisory';
+// The stage(s) one call works in: its TOOL_STAGE row, narrowed by the arguments where a tool spans several — the gate
+// is about the work the call does: run_ai_step captions is no cut, autocut no captions; set_clip volume is audio work,
+// graded color, speed the cut; a set_brand of fonts or glossary only is the captions' own fix (font-missing, font-wrong,
+// spelling). A draft render is for looking (like frame_at): none.
+const BRAND_CAPTIONS = ['font_files', 'caption_font', 'display_font', 'drop_fonts', 'glossary'];
+export function callStages(name: string, a: Record<string, unknown> = {}): Stage[] {
+  const given = Object.keys(a).filter((k) => a[k] !== undefined && k !== 'project_id');
+  if (name === 'run_ai_step') return a.step === 'autocut' ? ['corte'] : ['captions'];
+  if (name === 'set_clip') return STAGES.filter((s) => given.some((f) => row(CLIP_FIELD_STAGE, f)?.includes(s)));
+  const kit = given.filter((k) => k !== 'apply_style' && k !== 'clear');
+  if (name === 'set_brand' && !a.clear && kit.length && kit.every((k) => BRAND_CAPTIONS.includes(k))) return ['captions'];
+  if ((name === 'render' || name === 'start_render') && a.draft) return [];
+  return TOOL_STAGE[name] ?? [];
+}
+const FINAL = new Set(['render', 'start_render']);
 // What the MCP wrapper does with a tool call on a project → null (nothing to say) or {mode, stages, deps, refuse?}:
-// deps = the in-scope stages the tool's stages depend on that are red or stale (waitingOn: an omitted stage never
-// holds anything back), refuse = the message when enforce refuses it. Default-deny, like the plan gate: a tool
-// with no TOOL_STAGE row is refused in enforce.
-export function toolGate(name: string, p: {stagesMode?: unknown; scope?: unknown}, records: Partial<Record<Stage, {status?: string}>>) {
+// deps = what holds the call back — the in-scope stages its stages depend on that are BLOCKING (waitingOn: an omitted
+// stage never holds anything back; one stage of the call waiting on another of them counts too); for a final render in
+// enforce, every in-scope stage before the delivery that is not verde (a stage nobody checked holds it too — advisory
+// logs only its red / stale ones, as for any tool: a project that never ran a gate is not a log line); for set_scope, a
+// stage it would leave out that is BLOCKING (dropping it would hide a red: that is a blocker's waiver, Felipe's).
+// refuse = the message when enforce refuses it. Default-deny, like the plan gate: a tool with no TOOL_STAGE row is
+// refused in enforce.
+export function toolGate(name: string, p: {stagesMode?: unknown; scope?: unknown}, records: Partial<Record<Stage, {status?: string}>>, args: Record<string, unknown> = {}) {
   const mode = stagesModeOf(p);
   if (mode === 'off') return null;
   if (!Object.hasOwn(TOOL_STAGE, name)) return mode === 'enforce' ? {mode, stages: [] as Stage[], deps: {}, refuse: `${name} refused (stages enforce): it has no stage in src/stages.ts TOOL_STAGE, and a tool without one is refused until it gets its row.`} : null;
-  const own = TOOL_STAGE[name], held = new Set(own.flatMap((s) => waitingOn(records, p.scope, s)));
-  const deps = Object.fromEntries(STAGES.filter((d) => held.has(d) && !own.includes(d)).map((d) => [d, records[d]!.status!]));
-  const list = Object.entries(deps);
-  if (!list.length) return null;
-  const red = list.filter(([, st]) => st === 'rojo').map(([d]) => d);
-  return {mode, stages: own, deps, ...(mode === 'enforce' ? {refuse: `${name} refused (stages enforce): it works in ${own.join(' + ')}, which waits on ${list.map(([d, st]) => `${d} (${st})`).join(', ')}. ${red.length ? `Fix what ${red.join(', ')} reports, then ` : ''}check_stage ${list[0][0]}${list.length > 1 ? ` (then ${list.slice(1).map(([d]) => d).join(', ')})` : ''} and call ${name} again; stage_status shows every stage. A warning you keep: waive_finding with the reason; a blocker only Felipe waives.`} : {})};
+  const own = callStages(name, args), on = inScope(p.scope), st = (s: Stage) => records[s]?.status ?? 'pendiente';
+  const held = FINAL.has(name) && own.length && mode === 'enforce' ? upstream('entregables').filter((d) => on.includes(d) && st(d) !== 'verde')
+    : name === 'set_scope' ? (Array.isArray(args.stages) ? on.filter((d) => !inScope(args.stages).includes(d) && BLOCKING.includes(st(d))) : [])
+    : STAGES.filter((d) => own.some((s) => waitingOn(records, p.scope, s).includes(d)));
+  if (!held.length) return null;
+  const deps = Object.fromEntries(held.map((d) => [d, st(d)])), list = held.map((d) => `${d} (${deps[d]})`).join(', ');
+  const red = held.filter((d) => deps[d] === 'rojo');
+  const why = name === 'set_scope' ? `it leaves out ${list}: a stage dropped from the job stops holding anything back, so dropping one that is red, stale or being checked is a blocker's waiver — only Felipe does that (his login, the editor's Stages section).`
+    : `it works in ${own.join(' + ')}, which waits on ${list}${FINAL.has(name) ? ' — a final render needs every stage it delivers checked green' : ''}.`;
+  return {mode, stages: own, deps, ...(mode === 'enforce' ? {refuse: `${name} refused (stages enforce): ${why} ${red.length ? `Fix what ${red.join(', ')} reports, then ` : ''}check_stage ${held[0]}${held.length > 1 ? ` (then ${held.slice(1).join(', ')})` : ''} and call ${name} again; stage_status shows every stage. A warning you keep: waive_finding with the reason; a blocker only Felipe waives.`} : {})};
 }
 
-// Waivers (§3 "Reglas de cada gate"): a finding of a stage's check waived with a reason — {rule, ref, reason, by, level}.
-// A waiver names one finding by its code and ref (none = the findings without one) and covers a blocker only when it
-// was a blocker's (level 'error': the owner's login, scripts/stages.mjs waive); the agent waives warnings. A waived
-// finding stays listed, marked, and never makes its stage red.
-export type Waiver = {rule: string; ref?: string; reason: string; by: string | null; level: 'error' | 'warn'};
-export const waiverOf = (waivers: Waiver[] | undefined, f: {code: string; ref?: string; level: string}) =>
-  (waivers ?? []).find((w) => w.rule === f.code && (w.ref ?? null) === (f.ref ?? null) && (f.level !== 'error' || w.level === 'error'));
-export const withWaivers = <T extends {code: string; ref?: string; level: string}>(findings: T[], waivers: Waiver[] | undefined) =>
-  findings.map((f) => { const w = waiverOf(waivers, f); return w ? {...f, waived: {reason: w.reason, by: w.by}} : f; });
+// Waivers (§3 "Reglas de cada gate"): a finding of a stage's check waived with a reason — {rule, ref, msgs, hash?, reason,
+// by, level}. A waiver covers the finding it was given for, never a later one that reuses its code and ref (ids are
+// reused: graphic g0 deleted and made again): its code, ref AND message (msgs: what the check said then — an edit that
+// changes what the finding says brings it back unwaived); one without a ref (proof-missing, layer-blocker, hook…) says
+// nothing of where it is, so it holds only while the stage's slice is the one it was found in (hash, scripts/stages.mjs
+// sliceHash). It covers a blocker only when it was a blocker's (level 'error': the owner's login, scripts/stages.mjs
+// waive); the agent waives warnings. A waived finding stays listed, marked, and never makes its stage red.
+export type Waiver = {rule: string; ref?: string; msgs: string[]; hash?: string; reason: string; by: string | null; level: 'error' | 'warn'};
+type Found = {code: string; ref?: string; msg?: string; level: string};
+export const waiverOf = (waivers: Waiver[] | undefined, f: Found, hash?: string) =>
+  (waivers ?? []).find((w) => w.rule === f.code && (w.ref ?? null) === (f.ref ?? null) && (w.msgs ?? []).includes(f.msg ?? '')
+    && (f.ref != null || w.hash === hash) && (f.level !== 'error' || w.level === 'error'));
+export const withWaivers = <T extends Found>(findings: T[], waivers: Waiver[] | undefined, hash?: string) =>
+  findings.map((f) => { const w = waiverOf(waivers, f, hash); return w ? {...f, waived: {reason: w.reason, by: w.by}} : f; });
 
 // the defaults a writer fills into a project that lacks them (mcp/checks.mjs withDefaults / newProject; a test
 // holds them together): the same as absent

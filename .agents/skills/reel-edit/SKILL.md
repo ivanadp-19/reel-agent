@@ -26,21 +26,27 @@ entregables (the final render). Do one stage's work whole, then
 - A **warning** you keep because the reel is right as it is (a dramatic pause,
   another variant's line in script-coverage, a take you chose on purpose):
   `waive_finding stage rule ref reason` — say why; then check the stage again.
-  A **blocker** (ERR) is never yours to waive: fix it, or stop and ask Felipe
-  (only his login waives it).
+  A waiver covers that finding as check_stage said it: an edit that changes it
+  (another text on graphic g0, a new version of the captions for a finding
+  without a ref) brings it back — decide again. A **blocker** (ERR) is never
+  yours to waive: fix it, or stop and ask Felipe (only his login waives it).
 - An edit reopens only the stages after the one it touches: they go **stale**
   (their work stays; `check_stage` them again, in order). So finish a stage
   before the next: a cut after the captions reopens captions, B-roll and the
   delivery.
 - **Stages mode** (`stage_status` says it). A project with an identity is
-  `enforce`: a tool whose stage depends on a red or stale stage is refused, with
-  the reason — `<tool> refused (stages enforce): it works in <stage>, which waits
-  on <dep> (<status>). Fix what <dep> reports, then check_stage <dep> and call
-  <tool> again…`. Do exactly that; never work around it (another tool, another
-  project). `advisory` (other projects): nothing is refused, but every start on
-  a red or stale stage is logged and counts against the run. Only Felipe's login
-  changes the mode. Reads, searches, `validate`, `frame_at`, draft renders and
-  the stage tools are never refused.
+  `enforce`: a tool whose stage depends on a red, stale or still-checking stage
+  is refused, with the reason — `<tool> refused (stages enforce): it works in
+  <stage>, which waits on <dep> (<status>). Fix what <dep> reports, then
+  check_stage <dep> and call <tool> again…` — and so is the final render until
+  every stage before it is verde (a stage you never checked holds it too), and a
+  `set_scope` that would leave out a red or stale stage. A call is gated by the
+  work it does (`run_ai_step captions` is captions work, `set_clip volume` audio).
+  Do exactly what the refusal says; never work around it (another tool, another
+  project, a narrower scope). `advisory` (other projects): nothing is refused,
+  but every start on a red or stale stage is logged and counts against the run.
+  Only Felipe's login changes the mode. Reads, searches, `validate`, `frame_at`,
+  draft renders and the stage tools are never refused.
 
 ## 0. Scope — before anything else
 
@@ -49,10 +55,12 @@ finished exports, "solo captions": the cut, the color and the B-roll are his),
 cut + captions, or everything (the default when the brief does not narrow it).
 When it narrows, `set_scope stages: [...]` with exactly what it asks (`corte`,
 `color`, `audio`, `captions`, `broll`; ingest and the delivery always run, the
-guion goes with captions) — never narrow what it did not. **Never do a step the
-brief did not ask for**: skip every stage left out (its section below says
-"omitted → skip"). An omitted stage's checks do not run, it never blocks another
-(not even in enforce), and what validate or the render judge find there is
+guion goes with captions) — never narrow what it did not, and do it before any
+stage is checked (in enforce a scope that drops a red or stale stage is refused:
+that is Felipe's call). **Never do a step the brief did not ask for**: skip
+every stage left out (its section below says "omitted → skip"). An omitted
+stage's checks do not run, it never blocks another (not even in enforce), and
+what validate or the render judge find there is
 advisory — report it, do not fix it.
 
 ## 1. Ingest
@@ -108,9 +116,13 @@ after the captions: `set_transitions pattern=punch-alternate` hides jump cuts
 inside a take; a `whip`, `whipDiag` (Prism's diagonal smear — the default in
 `prism`), `card` or `split` into a clip marks a change of topic or place, a `zoom`
 a punchline (one or two per reel); each pack has its own family in the
-Captions.ai set — `set_transitions type: pack` applies it — stay inside one family
-per reel; a B-roll cue can enter with `whip`, `zoom` or `punch` too (items with
-its id, in the B-roll stage). `set_speed_ramp` rushes a walk-through (1 → 2.5) or
+Captions.ai set — stay inside one family per reel. `set_transitions type: pack`
+reads the pack the project has NOW: only when the kit set it already (`set_brand
+from: vibem`); otherwise the plan's pack is not set yet (that is the Captions
+stage), so name its family yourself — the `set_transitions` description lists
+them (prism → whipDiag, focus → bands, lift → polyWipe, stack → flash…). A
+B-roll cue can enter with `whip`, `zoom` or `punch` too (items with its id, in
+the B-roll stage). `set_speed_ramp` rushes a walk-through (1 → 2.5) or
 lands on a reveal (2 → 1). `set_audio_cut` puts a J-cut (the next take's voice
 starts under the outgoing shot: `j_sec` on the clip you enter) or an L-cut (the
 voice carries into the next shot: `l_sec` on the clip you leave), 0.5–1.5 s, on a
@@ -125,7 +137,8 @@ words left are warnings: fix them, or waive with the reason).
 ## 4. Guion (goes with captions; omitted with it)
 
 With the client's script, `set_guion` now (the captions take its wording where it
-aligns with the audio). → `check_stage guion`: `script-coverage` warns for a guion
+aligns with the audio). → `check_stage guion` (without a script too: the final
+render needs every stage in scope verde): `script-coverage` warns for a guion
 line the cut no longer keeps — fine when it is another variant's hook or CTA:
 waive it saying so.
 

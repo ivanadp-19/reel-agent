@@ -49,7 +49,7 @@ LENGTH: expected duration after cuts; if the material is short, say so — never
 
 One pack per reel (`set_caption_style`). It sets captions, palette, faces, the cut family, how
 B-roll comes and goes, and the frame the style lives in; `set_transitions type: pack` and
-plain `add_broll` follow it.
+plain `add_broll` follow it once it is set (before that, name the pack's transition kind).
 
 | Brief / footage | Pack |
 |---|---|
