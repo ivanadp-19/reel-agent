@@ -56,6 +56,8 @@ const {readFont} = await import(src('sfnt.ts'));
 const {projectBrolls} = await import(src('brollModel.ts'));
 const {projectGraphics} = await import(src('graphicTemplates.ts'));
 const {contentWords} = await import(src('brollMatch.ts'));
+const {CREW_WORDS, isCrewRun} = await import(src('cuts.ts'));
+const {numberOf} = await import(src('guion.ts'));
 const {toDisplay, endsSentence} = await import(src('paging.ts'));
 const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 // frame looks, the structure hash and the step rule: one implementation for the source scan and this judge
@@ -326,15 +328,23 @@ export function overflowFindings(pages, style, brandFont) {
   return out;
 }
 
-// caption ↔ audio sync, coverage and spelling against the aligned transcript
-export function captionTextFindings(pages, words, hidden = new Set()) {
+// caption ↔ audio sync, coverage, spelling and text against the aligned transcript.
+// caption-text: a page word that is not the word said at its id (folded: case, accents, punctuation aside) —
+// the audio wins (César). Allowed: what the captions pipeline made, which keeps what the ASR heard in `asr` —
+// a guion adoption (#35), a glossary respelling, a figure joined into digits, the pieces of a split word — and,
+// by hand, a glossary spelling (the profile's and the kit's, `glossary`) or a figure in digits said in words.
+export function captionTextFindings(pages, words, hidden = new Set(), glossary = []) {
   const out = [];
   const byWid = new Map(words.map((w) => [`${takeOf(w)}|${w.wid}`, w]));
   const covered = new Set();
   const seen = new Set(); // a word the guion split ("acomodan" → "acomoda" "a") shares its id: only its first piece starts with it
+  const terms = glossary.map((g) => new Set([g.term, ...(g.variants ?? [])].flatMap((f) => String(f).split(/\s+/)).map(fold)));
+  const figure = (digits, words) => /^\d+$/.test(digits) && numberOf([words]) === +digits;
+  const sameWord = (shown, said) => shown === said || terms.some((t) => t.has(shown) && t.has(said)) || figure(shown, said) || figure(said, shown);
   for (const c of pages) {
     const hand = c.words.filter((w) => !w.wid);
     let worst = null;
+    const other = new Map(); // page word → what was said there
     for (const w of c.words) {
       if (!w.wid) continue;
       covered.add(w.wid);
@@ -345,9 +355,15 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
       const d = w.startMs - s.t0 * 1000;
       if (Math.abs(d) >= T.syncMajorMs && (!worst || Math.abs(d) > Math.abs(worst.d))) worst = {w, s, d};
       const said = toDisplay(s.word);
+      if (w.asr == null && fold(w.text) && !sameWord(fold(w.text), fold(said))) other.set(w, said);
       // a diacritic pair (esta/está) is grammar the ASR also gets wrong: the judge reads it in context
       if (fold(said) === fold(w.text) && said.toLowerCase() !== w.text.toLowerCase() && /[áéíóúñü]/i.test(said) && !/[áéíóúñü]/i.test(w.text))
         out.push(F('spelling', DIACRITIC.has(fold(said)) ? 'minor' : 'major', DIACRITIC.has(fold(said)) ? 'candidate' : 'rule', s.t0, s.t1, `"${w.text}" (${c.id}) sin tilde — el transcript dice "${said}"`, {page: c.id, wid: w.wid}, [{tool: 'edit_caption', args: {caption_id: c.id, text: c.words.map((x) => (x === w ? said : x.text)).join(' ')}}]));
+    }
+    if (other.size) {
+      const list = [...other].map(([w, said]) => `"${w.text}" (se oye "${said}")`).join(', ');
+      out.push(F('caption-text', 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} "${c.words.map((x) => x.text).join(' ')}" no dice lo que se oye: ${list} — el audio manda`, {page: c.id, wids: [...other.keys()].map((w) => w.wid)},
+        [{tool: 'edit_caption', note: 'the words as said (same word count: ids and timing stay); a client spelling goes in the glossary, not here', args: {caption_id: c.id, text: c.words.map((x) => other.get(x) ?? x.text).join(' ')}}]));
     }
     if (worst) {
       const {w, s: sw, d} = worst;
@@ -478,10 +494,10 @@ export function repeatedFootageFindings(clips, brolls, hashes = [], fps = FPS) {
 // words flagged `off` (a quieter voice, src/speech.ts) are NOT all an off-mic director:
 // a countdown, "listo", "acción", crew chatter is crew talk (a meta cut, not a second
 // presenter), and the presenter reading the line to camera before performing it is a
-// read-through (a retake). Only what is neither stays off-mic (blocker).
-export const CREW_WORDS = ['tres', 'dos', 'uno', 'cuatro', 'cinco', 'listo', 'listos', 'lista', 'accion', 'grabando', 'corre', 'corriendo', 'rodando', 'va', 'ya', 'corte', 'corta', 'cuadro', 'otra', 'vez', 'vamos', 'ok', 'okay', 'sale', 'queda', 'bien', 'perfecto', 'rolling', 'action', 'ready', 'speed', 'cut', 'three', 'two', 'one', 'go', '3', '2', '1'];
-export function offMicFindings(words, crewWords = CREW_WORDS) {
-  const crew = new Set(crewWords.map(fold));
+// read-through (a retake). Only what is neither stays off-mic (blocker). The crew rule is src/cuts.ts
+// isCrewRun (find_cut_candidates proposes the same runs as 'meta' cuts); extra = the profile's crewWords.
+export {CREW_WORDS};
+export function offMicFindings(words, extra = []) {
   const runs = [];
   for (const w of words) {
     const r = runs.at(-1);
@@ -494,11 +510,10 @@ export function offMicFindings(words, crewWords = CREW_WORDS) {
   return runs.map((r) => {
     const text = r.map((w) => w.word).join(' ');
     const toks = r.map((w) => fold(w.word)).filter(Boolean);
-    const crewShare = toks.filter((t) => crew.has(t)).length / Math.max(1, toks.length);
     const echoed = r.length >= 3 && [...grams(r)].some((g) => mainGrams.has(g));
     const cut = [{tool: 'cut_words', args: {ranges: [{from_wid: r[0].wid, to_wid: r.at(-1).wid}]}}];
     const ev = {from: r[0].wid, to: r.at(-1).wid, clip: r[0].clipId};
-    if (crewShare >= 0.6) return F('crew-talk', 'major', 'rule', r[0].t0, r.at(-1).t1, `plática de crew / cuenta regresiva en el corte (no es off-mic): "${text.slice(0, 60)}"`, ev, cut);
+    if (isCrewRun(toks, {off: true, extra})) return F('crew-talk', 'major', 'rule', r[0].t0, r.at(-1).t1, `plática de crew / cuenta regresiva en el corte (no es off-mic): "${text.slice(0, 60)}"`, ev, cut);
     if (echoed) return F('read-through', 'major', 'rule', r[0].t0, r.at(-1).t1, `lectura previa de la línea (no es off-mic): "${text.slice(0, 60)}" — la toma buena viene después`, ev, cut);
     return F('off-mic', 'blocker', 'rule', r[0].t0, r.at(-1).t1, `voz fuera de micro en el corte: "${text.slice(0, 60)}"`, ev, [...cut, {tool: 'set_off_mic', args: {mode: 'cut'}}]);
   });
@@ -1315,12 +1330,21 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
       const fix = first.clipIndex === 0 ? [{tool: 'trim_clip', args: {clip_id: first.clipId, in_sec: r2(Math.max(0, first.srcStartMs / 1000 - 0.1))}}] : [{tool: 'delete_clips', note: 'clips before the first word carry no speech', args: {clip_ids: placed.slice(0, first.clipIndex).map((x) => x.clip.id)}}];
       findings.push(F('hook-dead-start', 'major', 'rule', 0, first.t0, `la primera palabra llega a los ${first.t0.toFixed(2)} s — el reel arranca muerto`, {wid: first.wid}, fix));
     }
-    for (const i of transcriptIssues(p, tr)) {
+    // the kit's glossary and the profile's: a name the client spells otherwise is still said
+    for (const i of transcriptIssues(p, tr, [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])])) {
       if (i.code === 'off-mic') continue; // classified below: off-mic vs crew talk vs a read-through
+      if (i.code === 'data-from-audio') { // CEO-21: a figure or name on screen this reel's audio does not say
+        const g = projectGraphics(p.graphics ?? [], p.clips, FPS).find((x) => x.id === i.ref);
+        findings.push(F(i.code, 'blocker', 'rule', g ? g.startMs / 1000 : null, g ? g.endMs / 1000 : null, i.msg, {graphic: i.ref}, [{tool: 'edit_graphic', note: 'what the audio says; or the client confirms the figure (datosPorConfirmar)', args: {graphic_id: i.ref}}]));
+        continue;
+      }
       const pc = placed.find((x) => x.clip.id === i.ref);
-      findings.push(F(i.code, 'major', 'rule', pc ? pc.startMs / 1000 : null, pc ? pc.endMs / 1000 : null, i.msg, {clip: i.ref}, [{tool: 'cut_words', note: 'or the trim_clip value in the message', args: {}}]));
+      // script-coverage (no captions to check the guion on): a line may be cut on purpose — confirm against the brief
+      const cov = i.code === 'script-coverage';
+      findings.push(F(i.code, 'major', cov ? 'candidate' : 'rule', pc ? pc.startMs / 1000 : null, pc ? pc.endMs / 1000 : null, i.msg, {clip: i.ref},
+        [cov ? {tool: 'get_transcript', note: 'the take that says the line (a retake cut away?) — or the brief drops it', args: {project_id: projectId}} : {tool: 'cut_words', note: 'or the trim_clip value in the message', args: {}}]));
     }
-    if (p.offMic !== 'off') findings.push(...offMicFindings(words, [...CREW_WORDS, ...(profile?.crewWords ?? [])]));
+    if (p.offMic !== 'off') findings.push(...offMicFindings(words, profile?.crewWords ?? []));
     const expect = parsePhone(p.plan) ?? (reel?.phone ? parsePhone(`PHONE: ${reel.phone}`) : null);
     if (a && (expect || profile?.detectPhone !== false)) {
       const bands = audioBands;
@@ -1342,7 +1366,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     const rawOf = (w) => (w.wid && rawWord.get(w.wid)) || w.text; // the transcript keeps the periods captions drop
     const namesMaySplit = !!profile?.captions?.namesMaySplit; // the client's look splits names across lines and pages (César v11)
     findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf, namesMaySplit), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body).filter((f) => !(namesMaySplit && f.check === 'split-name')));
-    if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? [])));
+    if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? []), glossary));
     if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle, rawOf));
     const offPack = packFindings(p.captionStyle, profile, p.brand?.style?.pack);
     findings.push(...offPack);

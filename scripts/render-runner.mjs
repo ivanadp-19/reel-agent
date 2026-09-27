@@ -88,7 +88,7 @@ import {lutBakes} from '../src/grade.ts';
 import {localBrollName} from './remote-broll.mjs';
 import {linkPublic} from './public-links.mjs';
 import {inReviewsRow, recordFinal, removeVersion} from './reviews.mjs';
-import {pairIdentity} from '../mcp/checks.mjs';
+import {datosPorConfirmar, pairIdentity, savedProject} from '../mcp/checks.mjs';
 import {killTree} from './render-jobs.mjs';
 import {writeRenderRecord} from './render-records.mjs';
 import {oomKills, oomReason, renderEnv, signalCode} from './render-memory.mjs';
@@ -278,6 +278,8 @@ export function createRenderRunner({
   unrecord = ({projectId, v}) => inReviewsRow(reviewsDir, projectId, () => removeVersion(reviewsDir, projectId, v, publicDir)), // a version recorded by a job cancelled meanwhile
   identityNow = (projectId) => pairIdentity(path.join(publicDir, 'projects'), projectId), // the saved project's identity when the pair is recorded
   judge = null, // ({projectId, v}) → the judge on a client's new version, not awaited (the backend: scripts/reviews.mjs judgeVersion)
+  // the rendered graphics' data its own audio does not say (the saved project's language and off-mic mode pick the transcript)
+  toConfirm = (projectId, props) => datosPorConfirmar({...savedProject(path.join(publicDir, 'projects'), projectId), ...props}, publicDir, process.env),
   writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,
@@ -590,7 +592,9 @@ export function createRenderRunner({
             const cur = identityNow(job.projectId);
             if (JSON.stringify(cur) !== JSON.stringify(pair)) throw new RenderError(`the project's identity changed during the render (${cur ? JSON.stringify(cur) : 'none now'}): render again`);
           };
-          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, qc: {lufs: qc.lufs ?? null, truePeak: qc.truePeak ?? null, parity: pairParity}, verify} : {})});
+          let datos;
+          try { datos = toConfirm(job.projectId, props); } catch (e) { log(`render ${id}: datos por confirmar not checked: ${e.message}`); }
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(datos?.length ? {datosPorConfirmar: datos} : {}), ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, qc: {lufs: qc.lufs ?? null, truePeak: qc.truePeak ?? null, parity: pairParity}, verify} : {})});
           if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; if (v.deliverables) result.deliverables = v.deliverables; }
         } catch (e) {
           stop(); // cancelled while the proxy was made: not a version error, a cancel

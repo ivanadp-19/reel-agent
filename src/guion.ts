@@ -380,7 +380,8 @@ const q = (s: string) => `"${s.length > 60 ? s.slice(0, 57) + '…' : s}"`;
 
 // shown: the caption pages as they play (timeline order). raw: the stored pages, for the timing of
 // reconciled words. The audio wins every conflict; these only say where a human should look.
-export function guionIssues(guionText: string, shown: Page[], raw: Page[] = shown): Issue[] {
+// where: what `shown` is — the captions, or the cut (validate's script-coverage: one pseudo-page per clip)
+export function guionIssues(guionText: string, shown: Page[], raw: Page[] = shown, where: 'captions' | 'cut' = 'captions'): Issue[] {
   const out: Issue[] = [];
   // reconciliation-made words (asr set) must keep a sane time: positive, ordered, inside what was said
   for (const c of raw) {
@@ -405,7 +406,7 @@ export function guionIssues(guionText: string, shown: Page[], raw: Page[] = show
       let e = k;
       while (ops[e + 1]?.kind === 'guion') e++;
       const run = ops.slice(k, e + 1).map((o) => guion[(o as {guion: number}).guion].core).join(' ');
-      push({level: 'warn', code: 'guion-missing', msg: `guion ${q(run)} is not in the captions${lastPage ? ` (after ${lastPage})` : ' (before the first page)'} — cut on purpose, or not heard? Check the take`, ref: lastPage});
+      push({level: 'warn', code: 'guion-missing', msg: `guion ${q(run)} is not in the ${where}${lastPage ? ` (after ${lastPage})` : ` (before the first ${where === 'cut' ? 'clip' : 'page'})`} — cut on purpose, or not heard? Check the take`, ref: lastPage});
       return;
     }
     if (op.kind === 'asr') {

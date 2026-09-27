@@ -25,6 +25,8 @@
 //     judge         QC técnico (CEO-6): {label, findings, at, profile, report?, error?} (+ attempt, owner, pid while it
 //                   runs) — see judgeVersion below
 //     pruned        the files of it the retention removed (pruneVersions), prunedAt when
+//   datosPorConfirmar  [{graphic, dato, src, atSec}]: figures / names its graphics show that its own audio does not
+//                 say (CEO-21, src/validate.ts unbackedData) — the client confirms them; absent = none (the runner logs a check that failed)
 //   link: {id, hash, createdAt, expiresAt, revokedAt} — the token itself is never stored, only sha256(token)
 //
 // Only finals that passed the QC gate are recorded (the backend calls recordVersion
@@ -97,7 +99,7 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // pair's files, on this filesystem) and its `identity`, they move into v<n>/ under their
 // system names next to the `snapshot` of the rendered props. The JSON is written last: a
 // step that fails leaves no file of this version behind.
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc}) {
+export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc, datosPorConfirmar}) {
   const r = loadReviews(dir, projectId, {strict: true});
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
   const sub = path.join(dir, projectId);
@@ -111,6 +113,7 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
       v, createdAt: new Date(now).toISOString(), durationSec: Math.round(durationSec * 100) / 100, sizeBytes,
       file: rel(file), proxy: rel(proxyAbs), poster: fs.existsSync(posterAbs) ? rel(posterAbs) : null, proxyBytes: fs.statSync(proxyAbs).size,
       ...(jobId ? {job: String(jobId)} : {}), // the render job it came from (public/render-jobs/<job>.json, scripts/render-jobs.mjs)
+      ...(datosPorConfirmar ? {datosPorConfirmar} : {}),
     };
     version.generated = [version.proxy, version.poster].filter(Boolean);
     if (deliverables) {
@@ -265,7 +268,7 @@ export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(
 // deliverables / identity / snapshot / masterKey / qc: the pair of a project with an identity (recordVersion).
 // verify: run in the row right before the version is numbered — throws to record nothing (the
 // runner checks the pair's identity is still the project's).
-export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, makeProxy: proxy = makeProxy}) {
+export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, datosPorConfirmar, makeProxy: proxy = makeProxy}) {
   if (draft || !qcOk || !projectId) return null;
   if (signal?.aborted) throw signal.reason;
   const tmp = path.join(dir, projectId, `.tmp-${jobId}`);
@@ -278,7 +281,7 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
     return await inReviewsRow(dir, projectId, () => {
       if (signal?.aborted) throw signal.reason;
       verify?.();
-      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc} : {})});
+      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, datosPorConfirmar, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc} : {})});
       try { pruneVersions(dir, projectId, publicDir); } catch (e) { console.error(`reviews of ${projectId}: retention not applied: ${e.message}`); } // never the new version's fault
       return version;
     });

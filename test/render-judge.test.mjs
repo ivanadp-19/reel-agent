@@ -684,3 +684,33 @@ test('versionSummary: superado on a PASS; otherwise n hallazgos = blockers + maj
   assert.equal(three.label, '3 hallazgos');
   assert.equal(three.findings.length, 5, 'the findings that count, not the candidates');
 });
+
+test('caption-text: a page word that is not the word said is flagged; pipeline respellings, glossary spellings and figures in digits are not', () => {
+  const clips = [clip('a', 'a', 0, 10)];
+  const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'Caben', 0, 300), TW(1, 'setenta', 350, 800), TW(2, 'personas', 850, 1300), TW(3, 'en', 1350, 1500), TW(4, 'Costa', 1550, 1800), TW(5, 'Luz.', 1850, 2200), TW(6, 'Acomodan', 2300, 2700)]}];
+  const w = words(clips, tr);
+  const gloss = [{term: 'Costaluz', variants: ['Costa Luz']}];
+  // what the captions pipeline makes: digits for a figure said in words, the glossary's spelling, a guion adoption (asr kept)
+  const ok = [page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', '70', 350, 800), CW('a:2', 'personas', 850, 1300)]), // '70' for "setenta" (and "setenta" for a 70 the ASR wrote)
+    page('c1', 'a', [CW('a:3', 'en', 1350, 1500), CW('a:4', 'Costaluz', 1550, 2200)]),
+    page('c2', 'a', [{...CW('a:6', 'Acomoda', 2300, 2500), asr: 'Acomodan'}, {...CW('a:6', 'a', 2500, 2700), asr: 'Acomodan'}])];
+  assert.deepEqual(captionTextFindings(ok, w, new Set(), gloss).filter((x) => x.check === 'caption-text'), []);
+  // a word changed by hand (same word count keeps the id): the audio wins
+  const bad = [page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', '60', 350, 800), CW('a:2', 'invitados', 850, 1300)])];
+  const f = captionTextFindings(bad, w, new Set(), gloss).filter((x) => x.check === 'caption-text');
+  assert.equal(f.length, 1); // one per page
+  assert.deepEqual([f[0].severity, f[0].kind, f[0].evidence.wids], ['major', 'rule', ['a:1', 'a:2']]);
+  assert.deepEqual(f[0].fix[0].args, {caption_id: 'c0', text: 'Caben setenta personas'});
+  // without the glossary, "Costaluz" is not what was said at a:4
+  assert.equal(captionTextFindings(ok, w).filter((x) => x.check === 'caption-text').length, 1);
+  const digits = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Caben', 0, 300), TW(1, '70', 350, 800)]}]);
+  assert.deepEqual(captionTextFindings([page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', 'setenta', 350, 800)])], digits), []);
+});
+
+test('crew talk in the judge is src/cuts.ts isCrewRun, with the profile\'s crew words added', () => {
+  const clips = [clip('a', 'a', 0, 30)];
+  const W2 = (i, word, s) => ({i, word, startMs: s, endMs: s + 250, off: true});
+  const tr = [{clipId: 'a', source: 'a', words: [W2(0, 'gracias', 0), W2(1, 'gracias', 400)]}];
+  assert.deepEqual(offMicFindings(words(clips, tr)).map((x) => x.check), ['off-mic']);
+  assert.deepEqual(offMicFindings(words(clips, tr), ['gracias']).map((x) => x.check), ['crew-talk']);
+});

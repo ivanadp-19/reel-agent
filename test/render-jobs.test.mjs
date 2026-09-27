@@ -1130,3 +1130,14 @@ test('global render lock: two backends on one public/ never render at the same t
   clearInterval(iv);
   assert.equal(max, 1);
 });
+
+test('a final records the data its graphics show that its own audio does not say (datosPorConfirmar, CEO-21)', async () => {
+  const s = setup({projects: {p1: {lang: 'es'}}});
+  fs.mkdirSync(path.join(s.pub, 'clips', 'transcripts'), {recursive: true});
+  fs.writeFileSync(path.join(s.pub, 'clips', 'transcripts', 'toma.es.json'), JSON.stringify([{word: 'Tiene', startMs: 0, endMs: 300}, {word: '3', startMs: 350, endMs: 600}, {word: 'recámaras.', startMs: 650, endMs: 1200}]));
+  const clips = [{id: 'c0', src: 'clips/toma.mp4', inSec: 0, outSec: 4, sourceDurationSec: 4}];
+  const g = (id, value) => ({id, src: 'clips/toma.mp4', startMs: 400, endMs: 2000, template: 'stat', props: {value, label: 'recámaras'}});
+  s.jobs.submit({props: props({}, {clips, graphics: [g('g0', '3'), g('g1', '4')]}), draft: false, projectId: 'p1', expectSec: 1});
+  await s.jobs.idle();
+  assert.deepEqual(s.calls.record[0].datosPorConfirmar, [{graphic: 'g1', dato: '4', src: 'toma', atSec: 0.4}]);
+});

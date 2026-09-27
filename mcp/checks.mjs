@@ -6,11 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {normalizeCaption} from '../src/captions.ts';
 import {deliveryFps} from '../src/timeline.ts';
-import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, validateIdentity, validateProject} from '../src/validate.ts';
+import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, unbackedData, validateIdentity, validateProject} from '../src/validate.ts';
 import {readFont} from '../src/sfnt.ts';
 import {cacheName, projectTranscript, sourceKey} from '../scripts/transcript-cache.mjs';
 import {readScan} from '../scripts/grade-scan.mjs';
 import {stageFindings} from '../src/stages.ts';
+import {readWind} from '../scripts/wind-scan.mjs';
+import {windIssues} from '../src/audio.ts';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -27,18 +29,29 @@ export const facesOf = (p, publicDir) => Object.fromEntries(p.clips.map((c) => {
 // never the machine's last transcription run; `env` (the caller's ROOT .env + process env) picks the engine
 export const projectWords = projectTranscript; // (p, publicDir, env)
 
-// every issue: layout / timing / emphasis (validateProject), then off-mic words left in the cut and clip
-// edges inside a word (projectWords), then half-graded sources (their scans) — at the fps the project
-// renders at. A source not scanned yet is said so and handed to kick(srcs): the backend's background
-// lane (scripts/grade-scan.mjs createGradeScans) — validate itself never decodes
+// the figures and names a version's graphics show that its own audio does not say (CEO-21, src/validate.ts
+// unbackedData): the review version lists them for the client to confirm — the agent never decides a figure
+export const datosPorConfirmar = (p, publicDir, env) => unbackedData(p, projectWords(p, publicDir, env)).map(({ref, dato, src, atSec}) => ({graphic: ref, dato, src, atSec}));
+
+// every issue: layout / timing / emphasis (validateProject), then what needs the words (projectWords: off-mic
+// words left in the cut, clip edges inside a word, the guion against the cut, the graphics' data against the
+// audio), then half-graded sources and wind (their scans) — at the fps the project renders at. A source not
+// scanned yet is said so and handed to kick(srcs): the backend's background lane (scripts/grade-scan.mjs
+// createGradeScans, which runs the wind scan too) — validate itself never decodes
 export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const fps = deliveryFps(p);
   // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name)
   const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { return [f, readFont(fs.readFileSync(file)).fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
-  const scans = Object.fromEntries([...new Set(p.clips.map((c) => c.src))].map((src) => [src, readScan(publicDir, src)]));
-  const pending = Object.keys(scans).filter((src) => scans[src] === null), failed = Object.keys(scans).filter((src) => scans[src]?.error);
-  if (pending.length) try { kick?.(pending); } catch {}
-  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir, env)), ...halfGradedIssues(p, scans, fps),
+  const srcs = [...new Set(p.clips.map((c) => c.src))];
+  const scans = Object.fromEntries(srcs.map((src) => [src, readScan(publicDir, src)]));
+  const winds = Object.fromEntries(srcs.map((src) => [src, readWind(publicDir, src)]));
+  const pending = srcs.filter((src) => scans[src] === null), failed = srcs.filter((src) => scans[src]?.error);
+  const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null);
+  if (kicked.length) try { kick?.(kicked); } catch {}
+  const words = await projectWords(p, publicDir, env);
+  // wind is the take's: the pauses of each whole source, not only what the cut keeps (next to none after autocut)
+  const takes = Object.fromEntries((await projectWords({...p, clips: srcs.map((src) => ({id: src, src, inSec: 0, outSec: Infinity}))}, publicDir, env)).map((t) => [t.clipId, t.words]));
+  return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
     ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))];
 }

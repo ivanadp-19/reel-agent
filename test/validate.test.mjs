@@ -213,3 +213,77 @@ test('transcriptIssues: a split that removed nothing (continuesPrev) cuts no wor
   assert.deepEqual(transcriptIssues(pieces([0, 0.95], [0.95, 2]), tr), [], 'the take runs on through "mundo"');
   assert.deepEqual(transcriptIssues(pieces([0, 0.95], [1, 2]), tr).map((i) => i.msg.split(' (')[0]), ['k0 ends in the middle of "mundo"', 'k1 starts in the middle of "mundo"']);
 });
+
+// ---- data on screen backed by this reel's audio (CEO-21): unbackedData, reported by transcriptIssues ----
+import {unbackedData} from '../src/validate.ts';
+
+// words said one after another from startMs, 400 ms each ('|' = a sentence end after the word before)
+const said = (source, text, startMs = 0, clipId = source) => {
+  let t = startMs;
+  return {clipId, source, words: text.split(' ').map((word, i) => ({i, word, startMs: (t += 400) - 400, endMs: t - 50}))};
+};
+const reel = (src, graphics, over = {}) => ({clips: [{id: src, src: `clips/${src}.mp4`, inSec: 0, outSec: 30, sourceDurationSec: 30}], captions: [], graphics, ...over});
+const gfx = (id, src, startMs, template, props) => ({id, src: `clips/${src}.mp4`, startMs, endMs: startMs + 2000, template, props});
+const datos = (p, tr) => unbackedData(p, tr).map((d) => d.dato);
+
+test('data-from-audio: a figure said near the graphic passes (digits or words); one not said blocks', () => {
+  const tr = [said('s', 'El jardín recibe hasta cuarenta personas y tiene 2 asadores.')];
+  const ok = reel('s', [gfx('g0', 's', 1200, 'label-2tone', {top: 'JARDÍN', bottom: 'Hasta 40 personas'}), gfx('g1', 's', 2000, 'stat', {value: '2', label: 'asadores'})]);
+  assert.deepEqual(unbackedData(ok, tr), []);
+  const bad = reel('s', [gfx('g0', 's', 1200, 'label-2tone', {top: 'JARDÍN', bottom: 'Hasta 45 personas'})]);
+  const i = transcriptIssues(bad, tr).filter((x) => x.code === 'data-from-audio');
+  assert.deepEqual(i.map((x) => [x.level, x.ref]), [['error', 'g0']]);
+  assert.match(i[0].msg, /"45" — dato sin respaldo en el audio de este reel/);
+});
+
+test('data-from-audio: only this reel\'s own audio backs it — the same fact with another value in another reel is never unified', () => {
+  const trA = said('a', 'Caben treinta personas en el patio.'), trB = said('b', 'Caben veinte personas en el patio.');
+  const g = (src) => gfx('g0', src, 400, 'label-2tone', {top: 'PATIO', bottom: 'Para 30 personas'});
+  assert.deepEqual(datos(reel('a', [g('a')]), [trA, trB]), []);
+  assert.deepEqual(datos(reel('b', [g('b')]), [trA, trB]), ['30']); // reel b says 20; reel a's 30 does not count
+});
+
+test('data-from-audio: far from the graphic, cut out of the reel, or under a chapter number does not count; a sentence that reaches it does', () => {
+  const tr = [said('s', 'Son 12 lofts. Y ahora hablemos de otra cosa muy distinta con calma y sin prisa ninguna hoy.')];
+  const late = gfx('g0', 's', 6000, 'stat', {value: '12', label: 'lofts'}); // 12 is said at 0.4 s: over 3 s away, another sentence
+  assert.deepEqual(datos(reel('s', [late]), tr), ['12']);
+  const reach = gfx('g0', 's', 3900, 'stat', {value: '12', label: 'lofts'}); // "12" ends 3.15 s before it; "lofts." reaches the window, and its sentence says 12
+  assert.deepEqual(datos(reel('s', [reach]), tr), []);
+  const cut = reel('s', [gfx('g0', 's', 1200, 'stat', {value: '12', label: 'lofts'})], {clips: [{id: 's', src: 'clips/s.mp4', inSec: 0.9, outSec: 30, sourceDurationSec: 30}]});
+  assert.deepEqual(datos(cut, tr), ['12']); // "12" (0.4–0.75 s) is cut out of the reel
+  assert.deepEqual(datos(reel('s', [gfx('g0', 's', 1200, 'chapter', {label: 'Parte', number: '07'})]), tr), []);
+});
+
+test('data-from-audio: names — glossary terms (folded both ways), capitalized words past a sentence start, a location tag\'s place', () => {
+  const glossary = [{term: 'Solmar', variants: ['Sol Mar']}];
+  const tr = [said('s', 'Vive en Sol Mar, al norte de Valtierra.')];
+  const p = (props, template = 'label-2tone') => ({...reel('s', [gfx('g0', 's', 800, template, props)]), brand: {glossary}});
+  assert.deepEqual(datos(p({top: 'SOLMAR', bottom: 'Al norte de Valtierra'}), tr), []); // "Sol Mar" said = the term Solmar
+  assert.deepEqual(datos(p({top: 'Vive en Solmar', bottom: 'Cerca de Puerto Azul'}), tr), ['Puerto', 'Azul']);
+  assert.deepEqual(datos(p({top: 'Terraza', bottom: 'Con vista'}), tr), []); // a capital that opens a text is not a name
+  assert.deepEqual(datos(p({place: 'Montecielo', sub: ''}, 'location-tag'), tr), ['Montecielo']);
+  assert.deepEqual(datos({...p({top: 'SOLMAR', bottom: ''}), brand: null}, tr), []); // all caps, no glossary: not taken as a name
+  assert.deepEqual(datos({...p({top: 'SKYPOOL', bottom: ''}), brand: {glossary: [{term: 'skypool', variants: ['sky pool']}]}}, tr), []); // an amenity's spelling is no name
+});
+
+test('data-from-audio: the kit\'s glossary reads a figure said in words ("cuatro dieciocho" = 418)', () => {
+  const tr = [said('s', 'Te espero en Solmar cuatro dieciocho.')];
+  const p = {...reel('s', [gfx('g0', 's', 1200, 'end-card', {title: 'Solmar 418', cta: 'Escríbeme'})]), brand: {glossary: [{term: '418', variants: ['cuatro dieciocho']}]}};
+  assert.deepEqual(datos(p, tr), []);
+  assert.deepEqual(datos({...p, brand: null}, tr), ['418']);
+});
+
+// ---- script-coverage: the guion against the cut, before there are captions ----
+test('script-coverage: a guion line the cut does not keep is a warning while there are no captions; then the captions check takes over', () => {
+  const tr = [said('s', 'Mi casa tiene jardín. Y también tiene alberca.')];
+  const guion = 'Mi casa tiene jardín. Y también tiene alberca. Escríbeme hoy mismo.';
+  const p = {...reel('s', []), guion};
+  const cov = transcriptIssues(p, tr).filter((x) => x.code === 'script-coverage');
+  assert.deepEqual(cov.map((x) => [x.level, x.ref]), [['warn', 's']]);
+  assert.match(cov[0].msg, /guion "Escríbeme hoy mismo" is not in the cut \(after s\)/);
+  assert.deepEqual(codes(transcriptIssues({...p, guion: guion.replace(' Escríbeme hoy mismo.', '')}, tr)), []);
+  assert.deepEqual(codes(validateProject(p)).filter((c) => c.startsWith('guion')), []); // no pages: not "missing from the captions"
+  const captioned = {...p, captions: [page('c0', 0, 3000, [W('Mi', 0, 350)])]};
+  assert.deepEqual(codes(transcriptIssues(captioned, tr)).filter((c) => c === 'script-coverage'), []);
+  assert.deepEqual(codes(transcriptIssues({...captioned, captionsOff: true}, tr)), ['script-coverage']);
+});

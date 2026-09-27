@@ -8,6 +8,8 @@ export const CLEAN = {
   off: {desc: 'nothing', af: ''},
   light: {desc: 'low cut at 80 Hz + gentle spectral denoise (room hiss, hum)', af: 'highpass=f=80,afftdn=nf=-25:nr=10:nt=w'},
   strong: {desc: 'low cut at 100 Hz + heavier denoise + de-esser', af: 'highpass=f=100,afftdn=nf=-30:nr=18:nt=w,deesser=i=0.35'},
+  // T16 / OQ4: ffmpeg only. The whole mix, the music's bass too (per-clip baking only if a reel mixes windy and clean takes)
+  wind: {desc: 'wind: low cut at 130 Hz + spectral denoise (outdoor takes; the whole mix, music bass included)', af: 'highpass=f=130:p=2,afftdn=nf=-25:nr=12:nt=w'},
 } as const;
 export type CleanId = keyof typeof CLEAN;
 export type AudioOptions = {clean?: CleanId | string; sfx?: boolean} | null;
@@ -50,4 +52,51 @@ export function musicGain(music: NonNullable<Music>, f: number, fps: number, tot
     v *= duckLevel + (1 - duckLevel) * k;
   }
   return v;
+}
+
+// ---------- wind (T16): scripts/wind-scan.mjs measures a source, this decides ----------
+// In the pauses of a take (windows between its first and last word, at least padMs from every word — the whole
+// source: a cut reel keeps next to no pause, and the wind is the take's, not the edit's), the noise floor (median
+// whole-band dB of the quieter half) and how far the band under 150 Hz sits under it (median of low − full there):
+// wind is a loud floor that lives under 150 Hz. It only warns and names the preset — never applies it.
+// Calibrated (floor dB / share under 150 Hz dB): César's takes G1 −27 / −18, G2 hook −30 / −12, body −35 / −10,
+// close −23 / −12 (G10 and his finished exports have < 1 s of pause: nothing to tell); an indoor take with HVAC
+// rumble −50 / −0.5 (a quiet floor: not wind); synthetic brown noise under 100 Hz beneath a voice −25 / −0.3
+// (wind; −42 / −1.3 after the preset), pink room tone −66 / −3.
+// ponytail: a loud pinkish floor (traffic, −40 dB) passes the share too and gets the "wind?" question — the preset
+// helps there as well; a spectral-slope test if that turns out noisy
+export const WIND = {fps: 10, padMs: 250, minGapSec: 1, floorDb: -45, lowDb: -5};
+export type WindScan = {fps: number; full: number[]; low: number[]; error?: string};
+type Span = {startMs: number; endMs: number};
+const median = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : NaN; };
+// words: everything said in the source (any voice)
+export function windOf(scan: WindScan, words: Span[]): {floorDb: number; lowDb: number; gapSec: number} | null {
+  if (!words.length) return null;
+  const first = Math.min(...words.map((w) => w.startMs)), last = Math.max(...words.map((w) => w.endMs));
+  const gap: number[] = [];
+  for (let k = 0; k < scan.full.length; k++) {
+    const t = ((k + 0.5) / scan.fps) * 1000;
+    if (t > first && t < last && !words.some((w) => t > w.startMs - WIND.padMs && t < w.endMs + WIND.padMs)) gap.push(k);
+  }
+  if (gap.length < WIND.minGapSec * scan.fps) return null; // too little pause to tell
+  // the quieter half of the pauses: a breath, a word the ASR missed or a door is louder than the floor it sits on
+  const quiet = [...gap].sort((a, b) => scan.full[a] - scan.full[b]).slice(0, Math.ceil(gap.length / 2));
+  return {floorDb: median(quiet.map((k) => scan.full[k])), lowDb: median(quiet.map((k) => scan.low[k] - scan.full[k])), gapSec: gap.length / scan.fps};
+}
+export const windy = (w: ReturnType<typeof windOf>) => !!w && w.floorDb > WIND.floorDb && w.lowDb >= WIND.lowDb;
+
+// one warning per windy source the reel uses (validate: mcp/checks.mjs projectIssues; the editor's Validate).
+// scans: src → its wind scan (undefined / null = not scanned yet: skipped); words: src → what is said in the whole source
+type WindIssue = {level: 'warn'; code: 'wind'; msg: string; ref: string};
+export function windIssues(p: {clips: {id: string; src: string}[]; audio?: AudioOptions}, scans: Record<string, WindScan | null | undefined>, words: Record<string, Span[]>): WindIssue[] {
+  if (p.audio?.clean === 'wind') return [];
+  const out: WindIssue[] = [];
+  for (const src of new Set(p.clips.map((c) => c.src))) {
+    const scan = scans[src];
+    const w = scan && !scan.error ? windOf(scan, words[src] ?? []) : null;
+    if (!windy(w)) continue;
+    const ids = p.clips.filter((c) => c.src === src).map((c) => c.id);
+    out.push({level: 'warn', code: 'wind', ref: ids[0], msg: `${src} (${ids.join(', ')}): wind? In the pauses of the take the noise floor is ${w!.floorDb.toFixed(0)} dB and ${Math.round(10 ** (w!.lowDb / 10) * 100)} % of it is under 150 Hz — set_audio clean: wind (low cut at 130 Hz + denoise on the final mix, music bass too; listen before and after), or leave it`});
+  }
+  return out;
 }

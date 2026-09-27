@@ -6,7 +6,7 @@ import {projectCaptions, type Caption} from './captions.ts';
 import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
-import {guionIssues} from './guion.ts';
+import {applyGlossary, coreOf, guionIssues, joinFigures, normKey, numberOf, type GlossaryEntry} from './guion.ts';
 import {continuesPrev, placeClips, renderSec, type Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
@@ -264,8 +264,9 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   // behind graphics need a matte
   for (const s of spansWithoutMatte([...(p.graphics ?? []), ...p.captions], p.mattes, p.clips)) issues.push({level: 'error', code: 'matte', msg: `behind graphics/captions on ${s.src} ${(s.startMs / 1000).toFixed(1)}–${(s.endMs / 1000).toFixed(1)} s have no person matte — run prepare_mattes`});
   // the guion's coverage (src/guion.ts): conflicts and missing / altered words are warnings for a
-  // human (the audio stays on screen); reconciliation-made timing errors are errors
-  if (p.guion?.trim() || p.captions.some((c) => c.words.some((w) => w.asr != null))) issues.push(...guionIssues(p.guion ?? '', caps, p.captions));
+  // human (the audio stays on screen); reconciliation-made timing errors are errors. No pages on screen:
+  // transcriptIssues' script-coverage checks the guion against the cut instead
+  if (caps.length && (p.guion?.trim() || p.captions.some((c) => c.words.some((w) => w.asr != null)))) issues.push(...guionIssues(p.guion ?? '', caps, p.captions));
   // hook: something in the first 3 s
   if (totalMs > 5000 && !gfx.some((g) => g.startMs < 3000 && g.template !== 'layout') && !caps.some((c) => c.startMs < 1500)) issues.push({level: 'warn', code: 'hook', msg: 'nothing on screen in the first 3 s — reels need a hook'});
   return issues;
@@ -273,10 +274,13 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
 
 // Checks that need the project's words (mcp/checks.mjs projectWords: its sources' transcript caches):
 // off-mic words still inside the cut, and clip edges that fall inside a word — never an edge the next piece
-// continues (continuesPrev: a split with nothing cut out plays the word whole)
+// continues (continuesPrev: a split with nothing cut out plays the word whole); the guion against the cut
+// before there are captions (script-coverage); the data in the graphics against the audio (data-from-audio).
+// glossary: the kit's (the render judge adds its profile's)
 import type {TClip} from './cuts.ts';
 const sourceOf = (src: string) => src.split('/').pop()!.replace(/\.[^.]+$/, '');
-export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[]): Issue[] {
+type WordsProject = {clips: Clip[]; offMic?: string; guion?: string; captions?: Caption[]; captionsOff?: boolean; graphics?: Graphic[]; brand?: {glossary?: GlossaryEntry[]} | null};
+export function transcriptIssues(p: WordsProject, tr: TClip[], glossary: GlossaryEntry[] = p.brand?.glossary ?? []): Issue[] {
   // one entry per word index: a word on the edge of two pieces of one source is listed in both
   const byIdx = new Map<string, Map<number, TClip['words'][number]>>();
   for (const t of tr) { const m = byIdx.get(t.source) ?? new Map(); for (const w of t.words) m.set(w.i, w); byIdx.set(t.source, m); }
@@ -297,8 +301,80 @@ export function transcriptIssues(p: {clips: Clip[]; offMic?: string}, tr: TClip[
     for (const w of off) { const r = runs[runs.length - 1]; if (r && w.i === r.to + 1) { r.to = w.i; r.text.push(w.word); } else runs.push({from: w.i, to: w.i, text: [w.word]}); }
     out.push({level: 'warn', code: 'off-mic', msg: `${c.id}: ${off.length} off-mic word(s) still in the cut: ${runs.slice(0, 4).map((r) => `cut_words ${source}:${r.from}${r.to !== r.from ? `…${source}:${r.to}` : ''} "${r.text.join(' ').slice(0, 40)}"`).join('; ')}${runs.length > 4 ? ` (+${runs.length - 4} more)` : ''} — or set_off_mic cut`, ref: c.id});
   }
+  // script-coverage: the guion against the words the cut keeps (one pseudo-page per clip, the off-mic voice
+  // aside), while there are no captions to check it on — then validateProject's guion check reads the pages.
+  // guionIssues' guion-missing, as a warning: a line may be cut on purpose (another variant's hook, a retake)
+  if (p.guion?.trim() && !(p.captions?.length && !p.captionsOff)) {
+    const pages = p.clips.map((c, k) => ({id: c.id, clipId: c.id, startMs: k, words: (bySource.get(sourceOf(c.src)) ?? [])
+      .filter((w) => w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000 && !(w.off && p.offMic !== 'off')).sort((a, b) => a.startMs - b.startMs)
+      .map((w) => ({text: w.word, wid: `${sourceOf(c.src)}:${w.i}`, startMs: w.startMs, endMs: w.endMs}))}));
+    for (const i of guionIssues(p.guion, pages, [], 'cut')) if (i.code === 'guion-missing') out.push({...i, code: 'script-coverage'});
+  }
+  for (const d of unbackedData(p, tr, glossary)) out.push({level: 'error', code: 'data-from-audio', msg: `graphic ${d.ref} (${d.template}) at ${d.atSec} s shows "${d.dato}" — dato sin respaldo en el audio de este reel: ${d.untranscribed ? `${d.src} has no transcript to check it against (get_transcript)` : `${d.src} does not say it within ${DATA_NEAR_MS / 1000} s of the graphic (nor in a sentence that reaches it)`}. Say it on camera, correct the graphic (edit_graphic), or leave it for the client to confirm (datosPorConfirmar of the version); a name the ASR spells otherwise goes in the brand kit's glossary`, ref: d.ref});
   return out;
 }
+
+// ---------- data on screen backed by this reel's audio (CEO-21) ----------
+// Every figure (number, price, capacity, date, distance) and name a text graphic shows must be said in this
+// reel's own audio: by a word the cut keeps, in the graphic's own source, within DATA_NEAR_MS of the graphic
+// (source time) or in a sentence that reaches that window — never another reel, the guion or the brief, so
+// two reels that say 70 and 60 each keep their own. Figures match by value (the words run through the
+// glossary and joinFigures: 'setenta' = 70, 'cincuenta y cuatro' = 54, the kit's 'tres veintiséis' = 326),
+// names by spelling, folded, after the glossary on both sides ('Montalban' said, 'Montealbán' shown).
+// ponytail: names are capitalized glossary terms, capitalized words of mixed-case text past its sentence start, and a
+// location-tag's one-word place / sub — capitals are a poor signal, so no more than that; a false block on a
+// brand name is fixed with a glossary term (its variants = what the ASR writes), never a waiver
+export const DATA_NEAR_MS = 3000;
+export type Unbacked = {ref: string; template: string; dato: string; src: string; atSec: number; untranscribed?: true};
+// the figures in a text: '70', '1,500,000' / '1.500.000' (thousands), '2.5' / '2,5' (decimals), '30%'
+const figuresOf = (s: string) => (s.match(/\d+(?:[.,]\d+)*/g) ?? []).map((n) => Number(/^\d{1,3}([.,]\d{3})+$/.test(n) ? n.replace(/[.,]/g, '') : n.replace(',', '.')));
+const SENT_END = /[.!?…]["')\]]*$/;
+const NOT_DATA = new Set(['number']); // a chapter's number is the reel's structure, not a fact
+export function unbackedData(p: WordsProject, tr: TClip[], glossary: GlossaryEntry[] = p.brand?.glossary ?? []): Unbacked[] {
+  const out: Unbacked[] = [];
+  const shown = new Map(projectGraphics(p.graphics ?? [], p.clips, 30).map((g) => [g.id, g])); // on the timeline (30 fps: the second is for people)
+  const glossed = (ws: {word: string; startMs: number; endMs: number}[]) => joinFigures(applyGlossary(ws, glossary).words);
+  const termKeys = new Set(glossary.filter((g) => /^\p{Lu}/u.test(g.term)).flatMap((g) => g.term.split(/\s+/).map(normKey))); // a name's spelling ('Montealbán'), not an amenity's ('skypool')
+  const spoken = new Map<string, {word: string; startMs: number; endMs: number; sent: number}[]>();
+  const heard = (src: string) => {
+    if (!spoken.has(src)) {
+      const kept = p.clips.filter((c) => c.src === src);
+      const byI = new Map<number, TClip['words'][number]>();
+      for (const t of tr) if (t.source === sourceOf(src)) for (const w of t.words) if (kept.some((c) => w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000)) byI.set(w.i, w);
+      let sent = 0;
+      spoken.set(src, glossed([...byI.values()].sort((a, b) => a.startMs - b.startMs)).map((w) => ({...w, sent: SENT_END.test(w.word) ? sent++ : sent})));
+    }
+    return spoken.get(src)!;
+  };
+  for (const g of p.graphics ?? []) {
+    const at = shown.get(g.id);
+    if (!at || !isTextGraphic(g.template)) continue;
+    const texts = Object.entries(g.props ?? {}).filter(([k]) => !NOT_DATA.has(k)).flatMap(([k, v]) => textsOf(v).map((text) => ({k, text})));
+    const figures = new Set<number>(), names = new Map<string, string>(); // key → as shown
+    for (const {k, text} of texts) {
+      for (const n of figuresOf(text)) figures.add(n);
+      const toks = glossed(text.split(/[\s/]+/).filter(Boolean).map((word) => ({word, startMs: 0, endMs: 0}))).map((w) => w.word);
+      const mixed = text !== text.toUpperCase();
+      toks.forEach((raw, i) => {
+        const core = coreOf(raw), key = normKey(core);
+        if (!key || /\d/.test(core)) return;
+        const capital = mixed && /^\p{Lu}/u.test(core) && core.length > 1;
+        if (termKeys.has(key) || (capital && i > 0 && !SENT_END.test(toks[i - 1])) || (capital && g.template === 'location-tag' && toks.length === 1 && (k === 'place' || k === 'sub'))) names.set(key, core);
+      });
+    }
+    if (!figures.size && !names.size) continue;
+    const near = heard(g.src).filter((w) => w.endMs > g.startMs - DATA_NEAR_MS && w.startMs < g.endMs + DATA_NEAR_MS);
+    const sents = new Set(near.map((w) => w.sent));
+    const said = heard(g.src).filter((w) => sents.has(w.sent));
+    const keys = new Set(said.map((w) => normKey(w.word)));
+    const values = new Set(said.flatMap((w) => (/\d/.test(w.word) ? figuresOf(w.word) : [numberOf([normKey(w.word)])]).filter((n): n is number => n != null)));
+    const miss = [...[...figures].filter((n) => !values.has(n)).map(String), ...[...names].filter(([key]) => !keys.has(key)).map(([, core]) => core)];
+    for (const dato of miss) out.push({ref: g.id, template: g.template, dato, src: sourceOf(g.src), atSec: Math.round(at.startMs / 100) / 10, ...(heard(g.src).length ? {} : {untranscribed: true as const})});
+  }
+  return out;
+}
+// the text of a prop: strings, and the strings inside lists / objects (a hook-stack's lines)
+const textsOf = (x: unknown): string[] => (typeof x === 'string' ? [x] : Array.isArray(x) ? x.flatMap(textsOf) : x && typeof x === 'object' ? Object.values(x).flatMap(textsOf) : []);
 
 // ---------- half-graded sources (scripts/grade-scan.mjs) ----------
 // A pre-edit graded only in part: inside one shot the look changes. scans: src → its scan's steps (source
