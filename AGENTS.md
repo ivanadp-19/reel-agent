@@ -150,7 +150,7 @@ project. `scripts/run-report.mjs` measures a run from its JSONL log.
 ## Commands
 
 - `npm run setup` — checks tools, creates the WhisperX venv, seeds `.env`
-- `npm start` — backend + editor at http://localhost:5173
+- `npm start` — backend + editor at http://localhost:5173; with `REEL_PUBLIC=1` (the VM, Railway, trying the login / bandeja on localhost) the backend alone, serving the built editor at :3333 behind its gate — `npx vite build` first (`editor/dist`: index.html + assets only, `copyPublicDir: false`; its index.html `no-cache`) — never a vite dev server, which serves `public/` to any local user with no login, a client's `/reviews` and `/clients` included. A child that dies on its own ends it with exit ≠ 0 (a backend that cannot listen exits 1)
 - `npm run stop` — stops them by the pid they wrote (`.dev.pid`, `.backend.pid`)
 - `npm run typecheck` — `tsc --noEmit`
 - `node --test` — unit tests
@@ -161,7 +161,7 @@ project. `scripts/run-report.mjs` measures a run from its JSONL log.
 
 ## Operating the VM
 
-The production box is a small Linux VM (2 vCPU) shared by several agent sessions.
+The production box is a Linux VM (KVM, 8 vCPU AMD EPYC 9354P, 31 GB RAM, no GPU; Ubuntu's ffmpeg 6.1.1) shared by several agent sessions.
 
 - **Node 24 through nvm.** `npm run setup` loads `~/.nvm/nvm.sh` and runs
   `nvm install 24 && nvm use 24` when the node on PATH is older (`.nvmrc` says 24);
@@ -172,8 +172,22 @@ The production box is a small Linux VM (2 vCPU) shared by several agent sessions
   `pkill -f remotion`, `pkill -f claude`, `pkill -f mcp` also match the agent's own
   session (Claude Code, Codex and the MCP server are node processes whose command
   lines contain those words) and kill it mid-edit — it happened twice in one day.
-  Stop the app with `npm run stop` (by pid file); anything else: `pgrep -af <pattern>`
+  Stop a local app with `npm run stop` (by pid file; on the VM: the unit, below); anything else: `pgrep -af <pattern>`
   first, read the list, then `kill <pid>` of exactly the process you mean.
+- **The app is the systemd unit `reel-agent`** (User=reel, `EnvironmentFile=.env`, `ExecStart=npm start`,
+  `Restart=on-failure`, `RestartSec=3`; Caddy's TLS in front → 127.0.0.1:3333), and only root can start it. On the VM
+  never `npm run stop` nor SIGTERM the app: a clean exit leaves the unit down until root comes. The one restart without
+  root: check that no render is active (`reel jobs list --active`, the editor's Renders panel), then SIGKILL
+  exactly the unit's MainPID as reel, guarded against an empty one (`kill -KILL 0` signals your own process group):
+  `pid=$(systemctl show -p MainPID --value reel-agent); [ "$pid" -gt 1 ] && sudo -n -u reel kill -KILL "$pid"` —
+  systemd restarts it ~3 s later (and emails one "crashed and restarted"). A deploy rebuilds `editor/dist` (`npx vite build`).
+- **Never `npm test` / `node --test` inside the live checkout** (`/home/reel/reel-agent`): paid Deepgram calls (its
+  `.env` has the key) and test projects written into its `public/projects`. Test in a clone of your own under `/tmp`,
+  niced, and delete it after.
+- **Human-only actions are forgeable on this box while agents can sudo to reel.** `sudo -n -u reel` reads the live
+  `.env` — `REEL_SESSION_SECRET` and `REEL_AUTH_BCRYPT` included, all a login cookie is signed from — so an agent there
+  can mint any user's session and approve, revoke or write notes as them. Until root restricts aiagent's sudoers (the
+  MainPID kill above, nothing that reads `.env`), an approval on the VM is no stronger than the trust in its agents.
 - **The asset catalog runs niced.** `scripts/catalog.mjs` renices itself to 15 (`REEL_CATALOG_NICE`; ffmpeg inherits it) and decodes with one thread (`REEL_CATALOG_THREADS`), so a render or another session keeps the CPU. Run it by hand as `nice -n 15 ionice -c3 node scripts/catalog.mjs` on the VM, and only when there are new files — it is incremental, a second run over the same folder decodes nothing. Never put it on server start or a tight cron. One run per folder: `public/catalog/<dir>.lock` (`scripts/project-lock.mjs`); a second run over a locked folder skips it instead of decoding it again. `catalog_assets` stops its child (and the ffmpeg under it) when the MCP request is cancelled or after `REEL_CATALOG_TIMEOUT_MS` (10 min); what was analyzed stays saved.
 - **The render judge runs niced too.** `judge.mjs` renices itself to 15 (`REEL_JUDGE_NICE`) and every ffmpeg it starts (the QC gate's included) decodes and filters on one thread (`REEL_JUDGE_THREADS`); it scans source clips incrementally: a file's already-decoded ranges are cached in `.captions-tmp/judge/source-scan.json` (path + size + mtime), so the next iteration decodes only the ranges an edit moved.
 - **Export cleanup.** Cron on the VM, dry-run first and read the log:

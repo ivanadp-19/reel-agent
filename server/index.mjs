@@ -1007,4 +1007,13 @@ if (CLEANUP_EVERY_H >= 1) {
 const PORT = +(process.env.REEL_PORT || 3333); // another port for a second backend on the same box (the MCP then needs REEL_API)
 const HOST = process.env.REEL_HOST || '127.0.0.1';
 const BIND_PORT = +(process.env.PORT || PORT);
+// a port in use (EADDRINUSE) or refused: exit 1, so systemd's Restart=on-failure restarts it (unhandled, it was exit 0),
+// the renders the queue may have started meanwhile stopped as on SIGTERM; once listening, an error (an accept's EMFILE)
+// is logged and the backend stays up, as before
+server.on('error', (e) => {
+  if (server.listening) return console.error('server:', e);
+  console.error(`backend not started: ${e.message}`);
+  renderJobs.shutdown();
+  process.exit(1);
+});
 server.listen(BIND_PORT, HOST, () => console.log(`editor backend → http://${HOST}:${BIND_PORT}`));

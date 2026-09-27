@@ -175,3 +175,19 @@ test('what callers upload into public/ is served inert: an .html or .svg planted
     assert.equal(editor.headers['content-security-policy'], undefined, 'the editor\'s own page runs as before');
   } finally { srv.close(); }
 });
+
+test('the editor\'s page is revalidated on every load (no-cache): one cached before a deploy names hashed assets that are gone', async () => {
+  fs.mkdirSync(path.join(dist, 'assets'), {recursive: true});
+  fs.writeFileSync(path.join(dist, 'assets', 'index-abc123.js'), 'app');
+  const srv = await serve();
+  try {
+    const headers = {'x-reel-token': 'backend-tok'};
+    for (const p of ['/', '/index.html', '/p/some-project']) {
+      const r = await req(srv, p, {headers});
+      assert.deepEqual([r.status, r.headers['cache-control']], [200, 'no-cache'], p);
+      assert.match(r.body, /<title>editor</);
+    }
+    const asset = await req(srv, '/assets/index-abc123.js', {headers});
+    assert.deepEqual([asset.status, asset.body, asset.headers['cache-control']], [200, 'app', undefined], 'hashed assets as before');
+  } finally { srv.close(); }
+});
