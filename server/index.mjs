@@ -8,7 +8,8 @@
 //   render     — export the MultiClip composition to mp4: a job persisted on disk, queued,
 //                cancellable (/api/render, /api/render-jobs; scripts/render-jobs.mjs); a final that
 //                passes QC becomes a review version of its project (720p proxy + poster, scripts/reviews.mjs)
-//   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs)
+//   reviews    — review links per project (/api/reviews/…), the public pages /r/<token> (server/review.mjs), and
+//                the judge on a client's version (QC técnico, scripts/reviews.mjs judgeVersion; re-judge by route)
 //   health     — environment checks for the Start screen (ffmpeg, WhisperX, keys) + free memory / disk
 //   the reel CLI (cli/reel.mjs) — per-user tokens (/api/tokens, /api/whoami; server/tokens.mjs; a signed-in
 //                user's own at /cli-token + /api/cli-tokens, server/cli-tokens.mjs),
@@ -35,9 +36,9 @@ import {oomReason} from '../scripts/render-memory.mjs';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
-import {createLink, inReviewsRow, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {createLink, inReviewsRow, judgeText, judgeVersion, loadReviews, playableVersions, publicLink, resumeJudges, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
+import {gate, mayRejudge, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
 import {handleReview, linkAccess} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
@@ -240,8 +241,10 @@ async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
   return bakeMissing(JSON.stringify(props), id, {signal, setPid, progress});
 }
 const RENDER_JOBS = jobsDir(PUBLIC);
-// full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version
-const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage});
+// full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version;
+// a client's version is then judged in the background (QC técnico en curso → superado | n hallazgos | no disponible)
+const judge = ({projectId, v}, o = {}) => judgeVersion({dir: REVIEWS, publicDir: PUBLIC, projectId, v, ...o});
+const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage, judge});
 const renderJobs = createRenderJobs({
   dir: RENDER_JOBS,
   workers: PLAN.workers,
@@ -251,6 +254,8 @@ const renderJobs = createRenderJobs({
 // stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
 for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
 console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
+// a judge a dead backend left 'en curso': judged again once, then 'no disponible'
+resumeJudges({dir: REVIEWS, publicDir: PUBLIC}).catch((e) => console.error(`judges not resumed: ${e.message}`));
 
 // Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
 // locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
@@ -795,6 +800,17 @@ async function handle(req, res) {
   //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt, clients, access} (the token is shown once;
   //                                                     access = what a client's link needs besides itself, server/review.mjs linkAccess)
   //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
+  //   POST   /api/reviews/<projectId>/versions/<v>/judge → 202 {v, judge, qcLabel}: the judge again on that version, no re-render
+  //                                                     (the MCP rejudge, the editor's Re-judge) — the backend token, an owner's
+  //                                                     login, or the local editor (loopback); never a reviewer
+  const rj0 = url.pathname.match(/^\/api\/reviews\/([\w-]+)\/versions\/(\d{1,6})\/judge$/);
+  if (rj0) {
+    if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
+    if (!mayRejudge(g)) return json(res, 403, {error: 'judging a version again needs the backend token or an owner login', code: 'forbidden'});
+    const r = await judge({projectId: rj0[1], v: +rj0[2]}, {fresh: true});
+    if (!r) return json(res, 404, {error: `no version v${rj0[2]} of ${rj0[1]}`, code: 'not_found'});
+    return json(res, 202, {projectId: rj0[1], v: r.version.v, judge: r.version.judge, qcLabel: judgeText(r.version.judge)});
+  }
   const rv = url.pathname.match(/^\/api\/reviews\/([\w-]+)(?:\/links(?:\/([0-9a-f]{8}))?)?$/);
   if (rv) {
     const [, projectId, linkId] = rv;
@@ -802,7 +818,7 @@ async function handle(req, res) {
     if (req.method === 'GET' && !withLinks) {
       const r = loadReviews(REVIEWS, projectId);
       const playable = new Set(playableVersions(r, PUBLIC).map((x) => x.v));
-      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v)})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
+      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v), qcLabel: judgeText(x.judge)})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
     }
     if (req.method === 'POST' && withLinks && !linkId) {
       let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }

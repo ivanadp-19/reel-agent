@@ -2,7 +2,8 @@
 //   normalizeLoudness(file): two-pass EBU R128 loudnorm to −14 LUFS / −1.5 dBTP
 //     (margin under the −1 dBTP gate for the AAC re-encode), video stream copied.
 //   qc(file, {expectSec, draft}): blocking checks (loudness, true peak, audio present,
-//     frame size, duration) + warnings (black or silent stretches).
+//     frame size, duration) + warnings (black or silent stretches); lufs / truePeak as measured
+//     (null without audio) — a client's review version records them (scripts/reviews.mjs).
 //   CLI: node scripts/qc.mjs <file.mp4> [expectSec]
 import fs from 'node:fs';
 import path from 'node:path';
@@ -71,6 +72,7 @@ function stretches(args, re) {
 
 export function qc(file, {expectSec, draft = false} = {}) {
   const checks = [];
+  let lufs = null, truePeak = null;
   const add = (name, ok, value, want, blocking = true) => checks.push({name, ok, value, want, blocking});
   const info = fs.existsSync(file) ? probe(file) : null;
   if (!info) return {ok: false, checks: [{name: 'file', ok: false, value: 'unreadable', want: 'an mp4', blocking: true}]};
@@ -84,6 +86,8 @@ export function qc(file, {expectSec, draft = false} = {}) {
   if (a) {
     const m = measureLoudness(file);
     const I = m?.I ?? -Infinity, TP = m?.TP ?? Infinity;
+    if (Number.isFinite(I)) lufs = I;
+    if (Number.isFinite(TP)) truePeak = TP;
     add('loudness', Math.abs(I - TARGET.I) <= TARGET.tolerance, Number.isFinite(I) ? `${I.toFixed(1)} LUFS` : 'silent', `${TARGET.I} ±${TARGET.tolerance} LUFS`, !draft);
     add('true peak', TP <= TARGET.TP, Number.isFinite(TP) ? `${TP.toFixed(1)} dBTP` : '?', `≤ ${TARGET.TP} dBTP`, !draft);
     const silent = stretches(['-i', file, '-vn', '-af', 'silencedetect=noise=-50dB:d=2', '-f', 'null', '-'], /silence_start: ([\d.]+)[\s\S]*?silence_end: ([\d.]+)/g);
@@ -94,7 +98,7 @@ export function qc(file, {expectSec, draft = false} = {}) {
   const lead = frameStats(file);
   add('first frame', !blankLead(lead), lead[0] ? `Y ${lead[0].ymin}–${lead[0].ymax}, U ${lead[0].uavg}, V ${lead[0].vavg}` : 'unreadable', 'footage (not a flat field before the first real frame)', !draft);
   add('black', !black.length, black.length ? black.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 0.5 s', 'no black stretch ≥ 0.5 s (fine when intended)', false);
-  return {ok: checks.every((c) => c.ok || !c.blocking), checks};
+  return {ok: checks.every((c) => c.ok || !c.blocking), checks, lufs, truePeak};
 }
 
 export const qcText = (r) => r.checks.map((c) => `${c.ok ? '✓' : c.blocking ? '✗' : '!'} ${c.name}: ${c.value}${c.ok ? '' : ` (want ${c.want})`}`).join('\n');
@@ -115,7 +119,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const [, file, expect, clean] = args;
     const ln = normalizeLoudness(path.resolve(file), clean && clean in CLEAN ? clean : 'off');
     const report = qc(path.resolve(file), {expectSec: expect ? +expect : undefined});
-    console.log(JSON.stringify({ok: ln.ok && report.ok, error: ln.ok ? null : ln.error, checks: report.checks, text: qcText(report)}));
+    console.log(JSON.stringify({ok: ln.ok && report.ok, error: ln.ok ? null : ln.error, checks: report.checks, text: qcText(report), lufs: report.lufs, truePeak: report.truePeak}));
     process.exit(0);
   }
   const [file, expect] = args;

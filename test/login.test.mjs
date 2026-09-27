@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
-import {gate, humanOnly, tokenOk} from '../server/http.mjs';
+import {gate, humanOnly, mayRejudge, tokenOk} from '../server/http.mjs';
 import {SESSION_COOKIE, clientIp, createLoginLimiter, handleLogin, parseCookies, parseRoles, safeNext, sameSite, signSession, trustedHops, verifySession} from '../server/session.mjs';
 import {createTokenStore} from '../server/tokens.mjs';
 
@@ -340,5 +340,9 @@ test('humanOnly: only a login session passes; loopback, basic auth, the backend 
     assert.equal(humanOnly(rev, {}).status, 403, 'nor on a project without a client');
     assert.equal(humanOnly(otro, {client: 'acme'}).status, 403);
     assert.match(humanOnly(nadie, {client: 'acme'}).error, /no tiene rol/, 'a user without an entry has no human-only action');
+    // re-judging a version (CEO-6): the backend tokens (the MCP rejudge), the owner's login, the local editor — nobody else
+    const rejudge = Object.fromEntries([...Object.entries(agents), ['the owner\'s login', boss], ['a login without a role', nadie]].map(([who, g]) => [who, mayRejudge(g)]));
+    assert.deepEqual(rejudge, {loopback: true, 'a session cookie in local mode': true, 'basic auth of the owner': false, 'the primary backend token': true, 'another backend token': true, 'the owner\'s own user token': false, 'the owner\'s login': true, 'a login without a role': false});
+    assert.equal(mayRejudge(rev), false, 'never a reviewer');
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });

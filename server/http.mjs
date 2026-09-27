@@ -237,6 +237,12 @@ export function seesClient(g, clients) {
   return g.role === 'owner' || (g.role === 'reviewer' && clients.every((c) => g.clients.includes(c)));
 }
 
+// Who may run the judge again on a review version (POST /api/reviews/<id>/versions/<v>/judge, CEO-6): the agents'
+// backend token (the MCP rejudge), an owner's login session, or the local editor on loopback (local mode: the machine's
+// own user). Never a reviewer, basic auth, a user token or a login without the owner role — a re-judge can turn
+// 'hallazgos' into 'superado', the label approval waits for.
+export const mayRejudge = (g) => g?.via === 'backend-token' || g?.via === 'loopback' || (g?.via === 'session' && g.role === 'owner');
+
 // A human-only action (CEO-2, E-2: approve, revoke, confirm a note, waive a blocker, confirm a colorRef,
 // stagesMode): only a login session, which exists in public mode only — never loopback, basic auth, the
 // backend token or a user token, whoever holds them; no MCP tool does these (the parity exception, AGENTS.md).

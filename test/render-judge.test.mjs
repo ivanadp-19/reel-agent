@@ -596,4 +596,52 @@ test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split
   assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
   assert.deepEqual(checks([clip('x', 'x', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
   assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3.5, 3.833), clip('x', 'x', 0, 3)]), [['flash-cut', 'h'], ['jump-cut', ['h']]]);
+
+// ---- the queued judge on a client's version: the project's own words and its own rate ----
+import {judge, versionSummary, counts} from '../.agents/skills/render-judge/judge.mjs';
+
+test('judge(): the project\'s own words (its sources\' caches, never the machine\'s last transcript.json) at its own rate — 29.97 for a client, or the snapshot\'s', async () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'jt-'));
+  const render = path.join(pub, 'exports', 'r.mp4');
+  fs.mkdirSync(path.dirname(render), {recursive: true});
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=108x192:r=30:d=2', '-f', 'lavfi', '-i', 'sine=f=440:d=2:sample_rate=48000', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', render]);
+  if (r.status !== 0) return; // no ffmpeg with libx264 here
+  for (const d of ['projects', 'clips/transcripts']) fs.mkdirSync(path.join(pub, d), {recursive: true});
+  const clip = (src) => ({id: 'c0', src, inSec: 0, outSec: 2, sourceDurationSec: 2});
+  // A was transcribed (its source's cache); B never was — yet the machine's last run, transcript.json, is a clip c0 of B heard late
+  fs.writeFileSync(path.join(pub, 'clips', 'transcripts', 'A.auto.json'), JSON.stringify([{word: 'Hola', startMs: 100, endMs: 400}, {word: 'mundo.', startMs: 450, endMs: 900}]));
+  fs.writeFileSync(path.join(pub, 'transcript.json'), JSON.stringify([{clipId: 'c0', source: 'B', words: [{i: 0, word: 'tarde', startMs: 1500, endMs: 1800}]}]));
+  fs.writeFileSync(path.join(pub, 'projects', 'a.json'), JSON.stringify({name: 'A', clips: [clip('clips/A.mp4')], identity: {client: 'acme', family: 'acme-G2', script: 2, variant: null}}));
+  fs.writeFileSync(path.join(pub, 'projects', 'b.json'), JSON.stringify({name: 'B', clips: [clip('clips/B.mp4')]}));
+  const run = (projectId, o = {}) => judge({projectId, render, publicDir: pub, sheets: false, sourceScan: false, env: {}, ...o});
+  try {
+    const a = await run('a');
+    assert.ok(!a.findings.some((f) => f.check === 'evidence'), 'A has its words');
+    assert.ok(!a.findings.some((f) => f.check === 'hook-dead-start'), 'its own: the first word at 0.1 s, not B\'s at 1.5 s');
+    assert.equal(a.fps, 30000 / 1001, 'a client\'s project renders at 29.97');
+    const b = await run('b');
+    assert.deepEqual(b.findings.filter((f) => f.check === 'evidence').map((f) => f.evidence.missing), [['c0']], 'B was never transcribed, whatever transcript.json holds');
+    assert.equal(b.fps, 30);
+    // a version is judged as it was rendered: the props of its snapshot win, their rate included
+    const snap = path.join(pub, 'snap.json');
+    fs.writeFileSync(snap, JSON.stringify({clips: [clip('clips/A.mp4')], fps: 30000 / 1001}));
+    const s = await run('b', {snapshot: snap});
+    assert.equal(s.fps, 30000 / 1001);
+    assert.ok(!s.findings.some((f) => f.check === 'evidence'), 'the snapshot\'s clip, with its words');
+    // what a review version keeps of it
+    const sum = versionSummary(a);
+    assert.match(sum.label, /^(superado|\d+ hallazgos?)$/);
+    assert.equal(sum.label === 'superado', a.verdict === 'PASS');
+    assert.ok(sum.findings.every((f) => Object.keys(f).join() === 'check,severity,at,end,msg' && counts(a.findings.find((x) => x.check === f.check && x.msg === f.msg))));
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('versionSummary: superado on a PASS; otherwise n hallazgos = blockers + majors + minor patterns; never "aprobado"', () => {
+  const f = (check, severity, kind = 'rule') => ({check, severity, kind, at: 1, end: 2, msg: check, fix: [], evidence: {}});
+  const of = (findings) => versionSummary({...verdictOf(findings), findings, profile: 'x'});
+  assert.deepEqual(of([f('static', 'nit', 'candidate')]), {label: 'superado', findings: [], profile: 'x'});
+  assert.equal(of([f('black-flash', 'blocker')]).label, '1 hallazgo');
+  const three = of([f('black-flash', 'blocker'), f('pause', 'major'), ...Array.from({length: 3}, () => f('glue', 'minor')), f('static', 'nit', 'candidate')]);
+  assert.equal(three.label, '3 hallazgos');
+  assert.equal(three.findings.length, 5, 'the findings that count, not the candidates');
 });

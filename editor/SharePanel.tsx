@@ -2,8 +2,10 @@ import React, {useEffect, useState} from 'react';
 
 // Review links (scripts/reviews.mjs through /api/reviews, the same routes as the MCP
 // share_version / list_versions / revoke_review_link): every final export that
-// passed QC is a version; a link opens a mobile page with the latest one.
-type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean};
+// passed QC is a version; a link opens a mobile page with the latest one. A client's
+// version carries its QC técnico label (the judge runs after it is recorded, CEO-6);
+// Re-judge runs the judge again without a re-render (the MCP rejudge, the same route).
+type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean; qcLabel?: string | null; judge?: {label: string; error?: string; findings?: {check: string; severity: string; at: number | null; msg: string}[]}};
 type Link = {id: string; createdAt: string; expiresAt: string; revokedAt: string | null; state: 'live' | 'expired' | 'revoked'};
 
 const mb = (b: number) => `${(b / 1e6).toFixed(1)} MB`;
@@ -20,6 +22,15 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
     try { setData(await fetch(`/api/reviews/${projectId}`).then((r) => r.json())); } catch { setData(null); }
   };
   useEffect(() => { setFresh(null); load(); }, [projectId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // while a judge runs and the panel is open, its label is re-read every 5 s
+  const judging = open && (data?.versions ?? []).some((v) => v.judge?.label === 'en curso');
+  useEffect(() => { if (!judging) return; const t = setInterval(load, 5000); return () => clearInterval(t); }, [judging, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rejudge = async (v: number) => {
+    const r = await fetch(`/api/reviews/${projectId}/versions/${v}/judge`, {method: 'POST', body: '{}'});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return notify('Could not re-judge: ' + (j.error || r.status), 'error');
+    load();
+  };
 
   const copy = async (url: string) => {
     try { await navigator.clipboard.writeText(url); notify('Review link copied', 'ok'); } catch { notify('Copy failed — select the link and copy it', 'error'); }
@@ -61,11 +72,19 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
         <div className="absolute right-0 top-8 w-80 bg-surface-container-high border border-outline-variant rounded-lg shadow-xl p-3 space-y-3 text-body-sm z-50">
           <div>
             <div className="text-[11px] uppercase text-on-surface-variant mb-1">Versions (finals that passed QC)</div>
-            <ul className="max-h-32 overflow-auto space-y-0.5">
+            <ul className="max-h-40 overflow-auto space-y-0.5">
               {versions.map((v) => (
-                <li key={v.v} className={`flex justify-between ${v.playable ? '' : 'opacity-40'}`} title={v.playable ? '' : 'proxy removed — not on the page'}>
-                  <span className="font-mono">v{v.v}</span>
-                  <span className="text-on-surface-variant">{when(v.createdAt)} · {v.durationSec.toFixed(1)}s · {mb(v.sizeBytes)}</span>
+                <li key={v.v} className={v.playable ? '' : 'opacity-40'} title={v.playable ? '' : 'proxy removed — not on the page'}>
+                  <div className="flex justify-between">
+                    <span className="font-mono">v{v.v}</span>
+                    <span className="text-on-surface-variant">{when(v.createdAt)} · {v.durationSec.toFixed(1)}s · {mb(v.sizeBytes)}</span>
+                  </div>
+                  {v.qcLabel && (
+                    <div className="flex justify-between text-[11px]" title={v.judge?.error ?? (v.judge?.findings ?? []).map((f) => `[${f.severity}] ${f.check}${f.at != null ? ` @${f.at}s` : ''} — ${f.msg}`).join('\n')}>
+                      <span className={v.judge?.label === 'superado' ? 'text-primary' : v.judge?.label === 'en curso' ? 'text-on-surface-variant' : 'text-error'}>{v.qcLabel}</span>
+                      {v.judge?.label !== 'en curso' && <button onClick={() => rejudge(v.v)} className="text-primary hover:underline">Re-judge</button>}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>

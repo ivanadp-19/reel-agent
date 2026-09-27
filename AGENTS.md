@@ -114,7 +114,16 @@ counts once confirmed on the frame. PASS is labeled "QC técnico superado" —
 never "aprobado": only the client approves. FAIL → prioritized findings go out
 with the delivery → fix → next version → re-judge, at most 3 iterations, then
 escalate. Agent tooling, not a product feature: it reads the project and the
-render and never edits either.
+render and never edits either. A client's version (a project with an identity) is
+judged by the backend itself (CEO-6): the version appears at once as `QC técnico en
+curso`, then `scripts/reviews.mjs` `judgeVersion` runs `judge.mjs --summary` niced
+on it (its render and snapshot; the per-source transcripts; the project's fps) and
+writes `version.judge` = `{label: superado | n hallazgos | no disponible, findings,
+at, profile}` (a crash or timeout: `no disponible` + an `[owner-alert]` log line);
+the render job never waits for it. Re-judge without a re-render: MCP `rejudge`,
+`POST /api/reviews/<id>/versions/<v>/judge` (backend token, an owner login or the
+local editor), the editor's Share panel. A pass a dead backend left `en curso` is
+judged again once on the next start, then `no disponible`.
 
 ## Headless runners
 

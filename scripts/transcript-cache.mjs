@@ -37,7 +37,8 @@ export function voices(words, turns, loud, env = process.env) {
 // A project's words from the per-source caches only: the files transcribeClip reads (this engine's cache,
 // else the other engine's) with the speaker and loudness sidecars already written — it never transcribes,
 // diarizes or decodes. The shape of public/transcript.json (scripts/transcribe.mjs): per clip, the words of
-// its trim window; a source not transcribed yet has none. The project checks read this (mcp/checks.mjs),
+// its trim window; a source not transcribed yet has none (and `missing: true`: the judge tells no words from
+// silence). The project checks read this (mcp/checks.mjs, the render judge),
 // never public/transcript.json, which is the last run of ANY project on the machine. `env` decides the
 // engine as the backend's jobs do: the caller's ROOT .env with its process env.
 export function projectTranscript(p, publicDir, env) {
@@ -49,6 +50,6 @@ export function projectTranscript(p, publicDir, env) {
     const cached = read(cacheName(key, lang, dg)) ?? read(cacheName(key, lang, !dg));
     const words = Array.isArray(cached) ? voices(cached, diarizeOn(env) ? read(`${key}.spk.json`)?.turns : null, p.offMic === 'off' ? null : read(`${key}.loud.json`), env) : [];
     const inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
-    return {clipId: clip.id, source: key, words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs)};
+    return {clipId: clip.id, source: key, words: words.map((w, i) => ({i, ...w})).filter((w) => w.endMs > inMs && w.startMs < outMs), ...(Array.isArray(cached) ? {} : {missing: true})};
   });
 }

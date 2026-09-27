@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 // Render judge — the deterministic half of the render-judge skill.
 //   node .agents/skills/render-judge/judge.mjs <project_id> <render.mp4> [--role master|captioned|extra]
-//        [--pair <other.mp4>] [--profile <client>] [--prev report.json | --fresh] [--out dir] [--json] [--no-source-scan]
+//        [--pair <other.mp4>] [--profile <client>] [--prev report.json | --fresh] [--out dir] [--json | --summary]
+//        [--snapshot <v<n>/project.json>] [--public dir] [--no-source-scan]
+//   --summary: one line of JSON, what a review version keeps (versionSummary) — the render queue's
+//   judge on a client's vN (scripts/reviews.mjs judgeVersion, spawned niced after the version is recorded)
 //   Niced (REEL_JUDGE_NICE, default 15) with one decoder thread for the source scans (REEL_JUDGE_THREADS).
 //
 // Everything a rule can decide is decided here, from evidence: the rendered mp4
 // (ffprobe / ffmpeg: loudness, clipping, silences, black, per-frame luma/chroma,
-// frame hashes), the project JSON and the aligned transcript (public/transcript.json,
-// written by get_transcript). What needs eyes (hook strength, B-roll fit, look,
+// frame hashes), the project JSON and its own words (the per-source transcript caches,
+// scripts/transcript-cache.mjs projectTranscript — never public/transcript.json, the machine's last
+// run of ANY project), at the rate the project renders at (src/timeline.ts: 29.97 for a client's
+// deliverables, else 30; --snapshot: the props a review version was rendered from, its rate
+// included). What needs eyes (hook strength, B-roll fit, look,
 // spelling in context) is left to the judge agent, who gets contact sheets of the
 // WHOLE reel and a list of moments to look at with frame_at.
 //
@@ -35,11 +41,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {spawnSync} from 'node:child_process';
+import {parseEnv} from 'node:util';
 
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips, continuesPrev} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev, deliveryFps, renderFps} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, validateIdentity, transcriptIssues, SAFE} = await import(src('validate.ts'));
 const {DUR_MS} = await import(src('transitions.ts'));
@@ -54,8 +61,11 @@ const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 // frame looks, the structure hash and the step rule: one implementation for the source scan and this judge
 const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
 export const {dhash, hamming} = gradeScan;
+const {projectTranscript} = await import(path.join(ROOT, 'scripts', 'transcript-cache.mjs'));
 
-const FPS = 30;
+const FPS = 30; // the pure rules' default; judge() passes the project's own rate
+// the env the backend's jobs see: ROOT's .env under the process env (the transcript engine, scripts/transcript-cache.mjs)
+const rootEnv = () => { let e = {}; try { e = parseEnv(fs.readFileSync(path.join(ROOT, '.env'), 'utf8')); } catch {} return {...e, ...process.env}; };
 export const SEVERITIES = ['blocker', 'major', 'minor', 'nit'];
 // thresholds (checks.md explains each; change them there too)
 export const T = {
@@ -179,10 +189,10 @@ export function timelineSpeech(clips, tr, fps = FPS) {
 // a long gap mid-sentence is a rule, and so is dead air past T.deadAirMs. emphasized null: the key
 // words are not known yet (the cut's gate, mcp/checks.mjs stageChecks) — any pause may be dramatic.
 const DRAMATIC_BEFORE = /[,;:…—–-]["')\]]*$/;
-export function pauseFindings(words, clips, emphasized = new Set()) {
+export function pauseFindings(words, clips, emphasized = new Set(), fps = FPS) {
   const out = [];
   const byId = new Map(clips.map((c) => [c.id, c]));
-  const jSec = new Map(placeClips(clips, FPS).map((pc) => [pc.clip.id, pc.jFrames / FPS]));
+  const jSec = new Map(placeClips(clips, fps).map((pc) => [pc.clip.id, pc.jFrames / fps]));
   for (let k = 1; k < words.length; k++) {
     const a = words[k - 1], b = words[k];
     if (a.off || b.off) continue; // off-mic / crew talk is its own check
@@ -428,9 +438,9 @@ export function repeatFindings(words, n = T.repeatWords) {
 }
 
 // the same footage twice: by source ranges (certain) and by frame hash (B-roll vs B-roll)
-export function repeatedFootageFindings(clips, brolls, hashes = []) {
+export function repeatedFootageFindings(clips, brolls, hashes = [], fps = FPS) {
   const out = [];
-  const placed = placeClips(clips, FPS);
+  const placed = placeClips(clips, fps);
   for (let i = 0; i < placed.length; i++) for (let j = i + 1; j < placed.length; j++) {
     const a = placed[i].clip, b = placed[j].clip;
     if (a.src !== b.src) continue;
@@ -954,6 +964,14 @@ export function verdictOf(findings, {reduced = false} = {}) {
   return {verdict: pass ? 'PASS' : 'FAIL', label, counts: n, patterns, toConfirm, advisories};
 }
 
+// What a review version keeps of a pass (scripts/reviews.mjs judgeVersion, CEO-6): its label — 'superado' or
+// '<n> hallazgo(s)', n = what the verdict counts (blockers + majors + minor patterns) — the findings that count
+// (compact: the full report stays in its folder, `report`) and the profile it ran with. Never 'aprobado'.
+export function versionSummary(r) {
+  const n = r.counts.blocker + r.counts.major + r.patterns.length;
+  return {label: r.verdict === 'PASS' ? 'superado' : `${n} hallazgo${n === 1 ? '' : 's'}`, findings: r.findings.filter(counts).map(({check, severity, at, end, msg}) => ({check, severity, at, end, msg})), profile: r.profile};
+}
+
 // compare with the previous iteration's report: new / still open / fixed / regressions
 export function diffWithPrev(findings, prev) {
   if (!prev?.findings) return null;
@@ -1168,11 +1186,17 @@ function sheet(file, times, cols, out, width = 270) {
 // ---------- the pass ----------
 // role: master = the clean master (no captions on screen), captioned = the version with
 // captions, extra = an alternate version (must live in its own project: duplicate_project).
-// The project is read NOW: run this right after the render, before editing again.
-export async function judge({projectId, render, publicDir = path.join(ROOT, 'public'), outDir, prev, sheets = true, role = null, pair = null, profile: profileName = null, stateDir = null, sourceScan = true}) {
+// The project is read NOW: run this right after the render, before editing again — or name the props
+// the render was made from (`snapshot`: a review version's v<n>/project.json), which win over the
+// project's (a version judged again after the project moved on is judged as it was rendered).
+// env: which transcript engine's caches are read (scripts/transcript-cache.mjs) — ROOT's .env + the process env.
+export async function judge({projectId, render, publicDir = path.join(ROOT, 'public'), outDir, prev, sheets = true, role = null, pair = null, profile: profileName = null, stateDir = null, sourceScan = true, snapshot = null, env = rootEnv()}) {
   const findings = [];
   const skipped = [];
   const p = JSON.parse(fs.readFileSync(path.join(publicDir, 'projects', `${projectId}.json`), 'utf8'));
+  if (snapshot) Object.assign(p, JSON.parse(fs.readFileSync(snapshot, 'utf8')));
+  // the rate it renders at: the snapshot's props say it (renderFps); the project decides it otherwise (deliveryFps)
+  const rate = snapshot ? renderFps(p) : deliveryFps(p);
   p.clips ??= []; p.captions = (p.captions ?? []).map(normalizeCaption); p.brolls ??= []; p.graphics ??= []; p.mattes ??= []; p.captionStyle ??= 'palabra';
   if (role === 'master') p.captionsOff = true; // what is on screen in this render, whatever the project says now
   if (role === 'captioned') p.captionsOff = false;
@@ -1183,15 +1207,14 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const file = resolve(render);
   if (!fs.existsSync(file)) throw new Error(`render not found: ${file}`);
   const draft = /-draft\.mp4$/.test(file);
-  const placed = placeClips(p.clips, FPS);
+  const placed = placeClips(p.clips, rate);
   const total = (placed.at(-1)?.endMs ?? 0) / 1000;
 
-  // transcript: the last get_transcript run must be this project's (every clip id present)
-  let tr = [];
-  try { tr = JSON.parse(fs.readFileSync(path.join(publicDir, 'transcript.json'), 'utf8')); } catch {}
-  const {words, missing} = timelineSpeech(p.clips, tr);
+  // transcript: this project's words, from its sources' caches — a clip whose source was never transcribed is missing
+  const tr = projectTranscript(p, publicDir, env).filter((t) => !t.missing);
+  const {words, missing} = timelineSpeech(p.clips, tr, rate);
   const haveTr = missing.length === 0 && p.clips.length > 0;
-  if (!haveTr) findings.push(F('evidence', 'blocker', 'rule', null, null, `transcript de otro proyecto o desactualizado (faltan ${missing.length} clips): los checks de pausas, sync, cobertura y repeticiones no corrieron`, {missing: missing.slice(0, 6)}, [{tool: 'get_transcript', note: 'then run the judge again', args: {project_id: projectId}}]));
+  if (!haveTr) findings.push(F('evidence', 'blocker', 'rule', null, null, `sin transcript para ${missing.length} clip(s) del proyecto: los checks de pausas, sync, cobertura y repeticiones no corrieron`, {missing: missing.slice(0, 6)}, [{tool: 'get_transcript', note: 'then run the judge again', args: {project_id: projectId}}]));
 
   // --- versions: an extra is its own project, never the master's ---
   if (role === 'extra' && stateDir && fs.existsSync(path.join(stateDir, 'master.json'))) findings.push(F('version', 'major', 'rule', null, null, `versión EXTRA renderizada desde el proyecto del master (${projectId}): el master base cambia con ella`, {}, [{tool: 'duplicate_project', note: 'name it "<reel> — EXTRA n (<what changes>)", redo the extra there, keep the master project as delivered', args: {project_id: projectId}}]));
@@ -1213,7 +1236,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const fps = v?.r_frame_rate ? v.r_frame_rate.split('/').reduce((n, d) => n / +d) : null; // "30/1"
   // the VIDEO stream's length: AAC padding makes the container 20–40 ms longer, which would push an allowed tail fade out of its margin
   const videoDur = +v?.duration || +info?.format?.duration || total;
-  if (fps && Math.abs(fps - FPS) > 0.5) findings.push(F('tech-fps', 'major', 'rule', null, null, `${fps.toFixed(2)} fps (want ${FPS})`, {}, []));
+  if (fps && Math.abs(fps - rate) > 0.5) findings.push(F('tech-fps', 'major', 'rule', null, null, `${fps.toFixed(2)} fps (want ${r2(rate)})`, {}, []));
 
   // --- audio ---
   let audio = null;
@@ -1261,7 +1284,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- transcript-based: pauses, repeats, hook start, off-mic vs crew talk, phone filter ---
   const emphasized = new Set(p.captions.flatMap((c) => c.words.filter((w) => (w.tier ?? 0) > 0 && w.wid).map((w) => w.wid)));
   if (haveTr) {
-    findings.push(...pauseFindings(words, p.clips, emphasized), ...repeatFindings(words));
+    findings.push(...pauseFindings(words, p.clips, emphasized, rate), ...repeatFindings(words));
     const first = words.find((w) => !w.off);
     if (first && first.t0 * 1000 > T.deadStartMs) {
       const fix = first.clipIndex === 0 ? [{tool: 'trim_clip', args: {clip_id: first.clipId, in_sec: r2(Math.max(0, first.srcStartMs / 1000 - 0.1))}}] : [{tool: 'delete_clips', note: 'clips before the first word carry no speech', args: {clip_ids: placed.slice(0, first.clipIndex).map((x) => x.clip.id)}}];
@@ -1282,8 +1305,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   } else skipped.push('pauses, repeats, dead start, off-mic / crew talk, cut-in-word, phone filter (no transcript for this project)');
 
   // --- captions ---
-  const pages = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, FPS);
-  const gfx = projectGraphics(p.graphics, p.clips, FPS);
+  const pages = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, rate);
+  const gfx = projectGraphics(p.graphics, p.clips, rate);
   const glossary = [...(profile?.glossary ?? []), ...(p.brand?.glossary ?? [])]; // the profile's and the project's brand kit's
   if (p.captionsOff) skipped.push(role === 'master' ? 'captions (clean master: none on screen by design)' : 'captions (switched off with set_captions — check the brief wants that)');
   else {
@@ -1313,7 +1336,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- validate (src/validate.ts) — estimated geometry: heuristic ---
   const sevOf = {matte: 'blocker', timing: 'major', 'overlap-captions': 'major', 'safe-top': 'major', 'safe-bottom': 'major', face: 'major', 'behind-hidden': 'major', 'overlap-graphic': 'major', hook: 'major', glue: 'minor', short: 'minor', long: 'minor', 'overlap-graphics': 'minor', 'tier2-density': 'minor', 'tier1-density': 'minor', 'emoji-density': 'minor', 'guion-timing': 'major', 'guion-missing': 'major', 'guion-conflict': 'major', 'guion-altered': 'minor', 'guion-extra': 'minor', 'fast-words': 'major'};
   const whenOf = (ref) => { const c = pages.find((x) => x.id === ref); if (c) return [c.startMs / 1000, c.endMs / 1000]; const g = gfx.find((x) => x.id === ref); return g ? [g.startMs / 1000, g.endMs / 1000] : [null, null]; };
-  for (const i of validateProject(p, FPS)) {
+  for (const i of validateProject(p, rate)) {
     if (i.code === 'hook' && (role === 'master' || findings.some((f) => f.check === 'hook-text'))) continue;
     const [s0, e] = whenOf(i.ref);
     findings.push(F(`validate-${i.code}`, sevOf[i.code] ?? (i.level === 'error' ? 'major' : 'minor'), ['matte', 'timing', 'overlap-captions', 'glue', 'short', 'long', 'guion-timing', 'guion-conflict'].includes(i.code) ? 'rule' : i.code === 'guion-missing' ? 'candidate' : 'heuristic', s0, e, i.msg, {page: i.ref, lookAt: s0 != null ? r2((s0 + e) / 2) : undefined}, []));
@@ -1322,27 +1345,27 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   // --- cuts ---
   findings.push(...cutFindings(placed));
   // a long continuous take is a choice more often than a flaw: candidate nit
-  const brolls = projectBrolls(p.brolls, p.clips, FPS);
+  const brolls = projectBrolls(p.brolls, p.clips, rate);
   const changes = [0, ...placed.map((x) => x.startMs / 1000), ...brolls.flatMap((b) => [b.startMs / 1000, b.endMs / 1000]), ...gfx.map((g) => g.startMs / 1000), total].sort((x, y) => x - y);
   for (let k = 1; k < changes.length; k++) if (changes[k] - changes[k - 1] > T.staticSec) findings.push(F('static', 'nit', 'candidate', changes[k - 1], changes[k], `toma continua de ${(changes[k] - changes[k - 1]).toFixed(1)} s sin cambio de plano, B-roll ni gráfico — solo si se siente lenta`, {lookAt: r2((changes[k - 1] + changes[k]) / 2)}, [{tool: 'set_transitions', note: 'a punch inside the take, or suggest_broll for a cue', args: {pattern: 'punch-alternate'}}]));
 
   // --- B-roll: repeats, length, what is said under it, the script's inserts ---
-  const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? FPS, looks: true}));
+  const video = timed('video', () => analyzeVideo(file, {scenes: !!pair, blackFps: fps ?? rate, looks: true}));
   const hashes = video.hashes;
   // black flashes from one frame, in this file's own frame rate (César: 3–5-frame blacks slipped through)
   if (video.timedOut) skipped.push(`video analysis did not finish in ${Math.round(TIMEOUT() / 1000)} s — its checks are partial`);
   // frame 0 (the thumbnail) black, measured on its own. One black opening, one finding: a single black
   // frame is frame0-black (the renderer's bug), a longer black opening is the black-flash that covers it
-  const flashes = blackFlashFindings(video.black, {fps: fps ?? FPS, duration: videoDur, fades: profile?.blackFades ?? {}, placed, brolls, video: file, qcBlack});
+  const flashes = blackFlashFindings(video.black, {fps: fps ?? rate, duration: videoDur, fades: profile?.blackFades ?? {}, placed, brolls, video: file, qcBlack});
   const opening = flashes.find((f) => f.at === 0 && f.check === 'black-flash');
   const f0 = frameZeroFindings(firstFrames(file), {fades: profile?.blackFades ?? {}, video: file});
   findings.push(...(opening && opening.evidence.frames > 1 ? [] : f0), ...flashes.filter((f) => !(f0.length && f === opening && f.evidence.frames === 1)));
   // a cut or a whip inside a source clip (candidates): scdet over the used ranges, cached per file
   if (sourceScan) {
-    const ranges = usedRanges(p.clips, brolls);
+    const ranges = usedRanges(p.clips, brolls, rate);
     findings.push(...sourceCutFindings(ranges, timed('source scan', () => scanSources(ranges, publicDir, skipped))));
   } else skipped.push('source-cut (--no-source-scan)');
-  findings.push(...repeatedFootageFindings(p.clips, brolls, hashes));
+  findings.push(...repeatedFootageFindings(p.clips, brolls, hashes, rate));
   let lib = [];
   try { lib = JSON.parse(fs.readFileSync(path.join(publicDir, 'broll-assets', 'library.json'), 'utf8')); } catch {}
   const brollEvidence = brolls.map((b) => {
@@ -1375,7 +1398,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   findings.push(...colorJumpFindings(clipLooks, placed));
   // inside a shot, every frame (the render's own fps): a part of a shot in another grade blocks
   if (video.looks.length) {
-    const rfps = fps ?? FPS;
+    const rfps = fps ?? rate;
     const holdMs = presetOf(p.captionStyle).holdMs;
     const shown = p.captionsOff ? [] : projectCaptions(p.captions, p.clips, rfps);
     const spans = [...projectBrolls(p.brolls, p.clips, rfps), ...projectGraphics(p.graphics, p.clips, rfps), ...shown.map((c, i) => ({startMs: c.startMs, endMs: Math.max(c.endMs, shownUntilMs(shown, i, holdMs))}))];
@@ -1424,7 +1447,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
         {times: Array.from({length: 16}, (_, k) => r2(((k + 0.5) * dur) / 16)), cols: 4, out: path.join(outDir, 'overview.jpg')},
         {times: Array.from({length: 9}, (_, k) => r2(Math.min(dur - 0.05, k * 0.25))), cols: 3, out: path.join(outDir, 'hook.jpg')},
         {times: cutTimes, cols: 4, out: path.join(outDir, 'cuts.jpg')},
-      ], fps ?? FPS);
+      ], fps ?? rate);
       Object.assign(evidence.sheets, {overview, hook, ...(cuts ? {cuts} : {})});
       for (const [k, g] of refSheets.entries()) {
         const mine = Array.from({length: g.items.length}, (_, i) => {
@@ -1456,7 +1479,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   findings.length = 0; findings.push(...uniq);
   findings.sort((x, y) => order(x) - order(y));
   const diff = diffWithPrev(findings, prev);
-  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, role, profile: profile?.id ?? null, profileFile: profile?.file ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), ...verdictOf(findings, {reduced: skipped.length > 0}), findings, diff, skipped, evidence, plan: p.plan ?? null};
+  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, fps: rate, snapshot, role, profile: profile?.id ?? null, profileFile: profile?.file ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), ...verdictOf(findings, {reduced: skipped.length > 0}), findings, diff, skipped, evidence, plan: p.plan ?? null};
 }
 
 // ---------- report ----------
@@ -1512,13 +1535,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
   const bool = (n) => { const i = args.indexOf(n); if (i >= 0) args.splice(i, 1); return i >= 0; };
-  const prevPath = flag('--prev'), outArg = flag('--out'), publicDir = flag('--public'), role = flag('--role') ?? null, pair = flag('--pair') ?? null, profile = flag('--profile') ?? null;
-  const asJson = bool('--json'), fresh = bool('--fresh'), noSourceScan = bool('--no-source-scan');
+  const prevPath = flag('--prev'), outArg = flag('--out'), publicDir = flag('--public'), role = flag('--role') ?? null, pair = flag('--pair') ?? null, profile = flag('--profile') ?? null, snapshot = flag('--snapshot') ?? null;
+  const asJson = bool('--json'), summary = bool('--summary'), fresh = bool('--fresh'), noSourceScan = bool('--no-source-scan');
   // the judge runs next to renders on a shared 2-vCPU VM: niced like the asset catalog (ffmpeg inherits it)
   const nice = Number(process.env.REEL_JUDGE_NICE ?? 15);
   try { if (nice > 0) os.setPriority(0, Math.min(19, nice)); } catch {}
   const [projectId, render] = args;
-  const usage = 'usage: judge.mjs <project_id> <render.mp4> [--role master|captioned|extra] [--pair other.mp4] [--profile client] [--prev report.json | --fresh] [--out dir] [--json] [--no-source-scan]';
+  const usage = 'usage: judge.mjs <project_id> <render.mp4> [--role master|captioned|extra] [--pair other.mp4] [--profile client] [--prev report.json | --fresh] [--out dir] [--json | --summary] [--snapshot project.json] [--public dir] [--no-source-scan]';
   if (!projectId || !render) { console.error(usage); process.exit(2); }
   if (!/^[\w-]+$/.test(projectId)) { console.error(`bad project id: ${projectId}`); process.exit(2); }
   if (role && !['master', 'captioned', 'extra'].includes(role)) { console.error(usage); process.exit(2); }
@@ -1528,7 +1551,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try { prev = JSON.parse(fs.readFileSync(prevPath ?? latest, 'utf8')); } catch {}
   if (fresh || (!prevPath && prev && Date.now() - Date.parse(prev.at) > 12 * 3600e3)) prev = null; // a new loop, not the next iteration
   const outDir = outArg ?? path.join(base, `${path.basename(render, '.mp4')}-${Date.now()}`);
-  const r = await judge({projectId, render, publicDir: publicDir ?? undefined, outDir, prev, role, pair, profile, stateDir: base, sourceScan: !noSourceScan});
+  const r = await judge({projectId, render, publicDir: publicDir ?? undefined, outDir, prev, role, pair, profile, stateDir: base, sourceScan: !noSourceScan, snapshot});
   const txt = reportText(r);
   const json = JSON.stringify(r, (k, x) => (typeof x === 'bigint' ? x.toString(16) : x), 2);
   try {
@@ -1538,6 +1561,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     fs.writeFileSync(latest, json);
     if (role) fs.writeFileSync(path.join(base, `${role}.json`), json);
   } catch (e) { console.error(`(report not saved: ${e.message}; read-only sandbox?)`); }
-  console.log(asJson ? json : `${txt}\n\nreport: ${path.join(outDir, 'report.json')}`);
+  console.log(summary ? JSON.stringify({...versionSummary(r), report: repoRel(path.join(outDir, 'report.json'))}) : asJson ? json : `${txt}\n\nreport: ${path.join(outDir, 'report.json')}`);
   process.exit(0);
 }

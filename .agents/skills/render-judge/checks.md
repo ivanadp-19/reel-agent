@@ -149,7 +149,7 @@ The judge cannot listen, so all of these are measured.
 
 | Check | Detection | Severity | Fix |
 |---|---|---|---|
-| `tech-*` | rule, the QC gate (`scripts/qc.mjs`): frame size, duration against the project, audio present; loudness −14 ±1 LUFS and true peak ≤ −1 dBTP (a blocker on the final, a nit on drafts); 30 fps | blocker / nit | re-`render`; `set_audio` |
+| `tech-*` | rule, the QC gate (`scripts/qc.mjs`): frame size, duration against the project, audio present; loudness −14 ±1 LUFS and true peak ≤ −1 dBTP (a blocker on the final, a nit on drafts); the project's rate (29.97 for a client's deliverables, else 30) | blocker / nit | re-`render`; `set_audio` |
 | `audio-silence` | rule: a silent stretch ≥ 2 s in the render | major | `run_ai_step autocut` |
 | `clipping` | rule: `astats` peak ≥ −0.1 dBFS, with flat samples or more than 8 samples at the peak | major | `set_clip volume` on the hot clip, `set_music volume` |
 | `voice-level` | rule: a clip's median momentary loudness during speech (`ebur128`) is ≥ 4 LU from the reel's | major | `set_clip volume` (the script computes it) |
