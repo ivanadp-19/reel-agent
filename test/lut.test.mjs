@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {cube} from '../src/hdr.ts';
-import {fitCube, labStats, lutSpans, matchCandidates, matchPair, mixCube, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
+import {fitCube, labStats, lutSpans, matchCandidates, matchPair, mixCube, pairSpread, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
 import {withLut} from '../src/grade.ts';
 import {decode} from '../scripts/lut.mjs';
 
@@ -112,6 +112,40 @@ test('fitCube keeps the target\'s saturation where the pairs scatter (a pop: +lu
   let o = 0;
   for (let i = 0; i < n; i++) o += C(...sampleCube(l, [x[i * 3], x[i * 3 + 1], x[i * 3 + 2]]));
   assert.ok(Math.abs(o / t - 1) < 0.03, `fitted saturation ×${(o / t).toFixed(3)} of the target's`);
+});
+
+test('pairSpread: the same pixels under any color map (clipped, hue-selective) are one map; two different pictures are not', () => {
+  let seed = 3;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const n = 20000, x = new Float64Array(n * 3), same = new Float64Array(n * 3), other = new Float64Array(n * 3);
+  for (let i = 0; i < n * 3; i++) x[i] = rnd();
+  // a harsh grade: greens pushed and clipped, blacks crushed — a function of the pixel, whatever a polynomial makes of it
+  for (let i = 0; i < n; i++) { const [r, g, b] = [x[i * 3], x[i * 3 + 1], x[i * 3 + 2]]; same.set([Math.min(1, r * 1.4), Math.min(1, g > r ? g * 1.8 : g), Math.max(0, b - 0.2)], i * 3); }
+  for (let i = 0; i < n * 3; i++) other[i] = rnd(); // another picture: nothing to do with x
+  assert.ok(pairSpread(x, same) < 5, `one map: ${pairSpread(x, same)}`); // the bins' own width, not a mismatch
+  assert.ok(pairSpread(x, other) > 40, `no map: ${pairSpread(x, other)}`);
+});
+
+// the job's same-shot bar on César's own footage (client media: only where it is on this machine, never in git) —
+// Morantes 10's neon pops are the same shot, its jump cut at 30.86 s is not
+const M10 = path.resolve(import.meta.dirname, '..', 'public', 'clips', 'Morantes10.mp4');
+test('match on real footage: Morantes 10\'s 3-frame pops are accepted, its jump cut at 30.864 s refused', {skip: !fs.existsSync(M10) && 'client footage not on this machine'}, () => {
+  const dir = tmp(), pub = path.join(dir, 'public');
+  fs.mkdirSync(path.join(pub, 'clips'), {recursive: true});
+  fs.symlinkSync(M10, path.join(pub, 'clips', 'm.mp4'));
+  const job = (name, from, to) => {
+    fs.writeFileSync(path.join(dir, 'job.json'), JSON.stringify({match: {name, from: {id: 'from', src: 'clips/m.mp4', ...from}, to: {id: 'to', src: 'clips/m.mp4', ...to}}}));
+    const r = spawnSync('nice', ['-n', '15', 'node', path.resolve(import.meta.dirname, '../scripts/lut.mjs'), 'job.json', 'out.json'], {cwd: dir, encoding: 'utf8'});
+    return r.status === 0 ? JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')) : {refused: r.stderr};
+  };
+  const f = 30000 / 1001;
+  for (const [a, b] of [[262, 265], [737, 740]]) {
+    const r = job(`pop${a}`, {inSec: a / f, outSec: b / f}, {inSec: a / f - 1.5, outSec: a / f});
+    assert.ok(r.spread <= 9, JSON.stringify(r));
+  }
+  const jump = job('jump', {inSec: 925 / f, outSec: 925 / f + 1.5}, {inSec: 925 / f - 1.5, outSec: 925 / f});
+  assert.match(jump.refused ?? '', /do not show the same picture .*spread (1[2-9]|[2-9]\d)/);
+  fs.rmSync(dir, {recursive: true, force: true});
 });
 
 test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, its grade taken over', () => {

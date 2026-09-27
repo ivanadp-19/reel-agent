@@ -6,7 +6,7 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {addedClip, applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
+import {addedClip, applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, rampClip, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -418,15 +418,9 @@ export const useEditor = create<EditorState>((set) => ({
       const speeds = speedRamp(from, to, steps);
       const span = c.outSec - c.inSec;
       if (span / speeds.length < 0.3) return s; // the UI checks this first
-      let clips = s.clips, brolls = s.brolls, cur = id;
-      const ids = [id];
-      for (let k = 1; k < speeds.length; k++) {
-        const r = splitClip(clips, cur, c.inSec + (span * k) / speeds.length);
-        if (!r) return s;
-        clips = r.clips; brolls = reanchor(brolls, r.remap); cur = r.newId; ids.push(cur);
-      }
-      clips = clips.map((x) => (ids.includes(x.id) ? {...x, speed: speeds[ids.indexOf(x.id)]} : x));
-      return {...withHistory(s), clips, brolls, meta: withMeta(s.meta, clips)};
+      const r = rampClip(s.clips, id, speeds); // src/timeline.ts: split at speed 1, then each piece's speed
+      if (!r) return s;
+      return {...withHistory(s), clips: r.clips, brolls: reanchor(s.brolls, r.remap), meta: withMeta(s.meta, r.clips)};
     }),
 
   cutWords: (tr, ranges) =>

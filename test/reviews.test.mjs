@@ -566,7 +566,8 @@ test('QC técnico: a client\'s version is "en curso" the moment it is recorded; 
   assert.equal(alerts.length, 4, 'one owner alert per judge that failed');
   assert.ok(!JSON.stringify(loadReviews(dir, 'p-1')).includes('aprobado'));
   // the judge got the version's render and the props it was rendered from; nothing of the version or the project changed
-  assert.deepEqual(fake.calls()[0].args, ['p-1', path.join(pub, 'exports', 'edited-9.mp4'), '--summary', '--public', pub, '--snapshot', path.join(pub, v.snapshot)]);
+  // grade-coverage measures the clean master: no caption page hides a frame there
+  assert.deepEqual(fake.calls()[0].args, ['p-1', path.join(pub, 'exports', 'edited-9.mp4'), '--summary', '--public', pub, '--snapshot', path.join(pub, v.snapshot), '--clean', path.join(pub, v.deliverables.master)]);
   const after = bytesUnder(pub);
   delete before[path.join(dir, 'p-1.json')]; delete after[path.join(dir, 'p-1.json')];
   assert.deepEqual(after, before);

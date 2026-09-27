@@ -178,6 +178,8 @@ export function reanchor<T extends {clipId?: string; startMs: number}>(items: T[
 // continue each other in the source (continuesPrev): one shot on screen, nothing that flashes (the judge's shotsOf
 // joins them). A trim or a cut (trimClip, cutRange) leaves a real cut behind and keeps its 0.2 s.
 export const MIN_PIECE_SEC = 3 / DELIVERY_FPS - 0.002;
+// a shot shorter than this is a flash (the render judge's flash-cut, T.flashMs): a word cut never leaves one behind
+export const FLASH_SEC = 0.5;
 // Split a clip at a source-time into two clips back-to-back; keyframes are
 // pinned at the cut so the animation stays continuous. null = a piece under MIN_PIECE_SEC on the timeline.
 // The one rule behind the editor's split, split_clip and every split made for it (cuts, ramps, sync_family).
@@ -193,9 +195,10 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
     if (!aK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) aK = [...(aK ?? []), pin];
     if (!bK?.some((k) => Math.abs(k.t - splitSrc) < 0.06)) bK = [{...pin}, ...(bK ?? [])];
   }
-  // a new cut starts plain: the J-cut stays with the head, the L-cut with the tail
+  // a new cut starts plain: the J-cut stays with the head, the L-cut with the tail — but the second piece holds the
+  // first's scale (a punch, or where a zoom lands: punch), or the split would pop the picture there
   const a = {...clip, outSec: splitSrc, transform: aK, lSec: undefined};
-  const b = {...clip, id: newId, inSec: splitSrc, transform: bK, enter: undefined, jSec: undefined};
+  const b = {...clip, id: newId, inSec: splitSrc, transform: bK, enter: clip.enter === 'punch' || clip.enter === 'zoom' ? 'punch' as const : undefined, jSec: undefined};
   const remap: SegmentRemap = [
     {origId: clip.id, segId: clip.id, inMs: clip.inSec * 1000, outMs: splitSrc * 1000},
     {origId: clip.id, segId: newId, inMs: splitSrc * 1000, outMs: clip.outSec * 1000},
@@ -203,15 +206,38 @@ export function splitClip(clips: Clip[], clipId: string, splitSrc: number): {cli
   return {clips: clips.flatMap((c) => (c.id === clip.id ? [a, b] : [c])), newId, remap};
 }
 
+// set_speed_ramp and the editor's ramp: the clip split into speeds.length equal source pieces, each at its speed. Split
+// at speed 1 (splitClip measures on the timeline): an already fast clip ramps like a slow one. null = a piece too short
+export function rampClip(clips: Clip[], clipId: string, speeds: number[]): {clips: Clip[]; remap: SegmentRemap; ids: string[]} | null {
+  const c = clips.find((x) => x.id === clipId);
+  if (!c) return null;
+  const span = c.outSec - c.inSec, ids = [clipId];
+  let out = clips.map((x) => (x.id === clipId ? {...x, speed: 1} : x));
+  for (let k = 1; k < speeds.length; k++) {
+    const r = splitClip(out, ids.at(-1)!, c.inSec + (span * k) / speeds.length);
+    if (!r) return null;
+    out = r.clips; ids.push(r.newId);
+  }
+  out = out.map((x) => (ids.includes(x.id) ? {...x, speed: speeds[ids.indexOf(x.id)]} : x));
+  return {clips: out, ids, remap: out.filter((x) => ids.includes(x.id)).map((x) => ({origId: clipId, segId: x.id, inMs: x.inSec * 1000, outMs: x.outSec * 1000}))};
+}
+
 // Trim a clip to [inSec, outSec] inside its source (an omitted end stays put),
-// clamped to the source; a result under 0.2 s is refused, never stretched.
-// The one rule behind the editor's trim handles and the trim_clip tool.
+// clamped to the source; a result under MIN_TRIM_SEC is refused, never stretched (a trim leaves a real cut — a split
+// piece may be shorter, MIN_PIECE_SEC). The one rule behind the editor's trim handles and the trim_clip tool.
+export const MIN_TRIM_SEC = 0.2;
+// the editor's trim handle: a drag of d source seconds on one edge, clamped so the clip never inverts, never leaves its
+// source and never moves the wrong way — a piece already under MIN_TRIM_SEC (a 3-frame split) does not shrink, and
+// never grows into the footage beside it
+export const trimDragSec = (c: {inSec: number; outSec: number; sourceDurationSec: number}, side: 'left' | 'right', d: number) =>
+  side === 'left' ? Math.max(-c.inSec, Math.min(d, Math.max(0, c.outSec - MIN_TRIM_SEC - c.inSec)))
+    : Math.max(Math.min(0, c.inSec + MIN_TRIM_SEC - c.outSec), Math.min(d, c.sourceDurationSec - c.outSec));
 export function trimClip(clips: Clip[], clipId: string, inSec?: number, outSec?: number): {clips: Clip[]; clip: Clip} | {error: string} {
   const c = clips.find((x) => x.id === clipId);
   if (!c) return {error: `no clip ${clipId}`};
   const lo = Math.max(0, inSec ?? c.inSec);
   const hi = Math.min(c.sourceDurationSec, outSec ?? c.outSec);
-  if (hi - lo < 0.2 - 1e-9) return {error: `${clipId}: ${lo.toFixed(2)}–${hi.toFixed(2)}s would be shorter than 0.2 s (source is 0–${c.sourceDurationSec.toFixed(2)}s)`};
+  if (hi - lo < MIN_TRIM_SEC - 1e-9) return {error: `${clipId}: ${lo.toFixed(2)}–${hi.toFixed(2)}s would be shorter than ${MIN_TRIM_SEC} s (source is 0–${c.sourceDurationSec.toFixed(2)}s)`};
   const clip = {...c, inSec: lo, outSec: hi};
   return {clips: clips.map((x) => (x.id === clipId ? clip : x)), clip};
 }
@@ -231,12 +257,13 @@ export const addedClip = <C extends {id: string; src: string}>(clips: {id: strin
   clips.some((c) => c.src === clip.src) ? null : clips.some((c) => c.id === clip.id) ? {...clip, id: uniqId(clips.map((c) => c.id), clip.id, 'c')} : clip;
 
 // Remove a source range [aSec, bSec] from a clip: a trim when it touches an
-// edge (pieces under 0.2 s fold into the cut), otherwise split twice and drop
-// the middle. Callers snap the range into pauses (see cut_words).
+// edge (pieces under 0.2 s — or 3 frames on screen at a fast speed — fold into the cut), otherwise split where the kept
+// tail starts and trim the head back to where the cut starts (the removed middle has no minimum). Callers snap the range
+// into pauses (see cut_words).
 export function cutRange(clips: Clip[], clipId: string, aSec: number, bSec: number): {clips: Clip[]; remap: SegmentRemap; removed: string[]} | null {
   const clip = clips.find((c) => c.id === clipId);
   if (!clip) return null;
-  const EDGE = 0.2;
+  const EDGE = Math.max(0.2, MIN_PIECE_SEC * (clip.speed ?? 1)); // source seconds: what is left must be a piece splitClip accepts
   let a = Math.max(clip.inSec, aSec);
   let b = Math.min(clip.outSec, bSec);
   if (b <= a) return null;
@@ -248,12 +275,11 @@ export function cutRange(clips: Clip[], clipId: string, aSec: number, bSec: numb
     const t = a === clip.inSec ? {...clip, inSec: b} : {...clip, outSec: a};
     return {clips: clips.map((c) => (c.id === clipId ? t : c)), remap: [seg(t)], removed: []};
   }
-  const first = splitClip(clips, clipId, a);
-  if (!first) return null;
-  const second = splitClip(first.clips, first.newId, b);
-  if (!second) return null;
-  const kept = second.clips.filter((c) => c.id !== first.newId);
-  return {clips: kept, remap: kept.filter((c) => c.id === clipId || c.id === second.newId).map(seg), removed: [first.newId]};
+  const split = splitClip(clips, clipId, b);
+  if (!split) return null;
+  const pin = (k: Keyframe[] | undefined) => (k?.length ? [...k.filter((x) => x.t < a - 0.06), {t: a, ...sampleTransform(clip.transform!, a)}] : k); // the head's keyframes end at its new out
+  const kept = split.clips.map((c) => (c.id === clipId ? {...c, outSec: a, transform: pin(c.transform)} : c));
+  return {clips: kept, remap: kept.filter((c) => c.id === clipId || c.id === split.newId).map(seg), removed: []};
 }
 
 // Autocut: replace clips with their speech segments (ends + internal pauses removed);

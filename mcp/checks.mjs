@@ -60,7 +60,7 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const {inScope, advisory} = scopeFindings([...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
     ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))], p.scope);
-  return [...inScope, ...advisory.map(({advisory: _, ...i}) => ({...i, level: 'warn', msg: `${i.msg} — ${i.omitted} omitida (the job did not ask for it): advisory, report it, do not fix it`}))];
+  return [...inScope, ...advisory.map(({advisory: _, ...i}) => ({...i, level: 'warn', msg: `${i.msg.split(' Fix: ')[0]} — ${i.omitted} omitida (the job did not ask for it): advisory, report it, do not fix it`}))];
 }
 
 // Every finding of a project by stage (src/stages.ts stageFindings): its issues (projectIssues), the judge's

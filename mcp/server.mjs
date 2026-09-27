@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, MIN_PIECE_SEC, nextId, placeClips, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
+import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, MIN_PIECE_SEC, nextId, placeClips, rampClip, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -918,12 +918,8 @@ server.registerTool('set_speed_ramp', {description: 'Speed ramp across a clip, a
   const p = load(project_id); const c = p.clips.find((x) => x.id === clip_id); if (!c) throw new Error(`no clip ${clip_id}`);
   const speeds = speedRamp(from_speed, to_speed, steps);
   const span = c.outSec - c.inSec; if (span / speeds.length < 0.3) throw new Error(`${clip_id} is too short for ${speeds.length} pieces`);
-  let id = clip_id; const ids = [id];
-  for (let k = 1; k < speeds.length; k++) {
-    const r = splitClip(p.clips, id, c.inSec + (span * k) / speeds.length); if (!r) throw new Error('could not split');
-    p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); id = r.newId; ids.push(id);
-  }
-  ids.forEach((pid2, k) => { const piece = p.clips.find((x) => x.id === pid2); piece.speed = speeds[k]; });
+  const r = rampClip(p.clips, clip_id, speeds); if (!r) throw new Error('could not split');
+  p.clips = r.clips; p.brolls = reanchor(p.brolls, r.remap); const ids = r.ids;
   await save(project_id, p);
   return text(`Speed ramp on ${clip_id}: ${ids.map((x, k) => `${x} ×${speeds[k]}`).join(' → ')}\n\n${summary(project_id, p)}`);
 });
@@ -1329,7 +1325,7 @@ server.registerTool('render', {description: 'Export the project to mp4 (1080x192
   const file = r.path && fs.existsSync(r.path) ? r.path : path.join(PUBLIC, r.file.replace(/^\//, ''));
   const size = fs.existsSync(file) ? ` (${(fs.statSync(file).size / 1e6).toFixed(1)} MB, ${f1(totalSec(p))}s)` : ` (${f1(totalSec(p))}s)`; // REEL_API on another machine: the file lives there
   const review = (r.version ? `\nReview version v${r.version} recorded — share_version gives a link` : r.versionError ? `\nReview version NOT recorded: ${r.versionError}` : '') + (r.deliverables ? `\nDeliverables (public/): ${Object.values(r.deliverables).join(', ')}` : '');
-  const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
+  const how = `${r.mode ?? 'full'}${r.master ? `, master ${r.master}${r.masterFile ? ` ${r.masterFile}` : ''}` : ''}${r.stages ? ` — ${Object.entries(r.stages).map(([k, v]) => `${k} ${v}s`).join(', ')}` : ''}${r.fallback ? `\nlayers → full: ${r.fallback.join('; ')}` : ''}`;
   return text(`Rendered ${draft ? '(draft) ' : ''}→ ${file}${size} [${how}]${r.qc ? `\nQC passed:\n${r.qc}` : ''}${review}`);
 });
 

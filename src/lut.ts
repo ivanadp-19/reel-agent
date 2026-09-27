@@ -190,6 +190,26 @@ const fromYC = ([y, cb, cr]: RGB): RGB => { const r = y + cr, b = y + cb; return
 const SECTORS = 12;
 const hue = (cb: number, cr: number) => ((Math.atan2(cr, cb) + Math.PI) / (2 * Math.PI)) * SECTORS; // 0…SECTORS
 
+// How far the pairs are from being one color map at all (of 255): x binned 16 per channel, the mean distance of each
+// pair's y from its bin's mean y (bins of ≥ 4 pairs). The same shot either side of a grade change makes y a function
+// of x — whatever the grade, clipped or hue-selective, a polynomial cannot follow; another shot, or a jump cut
+// between takes, does not (create_lut match's same-shot test, scripts/lut.mjs)
+export function pairSpread(x: ArrayLike<number>, y: ArrayLike<number>, bins = 16): number {
+  const at = new Map<number, number[]>();
+  for (let i = 0; i + 2 < x.length; i += 3) {
+    const k = [0, 1, 2].reduce((a, c) => a * bins + Math.min(bins - 1, Math.max(0, Math.floor(x[i + c] * bins))), 0);
+    const e = at.get(k);
+    if (e) e.push(i); else at.set(k, [i]);
+  }
+  let s = 0, n = 0;
+  for (const idx of at.values()) {
+    if (idx.length < 4) continue;
+    const mu = [0, 1, 2].map((c) => idx.reduce((a, i) => a + y[i + c], 0) / idx.length);
+    for (const i of idx) { s += (Math.abs(y[i] - mu[0]) + Math.abs(y[i + 1] - mu[1]) + Math.abs(y[i + 2] - mu[2])) / 3; n++; }
+  }
+  return n ? Math.round((s / n) * 2550) / 10 : Infinity;
+}
+
 export function fitCube(x: ArrayLike<number>, y: ArrayLike<number>, {size = 33, title = 'match'} = {}): string {
   const n = Math.floor(x.length / 3);
   if (n < 64 || y.length !== x.length) throw new Error('not enough pixel pairs to fit a LUT');

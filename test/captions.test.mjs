@@ -45,9 +45,9 @@ import {cutRange} from '../src/timeline.ts';
 test('cutRange removes the middle words and mints short ids', () => {
   const r = cutRange([clip], 'a', 1.95, 2.35);
   assert.deepEqual(shown(r.clips), ['uno', 'dos', 'tres']);
-  assert.deepEqual(r.clips.map((c) => c.id), ['a', 'a-s2']);
-  const again = cutRange(r.clips, 'a-s2', 5, 6);
-  assert.deepEqual(again.clips.map((c) => c.id), ['a', 'a-s2', 'a-s3']); // never a-s2-s1
+  assert.deepEqual(r.clips.map((c) => c.id), ['a', 'a-s1']); // one split where the kept tail starts; the head trimmed back
+  const again = cutRange(r.clips, 'a-s1', 5, 6);
+  assert.deepEqual(again.clips.map((c) => c.id), ['a', 'a-s1', 'a-s2']); // never a-s1-s1
 });
 
 test('cutRange at an edge trims; the whole clip removes it', () => {

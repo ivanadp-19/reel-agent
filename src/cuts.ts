@@ -237,7 +237,7 @@ export function speechSegments(
 // A range is "<source>:<i>" … "<source>:<i>" on one clip. The cut points snap into the pauses
 // around the words (SNAP_MS into the pause, never closer than 40 ms to a neighbour), so no
 // syllable is clipped; overlapping ranges become one span. Pure: no fs.
-import {cutRange, reanchor, type Clip} from './timeline.ts';
+import {clipDurationSec, continuesPrev, cutRange, FLASH_SEC, reanchor, type Clip} from './timeline.ts';
 export type CutRange = {from_wid: string; to_wid?: string};
 export type CutSpan = {src: string; startMs: number; endMs: number; text: string};
 export const SNAP_MS = 150;
@@ -282,9 +282,11 @@ export function planWordCuts(tr: TClip[], clips: Clip[], ranges: CutRange[]): {s
 
 // Apply the spans (each inside one clip, found again by source time since earlier cuts only
 // removed other spans); B-roll follows its footage; a piece left between two cuts that holds
-// no word at all is dead air and is dropped.
+// no word at all is dead air and is dropped — and so is a piece shorter than a flash (FLASH_SEC) that continued a
+// clip the cut took away: a 3-frame half-graded tail split off its shot, left alone between the cut and the next shot,
+// is a flash on screen (its continuing neighbour on the other side is often the source's own cut).
 export function applyWordCuts<B extends {clipId?: string; startMs: number}>(clips: Clip[], brolls: B[], spans: CutSpan[], tr: TClip[]): {clips: Clip[]; brolls: B[]; lines: string[]} {
-  const lines: string[] = [];
+  const lines: string[] = [], before = clips;
   const pieces = new Set<string>();
   const f1 = (n: number) => (Math.round(n * 10) / 10).toFixed(1);
   for (const c of spans) {
@@ -301,6 +303,16 @@ export function applyWordCuts<B extends {clipId?: string; startMs: number}>(clip
   if (silent.length) {
     clips = clips.filter((k) => !silent.includes(k));
     lines.push(`dropped ${silent.length} silent piece(s) left between cuts (${f1(silent.reduce((n, k) => n + k.outSec - k.inSec, 0))}s)`);
+  }
+  const at = new Map(before.map((c, i) => [c.id, i]));
+  const stranded = clips.filter((k, i) => {
+    const j = at.get(k.id);
+    if (j == null || before[j] !== k || clipDurationSec(k) >= FLASH_SEC) return false; // a clip the cut changed, or long enough
+    return (continuesPrev(before[j - 1], k) && !continuesPrev(clips[i - 1], k)) || (continuesPrev(k, before[j + 1]) && !continuesPrev(k, clips[i + 1]));
+  });
+  if (stranded.length) {
+    clips = clips.filter((k) => !stranded.includes(k));
+    lines.push(`dropped ${stranded.map((k) => k.id).join(', ')} (${stranded.map((k) => `${f1(clipDurationSec(k))}s`).join(', ')}): the cut took the clip ${stranded.length > 1 ? 'they' : 'it'} continued — alone ${stranded.length > 1 ? 'they' : 'it'} would flash`);
   }
   return {clips, brolls, lines};
 }

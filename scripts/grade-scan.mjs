@@ -20,27 +20,33 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 
-export const SCAN_VERSION = 3; // 2: stretches link over camera motion, the shorter side is the odd one, the whole picture moves; 3: tone + color together (SOURCE_NEED), the input's own range on any ffmpeg
+export const SCAN_VERSION = 4; // 2: stretches link over camera motion, the shorter side is the odd one, the whole picture moves; 3: tone + color together (SOURCE_NEED), the input's own range on any ffmpeg; 4: one channel alone on the same picture, one (limited) scale
 const W = 27, H = 24, N = W * H; // 3×3 blocks → the judge's 9×8 hash grid
 export const MAX_HASH = 6; // dHash bits (of 64) apart = the same picture (the judge's hashDist)
 export const CUT_HASH = 12; // … and still the same shot: camera motion reaches 7–11 bits in César's footage, his real cuts ≥ 14
 export const GLOBAL = 0.5; // how much of the frame's move the median block must share (lookSteps)
-// ponytail: a contrast-only residual (shadows one way, highlights the other) has a median block near 0 and is
-// not seen on its own; its saturation or chroma, which moves everywhere, usually is
-// the source rule: a grade moves tone AND color in the same frame — ΔY ≥ 4 together with saturation ×1.4 (log2 of it
-// ≥ 0.5, floored at 1 so grey footage never divides by ~0) — or either one far on its own (ΔY ≥ 12, saturation ×2);
-// a camera's exposure moves tone alone, its white balance or a new take's color alone (SOURCE_NEED). With both, the
-// step frame may move up to the shot's link (CUT_HASH): a strong grade flips the structure hash by itself. Calibrated on
-// every frame of G1, G2's three takes, G10, the 14 finished exports (Morantes) and 3 test clips (sourceSteps): G10's
-// three heads step ΔY +32..37, ×4.4–5.0 (3–4 bits); Morantes 10's tails step ΔY +7.7, ×1.97 (7 frames at 12.212 s,
-// 0 bits) and ΔY +9.4..10.4, ×1.9 (3 frames at 8.742 and 24.591 s, 8–10 bits) — about twice both bars. Nothing else
-// does: what passes every other guard moves one channel only — jump cuts between takes (Morantes 10.1 at 14.748 s:
-// V +2.2, ×1.15, 6 bits; the rooftop's in G10, Morantes 10 and 10.1 at 30.9–31.2 s: U, V ±2.2, 8 bits; Morantes 9 at
-// 37.571 s: luma +6, 12 bits) — or under 0.2 of any; without the other guards a 1-frame card at a cut (Morantes 4.1,
-// minSide) and a screen behind the presenter (G2's body, `global`) would pass. The old bars (12 or ×2 alone, 6 bits)
+// ponytail: what a real Morantes 10 shot with a synthetic step shows is NOT found: a contrast-only change (an S-curve:
+// mean luma −0.7, the median block 0.2 of it), a hue rotation (V −2.5, saturation unchanged), saturation ×1.38 alone
+// (log2 0.47, U −3.3) or with ΔY +2 — every one under its bar; a gradient channel would see the first, lower chroma
+// bars the others at the price of the jump cuts' ~2
+// the source rule (SOURCE_NEED): a grade moves tone AND color in the same frame — ΔY ≥ 4 together with saturation ×1.4
+// (log2 of it ≥ 0.5, floored at 1 so grey footage never divides by ~0) — or either far on its own (ΔY ≥ 12,
+// saturation ×2), up to the shot's link (CUT_HASH): a strong grade flips the structure hash by itself; and on the same
+// picture (≤ MAX_HASH) one channel alone — ΔY ≥ 7 (an exposure lift, an RGB gain) or U / V ≥ 4 (a white balance). A
+// camera's exposure ramps over frames (the `once` guard), a take's new white balance comes with a jump cut: the
+// picture moves (6–12 bits) and the chroma only ~2. Calibrated on every frame of G1, G2's three takes, G10, the 14
+// finished exports (Morantes) and 3 test clips (sourceSteps), all read on limited range (frameLooks): G10's three heads
+// step ΔY +32..37, ×4.4–5.0 (3–4 bits); Morantes 10's tails ΔY +7.7, ×1.97, U +7.7 (7 frames at 12.212 s, 0 bits) and
+// ΔY +9.4..10.4, ×1.9 (3 frames at 8.742 and 24.591 s, 8–10 bits). Nothing else passes: what passes every other guard
+// is a jump cut between takes — Morantes 10.1 at 14.748 s (V +2.2, ×1.15, 6 bits), the rooftop's in G10, Morantes 10
+// and 10.1 at 30.9–31.2 s (U, V ±2.2, 8 bits), Morantes 9 at 37.571 s (luma +6, 12 bits) — or under 0.2 of any;
+// without the other guards a 1-frame card at a cut (Morantes 4.1, minSide) would, and without the structure hash
+// every real cut (15–42 bits). Synthetic steps inside a real Morantes 10 shot (0 bits): an exposure step ΔY +8, an RGB
+// gain +9.4 and a white balance U −5.2 / V +4.9 are found; ΔY +6 alone is not. The old bars (12 or ×2 alone, 6 bits)
 // missed all three of Morantes 10
-export const SOURCE_CHANNELS = [{key: 'luma', t: 4, of: (f) => f.y}, {key: 'log2 sat', t: 0.5, of: (f) => Math.log2(Math.max(f.s, 1))}];
-export const SOURCE_NEED = (by) => (by.luma != null && by['log2 sat'] != null) || Math.abs(by.luma ?? 0) >= 12 || Math.abs(by['log2 sat'] ?? 0) >= 1;
+export const SOURCE_CHANNELS = [{key: 'luma', t: 4, of: (f) => f.y}, {key: 'log2 sat', t: 0.5, of: (f) => Math.log2(Math.max(f.s, 1))}, {key: 'U', t: 4, of: (f) => f.u}, {key: 'V', t: 4, of: (f) => f.v}];
+export const SOURCE_NEED = (by, bits = 0) => (by.luma != null && by['log2 sat'] != null) || Math.abs(by.luma ?? 0) >= 12 || Math.abs(by['log2 sat'] ?? 0) >= 1
+  || (bits <= MAX_HASH && (Math.abs(by.luma ?? 0) >= 7 || by.U != null || by.V != null));
 
 // 64-bit difference hash of a 9×8 grayscale frame (the judge's frame hash)
 export function dhash(px) {
@@ -52,8 +58,12 @@ export function hamming(a, b) { let x = a ^ b, n = 0; while (x) { n += Number(x 
 
 // raw 27×24 yuv444p frames → [{y, u, v, s, h, b}]: mean luma / chroma, mean saturation (signalstats' SATAVG:
 // |U−128, V−128|), the dHash of the 3×3-block means (8-bit, as ffmpeg delivers them) and those 72 blocks'
-// own means (b: y, u, v, s × 72 — lookSteps' check that a step moves the whole picture)
-export function frameLooks(buf) {
+// own means (b: y, u, v, s × 72 — lookSteps' check that a step moves the whole picture). range: the frames' own
+// (looksVf); a full-range file's values are mapped onto the limited scale (luma 16 + y × 219/255, chroma × 224/255
+// around 128 — affine, so exact on the means), so a render (pc) and its sources (tv) are measured on one scale by one
+// set of bars — on any ffmpeg (6.1's own pc → tv conversion rounds chroma differently from 8's)
+export function frameLooks(buf, range = 'tv') {
+  const [ky, kc] = range === 'pc' ? [219 / 255, 224 / 255] : [1, 1], y0 = range === 'pc' ? 16 : 0;
   const out = [];
   for (let o = 0; o + 3 * N <= buf.length; o += 3 * N) {
     const g = new Float64Array(4 * 72);
@@ -64,15 +74,15 @@ export function frameLooks(buf) {
       y += a; u += p; v += q; s += r;
       g[j] += a; g[72 + j] += p; g[144 + j] += q; g[216 + j] += r;
     }
-    const b = Float32Array.from(g, (x, i) => x / 9 + (i >= 72 && i < 216 ? 128 : 0));
-    out.push({y: y / N, u: 128 + u / N, v: 128 + v / N, s: s / N, h: dhash(g), b});
+    const b = Float32Array.from(g, (x, i) => (i < 72 ? y0 + (x / 9) * ky : i < 216 ? 128 + (x / 9) * kc : (x / 9) * kc));
+    out.push({y: y0 + (y / N) * ky, u: 128 + (u / N) * kc, v: 128 + (v / N) * kc, s: (s / N) * kc, h: dhash(g), b});
   }
   return out;
 }
 // the ffmpeg filter that makes those frames — the source scan's, and the judge's on a render's own frames — in the
-// input's own range (rangeOf): ffmpeg < 7.1 (the VM's 6.1) squeezes a full-range input to limited on the way to
-// yuv444p unless told (steps ×0.86 luma, ×0.88 chroma) and, without accurate_rnd + full_chroma_int, averages a
-// 1080×1920 frame off by up to 14 %; so 6.1.1 and 8.0.1 give the same bytes (test/grade.test.mjs)
+// input's own range (rangeOf; frameLooks puts them on one scale): ffmpeg < 7.1 (the VM's 6.1) squeezes a full-range
+// input to limited on the way to yuv444p unless told (steps ×0.86 luma, ×0.88 chroma) and, without accurate_rnd +
+// full_chroma_int, averages a 1080×1920 frame off by up to 14 %; so 6.1.1 and 8.0.1 give the same bytes
 export const looksVf = (range) => { const r = range === 'pc' ? 'pc' : 'tv'; return `scale=${W}:${H}:flags=area+accurate_rnd+full_chroma_int:in_range=${r}:out_range=${r},format=yuv444p`; };
 // a video stream's range as ffprobe reports it: pc (full: Remotion's renders, phone footage) when tagged so or in a
 // J pixel format, else tv
@@ -95,7 +105,7 @@ const spread = (xs) => (xs.length ? Math.max(...xs) - Math.min(...xs) : 0);
 // up to cutHash apart (camera motion 7–11 bits in César's footage, real cuts ≥ 14).
 // ok(k): frame k may be measured (the judge: not under B-roll, text or a transition); joined(k): frames
 // k−1 and k are one stretch of footage (the judge: the same clip, or a clip that continues it); need(by): which
-// channels that stepped make a step (default any one — the source rule wants tone and color, SOURCE_NEED).
+// channels that stepped make a step, given the hash bits k−1 → k (default any one — the source rule: SOURCE_NEED).
 // → [{k, from, to, by: {key: move}}], from / to = the footage the step splits: back to the cut that starts
 // the shot (or the step before it), on to the next step (or the cut that ends it) — the shorter side is
 // the part in another grade
@@ -125,7 +135,7 @@ export function lookSteps(frames, channels, {win = 6, noiseK = 4, once = 0.9, mi
         if (median(blocks) < global) continue;
         by[c.key] = Math.round(move * 100) / 100;
       }
-      if (need(by)) here.push({k, by});
+      if (need(by, hd(k))) here.push({k, by});
     }
     here.forEach(({k, by}, i) => out.push({k, from: here[i - 1]?.k ?? a, to: here[i + 1]?.k ?? b, by}));
     a = b;
@@ -166,7 +176,7 @@ function decode(file, name, range) {
     const timer = setTimeout(() => c.kill('SIGKILL'), TIMEOUT());
     c.stdout.on('data', (d) => { // frame by frame as they come: a long source never sits in memory raw
       const buf = Buffer.concat([rest, d]), whole = buf.length - (buf.length % (3 * N));
-      for (const f of frameLooks(buf.subarray(0, whole))) looks.push(f);
+      for (const f of frameLooks(buf.subarray(0, whole), range)) looks.push(f);
       rest = buf.subarray(whole);
     });
     c.stderr.on('data', (d) => (err = (err + d).slice(-2000)));

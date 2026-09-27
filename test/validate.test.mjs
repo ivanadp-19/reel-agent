@@ -187,6 +187,13 @@ test('half-graded: a clip over the head gets split + match; the fixed head (own 
   // Morantes 10's 3-frame pops (0.1 s) are a piece of their own too: split off and matched to their shot
   const short3 = {'clips/g.mp4': {steps: [{at: 8.742, from: 5.9, to: 8.842, off: true, frames: 3, dY: 10.4, sat: [10, 19.2]}]}};
   assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, short3)[0].msg, /Fix: split_clip at_sec 3\.842, then at_sec 3\.742 \(timeline\), then create_lut match on the tail \(clip_id of the new piece at 3\.742 s, to_clip_id g: it takes the shot's grade\), then set_clip graded: true on it$/);
+  // lengths as the timeline shows them: at ×1.5 the 3-frame pop is 2 frames on screen (trimmed), at ×0.5 six (split + match)
+  assert.match(halfGradedIssues({clips: [c('g', 5, 8.842, {speed: 1.5})]}, short3)[0].msg, /Fix: trim_clip out_sec 8\.742 on g \(3 frames are too short/);
+  assert.match(halfGradedIssues({clips: [c('g', 5, 20, {speed: 0.5})]}, short3)[0].msg, /Fix: split_clip at_sec 7\.684, then at_sec 7\.484 \(timeline\), then create_lut match on the tail/);
+  // a clip that starts inside a short tail: no split split_clip would refuse — its first frames go (or all of it)
+  const onTail = {'clips/g.mp4': {steps: [{at: 8.742, from: 5.9, to: 8.809, off: true, frames: 2, dY: 10, sat: [10, 19]}]}};
+  assert.match(halfGradedIssues({clips: [c('p', 0, 5), c('q', 8.742, 20)]}, onTail)[0].msg, /Fix: trim_clip in_sec 8\.809 on q \(2 frames/);
+  assert.match(halfGradedIssues({clips: [c('p', 0, 5), c('q', 8.742, 8.809)]}, onTail)[0].msg, /Fix: delete_clips q \(2 frames/);
   // under 3 frames of the reel (a 60 fps source's 3 frames): split at the cut, trimmed off — and the message says the voice goes too
   const short2 = {'clips/g.mp4': {steps: [{at: 8.742, from: 5.9, to: 8.792, off: true, frames: 3, dY: 10.4, sat: [10, 19.2]}]}};
   assert.match(halfGradedIssues({clips: [c('g', 5, 20)]}, short2)[0].msg, /Fix: split_clip at_sec 3\.792 \(timeline\), then trim_clip out_sec 8\.742 on g \(3 frames are too short for a clip of their own: the trim drops them with the voice under them — if cut-word then flags a word, leave them and tell the client instead\)$/);
@@ -256,7 +263,8 @@ test('projectIssues: a stage the job did not ask for is advisory — a captions-
     assert.equal(all.omitted, undefined);
     const captions = (await projectIssues(p(['captions']), pub)).find((i) => i.code === 'half-graded');
     assert.deepEqual([captions.level, captions.omitted], ['warn', 'color']);
-    assert.match(captions.msg, /— color omitida \(the job did not ask for it\): advisory, report it, do not fix it$/);
+    assert.match(captions.msg, /are in another grade \(ΔY \+7\.7, saturation 8\.3 → 16\.3\)\. — color omitida \(the job did not ask for it\): advisory, report it, do not fix it$/);
+    assert.doesNotMatch(captions.msg, /Fix:|split_clip|create_lut/, 'no fix to follow in a job that did not ask for it');
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
