@@ -262,7 +262,7 @@ const renderJobs = createRenderJobs({
 }).start();
 // stopping (npm run stop, Ctrl-C in npm start): no render left running without a backend — the next start re-queues its job
 for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
-console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
+console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE}; proofs ${renderJobs.proofWorkers} at a time — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
 // a judge a dead backend left 'en curso': judged again once, then 'no disponible'
 resumeJudges({dir: REVIEWS, publicDir: PUBLIC}).catch((e) => console.error(`judges not resumed: ${e.message}`)).finally(inboxNow);
 
@@ -923,7 +923,7 @@ async function handle(req, res) {
   // ---- render jobs ----
   //   POST   /api/render {…props, draft?, mode?, project_id?} → {jobId, status: 'queued', ahead} at once
   //   GET    /api/render/<id>                → the job in the shape pollers read (running / done / error)
-  //   GET    /api/render-jobs?project=&status=&limit= → {jobs (newest first, each with ahead), workers}
+  //   GET    /api/render-jobs?project=&status=&limit=&kind= → {jobs (newest first, each with ahead), workers} (kind: render, proof or all)
   //   GET    /api/render-jobs/<id>           → the job as stored + ahead
   //   POST   /api/render-jobs/<id>/cancel    → cancelled (queued: at once; running: its process is killed)
   //   POST   /api/render-jobs/prune {days?}  → {removed}: state of finished jobs older than days (never the mp4s)
@@ -979,6 +979,25 @@ async function handle(req, res) {
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {}), plan});
   }
+  // ---- proofs: the render queue's proof lane (scripts/render-jobs.mjs kind 'proof' — REEL_PROOF_CONCURRENCY at once on the
+  // machine, never a render's slot; scripts/render-runner.mjs runs mcp/proof.mjs in a child, niced while a render runs)
+  //   POST /api/proof {project_id, what: 'caption', times: [s, …] (≤ 8)} | {project_id, what: 'motion', at_sec}
+  //     → {jobId, status, ahead} at once; GET /api/render/<id> follows it like a render ('proof en fila, N antes');
+  //     done → {sheet (this box's path to the contact sheet), dir, rev (the saved project it shows), cols, rows | first, fps}
+  if (req.method === 'POST' && url.pathname === '/api/proof') {
+    let b; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
+    const id = typeof b.project_id === 'string' && /^[\w-]+$/.test(b.project_id) ? b.project_id : null;
+    if (!id || !fs.existsSync(path.join(PROJECTS_DIR, `${id}.json`))) return json(res, id ? 404 : 400, {error: id ? `project ${id} not found` : 'project_id', code: id ? 'not_found' : 'bad_request'});
+    const secs = (x) => Number.isFinite(x) && x >= 0;
+    const proof = b.what === 'caption' && Array.isArray(b.times) && b.times.length >= 1 && b.times.length <= 8 && b.times.every(secs) ? {what: 'caption', times: b.times}
+      : b.what === 'motion' && secs(b.at_sec) ? {what: 'motion', atSec: b.at_sec} : null;
+    if (!proof) return json(res, 400, {error: 'proof: what "caption" with times (1–8 seconds) or "motion" with at_sec', code: 'bad_request'});
+    // the saved project, as the MCP's load() reads it and the render builds it (src/renderProps.ts) — and its revision
+    const p = withDefaults(savedProject(PROJECTS_DIR, id));
+    if (!p.clips.length) return json(res, 400, {error: 'project has no clips', code: 'bad_request'});
+    const {job, ahead} = renderJobs.submit({kind: 'proof', proof: {...proof, rev: p.updatedAt ?? null}, props: projectRenderProps(p), projectId: id, label: 'Queued'});
+    return json(res, 200, {jobId: job.id, status: job.status, ahead});
+  }
   if (req.method === 'GET' && url.pathname.startsWith('/api/render/')) {
     const id = url.pathname.split('/').pop();
     if (!/^[\w-]{6,64}$/.test(id)) return json(res, 200, {status: 'unknown'});
@@ -1008,7 +1027,9 @@ async function handle(req, res) {
       const status = url.searchParams.get('status')?.split(',').filter(Boolean);
       const project = url.searchParams.get('project') || undefined;
       const limit = Math.min(200, +url.searchParams.get('limit') || 50);
-      return json(res, 200, {workers: renderJobs.workers, jobs: renderJobs.list({projectId: project, status, limit}).map(withAhead)});
+      // renders unless ?kind=proof | all (the editor's Renders panel and the reel CLI list exports; proofs are the agent's)
+      const kind = url.searchParams.get('kind') ?? 'render';
+      return json(res, 200, {workers: renderJobs.workers, jobs: renderJobs.list({projectId: project, status, limit, kind: kind === 'all' ? undefined : kind}).map(withAhead)});
     }
     if (req.method === 'GET' && id && !cancel) {
       const j = renderJobs.get(id);

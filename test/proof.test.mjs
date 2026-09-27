@@ -45,3 +45,10 @@ test('proofs asked in parallel share one bundle; a failed bundle is made again',
   assert.equal(await get(), a, 'later proofs reuse it');
   fs.rmSync(dir, {recursive: true, force: true});
 });
+
+// T25: ten stdio agents were ten Chromes — the MCP process renders no proof itself, it queues one in the backend's proof lane
+test('caption_proof and motion_proof go through POST /api/proof, never a renderStill in the MCP process', () => {
+  const src = fs.readFileSync(new URL('../mcp/server.mjs', import.meta.url), 'utf8');
+  assert.ok(!/from '\.\/proof\.mjs'/.test(src) && !/@remotion\/renderer/.test(src));
+  assert.equal(src.match(/proofJob\(\{project_id, what: '(caption|motion)'/g).length, 2);
+});

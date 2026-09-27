@@ -82,6 +82,11 @@
 // at it, and the caption encode, the composite, the first-frame repair and the master key use the same
 // number (src/timeline.ts renderFps); the pair's parity wants the identity's rate (deliveryFps), so a job
 // queued without it fails instead of delivering a client 30 fps files.
+//
+// A PROOF (job.kind 'proof', the queue's proof lane — POST /api/proof, the MCP's caption_proof / motion_proof):
+// no export, no QC, no version. mcp/proof.mjs renders the stills (or the 24-frame strip) of the job's props in a
+// child — niced (REEL_PROOF_NICE, 15) when a render holds a slot as it starts — into .captions-tmp/proof-<id>/,
+// and the result names the contact sheet there ({sheet, dir, rev, …}); a failed or cancelled proof leaves nothing.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -155,12 +160,14 @@ class RenderError extends Error { constructor(msg, result) { super(msg); this.re
 // A child that exits while something below it still holds its pipes open (Chrome left behind
 // after the kernel OOM-killed the CLI) settles EXIT_GRACE_MS after its exit, its group killed.
 const EXIT_GRACE_MS = 3000;
-function runChild(cmd, args, {cwd, signal, onLine, onPid, env}) {
+function runChild(cmd, args, {cwd, signal, onLine, onPid, env, nice = 0}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
     const oom0 = oomKills();
     let child;
     try { child = spawn(cmd, args, {cwd, env: env ?? process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe']}); } catch (e) { return reject(new Error(`${cmd} could not start: ${e.message}`)); }
+    // before it starts anything of its own (Chrome, ffmpeg inherit it)
+    if (nice > 0 && child.pid) try { os.setPriority(child.pid, nice); } catch {}
     onPid?.(child.pid);
     let out = '', tail = '', buf = '';
     const feed = (d, isOut) => {
@@ -238,7 +245,10 @@ export const defaultCommands = {
   probe: ({file}) => ['ffprobe', parityProbeArgs(file)],
   // the sha256 of a file's audio packets ("SHA256=…"): the final audio a master is remuxed with (an unchanged master is linked)
   audioHash: ({file}) => ['ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-map', '0:a:0', '-c', 'copy', '-f', 'hash', '-hash', 'sha256', '-']],
+  // a proof: the stills / strip of spec.json ({what, times | atSec, props}) → result.json next to it
+  proof: ({spec}) => ['node', ['mcp/proof.mjs', spec]],
 };
+const PROOF_NICE = Math.min(19, Math.max(0, +(process.env.REEL_PROOF_NICE ?? 15) || 0));
 const sha256Of = async (file) => { const h = crypto.createHash('sha256'); for await (const b of fs.createReadStream(file)) h.update(b); return h.digest('hex'); };
 
 // What a render will do, said before it is queued (POST /api/render answers with it,
@@ -312,9 +322,38 @@ export function createRenderRunner({
     try { names = fs.readdirSync(masterCache?.dir); } catch {}
     for (const n of names) if (n.includes('.part-') && n.endsWith(`-${job.id}.mp4`)) fs.rmSync(path.join(masterCache.dir, n), {force: true});
     for (const k of ['captions', 'supers']) fs.rmSync(path.join(os.tmpdir(), `reel-${k}-${job.id}`), {recursive: true, force: true}); // the layers' PNG frames
+    fs.rmSync(path.join(tmpDir, `proof-${job.id}`), {recursive: true, force: true}); // a proof's stills
   };
   return runRender;
+  async function runProof(job, ctx) {
+    const t0 = now();
+    const out = path.join(tmpDir, `proof-${job.id}`);
+    try {
+      fs.rmSync(out, {recursive: true, force: true}); // an earlier attempt's (re-queued after its backend died)
+      fs.mkdirSync(out, {recursive: true});
+      const spec = path.join(out, 'spec.json');
+      fs.writeFileSync(spec, JSON.stringify({...job.proof, props: JSON.parse(ctx.props)}));
+      ctx.update({stage: 'bundling', label: 'Proof: bundling', progress: 5});
+      const [cmd, args] = commands.proof({spec, out});
+      // ponytail: niced when it starts; a final that starts after it finds it at normal priority for its minute or two
+      // (renice its tree from the heartbeat if that ever shows)
+      const r = await runChild(cmd, args, {cwd: root, signal: ctx.signal, onPid: ctx.setPid, env: childEnv, nice: ctx.renderBusy?.() ? PROOF_NICE : 0, onLine: (l) => {
+        const m = /^still (\d+)\/(\d+)/.exec(l);
+        if (m) ctx.update({stage: 'rendering', label: `Proof: still ${m[1]}/${m[2]}`, progress: Math.round(10 + (85 * m[1]) / m[2]), frames: {done: +m[1], total: +m[2]}});
+      }});
+      if (r.code !== 0) {
+        const oom = memoryFailure(r);
+        throw Object.assign(new Error(oom ?? `proof failed (exit ${r.code}): ${r.tail.trim().split('\n').slice(-3).join(' | ')}`.slice(0, 400)), oom ? {code: 'OOM'} : {});
+      }
+      const res = JSON.parse(fs.readFileSync(path.join(out, 'result.json'), 'utf8'));
+      return {...res, dir: out, rev: job.proof?.rev ?? null, renderSec: Math.round((now() - t0) / 100) / 10};
+    } catch (e) {
+      fs.rmSync(out, {recursive: true, force: true});
+      throw e;
+    }
+  }
   async function runRender(job, ctx) {
+    if (job.kind === 'proof') return runProof(job, ctx);
     const {id, draft} = job;
     const {signal} = ctx;
     const expectSec = job.expectSec ?? 0;

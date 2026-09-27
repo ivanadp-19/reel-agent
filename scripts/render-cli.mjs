@@ -116,7 +116,7 @@ switch (cmd) {
     const live = await backendUp();
     const q = new URLSearchParams({limit: String(limit), ...(project ? {project} : {}), ...(active ? {status: 'queued,running'} : {})});
     const all = live ? null : listJobs(DIR);
-    const jobs = live ? (await api(`/api/render-jobs?${q}`)).jobs : listJobs(DIR, {projectId: project, status: active ? ['queued', 'running'] : undefined, limit}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
+    const jobs = live ? (await api(`/api/render-jobs?${q}`)).jobs : listJobs(DIR, {projectId: project, status: active ? ['queued', 'running'] : undefined, limit, kind: 'render'}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
     out(jobs, jobs.length ? jobs.map((j) => describeJob(j, {ahead: j.ahead ?? 0})).join('\n') + (live ? '' : '\n(backend not running — read from disk)') : 'no render jobs');
     break;
   }
