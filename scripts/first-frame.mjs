@@ -17,8 +17,11 @@ export const isFlat = (s) => !!s && s.ymax - s.ymin <= FLAT.ySpread && Math.abs(
 // [frame 0, frame 1, …] stats → a blank lead frame (frame 0 flat, frame 1 real)
 export const blankLead = (stats) => stats.length >= 2 && isFlat(stats[0]) && !isFlat(stats[1]);
 
+// ffmpeg's decoder and filter threads capped at n (input options: before -i); none = ffmpeg's own choice. The render
+// judge passes REEL_JUDGE_THREADS: it decodes beside the next render on a 2-vCPU box
+export const threadArgs = (n) => (n ? ['-threads', String(n), '-filter_threads', String(n), '-filter_complex_threads', String(n)] : []);
 // ffmpeg: signalstats of the first n + 1 frames, printed to stdout
-export const statsArgs = (file, n = 2) => ['-hide_banner', '-v', 'error', '-i', file, '-an', '-vf', `select='lte(n\\,${n})',signalstats,metadata=print:file=-`, '-f', 'null', '-'];
+export const statsArgs = (file, n = 2, threads) => ['-hide_banner', '-v', 'error', ...threadArgs(threads), '-i', file, '-an', '-vf', `select='lte(n\\,${n})',signalstats,metadata=print:file=-`, '-f', 'null', '-'];
 
 // the metadata=print output → [{n, ymin, ymax, yavg, uavg, vavg}] in frame order
 export function parseStats(text) {
@@ -33,8 +36,8 @@ export function parseStats(text) {
   return out.filter((s) => s.ymin != null && s.uavg != null);
 }
 
-export function frameStats(file, n = 2) {
-  const r = spawnSync('ffmpeg', statsArgs(file, n), {encoding: 'utf8', maxBuffer: 1 << 24});
+export function frameStats(file, n = 2, threads) {
+  const r = spawnSync('ffmpeg', statsArgs(file, n, threads), {encoding: 'utf8', maxBuffer: 1 << 24});
   return r.status === 0 ? parseStats(r.stdout) : [];
 }
 

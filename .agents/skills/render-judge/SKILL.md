@@ -45,7 +45,8 @@ approves. The judge's PASS means technical QC passed, nothing more.
 A client's version (a project with an identity) is judged by the backend: right
 after the version is recorded, `judge.mjs --summary` runs niced on it (its render
 and the props it was rendered from) and the label lands on the version
-(`list_versions`: `en curso` → `superado` / `n hallazgos` / `no disponible`;
+(`list_versions`: `en curso` → `superado` / `superado (evidencia reducida)` /
+`n hallazgos` / `no disponible`;
 `rejudge` runs it again without a re-render). For those, skip step 2's run of
 `judge.mjs` and give the subagent the report and contact sheets of that pass (the
 folder `list_versions` names): the rules are done, the eyes pass is what is left.

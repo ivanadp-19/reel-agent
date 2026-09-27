@@ -485,6 +485,7 @@ test('retention (T6): the newest unapproved versions and the approved ones stay 
 
 // ---- QC técnico on a client's version (CEO-6): the judge after the version, its four labels, re-run, restart ----
 import {judgeText, judgeVersion, resumeJudges} from '../scripts/reviews.mjs';
+import {pidAlive} from '../scripts/render-jobs.mjs';
 
 // a stand-in for `judge.mjs --summary` (written at test time: node --test would run any .mjs under test/): its first
 // argument says how it behaves, the judge's arguments follow and every call is kept in calls.jsonl next to it
@@ -496,7 +497,9 @@ fs.appendFileSync(path.join(here, 'calls.jsonl'), JSON.stringify({mode, args}) +
 const say = (x) => console.log(JSON.stringify(x));
 if (mode === 'superado') say({label: 'superado', findings: [], profile: 'acme', report: '.captions-tmp/judge/p-1/r/report.json'});
 if (mode === 'hallazgos') say({label: '2 hallazgos', findings: [{check: 'black-flash', severity: 'blocker', at: 1.2, end: 1.3, msg: 'negro de 3 frames'}, {check: 'pause', severity: 'major', at: 4, end: 4.8, msg: 'pausa'}], profile: 'acme'});
+if (mode === 'reduced') say({label: 'superado (evidencia reducida)', findings: [], profile: 'acme'});
 if (mode === 'crash') { console.error('TypeError: boom'); process.exit(1); }
+if (mode === 'throw') throw new Error('no judge profile "acme"'); // uncaught: a stack, then Node's version banner
 if (mode === 'aprobado') say({label: 'aprobado', findings: []});
 if (mode === 'hang') setInterval(() => {}, 1e6);
 if (mode === 'gate') { while (!fs.existsSync(path.join(here, 'go'))) await new Promise((r) => setTimeout(r, 10)); say({label: 'superado', findings: [], profile: null}); }
@@ -530,14 +533,16 @@ test('QC técnico: a client\'s version is "en curso" the moment it is recorded; 
   assert.deepEqual([pass.label, pass.profile, pass.report, judgeText(pass)], ['superado', 'acme', '.captions-tmp/judge/p-1/r/report.json', 'QC técnico superado']);
   const fail = await run('hallazgos');
   assert.deepEqual([fail.label, judgeText(fail), fail.findings.map((f) => f.check)], ['2 hallazgos', 'QC técnico: 2 hallazgos', ['black-flash', 'pause']]);
+  const reduced = await run('reduced'); // a pass with checks skipped keeps saying so
+  assert.deepEqual([reduced.label, judgeText(reduced)], ['superado (evidencia reducida)', 'QC técnico superado (evidencia reducida)']);
   assert.equal(alerts.length, 0);
-  for (const [mode, why] of [['crash', /exit 1\): TypeError: boom/], ['aprobado', /no verdict/], ['hang', /did not finish in 0 s/]]) {
+  for (const [mode, why] of [['crash', /exit 1\): TypeError: boom$/], ['throw', /exit 1\): Error: no judge profile "acme"$/], ['aprobado', /no verdict/], ['hang', /did not finish in 0 s/]]) {
     const j = await run(mode);
     assert.deepEqual([j.label, j.findings], ['no disponible', []], mode);
     assert.match(j.error, why);
     assert.match(alerts.at(-1), /^\[owner-alert\] QC técnico no disponible — p-1 v1: /);
   }
-  assert.equal(alerts.length, 3, 'one owner alert per judge that failed');
+  assert.equal(alerts.length, 4, 'one owner alert per judge that failed');
   assert.ok(!JSON.stringify(loadReviews(dir, 'p-1')).includes('aprobado'));
   // the judge got the version's render and the props it was rendered from; nothing of the version or the project changed
   assert.deepEqual(fake.calls()[0].args, ['p-1', path.join(pub, 'exports', 'edited-9.mp4'), '--summary', '--public', pub, '--snapshot', path.join(pub, v.snapshot)]);
@@ -586,4 +591,65 @@ test('restart: a pass a dead backend left "en curso" runs again once, then is "n
   assert.deepEqual(alerts, [`[owner-alert] QC técnico no disponible — p-1 v2: ${vs[1].judge.error}`]);
   assert.equal(fake.calls().length, 1, 'only v1 was judged again');
   assert.deepEqual(await resumeJudges(o), [], 'the next start finds nothing left');
+});
+
+const until = async (ok, ms = 5000) => { for (const t0 = Date.now(); !ok() && Date.now() - t0 < ms;) await new Promise((r) => setTimeout(r, 20)); return ok(); };
+
+test('judges run one at a time: a second version waits "en curso" for the first; the running judge\'s pid is on its version', async () => {
+  const {pub, dir} = fixture(0);
+  withPair(pub, dir); withPair(pub, dir);
+  const fake = fakeJudge();
+  const o = {dir, publicDir: pub, projectId: 'p-1', log: () => {}};
+  const a = await judgeVersion({...o, v: 1, cmd: fake.cmd('gate')});
+  const b = await judgeVersion({...o, v: 2, cmd: fake.cmd('hallazgos')});
+  assert.equal(b.version.judge.label, 'en curso', 'queued, and labeled at once');
+  assert.ok(await until(() => Number.isInteger(loadReviews(dir, 'p-1').versions[0].judge.pid)), 'the pid of v1\'s judge is recorded');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(fake.calls().map((c) => c.mode), ['gate'], 'v2\'s judge has not started');
+  fake.go();
+  assert.deepEqual([(await a.done).label, (await b.done).label], ['superado', '2 hallazgos']);
+  assert.deepEqual(fake.calls().map((c) => c.mode), ['gate', 'hallazgos']);
+  assert.equal(loadReviews(dir, 'p-1').versions[0].judge.pid, undefined, 'a settled label keeps no pid');
+});
+
+test('restart after a SIGKILL: the judge a dead backend left behind is killed by pid once its command line names judge.mjs and the version\'s render — never a bystander', async () => {
+  const {pub, dir} = fixture(0);
+  withPair(pub, dir); withPair(pub, dir);
+  const fake = fakeJudge();
+  const render = path.join(pub, 'exports', 'edited-9.mp4');
+  // a backend that started a detached child (as runJudge does) and died without its exit hook
+  const orphanOf = (args) => {
+    const r = spawnSync(process.execPath, ['-e', "const c = require('child_process').spawn(process.execPath, JSON.parse(process.argv[1]), {detached: true, stdio: 'ignore'}); c.unref(); console.log(c.pid)", JSON.stringify(args)], {encoding: 'utf8'});
+    return {backend: r.pid, pid: +r.stdout.trim()};
+  };
+  const judge = orphanOf([...fake.cmd('hang').slice(1), 'p-1', render, '--summary']);
+  const bystander = orphanOf(['-e', 'setInterval(() => {}, 1e6)', 'judge.mjs']); // names judge.mjs, not this render
+  try {
+    assert.ok(pidAlive(judge.pid) && pidAlive(bystander.pid));
+    const r = loadReviews(dir, 'p-1'), at = new Date(T0).toISOString();
+    Object.assign(r.versions[0], {judge: {label: 'en curso', at, attempt: 1, owner: judge.backend, pid: judge.pid}});
+    Object.assign(r.versions[1], {judge: {label: 'en curso', at, attempt: 2, owner: bystander.backend, pid: bystander.pid}});
+    fs.writeFileSync(path.join(dir, 'p-1.json'), JSON.stringify(r));
+    const started = await resumeJudges({dir, publicDir: pub, cmd: fake.cmd('superado'), log: () => {}});
+    assert.ok(await until(() => !pidAlive(judge.pid)), 'the orphan judge is gone');
+    assert.equal((await started[0].done).label, 'superado', 'v1 judged again');
+    assert.equal(loadReviews(dir, 'p-1').versions[1].judge.label, 'no disponible');
+    assert.ok(pidAlive(bystander.pid), 'a process that is not this version\'s judge is left alone');
+  } finally { for (const x of [judge, bystander]) try { process.kill(x.pid, 'SIGKILL'); } catch {} }
+});
+
+test('a version without a snapshot (no identity, or from before them) is never judged: re-judge refused, and one left "en curso" is "no disponible" on restart', async () => {
+  const {pub, dir} = fixture(1);
+  const fake = fakeJudge();
+  const o = {dir, publicDir: pub, projectId: 'p-1', v: 1, cmd: fake.cmd('superado'), log: () => {}};
+  await assert.rejects(judgeVersion({...o, fresh: true}), (e) => e.code === 'no_snapshot' && /cannot be judged as it was rendered/.test(e.message));
+  assert.equal(loadReviews(dir, 'p-1').versions[0].judge, undefined, 'nothing written');
+  const r = loadReviews(dir, 'p-1');
+  r.versions[0].judge = {label: 'en curso', at: new Date(T0).toISOString(), attempt: 1, owner: spawnSync(process.execPath, ['-e', '']).pid};
+  fs.writeFileSync(path.join(dir, 'p-1.json'), JSON.stringify(r));
+  const alerts = [];
+  assert.deepEqual(await resumeJudges({...o, log: (m) => alerts.push(m)}), []);
+  assert.match(loadReviews(dir, 'p-1').versions[0].judge.error, /no snapshot/);
+  assert.equal(alerts.length, 1);
+  assert.deepEqual(fake.calls(), [], 'the live project was never judged in its place');
 });

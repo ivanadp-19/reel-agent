@@ -1,9 +1,10 @@
 // Final-render audio + QC gate.
 //   normalizeLoudness(file): two-pass EBU R128 loudnorm to −14 LUFS / −1.5 dBTP
 //     (margin under the −1 dBTP gate for the AAC re-encode), video stream copied.
-//   qc(file, {expectSec, draft}): blocking checks (loudness, true peak, audio present,
+//   qc(file, {expectSec, draft, threads}): blocking checks (loudness, true peak, audio present,
 //     frame size, duration) + warnings (black or silent stretches); lufs / truePeak as measured
-//     (null without audio) — a client's review version records them (scripts/reviews.mjs).
+//     (null without audio) — a client's review version records them (scripts/reviews.mjs). threads: ffmpeg's decoder /
+//     filter threads (the render judge's REEL_JUDGE_THREADS; unset = ffmpeg's own, the render's gate).
 //   CLI: node scripts/qc.mjs <file.mp4> [expectSec]
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,14 +14,14 @@ export const TARGET = {I: -14, tolerance: 1, TP: -1, tpAim: -1.5, LRA: 11};
 
 // optional voice cleanup before loudness (final render only): src/audio.ts
 import {CLEAN} from '../src/audio.ts';
-import {blankLead, frameStats} from './first-frame.mjs';
+import {blankLead, frameStats, threadArgs} from './first-frame.mjs';
 export {CLEAN};
 
-const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 26});
+const ff = (args, threads) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...threadArgs(threads), ...args], {encoding: 'utf8', maxBuffer: 1 << 26});
 
 // EBU R128 measurement (loudnorm analysis pass); null when there is no audio stream
-export function measureLoudness(file) {
-  const r = ff(['-i', file, '-vn', '-af', `loudnorm=I=${TARGET.I}:TP=${TARGET.tpAim}:LRA=${TARGET.LRA}:print_format=json`, '-f', 'null', '-']);
+export function measureLoudness(file, threads) {
+  const r = ff(['-i', file, '-vn', '-af', `loudnorm=I=${TARGET.I}:TP=${TARGET.tpAim}:LRA=${TARGET.LRA}:print_format=json`, '-f', 'null', '-'], threads);
   const m = r.stderr.match(/\{[^{}]*"input_i"[^{}]*\}/);
   if (!m) return null;
   const j = JSON.parse(m[0]);
@@ -64,13 +65,13 @@ function probe(file) {
   return JSON.parse(r.stdout);
 }
 // stretches of [start, end] seconds reported by blackdetect / silencedetect
-function stretches(args, re) {
+function stretches(args, re, threads) {
   const out = [];
-  for (const m of ff(args).stderr.matchAll(re)) out.push([+m[1], +m[2]]);
+  for (const m of ff(args, threads).stderr.matchAll(re)) out.push([+m[1], +m[2]]);
   return out;
 }
 
-export function qc(file, {expectSec, draft = false} = {}) {
+export function qc(file, {expectSec, draft = false, threads} = {}) {
   const checks = [];
   let lufs = null, truePeak = null;
   const add = (name, ok, value, want, blocking = true) => checks.push({name, ok, value, want, blocking});
@@ -84,18 +85,18 @@ export function qc(file, {expectSec, draft = false} = {}) {
   if (expectSec != null) add('duration', Math.abs(dur - expectSec) <= 0.2, `${dur.toFixed(2)} s`, `${expectSec.toFixed(2)} s ±0.2`);
   add('audio', !!a, a ? `${a.codec_name} ${a.sample_rate} Hz` : 'none', 'an audio track');
   if (a) {
-    const m = measureLoudness(file);
+    const m = measureLoudness(file, threads);
     const I = m?.I ?? -Infinity, TP = m?.TP ?? Infinity;
     if (Number.isFinite(I)) lufs = I;
     if (Number.isFinite(TP)) truePeak = TP;
     add('loudness', Math.abs(I - TARGET.I) <= TARGET.tolerance, Number.isFinite(I) ? `${I.toFixed(1)} LUFS` : 'silent', `${TARGET.I} ±${TARGET.tolerance} LUFS`, !draft);
     add('true peak', TP <= TARGET.TP, Number.isFinite(TP) ? `${TP.toFixed(1)} dBTP` : '?', `≤ ${TARGET.TP} dBTP`, !draft);
-    const silent = stretches(['-i', file, '-vn', '-af', 'silencedetect=noise=-50dB:d=2', '-f', 'null', '-'], /silence_start: ([\d.]+)[\s\S]*?silence_end: ([\d.]+)/g);
+    const silent = stretches(['-i', file, '-vn', '-af', 'silencedetect=noise=-50dB:d=2', '-f', 'null', '-'], /silence_start: ([\d.]+)[\s\S]*?silence_end: ([\d.]+)/g, threads);
     add('silence', !silent.length, silent.length ? silent.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 2 s', 'no silent stretch ≥ 2 s', false);
   }
-  const black = stretches(['-i', file, '-an', '-vf', 'blackdetect=d=0.5:pix_th=0.08', '-f', 'null', '-'], /black_start:([\d.]+) black_end:([\d.]+)/g);
+  const black = stretches(['-i', file, '-an', '-vf', 'blackdetect=d=0.5:pix_th=0.08', '-f', 'null', '-'], /black_start:([\d.]+) black_end:([\d.]+)/g, threads);
   // frame 0 a flat field while frame 1 is footage (scripts/first-frame.mjs; the render runner repairs it, this is the gate)
-  const lead = frameStats(file);
+  const lead = frameStats(file, 2, threads);
   add('first frame', !blankLead(lead), lead[0] ? `Y ${lead[0].ymin}–${lead[0].ymax}, U ${lead[0].uavg}, V ${lead[0].vavg}` : 'unreadable', 'footage (not a flat field before the first real frame)', !draft);
   add('black', !black.length, black.length ? black.map(([s, e]) => `${s.toFixed(1)}–${e.toFixed(1)} s`).join(', ') : 'none ≥ 0.5 s', 'no black stretch ≥ 0.5 s (fine when intended)', false);
   return {ok: checks.every((c) => c.ok || !c.blocking), checks, lufs, truePeak};

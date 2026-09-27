@@ -802,12 +802,14 @@ async function handle(req, res) {
   //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
   //   POST   /api/reviews/<projectId>/versions/<v>/judge → 202 {v, judge, qcLabel}: the judge again on that version, no re-render
   //                                                     (the MCP rejudge, the editor's Re-judge) — the backend token, an owner's
-  //                                                     login, or the local editor (loopback); never a reviewer
+  //                                                     login, or the local editor (loopback); never a reviewer. 409 no_snapshot:
+  //                                                     a version without the props it was rendered from
   const rj0 = url.pathname.match(/^\/api\/reviews\/([\w-]+)\/versions\/(\d{1,6})\/judge$/);
   if (rj0) {
     if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
     if (!mayRejudge(g)) return json(res, 403, {error: 'judging a version again needs the backend token or an owner login', code: 'forbidden'});
-    const r = await judge({projectId: rj0[1], v: +rj0[2]}, {fresh: true});
+    const r = await judge({projectId: rj0[1], v: +rj0[2]}, {fresh: true}).catch((e) => { if (e.code === 'no_snapshot') return e; throw e; });
+    if (r instanceof Error) return json(res, 409, {error: r.message, code: r.code});
     if (!r) return json(res, 404, {error: `no version v${rj0[2]} of ${rj0[1]}`, code: 'not_found'});
     return json(res, 202, {projectId: rj0[1], v: r.version.v, judge: r.version.judge, qcLabel: judgeText(r.version.judge)});
   }

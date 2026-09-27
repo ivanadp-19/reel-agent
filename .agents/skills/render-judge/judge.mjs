@@ -5,7 +5,7 @@
 //        [--snapshot <v<n>/project.json>] [--public dir] [--no-source-scan]
 //   --summary: one line of JSON, what a review version keeps (versionSummary) — the render queue's
 //   judge on a client's vN (scripts/reviews.mjs judgeVersion, spawned niced after the version is recorded)
-//   Niced (REEL_JUDGE_NICE, default 15) with one decoder thread for the source scans (REEL_JUDGE_THREADS).
+//   Niced (REEL_JUDGE_NICE, default 15); every ffmpeg it starts decodes and filters on one thread (REEL_JUDGE_THREADS).
 //
 // Everything a rule can decide is decided here, from evidence: the rendered mp4
 // (ffprobe / ffmpeg: loudness, clipping, silences, black, per-frame luma/chroma,
@@ -46,7 +46,7 @@ import {parseEnv} from 'node:util';
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips, continuesPrev, deliveryFps, renderFps} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, validateIdentity, transcriptIssues, SAFE} = await import(src('validate.ts'));
 const {DUR_MS} = await import(src('transitions.ts'));
@@ -62,6 +62,7 @@ const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
 export const {dhash, hamming} = gradeScan;
 const {projectTranscript} = await import(path.join(ROOT, 'scripts', 'transcript-cache.mjs'));
+const {threadArgs} = await import(path.join(ROOT, 'scripts', 'first-frame.mjs'));
 
 const FPS = 30; // the pure rules' default; judge() passes the project's own rate
 // the env the backend's jobs see: ROOT's .env under the process env (the transcript engine, scripts/transcript-cache.mjs)
@@ -144,7 +145,6 @@ const clean = (s) => String(s).replace(/^[¿¡"'(]+|[.,;:!?"')]+$/g, '');
 const CAP = /^[A-ZÁÉÍÓÚÑÜ]/;
 const SENT_END = /[.!?…]["')\]]*$/;
 const sourceOf = (s) => path.basename(s).replace(/\.[^.]+$/, '');
-const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], {encoding: 'utf8', maxBuffer: 1 << 28});
 
 // ---------- evidence: timeline speech ----------
 // transcript words of every placed clip at the time the viewer HEARS them (seconds), in order.
@@ -152,13 +152,16 @@ const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], 
 // previous clip's tail (and mutes them after the cut), an L-cut plays the source past outSec
 // under the next clip's head; the frames come from placeClips, like the render's. A muted clip
 // is not heard at all. Words in a lead / trail carry `jl` ('lead' | 'trail'). A word a split runs through
-// with nothing cut out (continuesPrev: a half-graded head split off) is heard once, whole — never "eso" → "eso"
+// with nothing cut out (continuesPrev: a half-graded head split off) is heard once, whole — never "eso" → "eso".
+// `take` = the first clip of such a run, the id projectCaptions gives its pages (a word is on a page of its take).
 export function timelineSpeech(clips, tr, fps = FPS) {
   const out = [];
   const missing = [];
   const placed = placeClips(clips, fps);
+  let take;
   for (const [k, pc] of placed.entries()) {
     const joined = continuesPrev(placed[k - 1]?.clip, pc.clip);
+    if (!joined) take = pc.clip.id;
     const t = tr.find((x) => x.clipId === pc.clip.id);
     if (!t) { missing.push(pc.clip.id); continue; }
     if (pc.clip.muted || pc.clip.volume === 0) continue;
@@ -176,11 +179,12 @@ export function timelineSpeech(clips, tr, fps = FPS) {
       const s0 = Math.max(w.startMs, inMs), s1 = Math.min(w.endMs, trailEnd);
       const where = part(s0), last = out.at(-1);
       if (joined && where === 'main' && last?.wid === `${t.source}:${w.i}` && !last.jl) { last.t1 = Math.max(last.t1, heard(Math.max(s0, s1 - 1))); continue; }
-      out.push({wid: `${t.source}:${w.i}`, word: w.word, t0: heard(s0), t1: Math.max(heard(s0), heard(Math.max(s0, s1 - 1))), srcStartMs: w.startMs, srcEndMs: w.endMs, clipId: pc.clip.id, clipIndex: k, off: !!w.off, ...(where !== 'main' ? {jl: where} : {}), ...(w.speaker ? {speaker: w.speaker} : {})});
+      out.push({wid: `${t.source}:${w.i}`, word: w.word, t0: heard(s0), t1: Math.max(heard(s0), heard(Math.max(s0, s1 - 1))), srcStartMs: w.startMs, srcEndMs: w.endMs, clipId: pc.clip.id, take, clipIndex: k, off: !!w.off, ...(where !== 'main' ? {jl: where} : {}), ...(w.speaker ? {speaker: w.speaker} : {})});
     }
   }
   return {words: out.sort((a, b) => a.t0 - b.t0), missing};
 }
+const takeOf = (w) => w.take ?? w.clipId; // a word's take: the id pages carry (projectCaptions)
 
 // ---------- rules (pure, exported for tests) ----------
 // odd pauses in the narration: gaps between consecutive spoken words as the viewer hears them.
@@ -205,7 +209,7 @@ export function pauseFindings(words, clips, emphasized = new Set(), fps = FPS) {
       continue;
     }
     const gap = (b.t0 - a.t1) * 1000;
-    const across = a.clipId !== b.clipId;
+    const across = takeOf(a) !== takeOf(b); // a join where the take runs on is no cut
     const ended = SENT_END.test(a.word);
     const hot = emphasized?.has(b.wid) ?? true;
     const dramatic = ended || DRAMATIC_BEFORE.test(a.word) || hot;
@@ -325,7 +329,7 @@ export function overflowFindings(pages, style, brandFont) {
 // caption ↔ audio sync, coverage and spelling against the aligned transcript
 export function captionTextFindings(pages, words, hidden = new Set()) {
   const out = [];
-  const byWid = new Map(words.map((w) => [`${w.clipId}|${w.wid}`, w]));
+  const byWid = new Map(words.map((w) => [`${takeOf(w)}|${w.wid}`, w]));
   const covered = new Set();
   const seen = new Set(); // a word the guion split ("acomodan" → "acomoda" "a") shares its id: only its first piece starts with it
   for (const c of pages) {
@@ -354,13 +358,13 @@ export function captionTextFindings(pages, words, hidden = new Set()) {
     }
     for (const wid of c.covers ?? []) covered.add(wid);
     if (hand.length > 2 && c.words.length === hand.length) {
-      const cov = words.filter((w) => w.clipId === c.clipId && (c.covers ?? []).includes(w.wid));
+      const cov = words.filter((w) => takeOf(w) === c.clipId && (c.covers ?? []).includes(w.wid));
       const d = cov.length ? c.startMs - cov[0].t0 * 1000 : 0;
       out.push(F('sync', Math.abs(d) >= T.syncMajorMs ? 'major' : 'minor', 'rule', c.startMs / 1000, c.endMs / 1000, `${c.id} fue reescrita con otro número de palabras: el tiempo de cada palabra es repartido, no el del audio${cov.length ? ` (inicio ${Math.round(d)} ms vs voz)` : ''}`, {page: c.id}, [{tool: 'edit_caption', note: 'same word count as the spoken words keeps the real timing', args: {caption_id: c.id, text: '<same number of words as spoken>'}}]));
     }
   }
   // spoken words with no caption (runs of 3+)
-  const inPage = (w) => pages.some((c) => c.clipId === w.clipId && w.t0 * 1000 >= c.startMs - 30 && w.t0 * 1000 < c.endMs + 30);
+  const inPage = (w) => pages.some((c) => c.clipId === takeOf(w) && w.t0 * 1000 >= c.startMs - 30 && w.t0 * 1000 < c.endMs + 30);
   let run = [];
   const flush = () => {
     const jl = run.find((w) => w.jl);
@@ -592,8 +596,9 @@ export function insertFindings(inserts, words, brolls, gfx, lib = []) {
   const cueText = (b) => { const e = lib.find((x) => sourceOf(x.src ?? '') === sourceOf(b.src)); return [...(e?.tags ?? []), e?.desc, e?.label, b.query, sourceOf(b.src)].filter(Boolean).join(' '); };
   const gText = (g) => textValues(g.props ?? {}).join(' ');
   for (const ins of inserts) {
-    // the mention: the anchor id, else the first spoken word that shares a stem with a keyword or the insert's name (plaza ~ plazas)
-    const stems = [...ins.keywords, ...ins.what.split(/\s+/)].filter((k) => !k.includes(' ')).map(fold).filter((k) => k.length >= 4);
+    // the mention: the anchor id, else the first spoken word that shares a stem with a keyword or the insert's name (plaza ~
+    // plazas) — a super's name never: "super de calle" is not where "súper" (the supermarket) is said. No mention: anywhere
+    const stems = [...ins.keywords, ...(ins.need === 'super' ? [] : ins.what.split(/\s+/))].filter((k) => !k.includes(' ')).map(fold).filter((k) => k.length >= 4);
     const stem = (w) => { const x = fold(w.word); return x.length >= 4 && stems.some((k) => x.startsWith(k) || k.startsWith(x)); };
     const anchorWord = ins.anchor ? words.find((w) => w.wid === ins.anchor) : words.find(stem);
     const t = anchorWord?.t0;
@@ -695,13 +700,13 @@ export function colorRefGroups(profile, development) {
 }
 
 // ---------- color from clip to clip: an ADVISORY (two shots may look different on purpose) ----------
-// clipLooks: [{pc, n, Y, U, V}] of the A-roll clips. Each is compared with the duration-weighted median of
-// the clips of its own location (set_clip location; clips without one are one group): a jump between two
-// places is not a jump
-export function colorJumpFindings(clipLooks, placed) {
+// clipLooks: [{pc, n, Y, U, V}] of the A-roll shots (pc: one of `shots`, shotsOf — a split the source runs on
+// through is no cut to jump at). Each is compared with the duration-weighted median of the shots of its own
+// location (set_clip location; clips without one are one group): a jump between two places is not a jump
+export function colorJumpFindings(clipLooks, shots) {
   const out = [];
   const src0 = (x) => sourceOf(x.pc.clip.src);
-  const cutAt = (x) => { const k = placed.indexOf(x.pc); return [k > 0 ? r2(x.pc.startMs / 1000 - 0.3) : null, r2(x.pc.startMs / 1000 + 0.3)].filter((t) => t != null); };
+  const cutAt = (x) => { const k = shots.indexOf(x.pc); return [k > 0 ? r2(x.pc.startMs / 1000 - 0.3) : null, r2(x.pc.startMs / 1000 + 0.3)].filter((t) => t != null); };
   const byPlace = new Map();
   for (const x of clipLooks) { const l = x.pc.clip.location ?? ''; byPlace.set(l, [...(byPlace.get(l) ?? []), x]); }
   for (const xs of byPlace.values()) {
@@ -723,18 +728,34 @@ export function colorJumpFindings(clipLooks, placed) {
   return out;
 }
 
-// ---------- cuts: a flash, jump cuts inside one take ----------
-// placed: placeClips. A clip joined to its neighbour with nothing cut out (continuesPrev — a pre-edit split
-// at its own shot change, a half-graded head split off by grade-coverage's fix) is one uninterrupted shot on
-// screen: neither a flash nor a jump cut
-// ponytail: a run of continuing clips under flashMs altogether (two tiny pieces) is not called a flash
-export function cutFindings(placed) {
-  const out = [], jumps = [];
+// ---------- the edit's shots: what the viewer sees as one uninterrupted shot ----------
+// placed: placeClips. Clips joined where the source runs on (continuesPrev: a split that removed nothing — a
+// pre-edit split at its own shot change, a half-graded head split off by grade-coverage's fix) with a plain cut
+// and the same framing either side are one shot: the edit adds nothing on screen there (whatever the source
+// shows there is source-cut's). → [{clip (its first), startMs, endMs, ids}]. Every rule that counts shots uses
+// this: flash-cut, color-jump, color-burnt / dark, static and the cuts sheet
+export function shotsOf(placed) {
+  const shots = [];
   placed.forEach((pc, k) => {
-    const c = pc.clip, dur = (pc.endMs - pc.startMs) / 1000, prevClip = placed[k - 1]?.clip;
-    const joined = continuesPrev(prevClip, c);
-    if (dur * 1000 < T.flashMs && (c.speed ?? 1) === 1 && placed.length > 1 && !joined && !continuesPrev(c, placed[k + 1]?.clip)) out.push(F('flash-cut', 'major', 'rule', pc.startMs / 1000, pc.endMs / 1000, `${c.id} dura ${dur.toFixed(2)} s — un parpadeo`, {clip: c.id}, [{tool: 'delete_clips', args: {clip_ids: [c.id]}}]));
-    if (prevClip && !joined && prevClip.src === c.src && (!c.enter || c.enter === 'cut') && !c.transform?.length && Math.abs(c.inSec - prevClip.outSec) < 4) jumps.push(pc);
+    const prev = placed[k - 1]?.clip, a = prev && sampleTransform(prev.transform, prev.outSec), b = sampleTransform(pc.clip.transform, pc.clip.inSec);
+    if (continuesPrev(prev, pc.clip) && (!pc.clip.enter || pc.clip.enter === 'cut') && Math.abs(a.scale - b.scale) + Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 1e-3) Object.assign(shots.at(-1), {endMs: pc.endMs, ids: [...shots.at(-1).ids, pc.clip.id]});
+    else shots.push({clip: pc.clip, startMs: pc.startMs, endMs: pc.endMs, ids: [pc.clip.id]});
+  });
+  return shots;
+}
+
+// ---------- cuts: a flash, jump cuts inside one take ----------
+// a flash is a SHOT under flashMs (shotsOf: a 10-frame piece a split runs on through is no flash, two tiny pieces
+// together still are); a jump cut is a join inside one take with something cut out (never a continuing one)
+export function cutFindings(placed) {
+  const out = [], jumps = [], shots = shotsOf(placed);
+  for (const sh of shots) {
+    const dur = (sh.endMs - sh.startMs) / 1000, name = sh.ids.length > 1 ? `${sh.ids[0]}…${sh.ids.at(-1)}` : sh.clip.id;
+    if (dur * 1000 < T.flashMs && (sh.clip.speed ?? 1) === 1 && shots.length > 1) out.push(F('flash-cut', 'major', 'rule', sh.startMs / 1000, sh.endMs / 1000, `${name} dura ${dur.toFixed(2)} s — un parpadeo`, {clip: sh.clip.id}, [{tool: 'delete_clips', args: {clip_ids: sh.ids}}]));
+  }
+  placed.forEach((pc, k) => {
+    const c = pc.clip, prevClip = placed[k - 1]?.clip;
+    if (prevClip && !continuesPrev(prevClip, c) && prevClip.src === c.src && (!c.enter || c.enter === 'cut') && !c.transform?.length && Math.abs(c.inSec - prevClip.outSec) < 4) jumps.push(pc);
   });
   if (jumps.length) out.push(F('jump-cut', jumps.length >= 3 ? 'major' : 'minor', 'rule', jumps[0].startMs / 1000, null, `${jumps.length} jump cut(s) del mismo plano sin punch/transición: ${jumps.slice(0, 5).map((x) => `${x.clip.id} @${tc(x.startMs / 1000)}`).join(', ')}`, {clips: jumps.map((x) => x.clip.id)}, [{tool: 'set_transitions', args: {pattern: 'punch-alternate'}}]));
   return out;
@@ -964,12 +985,13 @@ export function verdictOf(findings, {reduced = false} = {}) {
   return {verdict: pass ? 'PASS' : 'FAIL', label, counts: n, patterns, toConfirm, advisories};
 }
 
-// What a review version keeps of a pass (scripts/reviews.mjs judgeVersion, CEO-6): its label — 'superado' or
+// What a review version keeps of a pass (scripts/reviews.mjs judgeVersion, CEO-6): its label — 'superado', 'superado
+// (evidencia reducida)' when checks were skipped (the report's `skipped`: not checked, so not passed), or
 // '<n> hallazgo(s)', n = what the verdict counts (blockers + majors + minor patterns) — the findings that count
 // (compact: the full report stays in its folder, `report`) and the profile it ran with. Never 'aprobado'.
 export function versionSummary(r) {
   const n = r.counts.blocker + r.counts.major + r.patterns.length;
-  return {label: r.verdict === 'PASS' ? 'superado' : `${n} hallazgo${n === 1 ? '' : 's'}`, findings: r.findings.filter(counts).map(({check, severity, at, end, msg}) => ({check, severity, at, end, msg})), profile: r.profile};
+  return {label: r.verdict === 'PASS' ? `superado${r.skipped?.length ? ' (evidencia reducida)' : ''}` : `${n} hallazgo${n === 1 ? '' : 's'}`, findings: r.findings.filter(counts).map(({check, severity, at, end, msg}) => ({check, severity, at, end, msg})), profile: r.profile};
 }
 
 // compare with the previous iteration's report: new / still open / fixed / regressions
@@ -1034,7 +1056,7 @@ export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, bla
       ? [`[0:v]scale=160:-2,split=${full.length + 1}${labels}[v0]`, ...full, `[v0]fps=${rate},split=2[st][h]`]
       : [`[0:v]fps=${rate},scale=270:-2,split=2[st][h]`])
       .concat([`[st]signalstats,metadata=print:file=${fesc(stats)},nullsink`, '[h]scale=9:8:flags=area,format=gray[out]']).join(';');
-    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-', ...(looks ? ['-map', '[looks]', '-fps_mode', 'passthrough', '-f', 'rawvideo', lk] : [])], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', ...LIMIT(), '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-', ...(looks ? ['-map', '[looks]', '-fps_mode', 'passthrough', '-f', 'rawvideo', lk] : [])], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const frames = readMeta(stats, /lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);
     const buf = r.stdout ?? Buffer.alloc(0);
     const hs = [];
@@ -1048,7 +1070,7 @@ export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, bla
 export function firstFrames(file, n = 2) {
   const dir = tmpDir(), meta = path.join(dir, 'f0.txt');
   try {
-    spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-an', '-vf', `select='lt(n\\,${n})',signalstats,metadata=print:file=${fesc(meta)}`, '-frames:v', String(n), '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+    spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', ...LIMIT(), '-i', file, '-an', '-vf', `select='lt(n\\,${n})',signalstats,metadata=print:file=${fesc(meta)}`, '-frames:v', String(n), '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     return readMeta(meta, /lavfi\.signalstats\.(YAVG|YMIN|YMAX|UMIN|UMAX|VMIN|VMAX)=([\d.]+)/).map((f, i) => ({...f, n: i}));
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
@@ -1061,7 +1083,7 @@ function analyzeAudio(file, {bands = true} = {}) {
     const legs = bands ? 4 : 2;
     const g = [`[0:a]aresample=48000,asplit=${legs}${['[full]', '[pk]', '[low]', '[high]'].slice(0, legs).join('')}`, `[full]${meter('full', '')}`, '[pk]astats=metadata=0[out]',
       ...(bands ? [`[low]${meter('low', 'lowpass=f=300,lowpass=f=300,')}`, `[high]${meter('high', 'highpass=f=3400,highpass=f=3400,')}`] : [])].join(';');
-    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-filter_complex', g, '-map', '[out]', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...LIMIT(), '-i', file, '-vn', '-filter_complex', g, '-map', '[out]', '-f', 'null', '-'], {encoding: 'utf8', maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const o = r.stderr.slice(r.stderr.lastIndexOf('Overall'));
     const num = (re) => { const m = o.match(re); return m ? (m[1] === '-inf' ? -Infinity : +m[1]) : NaN; };
     const series = (name) => readMeta(path.join(dir, `${name}.txt`), /(lavfi\.r128\.M)=(-?[\d.]+|-inf)/).map((x) => ({t: r2(x.t + 0.1), M: x['lavfi.r128.M'] ?? -Infinity}));
@@ -1098,7 +1120,7 @@ export function scanSources(ranges, publicDir, skipped) {
     for (const [a, b] of missingRanges(need, entry.covered)) {
       const dir = tmpDir(), meta = path.join(dir, 'scd.txt');
       try {
-        const run = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', '-threads', THREADS(), '-ss', a.toFixed(3), '-t', (b - a).toFixed(3), '-copyts', '-i', file, '-an', '-vf', `scale=160:-2,scdet=threshold=0,metadata=print:file=${fesc(meta)}`, '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
+        const run = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', ...LIMIT(), '-ss', a.toFixed(3), '-t', (b - a).toFixed(3), '-copyts', '-i', file, '-an', '-vf', `scale=160:-2,scdet=threshold=0,metadata=print:file=${fesc(meta)}`, '-f', 'null', '-'], {timeout: TIMEOUT(), killSignal: 'SIGKILL'});
         if (timedOut(run)) { skipped.push(`source-cut: ${src} ${a.toFixed(1)}–${b.toFixed(1)} s did not finish in ${Math.round(TIMEOUT() / 1000)} s (corrupt file?) — not scanned`); continue; } // not cached: tried again next run
         const pts = readMeta(meta, /lavfi\.scd\.(score)=([\d.]+)/).filter((x) => x.score != null).map((x) => [r2(x.t * 1000) / 1000, Math.round(x.score * 1000) / 1000]);
         entry.scores.push(...pts.slice(1)); // the first frame of a range has nothing before it
@@ -1114,6 +1136,9 @@ export function scanSources(ranges, publicDir, skipped) {
   return out;
 }
 const THREADS = () => String(process.env.REEL_JUDGE_THREADS || 1);
+// every ffmpeg the judge starts decodes and filters on THREADS: it runs beside the next render (the QC gate's too)
+const LIMIT = () => threadArgs(THREADS());
+const LATE = () => ({timeout: TIMEOUT(), killSignal: 'SIGKILL'});
 // every ffmpeg the judge starts has a deadline (a corrupt file must not hang it; the catalog's 10 min)
 const TIMEOUT = () => Number(process.env.REEL_JUDGE_TIMEOUT_MS || 600000);
 const timedOut = (r) => !!(r.error?.code === 'ETIMEDOUT' || r.signal);
@@ -1159,7 +1184,7 @@ function sheetsOf(file, groups, fps = FPS, width = 270) {
   for (const label of [true, false]) {
     const graph = [`[0:v]split=${groups.length}${groups.map((_, i) => `[s${i}]`).join('')}`, ...groups.map((g, i) => `[s${i}]${chain(g, label)}[o${i}]`)].join(';');
     const outs = groups.flatMap((g, i) => ['-map', `[o${i}]`, '-fps_mode', 'vfr', '-frames:v', '1', '-q:v', '4', g.out]);
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-an', '-filter_complex', graph, ...outs]);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...LIMIT(), '-i', file, '-an', '-filter_complex', graph, ...outs], LATE());
     if (r.status === 0 && groups.every((g) => fs.existsSync(g.out))) return groups.map((g) => g.out);
   }
   return groups.map((g) => sheet(file, g.times, g.cols, g.out, width)); // the slow path: one seek per frame
@@ -1172,13 +1197,13 @@ function sheet(file, times, cols, out, width = 270) {
   try {
     items.forEach(({file: f0, t, label}, i) => {
       const f = path.join(dir, `${String(i).padStart(2, '0')}.jpg`);
-      const base = ['-v', 'error', '-y', ...(MEDIA.test(f0) && !/\.(jpe?g|png|webp|tiff?)$/i.test(f0) ? ['-ss', String(t)] : []), '-i', f0, '-frames:v', '1'];
+      const base = ['-v', 'error', '-y', ...LIMIT(), ...(MEDIA.test(f0) && !/\.(jpe?g|png|webp|tiff?)$/i.test(f0) ? ['-ss', String(t)] : []), '-i', f0, '-frames:v', '1'];
       const pad = `scale=${width}:${Math.round(width * 16 / 9)}:force_original_aspect_ratio=decrease,pad=${width}:${Math.round(width * 16 / 9)}:(ow-iw)/2:(oh-ih)/2`;
       const lab = `${pad},pad=iw:ih+26:0:0:color=0xFFE500,drawtext=text='${String(label).replace(/[\\':,;[\]=]/g, (c) => `\\${c}`).slice(0, 40)}':fontcolor=black:fontsize=18:x=6:y=h-22`;
-      if (spawnSync('ffmpeg', [...base, '-vf', lab, '-q:v', '4', f]).status !== 0) spawnSync('ffmpeg', [...base, '-vf', pad, '-q:v', '4', f]);
+      if (spawnSync('ffmpeg', [...base, '-vf', lab, '-q:v', '4', f], LATE()).status !== 0) spawnSync('ffmpeg', [...base, '-vf', pad, '-q:v', '4', f], LATE());
     });
     const rows = Math.ceil(items.length / cols);
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-framerate', '1', '-i', path.join(dir, '%02d.jpg'), '-vf', `tile=${cols}x${rows}:padding=4:color=0x303030`, '-frames:v', '1', '-q:v', '4', out]);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', ...LIMIT(), '-framerate', '1', '-i', path.join(dir, '%02d.jpg'), '-vf', `tile=${cols}x${rows}:padding=4:color=0x303030`, '-frames:v', '1', '-q:v', '4', out], LATE());
     return r.status === 0 ? out : null;
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 }
@@ -1224,7 +1249,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const info = probe(file);
   const v = info?.streams.find((s) => s.codec_type === 'video');
   const a = info?.streams.find((s) => s.codec_type === 'audio');
-  const q = timed('qc gate', () => qc(file, {expectSec: total, draft}));
+  const q = timed('qc gate', () => qc(file, {expectSec: total, draft, threads: THREADS()}));
   const qcBlack = []; // the black stretches the QC gate reported (pix_th 0.08): the judge's long runs defer to these only
   for (const c of q.checks) {
     if (c.ok) continue;
@@ -1343,10 +1368,11 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   }
 
   // --- cuts ---
+  const shots = shotsOf(placed);
   findings.push(...cutFindings(placed));
   // a long continuous take is a choice more often than a flaw: candidate nit
   const brolls = projectBrolls(p.brolls, p.clips, rate);
-  const changes = [0, ...placed.map((x) => x.startMs / 1000), ...brolls.flatMap((b) => [b.startMs / 1000, b.endMs / 1000]), ...gfx.map((g) => g.startMs / 1000), total].sort((x, y) => x - y);
+  const changes = [0, ...shots.map((x) => x.startMs / 1000), ...brolls.flatMap((b) => [b.startMs / 1000, b.endMs / 1000]), ...gfx.map((g) => g.startMs / 1000), total].sort((x, y) => x - y);
   for (let k = 1; k < changes.length; k++) if (changes[k] - changes[k - 1] > T.staticSec) findings.push(F('static', 'nit', 'candidate', changes[k - 1], changes[k], `toma continua de ${(changes[k] - changes[k - 1]).toFixed(1)} s sin cambio de plano, B-roll ni gráfico — solo si se siente lenta`, {lookAt: r2((changes[k - 1] + changes[k]) / 2)}, [{tool: 'set_transitions', note: 'a punch inside the take, or suggest_broll for a cue', args: {pattern: 'punch-alternate'}}]));
 
   // --- B-roll: repeats, length, what is said under it, the script's inserts ---
@@ -1386,16 +1412,16 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   if (inserts.length) findings.push(...insertFindings(inserts, words, brolls, gfx, lib));
   else if (profile?.requireInserts) findings.push(F('insert-missing', 'major', 'rule', null, null, 'el plan no lista los INSERTS del guion: no se puede verificar que cada escena/inserto esté cubierto', {}, [{tool: 'set_plan', note: 'add an INSERTS: block (reel-plan template) with every scene / insert the script names — in review mode an edited plan needs the user\'s approval again (src/plan.ts)', args: {}}]));
 
-  // --- color: per A-roll clip (B-roll spans left out), rendered frames ---
+  // --- color: per A-roll shot (shotsOf; B-roll spans left out), rendered frames ---
   const stats = video.stats;
   const isBroll = (t) => brolls.some((b) => b.mode !== 'inset' && t >= b.startMs / 1000 && t < b.endMs / 1000);
   const aroll = stats.filter((x) => !isBroll(x.t));
-  const clipLooks = placed.map((pc) => {
+  const clipLooks = shots.map((pc) => {
     const s0 = aroll.filter((x) => x.t >= pc.startMs / 1000 + 0.1 && x.t < pc.endMs / 1000 - 0.1);
     return {pc, n: s0.length, Y: median(s0.map((x) => x.YAVG)), YH: median(s0.map((x) => x.YHIGH)), U: median(s0.map((x) => x.UAVG)), V: median(s0.map((x) => x.VAVG))};
   }).filter((x) => x.n >= 1);
   const src0 = (x) => sourceOf(x.pc.clip.src);
-  findings.push(...colorJumpFindings(clipLooks, placed));
+  findings.push(...colorJumpFindings(clipLooks, shots));
   // inside a shot, every frame (the render's own fps): a part of a shot in another grade blocks
   if (video.looks.length) {
     const rfps = fps ?? rate;
@@ -1442,7 +1468,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
       fs.mkdirSync(outDir, {recursive: true});
       const dur = +info?.format?.duration || total;
       timed('sheets', () => {
-      const cutTimes = placed.slice(1).map((x) => r2(x.startMs / 1000 + 0.1)).slice(0, 16);
+      const cutTimes = shots.slice(1).map((x) => r2(x.startMs / 1000 + 0.1)).slice(0, 16);
       const [overview, hook, cuts] = sheetsOf(file, [
         {times: Array.from({length: 16}, (_, k) => r2(((k + 0.5) * dur) / 16)), cols: 4, out: path.join(outDir, 'overview.jpg')},
         {times: Array.from({length: 9}, (_, k) => r2(Math.min(dur - 0.05, k * 0.25))), cols: 3, out: path.join(outDir, 'hook.jpg')},
@@ -1551,7 +1577,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try { prev = JSON.parse(fs.readFileSync(prevPath ?? latest, 'utf8')); } catch {}
   if (fresh || (!prevPath && prev && Date.now() - Date.parse(prev.at) > 12 * 3600e3)) prev = null; // a new loop, not the next iteration
   const outDir = outArg ?? path.join(base, `${path.basename(render, '.mp4')}-${Date.now()}`);
-  const r = await judge({projectId, render, publicDir: publicDir ?? undefined, outDir, prev, role, pair, profile, stateDir: base, sourceScan: !noSourceScan, snapshot});
+  let r;
+  // a failure says why in ONE line (the render queue keeps stderr's last line: never a stack or Node's version banner)
+  try { r = await judge({projectId, render, publicDir: publicDir ?? undefined, outDir, prev, role, pair, profile, stateDir: base, sourceScan: !noSourceScan, snapshot}); } catch (e) { console.error(`judge: ${String(e?.message ?? e).split('\n')[0]}`); process.exit(1); }
   const txt = reportText(r);
   const json = JSON.stringify(r, (k, x) => (typeof x === 'bigint' ? x.toString(16) : x), 2);
   try {

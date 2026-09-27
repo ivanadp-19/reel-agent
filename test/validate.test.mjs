@@ -206,3 +206,10 @@ test('cut-word: an edge inside a word that the next piece continues (a split, no
   assert.deepEqual(transcriptIssues({clips: [c('a', 0, 5.1), c('b', 5.1, 9)]}, tr), []);
   assert.deepEqual(transcriptIssues({clips: [c('a', 0, 5.1), c('b', 6, 9)]}, tr).map((i) => [i.code, i.ref]), [['cut-word', 'a']]);
 });
+
+test('transcriptIssues: a split that removed nothing (continuesPrev) cuts no word; a real cut inside a word still does', () => {
+  const tr = [{clipId: 'k0', source: 'a', words: [{i: 0, word: 'mundo', startMs: 800, endMs: 1100}]}];
+  const pieces = (...ranges) => ({clips: ranges.map(([inSec, outSec], k) => ({id: `k${k}`, src: 'clips/a.mp4', inSec, outSec, sourceDurationSec: 2}))});
+  assert.deepEqual(transcriptIssues(pieces([0, 0.95], [0.95, 2]), tr), [], 'the take runs on through "mundo"');
+  assert.deepEqual(transcriptIssues(pieces([0, 0.95], [1, 2]), tr).map((i) => i.msg.split(' (')[0]), ['k0 ends in the middle of "mundo"', 'k1 starts in the middle of "mundo"']);
+});
