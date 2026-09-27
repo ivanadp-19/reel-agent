@@ -4,7 +4,7 @@
 //         — the editor's CURRENT cut (trim + order).
 // Steps : 1) transcribe each source clip with WhisperX (cached per source),
 //         2) map words onto the assembled/trimmed timeline,
-//         3) page words per the caption preset (src/paging.ts),
+//         3) page words per the caption preset (src/paging.ts; the kit's multi-word glossary terms never split),
 //         4) place the pages clear of every face (src/faces.ts, local YuNet scans) → argv[3] (the backend's job: its own
 //            file; by hand: public/captions.multi.json)
 // Yellow words: the project's own tiers (`tiers`, every word it shows) apply exactly; only words it does
@@ -86,7 +86,7 @@ if (guionPathP) {
 // waited for), then each page placed by the project's knobs (faceShift / faceHold). What the check could not see is
 // said (WARN: lines, in the job's done status: the MCP, the editor and the reel CLI show them) — no venv or model on
 // the box, a scan that failed: those pages stay at the pack's top. REEL_FACE_AWARE=0: no scan, no move (checks.mjs)
-let captions = pageWords(words, presetOf(style));
+let captions = pageWords(words, presetOf(style), Array.isArray(glossary) ? glossary : []); // the kit's multi-word terms stay on one page
 if (faceAware()) {
   const p = {...(saved ?? {}), clips, captions, captionStyle: style, brolls: saved?.brolls ?? [], graphics: saved?.graphics ?? []};
   const todo = faceSources(p).filter((s) => fs.existsSync(path.join(PUBLIC, s)) && !readFaces(PUBLIC, s));

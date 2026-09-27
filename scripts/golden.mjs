@@ -7,7 +7,8 @@
 //                  refFirst / refLast = first / last frame of the page in ref.mp4;
 //                  our frame = ref frame + frameOffset
 //   ref.mp4        the approved render
-// Layer A (no render): the real pager (src/paging.ts pageWords) on the pinned words with the pack
+// Layer A (no render): the real pager (src/paging.ts pageWords) on the pinned words with the pack and the
+//   glossary of the client's kit (expected.brand, else public/brands/<pack>.json — its multi-word terms bond)
 //   → each page's word range, text, yellow words and lines (flex-wrap as the browser does it: the
 //   pack's font file when it is on the machine, else the textFit estimate), against expected.
 // Layer B (one render): the expected pages as the layered export's caption layer (transparent, the
@@ -55,11 +56,12 @@ export function pageLines(page, preset, measure) {
 
 const nfc = (s) => s.normalize('NFC');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-// pinned words → pages with the pack's own pager → the checks against expected, matched by word range
-export function layerA(words, exp, {measure = null} = {}) {
+// pinned words → pages with the pack's own pager (and the client kit's glossary, as the captions job pages)
+// → the checks against expected, matched by word range
+export function layerA(words, exp, {measure = null, glossary = []} = {}) {
   const preset = presetOf(exp.pack);
   const tw = words.map((w) => ({wid: w.wid, word: w.text, src: exp.source, clipId: 'golden', startMs: w.startMs, endMs: w.endMs, srcStartMs: w.startMs, srcEndMs: w.endMs, tier: w.tier ?? 0}));
-  const pages = pageWords(tw, preset, {});
+  const pages = pageWords(tw, preset, glossary);
   const byRange = new Map(pages.map((p) => [`${p.words[0].wid}…${p.words.at(-1).wid}`, p]));
   const upper = (s) => nfc(preset.font.case === 'upper' ? s.toUpperCase() : s);
   const rows = [{page: '*', check: 'pages', ok: pages.length === exp.pages.length, got: pages.length, want: exp.pages.length}];
@@ -360,10 +362,13 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (fontFile && !fs.existsSync(fontFile)) { console.error(`golden: ${path.relative(ROOT, fontFile)} is missing — run \`npm run setup\` (or copy the client's licensed file there), then again`); process.exit(2); }
   const measure = fontFile ? fontAdvances(fontFile) : null;
   if (measure) realAdvances(preset.font.custom.family, measure); // the page size as the renderer fits it
+  // the client's kit (expected.brand, else the kit named like the pack): its glossary terms bond as in production
+  const kit = path.join(ROOT, 'public', 'brands', `${exp.brand ?? exp.pack}.json`);
+  const glossary = fs.existsSync(kit) ? JSON.parse(fs.readFileSync(kit, 'utf8')).glossary ?? [] : [];
   let ok = true;
   if (!flags.includes('--b')) {
-    const rows = layerA(words, exp, {measure});
-    console.log(table(`Layer A — ${path.basename(dir)}, pack ${exp.pack}`, rows));
+    const rows = layerA(words, exp, {measure, glossary});
+    console.log(table(`Layer A — ${path.basename(dir)}, pack ${exp.pack}, glossary ${glossary.length ? `of kit ${path.basename(kit, '.json')} (${glossary.length} terms)` : 'none'}`, rows));
     ok &&= rows.every((r) => r.ok);
   }
   if (!flags.includes('--a')) {

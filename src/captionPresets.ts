@@ -162,7 +162,7 @@ const vibem: Preset = {
   // said SAME size: v11 video wins (user decision 2026-09-26)
   tiers: {1: {weight: 700, color: 'accent', scale: 1.15}, 2: {weight: 700, color: 'accent', scale: 1.15}},
   // v11: no name / number bonds (MONTEALBÁN | 326 are two pages; his 10:35 note bonded them: v11
-  // video wins, user decision 2026-09-26). Block top at 53 % on every page, whatever face detection
+  // video wins, user decision 2026-09-26) — the kit's multi-word glossary terms still never split (src/paging.ts). Block top at 53 % on every page, whatever face detection
   // finds. Wrap at 934 px (padPx 73): v11's widest one-line phrase is 929 px, its narrowest wrapped
   // one 940. A single word may run into the side padding at full size (DEPARTAMENTOS at 93 % of the
   // width) before the page shrinks. Commas stay mid-page and break nothing (MAYAB, ALTA / ESPECIALIDAD,
