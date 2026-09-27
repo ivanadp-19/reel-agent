@@ -8,8 +8,8 @@ import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
 import {createLink, hashToken, inReviewsRow, keepUnapproved, loadReviews, proxyArgs, pruneVersions, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
-import {handleReview, linkAccess} from '../server/review.mjs';
-import {SESSION_COOKIE, parseRoles, signSession} from '../server/session.mjs';
+import {bandejaRows, handleBandeja, handleReview, linkAccess} from '../server/review.mjs';
+import {SESSION_COOKIE, createLoginLimiter, parseRoles, signSession} from '../server/session.mjs';
 
 const DAY = 86400e3;
 const T0 = Date.parse('2026-09-25T12:00:00Z');
@@ -93,11 +93,12 @@ const SECRET = 'reviews-test-secret';
 const AUTH = Object.fromEntries(['ana', 'boss', 'rev', 'otro', 'nadie'].map((u) => [u, bcrypt.hashSync('pw', 4)]));
 const ROLES = parseRoles(JSON.stringify({boss: {role: 'owner'}, rev: {role: 'reviewer', clients: ['acme']}, otro: {role: 'reviewer', clients: ['other']}}));
 const cookie = (user) => ({cookie: `${SESSION_COOKIE}=${signSession(SECRET, user, {hash: AUTH[user]})}`});
-function serve(pub, {publicMode = true, now} = {}) {
+function serve(pub, {publicMode = true, now, limiter = null, log = () => {}, disk = () => null} = {}) {
   const srv = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const g = await gate(req, url, {publicMode, auth: AUTH, tokens: ['backend-tok', 'second-tok'], sessionSecret: SECRET, roles: ROLES});
     if (g.kind === 'review') return handleReview(req, res, url, {publicDir: pub, now, g, login: publicMode});
+    if (g.kind === 'bandeja') return handleBandeja(req, res, url, {publicDir: pub, g, login: publicMode, secret: SECRET, limiter, log, disk});
     if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
     const f = path.join(pub, path.normalize(decodeURIComponent(url.pathname)));
     if (f.startsWith(pub) && fs.existsSync(f) && fs.statSync(f).isFile()) return serveFile(req, res, f);
@@ -105,7 +106,7 @@ function serve(pub, {publicMode = true, now} = {}) {
   });
   return new Promise((r) => srv.listen(0, '127.0.0.1', () => r(srv)));
 }
-function get(srv, p, headers = {}, method = 'GET') {
+function get(srv, p, headers = {}, method = 'GET', body) {
   return new Promise((resolve, reject) => {
     const req = http.request({host: '127.0.0.1', port: srv.address().port, path: p, method, headers}, (res) => {
       const chunks = [];
@@ -113,7 +114,7 @@ function get(srv, p, headers = {}, method = 'GET') {
       res.on('end', () => resolve({status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks)}));
     });
     req.on('error', reject);
-    req.end();
+    req.end(body);
   });
 }
 
@@ -269,7 +270,7 @@ test('recordFinal of a cancelled render job records nothing', async () => {
 // ---- the delivered pair of a project with an identity (scripts/render-runner.mjs) ----
 const IDENTITY = {client: 'acme', family: 'acme-G2', script: 2, variant: {hook: 1, cta: 1}};
 // a version of p-1 with its pair (fake bytes): the temps where the runner leaves them, then recordVersion
-function withPair(pub, dir, {captions = true, now = T0, master = 'master', masterKey} = {}) {
+function withPair(pub, dir, {captions = true, now = T0, master = 'master', masterKey, snapshot = {clips: [{id: 'c0'}], captionStyle: 'palabra'}} = {}) {
   const t = path.join(dir, 'p-1', '.tmp-pair-j9');
   fs.mkdirSync(t, {recursive: true});
   fs.writeFileSync(path.join(t, 'master.mp4'), master);
@@ -280,7 +281,7 @@ function withPair(pub, dir, {captions = true, now = T0, master = 'master', maste
   fs.writeFileSync(path.join(pub, '.proxy-9'), 'proxy'); fs.writeFileSync(path.join(pub, '.poster-9'), 'jpeg');
   fs.writeFileSync(path.join(pub, 'exports', 'edited-9.mp4'), 'full');
   return recordVersion(dir, 'p-1', {file: path.join(pub, 'exports', 'edited-9.mp4'), proxyTmp: path.join(pub, '.proxy-9'), posterTmp: path.join(pub, '.poster-9'), durationSec: 2, sizeBytes: 4, publicDir: pub, jobId: 'j9', now,
-    deliverables: {master: path.join(t, 'master.mp4'), captions: path.join(t, 'captions.mov'), captionsPng: path.join(t, 'captions.png.zip'), supers: path.join(t, 'supers.mov'), masterSupers: path.join(t, 'master_supers.mp4')}, identity: IDENTITY, snapshot: {clips: [{id: 'c0'}], captionStyle: 'palabra'}, masterKey});
+    deliverables: {master: path.join(t, 'master.mp4'), captions: path.join(t, 'captions.mov'), captionsPng: path.join(t, 'captions.png.zip'), supers: path.join(t, 'supers.mov'), masterSupers: path.join(t, 'master_supers.mp4')}, identity: IDENTITY, snapshot, masterKey});
 }
 
 test('an unchanged master (same masterKey, same bytes) is a hard link to the earlier version\'s (design §5), never a copy', () => {
@@ -666,4 +667,263 @@ test('datos por confirmar (CEO-21): kept in the version, shown on its review pag
   const html = reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [v], current: v.v, fullOf: () => null});
   assert.match(html, /<h2>Datos por confirmar<\/h2><ul><li>«&lt;80&gt;» en 0:21 — no se oye en el audio de este reel<\/li><\/ul>/);
   assert.doesNotMatch(reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [{...v, datosPorConfirmar: []}], current: v.v, fullOf: () => null}), /Datos por confirmar/);
+});
+
+// ---- the bandeja (server/review.mjs handleBandeja; its steps: scripts/review-states.mjs) ----
+import {withVersion} from '../scripts/reviews.mjs';
+import {actorOf, moveNote} from '../scripts/review-states.mjs';
+import {DELIVERY_FPS} from '../src/timeline.ts';
+// the version as rendered: c0 = a.mp4 0–1 s, c1 = b.mp4 from 10 s; 1.5 s on the reel (at 29.97) is b.mp4 10.499 s, in "propia"
+const SNAP = {fps: DELIVERY_FPS, clips: [{id: 'c0', src: 'clips/a.mp4', inSec: 0, outSec: 1}, {id: 'c1', src: 'clips/b.mp4', inSec: 10, outSec: 20}],
+  captions: [{id: 'p1', src: 'clips/b.mp4', startMs: 10000, endMs: 10900, words: [{wid: 'b:1', text: 'tu', startMs: 10000, endMs: 10400}, {wid: 'b:2', text: 'propia', startMs: 10400, endMs: 10900}]}]};
+const ANCHOR = {clipId: 'c1', src: 'clips/b.mp4', srcSec: 10.499, wordId: 'b:2'};
+// p-1 = acme's ACME_G2_H1_C1 with n versions (en curso), p-2 = another client's variant
+function bandejaFixture(n = 1) {
+  const {pub, dir} = fixture(0);
+  for (let i = 0; i < n; i++) withPair(pub, dir, {snapshot: SNAP, now: T0 + i});
+  // the live project moved on (other clips): notes still anchor on the version's snapshot
+  fs.writeFileSync(path.join(pub, 'projects', 'p-1.json'), JSON.stringify({name: 'G2', identity: IDENTITY, clips: [{id: 'z9', src: 'clips/z.mp4', inSec: 0, outSec: 9}], captions: []}));
+  fs.writeFileSync(path.join(dir, 'p-2.json'), JSON.stringify({projectId: 'p-2', versions: [{v: 1, createdAt: new Date(T0).toISOString(), durationSec: 2, proxy: 'reviews/p-2/v1.mp4', identity: {client: 'other', family: 'other-G2', script: 2, variant: {hook: 1}}, judge: {label: 'superado', findings: []}}], links: []}));
+  return {pub, dir};
+}
+// one login per user (the CSRF token belongs to that session's cookie)
+const jar = {};
+const ck = (user) => (jar[user] ??= cookie(user));
+const setJudge = (dir, v, label) => withVersion(dir, 'p-1', v, (x) => { x.judge = {label, findings: [], at: 'now'}; });
+async function page(srv, who) {
+  const r = await get(srv, '/bandeja', who ? ck(who) : {});
+  const html = r.body.toString();
+  return {...r, html, csrf: html.match(/name="csrf" value="([^"]+)"/)?.[1]};
+}
+const post = (srv, route, headers, fields) => get(srv, route, {origin: `http://127.0.0.1:${srv.address().port}`, 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'TestPhone/1', ...headers}, 'POST', new URLSearchParams(fields).toString());
+
+test('the bandeja: a login session only; a reviewer sees their clients\' variants and never the owner\'s inbox; the owner sees every client and the inbox', async () => {
+  const {pub} = bandejaFixture(1);
+  const [srv, local] = [await serve(pub), await serve(pub, {publicMode: false})];
+  try {
+    for (const [who, headers] of [['anonymous', {}], ['basic auth, even the owner', {authorization: 'Basic ' + Buffer.from('boss:pw').toString('base64')}], ['the primary token', {'x-reel-token': 'backend-tok'}]]) {
+      const r = await get(srv, '/bandeja', headers);
+      assert.deepEqual([r.status, r.headers.location], [303, '/login?next=%2Fbandeja'], who);
+    }
+    assert.equal((await get(local, '/bandeja')).status, 403, 'local mode has no login: never the bandeja');
+    const rev = await page(srv, 'rev');
+    assert.equal(rev.status, 200);
+    assert.match(rev.headers['content-security-policy'], /form-action 'self'/);
+    assert.match(rev.headers['content-security-policy'], /script-src 'sha256-[A-Za-z0-9+/=]+'/);
+    assert.equal(rev.headers['referrer-policy'], 'no-referrer');
+    assert.equal(rev.headers['cache-control'], 'no-store');
+    assert.match(rev.html, /ACME_G2_H1_C1/);
+    assert.match(rev.html, /<video id="vid-p-1-1" src="\/reviews\/p-1\/v1\.mp4"/);
+    assert.match(rev.html, /<button type="button" disabled>Aprobar v1<\/button> <span>QC técnico en curso: aprobar se habilita con QC técnico superado/);
+    assert.ok(!/OTHER_G2/.test(rev.html), 'another client\'s variant is never listed');
+    assert.ok(!/<section class="inbox"|Pendientes|owner-inbox/.test(rev.html), 'the reviewer never sees the inbox');
+    const boss = await page(srv, 'boss');
+    assert.match(boss.html, /<section class="inbox"/);
+    assert.match(boss.html, /ACME_G2_H1_C1/);
+    assert.match(boss.html, /OTHER_G2_H1/);
+    assert.ok(!boss.html.includes('/bandeja/aprobar') && !boss.html.includes('/bandeja/nota"'), 'the owner neither approves nor writes the client\'s notes');
+    const otro = await page(srv, 'otro');
+    assert.ok(/OTHER_G2_H1/.test(otro.html) && !/ACME_G2/.test(otro.html) && !/Pendientes/.test(otro.html));
+    assert.match((await page(srv, 'nadie')).html, /nadie no tiene rol en REEL_USER_ROLES/);
+    assert.equal((await get(srv, '/bandeja/aprobar', ck('rev'))).status, 405, 'no GET on a step');
+    assert.equal((await get(srv, '/bandeja/otra', ck('rev'))).status, 404);
+    const out = await post(srv, '/bandeja/salir', ck('rev'), {csrf: rev.csrf});
+    assert.deepEqual([out.status, out.headers.location], [303, '/login?next=%2Fbandeja'], 'signing in again lands on the bandeja');
+    assert.match(out.headers['set-cookie'][0], new RegExp(`^${SESSION_COOKIE}=; .*Max-Age=0.*; Secure`));
+    assert.equal((await post(srv, '/bandeja/salir', ck('rev'), {csrf: 'x'})).status, 403, 'not without its CSRF token');
+  } finally { srv.close(); local.close(); }
+  // the gate: the bandeja gets the session or nobody — never a token, basic auth or loopback
+  const req = (headers) => ({headers: {host: '127.0.0.1:3333', ...headers}});
+  const o = {publicMode: true, auth: AUTH, tokens: ['backend-tok'], sessionSecret: SECRET, roles: ROLES};
+  assert.deepEqual(await gate(req(ck('rev')), new URL('http://x/bandeja'), o), {kind: 'bandeja', user: 'rev', via: 'session', role: 'reviewer', clients: ['acme']});
+  assert.deepEqual(await gate(req({'x-reel-token': 'backend-tok'}), new URL('http://x/bandeja/aprobar'), o), {kind: 'bandeja', user: null});
+  assert.deepEqual(await gate(req(ck('rev')), new URL('http://x/bandeja'), {...o, publicMode: false}), {kind: 'bandeja', user: null});
+});
+
+test('approve / revoke in the bandeja: only the client\'s reviewer, same-site, with the session\'s CSRF token, from QC superado, retyping the variant name; tokens 403; two at once = one approval; /r/ stays read-only', async () => {
+  const {pub, dir} = bandejaFixture(2);
+  const srv = await serve(pub, {limiter: createLoginLimiter({max: 100})});
+  try {
+    const {csrf} = await page(srv, 'rev');
+    const ok = {csrf, project: 'p-1', v: '1', confirm: 'ACME_G2_H1_C1'};
+    const approval = () => loadReviews(dir, 'p-1').versions[0].approval;
+    let r = await post(srv, '/bandeja/aprobar', ck('rev'), ok);
+    assert.equal(r.status, 409, 'QC técnico en curso');
+    assert.match(r.body.toString(), /role="alert">No se puede aprobar v1: QC técnico en curso/);
+    for (const label of ['2 hallazgos', 'no disponible']) {
+      await setJudge(dir, 1, label);
+      assert.equal((await post(srv, '/bandeja/aprobar', ck('rev'), ok)).status, 409, label);
+    }
+    await setJudge(dir, 1, 'superado');
+    const {csrf: bossCsrf} = await page(srv, 'boss');
+    for (const [who, headers, fields, status] of [
+      ['the primary token', {'x-reel-token': 'backend-tok'}, ok, 403], ['basic auth', {authorization: 'Basic ' + Buffer.from('rev:pw').toString('base64')}, ok, 403],
+      ['the owner (never writes approval)', ck('boss'), {...ok, csrf: bossCsrf}, 403], ['another client\'s reviewer', ck('otro'), ok, 403],
+      ['no CSRF token', ck('rev'), {...ok, csrf: ''}, 403], ['another session\'s CSRF token', ck('rev'), {...ok, csrf: bossCsrf}, 403],
+      ['the wrong name', ck('rev'), {...ok, confirm: 'ACME_G2_H1_C2'}, 400]]) assert.equal((await post(srv, '/bandeja/aprobar', headers, fields)).status, status, who);
+    assert.equal((await get(srv, '/bandeja/aprobar', {...ck('rev'), 'content-type': 'application/x-www-form-urlencoded'}, 'POST', new URLSearchParams(ok).toString())).status, 403, 'no Origin: cross-site refused');
+    assert.equal((await post(srv, '/bandeja/aprobar', {...ck('rev'), origin: 'https://evil.example'}, ok)).status, 403, 'another site\'s Origin');
+    assert.match((await post(srv, '/bandeja/aprobar', ck('boss'), {...ok, csrf: bossCsrf})).body.toString(), /role="alert">Solo el revisor del cliente puede aprobar — el owner nunca escribe la aprobación/, 'the owner\'s own valid session: refused by the life cycle itself');
+    assert.equal(approval(), undefined, 'none of those wrote an approval');
+    // a double click: two POSTs at once → one approval, both answered like the first. The second comes as a browser sends it
+    // from this page (its Referrer-Policy no-referrer: Origin null) — the CSRF token decides
+    const both = await Promise.all([post(srv, '/bandeja/aprobar', ck('rev'), ok), post(srv, '/bandeja/aprobar', {...ck('rev'), origin: 'null'}, ok)]);
+    assert.deepEqual(both.map((x) => [x.status, x.headers.location]), [[303, '/bandeja?ok=aprobada#p-1-ACME_G2_H1_C1'], [303, '/bandeja?ok=aprobada#p-1-ACME_G2_H1_C1']]);
+    assert.equal(approval().by, 'rev');
+    assert.match(approval().ipHash, /^[0-9a-f]{16}$/);
+    assert.equal(approval().userAgent, 'TestPhone/1');
+    assert.deepEqual(loadReviews(dir, 'p-1').versions[0].log.map((l) => l.action), ['aprobar']);
+    const after = await get(srv, '/bandeja?ok=aprobada', ck('rev'));
+    assert.match(after.body.toString(), /role="status">Aprobada\./);
+    assert.match(after.body.toString(), /aprobada = v1/);
+    // v2 approved too, at the same moment as a revoke of v1 is refused: the newer approval is the delivered one
+    await setJudge(dir, 2, 'superado (evidencia reducida)');
+    const [a2, bad] = await Promise.all([post(srv, '/bandeja/aprobar', ck('rev'), {...ok, v: '2'}), post(srv, '/bandeja/revocar', ck('rev'), {...ok, reason: ''})]);
+    assert.deepEqual([a2.status, bad.status], [303, 400]);
+    assert.match((await page(srv, 'rev')).html, /aprobada = v2/);
+    const api = loadReviews(dir, 'p-1').versions;
+    assert.deepEqual(api.map((x) => x.approval?.by), ['rev', 'rev']);
+    // revoke: the reviewer, with a reason → por revisar
+    assert.equal((await post(srv, '/bandeja/revocar', ck('boss'), {...ok, csrf: bossCsrf, v: '2', reason: 'no'})).status, 403, 'the owner asks the client to revoke; never does it');
+    assert.equal((await post(srv, '/bandeja/revocar', ck('rev'), {...ok, v: '2', reason: 'el precio cambió'})).status, 303);
+    const v2 = loadReviews(dir, 'p-1').versions[1];
+    assert.deepEqual([v2.approval, v2.log.at(-1).action, v2.log.at(-1).reason], [undefined, 'revocar', 'el precio cambió']);
+    assert.match((await page(srv, 'rev')).html, /aprobada = v1/, 'v1 is the delivered one again');
+    // R-1 / read-only /r/: a link of this client's project plays for its reviewer, takes no POST and has no form
+    const l = createLink(dir, 'p-1', {now: Date.now()});
+    const rp = await get(srv, `/r/${l.token}`, ck('rev'));
+    assert.equal(rp.status, 200);
+    assert.ok(!/<form|aprobar|csrf/i.test(rp.body.toString()), 'the /r/ page stays a player');
+    assert.match(rp.headers['content-security-policy'], /form-action 'none'/);
+    for (const p of [`/r/${l.token}`, `/r/${l.token}/v/1.mp4`]) assert.equal((await post(srv, p, ck('rev'), ok)).status, 405, p);
+    for (const p of [`/r/${l.token}/v/1/ACME_G2_H1_C1_v1_master.mp4`, `/r/${l.token}/v/1/project.json`]) assert.equal((await get(srv, p, ck('rev'))).status, 404, `${p}: no pair there`);
+  } finally { srv.close(); }
+});
+
+test('notes in the bandeja: 20 at once (and 2 approvals) lose none, each anchored on the version\'s snapshot to the right word; plain text, escaped, never a link; each lands in the owner\'s log', async () => {
+  const {pub, dir} = bandejaFixture(2);
+  await setJudge(dir, 1, 'superado'); await setJudge(dir, 2, 'superado');
+  const lines = [];
+  const srv = await serve(pub, {limiter: createLoginLimiter({max: 100}), log: (m) => lines.push(m), disk: () => ({freeDiskMb: 100, minDiskMb: 3072})});
+  try {
+    const {csrf} = await page(srv, 'rev');
+    const note = (i) => post(srv, '/bandeja/nota', ck('rev'), {csrf, project: 'p-1', v: '1', atSec: i % 2 ? '1.5' : '1,5', text: `nota ${i}`});
+    const approveV = (v) => post(srv, '/bandeja/aprobar', ck('rev'), {csrf, project: 'p-1', v: String(v), confirm: 'ACME_G2_H1_C1'});
+    const all = await Promise.all([...Array.from({length: 20}, (_, i) => note(i)), approveV(1), approveV(2)]);
+    assert.deepEqual([...new Set(all.map((x) => x.status))], [303]);
+    const [v1, v2] = loadReviews(dir, 'p-1').versions;
+    assert.equal(v1.notes.length, 20, 'none lost');
+    assert.deepEqual(v1.notes.map((n) => n.text).sort(), Array.from({length: 20}, (_, i) => `nota ${i}`).sort());
+    assert.equal(new Set(v1.notes.map((n) => n.id)).size, 20);
+    assert.ok(v1.approval && v2.approval, 'both approvals written');
+    for (const n of v1.notes) assert.deepEqual([n.atSec, n.anchor, n.by, n.state], [1.5, ANCHOR, 'rev', 'abierta'], n.id);
+    assert.ok(v1.notes.some((n) => !n.afterApproval) && v1.notes.every((n) => !n.afterApproval || v1.log.findIndex((l) => l.action === 'aprobar') < v1.log.findIndex((l) => l.note === n.id)), 'flagged only when written after the approval');
+    // the owner's log: one line per note, the low disk too — each once
+    assert.equal(lines.filter((l) => /^\[owner-inbox\] nota: ACME_G2_H1_C1 v1 @0:01\.5, de rev \(abierta/.test(l)).length, 20);
+    assert.equal(lines.filter((l) => l.startsWith('[owner-inbox] disco:')).length, 1);
+    // hostile text: escaped, never a tag, never a link
+    assert.equal((await post(srv, '/bandeja/nota', ck('rev'), {csrf, project: 'p-1', v: '2', atSec: '0.5', text: '<script>alert(1)</script> mira https://evil.example/x'})).status, 303);
+    for (const who of ['rev', 'boss']) {
+      const html = (await page(srv, who)).html;
+      assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt; mira https://evil.example/x'), who);
+      assert.ok(!/<script>alert|href="https:\/\/evil/.test(html), who);
+    }
+    assert.match((await page(srv, 'boss')).html, /palabra b:2/, 'the owner sees where it anchored');
+    // bad notes: the page again, the draft kept in its form
+    const bad = await post(srv, '/bandeja/nota', ck('rev'), {csrf, project: 'p-1', v: '1', atSec: '99', text: 'fuera del reel'});
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.toString(), /<details class="note" data-draft="nota:p-1:1:" data-video="vid-p-1-1" open>/);
+    assert.match(bad.body.toString(), />fuera del reel<\/textarea>/);
+    assert.equal((await post(srv, '/bandeja/nota', {'x-reel-token': 'backend-tok'}, {csrf, project: 'p-1', v: '1', atSec: '1', text: 'x'})).status, 403, 'an agent never writes the client\'s notes');
+    assert.equal((await post(srv, '/bandeja/nota', ck('rev'), {csrf, project: 'p-2', v: '1', atSec: '1', text: 'x'})).status, 404, 'another client\'s version is not there for them');
+  } finally { srv.close(); }
+  // at most 30 steps a minute per user (here 2)
+  const slow = await serve(pub, {limiter: createLoginLimiter({max: 2})});
+  try {
+    const {csrf} = await page(slow, 'rev');
+    const r = [];
+    for (let i = 0; i < 3; i++) r.push(await post(slow, '/bandeja/nota', ck('rev'), {csrf, project: 'p-1', v: '1', atSec: '1', text: 'x'}));
+    assert.deepEqual(r.map((x) => x.status), [303, 303, 429]);
+    assert.ok(+r[2].headers['retry-after'] > 0);
+  } finally { slow.close(); }
+});
+
+test('note steps in the bandeja: the owner confirms a classified note or discards one (the client sees why); the reviewer verifies only a resolved one', async () => {
+  const {pub, dir} = bandejaFixture(1);
+  const srv = await serve(pub, {limiter: createLoginLimiter({max: 100})});
+  try {
+    const rev = (await page(srv, 'rev')).csrf, boss = (await page(srv, 'boss')).csrf;
+    for (const text of ['sube la voz', 'quita el logo']) assert.equal((await post(srv, '/bandeja/nota', ck('rev'), {csrf: rev, project: 'p-1', v: '1', atSec: '0.4', text})).status, 303);
+    const step = (who, csrf, note, s, extra = {}) => post(srv, '/bandeja/nota/estado', ck(who), {csrf, project: 'p-1', v: '1', note, step: s, ...extra});
+    const state = (id) => loadReviews(dir, 'p-1').versions[0].notes.find((n) => n.id === id).state;
+    assert.equal((await step('rev', rev, 'n1', 'confirmar')).status, 403, 'the reviewer never confirms');
+    assert.equal((await step('boss', boss, 'n1', 'confirmar')).status, 409, 'an unclassified note is not confirmed');
+    const unclassified = (await page(srv, 'boss')).html;
+    assert.match(unclassified, /Se confirma cuando el agente la clasifique/, 'the owner is told why there is no Confirmar yet');
+    assert.doesNotMatch(unclassified, /value="confirmar"/);
+    assert.equal((await step('boss', boss, 'n1', 'resolver')).status, 400, 'the agent\'s steps are not the bandeja\'s');
+    const agent = actorOf({via: 'backend-token'});
+    await withVersion(dir, 'p-1', 1, (x) => moveNote(x, 'n1', 'clasificar', agent, {at: 'now', kind: 'fix'})); // the agent's side (phase 8: review_notes)
+    assert.equal((await step('boss', boss, 'n1', 'confirmar')).status, 303);
+    assert.equal(state('n1'), 'confirmada');
+    assert.equal((await step('rev', rev, 'n1', 'verificar')).status, 409, 'verificada without resuelta');
+    await withVersion(dir, 'p-1', 1, (x) => moveNote(x, 'n1', 'resolver', agent, {at: 'now', v: 2}));
+    assert.equal((await step('boss', boss, 'n1', 'verificar')).status, 403, 'only the client verifies');
+    assert.equal((await step('rev', rev, 'n1', 'verificar')).status, 303);
+    assert.equal(state('n1'), 'verificada');
+    assert.equal((await step('boss', boss, 'n2', 'descartar')).status, 400, 'a reason is required');
+    assert.equal((await step('rev', rev, 'n2', 'descartar', {reason: 'x'})).status, 403, 'the reviewer never discards');
+    assert.equal((await step('boss', boss, 'n2', 'descartar', {reason: 'el logo es del cliente'})).status, 303);
+    const html = (await page(srv, 'rev')).html;
+    assert.match(html, /Descartada: el logo es del cliente/);
+    assert.match(html, /verificada/);
+    assert.deepEqual(loadReviews(dir, 'p-1').versions[0].log.map((l) => `${l.action}:${l.by}`), ['nota:rev', 'nota:rev', 'clasificar:backend-token', 'confirmar:boss', 'resolver:backend-token', 'verificar:rev', 'descartar:boss']);
+  } finally { srv.close(); }
+});
+
+test('the bandeja after the reviews: a variant reads only its own versions; retention-stripped versions take no approval or note; drafts of a version no longer shown come back; a note\'s answer names its draft; a stale page is answered with a working one', async () => {
+  const {pub, dir} = bandejaFixture(3);
+  for (const v of [1, 2, 3]) await setJudge(dir, v, 'superado');
+  const srv = await serve(pub, {limiter: createLoginLimiter({max: 100})});
+  try {
+    const {csrf, html} = await page(srv, 'rev');
+    // v3 is the newest: v1 and v2 keep a hidden note form each, where a draft left on them comes back (UX-1)
+    assert.match(html, /<details class="note" data-draft="nota:p-1:3:" data-video="vid-p-1-3">/);
+    for (const v of [1, 2]) assert.match(html, new RegExp(`<details class="note" data-draft="nota:p-1:${v}:" data-video="" hidden><summary>Nota sin enviar en v${v}`));
+    assert.match(html, /name="atSec" type="number" inputmode="decimal" step="any" min="0" max="2.5"/, 'the form takes what the server takes: the length + 0.5 s');
+    // a note's answer names the draft it confirms; the anchor is the variant's row
+    const sent = await post(srv, '/bandeja/nota', {...ck('rev'), origin: 'null'}, {csrf, project: 'p-1', v: '2', atSec: '2.4', text: 'al final'});
+    assert.deepEqual([sent.status, sent.headers.location], [303, '/bandeja?ok=nota&k=p-1%3A2%3A2.4#p-1-ACME_G2_H1_C1']);
+    assert.match(html, /<article class="variant" id="p-1-ACME_G2_H1_C1">/);
+    // a page of an earlier login: 403 with the bandeja itself — this session's token, the note still in its form
+    const stale = await post(srv, '/bandeja/nota', ck('rev'), {csrf: 'from-an-earlier-login', project: 'p-1', v: '1', atSec: '1', text: 'mi nota'});
+    const body = stale.body.toString();
+    assert.equal(stale.status, 403);
+    assert.match(body, /role="alert">La página había caducado/);
+    assert.match(body, new RegExp(`name="csrf" value="${csrf}"`));
+    assert.match(body, /data-draft="nota:p-1:1:" data-video="vid-p-1-1" open>.*>mi nota<\/textarea>/s);
+    // a refusal outside the page: plain HTML with the way back, never a dead end
+    const late = await post(srv, '/bandeja/nota', {'x-reel-token': 'backend-tok'}, {csrf, project: 'p-1', v: '1', atSec: '1', text: 'x'});
+    assert.equal(late.status, 403);
+    assert.match(late.body.toString(), /<a style="color:#8ab4ff" href="\/login\?next=%2Fbandeja">Entrar<\/a>/);
+    // the retention stripped v1 (REEL_REVIEW_KEEP_UNAPPROVED): neither approved nor annotated, and the page says so
+    await withVersion(dir, 'p-1', 1, (x) => { x.pruned = Object.values(x.deliverables); });
+    for (const [route, fields] of [['/bandeja/aprobar', {confirm: 'ACME_G2_H1_C1'}], ['/bandeja/nota', {atSec: '1', text: 'tarde'}]]) {
+      const r = await post(srv, route, ck('rev'), {csrf, project: 'p-1', v: '1', ...fields});
+      assert.equal(r.status, 409, route);
+      assert.match(r.body.toString(), /role="alert">No se puede (aprobar|anotar) v1: sus archivos ya no están/, route);
+    }
+    assert.equal(loadReviews(dir, 'p-1').versions[0].approval, undefined);
+    // the project's identity moves to H2 after v1 (H1) was approved: H2 is not 'aprobada = v1'; H1 keeps its approval
+    await withVersion(dir, 'p-1', 1, (x) => { delete x.pruned; });
+    assert.equal((await post(srv, '/bandeja/aprobar', ck('rev'), {csrf, project: 'p-1', v: '1', confirm: 'ACME_G2_H1_C1'})).status, 303);
+    const h2 = {...IDENTITY, variant: {hook: 2, cta: 1}};
+    await withVersion(dir, 'p-1', 3, (x) => { x.identity = h2; });
+    fs.writeFileSync(path.join(pub, 'projects', 'p-1.json'), JSON.stringify({name: 'G2', identity: h2}));
+    const moved = (await page(srv, 'rev')).html;
+    assert.match(moved, /<article class="variant" id="p-1-ACME_G2_H1_C1">\n<header><h3>ACME_G2_H1_C1<\/h3><span class="badge st-aprobada">aprobada = v1</);
+    assert.match(moved, /<article class="variant" id="p-1-ACME_G2_H2_C1">\n<header><h3>ACME_G2_H2_C1<\/h3><span class="badge st-por-revisar">por revisar</);
+    const rows = bandejaRows(pub, () => true).filter((r) => r.projectId === 'p-1');
+    assert.deepEqual(rows.map((r) => [r.stem, r.versions.map((x) => x.v), !!r.project]), [['ACME_G2_H1_C1', [1, 2], false], ['ACME_G2_H2_C1', [3], true]]);
+  } finally { srv.close(); }
 });

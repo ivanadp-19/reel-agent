@@ -16,7 +16,8 @@ import {SESSION_COOKIE, createLoginLimiter, handleLogin, parseRoles, signSession
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-media-'));
 after(() => fs.rmSync(tmp, {recursive: true, force: true}));
 const pub = path.join(tmp, 'public'), dist = path.join(tmp, 'dist');
-for (const [f, body] of [['exports/edited-1.mp4', 'render bytes'], ['clips/take1.mp4', 'clip bytes'], ['clips/thumbs/take1.jpg', 'jpg'], ['music/bed.mp3', 'mp3'], ['broll/city.mp4', 'broll']]) {
+for (const [f, body] of [['exports/edited-1.mp4', 'render bytes'], ['clips/take1.mp4', 'clip bytes'], ['clips/thumbs/take1.jpg', 'jpg'], ['music/bed.mp3', 'mp3'], ['broll/city.mp4', 'broll'],
+  ['music/pwn.html', '<script>fetch("/bandeja")</script>'], ['brand/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>']]) {
   fs.mkdirSync(path.dirname(path.join(pub, f)), {recursive: true});
   fs.writeFileSync(path.join(pub, f), body);
 }
@@ -156,5 +157,21 @@ test('a client\'s /reviews/ files (CEO-4): its reviewer, the owner and the prima
       const r = await req(srv, '/reviews/p-n/v1.mp4', {headers});
       assert.deepEqual([r.status, r.body], [200, 'plain bytes'], 'R-1');
     }
+  } finally { srv.close(); }
+});
+
+test('what callers upload into public/ is served inert: an .html or .svg planted there never runs as a page of this origin (the owner opening it would act in the bandeja)', async () => {
+  const srv = await serve();
+  try {
+    const headers = {cookie: `${SESSION_COOKIE}=${signSession(SECRET, 'boss', {hash: AUTH.boss})}`};
+    for (const p of ['/music/pwn.html', '/brand/logo.svg', '/clips/thumbs/take1.jpg', '/music/bed.mp3', '/exports/edited-1.mp4']) {
+      const r = await req(srv, p, {headers});
+      assert.equal(r.status, 200, p);
+      // video and audio: never parsed as a page (nosniff), and still playable when opened in a tab (no sandbox)
+      assert.equal(r.headers['content-security-policy'], /\.(mp3|mp4)$/.test(p) ? undefined : "default-src 'none'; sandbox", p);
+      assert.equal(r.headers['x-content-type-options'], 'nosniff', p);
+    }
+    const editor = await req(srv, '/', {headers});
+    assert.equal(editor.headers['content-security-policy'], undefined, 'the editor\'s own page runs as before');
   } finally { srv.close(); }
 });

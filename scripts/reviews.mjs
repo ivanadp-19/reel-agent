@@ -27,6 +27,10 @@
 //     pruned        the files of it the retention removed (pruneVersions), prunedAt when
 //   datosPorConfirmar  [{graphic, dato, src, atSec}]: figures / names its graphics show that its own audio does not
 //                 say (CEO-21, src/validate.ts unbackedData) — the client confirms them; absent = none (the runner logs a check that failed)
+//     approval      {by, at, ipHash, userAgent}: its client's reviewer approved it in the bandeja (server/review.mjs, the only
+//                   writer); notes [{id, v, atSec, text, anchor: {clipId, src, srcSec, wordId}, by, at, state, history,
+//                   afterApproval?, kind?, resolvedIn?, reason?}]; log [{action, by, at, …}]: every bandeja step with its
+//                   principal — the life cycle is scripts/review-states.mjs
 //   link: {id, hash, createdAt, expiresAt, revokedAt} — the token itself is never stored, only sha256(token)
 //
 // Only finals that passed the QC gate are recorded (the backend calls recordVersion
@@ -45,6 +49,8 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {DELIVERABLES, deliverableName} from '../src/validate.ts';
 import {killTree, pidAlive, pidCmdline} from './render-jobs.mjs';
+import {judgeText} from './review-states.mjs';
+export {judgeText}; // the QC técnico label as people read it: one definition, next to versionQc (scripts/review-states.mjs)
 
 export const LINK_DAYS = 30;
 export const MANAGED_BY = 'review-link';
@@ -312,14 +318,13 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
 // write wins) or two judges at once.
 export const JUDGE_CMD = [process.execPath, path.join(import.meta.dirname, '..', '.agents', 'skills', 'render-judge', 'judge.mjs')];
 const VERDICT = /^(superado( \(evidencia reducida\))?|\d+ hallazgos?)$/; // what a pass may answer; the queue itself says 'en curso' / 'no disponible'
-// the label as people read it (the editor, list_versions): "QC técnico en curso", "QC técnico: 2 hallazgos"
-export const judgeText = (j) => (j?.label ? `QC técnico${/hallazgo/.test(j.label) ? ':' : ''} ${j.label}` : null);
 const passes = new Map(); // `<reviews json>|<v>` → {version, done} of this process
 const kids = new Set(); // judge processes of this process, stopped with it (the next start judges again); a SIGKILL
 process.once('exit', () => { for (const pid of kids) killTree(pid, 'SIGKILL'); }); // skips this: version.judge.pid, resumeJudges
 let lane = Promise.resolve(); // one judge at a time
-// fn(the version) in the reviews row, then saved → the version, or null when it is not there
-const withVersion = (dir, projectId, v, fn) => inReviewsRow(dir, projectId, () => {
+// fn(the version) in the reviews row, then saved → the version, or null when it is not there. fn throws → nothing
+// is written (the bandeja's steps, scripts/review-states.mjs, check the state they write over this way)
+export const withVersion = (dir, projectId, v, fn) => inReviewsRow(dir, projectId, () => {
   const r = loadReviews(dir, projectId, {strict: true});
   const x = r.versions.find((y) => y.v === v);
   if (!x) return null;
