@@ -19,6 +19,7 @@ import {parseArgs} from 'node:util';
 import {PRESETS} from '../src/captionPresets.ts';
 import {projectTiers, repage} from '../src/paging.ts';
 import {addedClip, applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
+import {parseStem} from '../src/validate.ts';
 import {newProject} from '../mcp/checks.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -32,6 +33,7 @@ export const EXIT = {
   no_token: 3, bad_token: 3, token_required: 3, token_file_mode: 3, unauthorized: 3, forbidden: 3,
   not_found: 4, conflict: 5, revision_mismatch: 5, render_busy: 5, exists: 5, upload_incomplete: 5,
   too_large: 6, low_disk: 6, low_memory: 6, backend_unreachable: 7, render_failed: 8, invalid: 9, timeout: 124,
+  drive_auth: 3, bad_mapping: 2,
 };
 export class CliError extends Error {
   constructor(code, message, hint, extra = {}) { super(message); this.code = code; this.hint = hint; this.extra = extra; }
@@ -170,7 +172,7 @@ async function runJob(ctx, route, body, {timeout, what, retry}) {
     const s = await api(ctx, 'GET', `${route}/${jobId}`);
     if (!ctx.json && s.label && s.label !== last) { ctx.err(`${s.progress ?? 0}% ${s.label}`); last = s.label; }
     if (s.status === 'done') return s;
-    if (s.status === 'error') throw new CliError('job_failed', s.error || `${what} failed`);
+    if (s.status === 'error') throw new CliError(s.code || 'job_failed', s.error || `${what} failed`, undefined, s.added ? {added: s.added, skipped: s.skipped, failed: s.failed} : {});
     if (s.status === 'unknown') throw new CliError('job_failed', `the ${what} job vanished (backend restarted?)`, retry);
     if ((Date.now() - t0) / 1000 > limit) throw new CliError('timeout', `${what} still running after ${limit}s`, 'retry with a longer --timeout');
     await sleep(ctx.pollMs);
@@ -231,6 +233,14 @@ async function ingest(ctx, file, st, key, {upload}) {
   }
   return {clip: await uploadFile(ctx, file, st, key), via: 'upload'};
 }
+
+// ---- Drive: `drive import --file <fileId>=<take>`, the take as its stem (the MCP's import_drive, set_identity's numbers) ----
+export function parseTake(arg) {
+  const m = String(arg).match(/^([\w-]{1,200})=(.+)$/), take = m && parseStem(m[2]);
+  if (!take) throw new CliError('bad_usage', `--file ${arg}: <fileId>=<take>, the take as G2 (the body), G2_H1, G2_C1, G2_H1_C1 or G3_V2`, 'reel drive list <folder> --json shows the file ids and the proposed takes');
+  return {fileId: m[1], ...take};
+}
+const takeRow = (x) => `${x.name} (${x.take})${x.clip ? ` → ${x.clip}` : ''}${x.why ? `: ${x.why}` : ''}`;
 
 // ---- captions ----
 function readJsonArg(ctx, src) {
@@ -450,6 +460,26 @@ export const COMMANDS = [
       return [{project: id, added, skipped, clips: (p.clips ?? []).length}, `${id}: ${added.length} added, ${skipped.length} already there, ${(p.clips ?? []).length} clips on the timeline`];
     }},
 
+  {name: 'drive list', args: '<folder>', flags: {project: {type: 'string', description: 'mark which files fit this project\'s identity (fits: null = it does, else why not)'}},
+    summary: 'the videos of a Google Drive folder shared with the backend\'s service account (the folder id or its URL), each with the take its name suggests — a proposal: confirm it, then drive import',
+    output: '{folder, files: [{id, name, size, modifiedTime, mimeType, proposed: {script, variant, stem}, fits?}], others}', examples: ['reel drive list 1AbCdEfGhIjK --json', 'reel drive list https://drive.google.com/drive/folders/1AbCdEfGhIjK --project promo-cafe --json'],
+    run: async (ctx, [folder], o) => {
+      if (!folder) throw new CliError('bad_usage', 'a Drive folder id or URL is required', 'reel drive list <folder>');
+      const r = await api(ctx, 'GET', `/api/drive/list?${q({folder, project: o.project})}`);
+      const lines = r.files.map((f) => `${f.id}  ${f.name}  ${(f.size / 2 ** 20).toFixed(1)} MB  → ${f.proposed?.stem ?? '? (no script in the name)'}${f.fits === undefined ? '' : f.fits ? `  (not this project's: ${f.fits})` : '  (fits)'}`);
+      return [r, [`${r.folder}: ${r.files.length} video(s)${r.others ? `, ${r.others} other file(s)` : ''}`, ...lines].join('\n')];
+    }},
+  {name: 'drive import', args: '<project|name>', flags: {file: {type: 'string', multiple: true, description: '<fileId>=<take>, once per file — the take stated explicitly: G2 (the body every variant shares), G2_H1, G2_C1, G2_H1_C1, G3_V2'}, timeout: {type: 'string', description: 'seconds to wait (default 14400)'}},
+    summary: 'import Drive videos into a project with the mapping you state (a take of another script or variant than the project\'s identity is refused): downloaded by the backend (a cut download resumes), ingested and appended; a file already imported (same Drive file, modifiedTime and size) is skipped (safe to retry)',
+    output: '{project, added: [{fileId, name, take, clip}], skipped: [{fileId, name, take, clip?, why}]}', examples: ['reel drive import promo-cafe --file 1HookId=G2_H1 --file 1BodyId=G2 --file 1CloseId=G2_C1 --json'],
+    run: async (ctx, [ref], o) => {
+      const files = (o.file ?? []).map(parseTake);
+      if (!files.length) throw new CliError('bad_usage', 'at least one --file <fileId>=<take>', 'reel drive list <folder> --json, then reel drive import <project> --file <id>=G2_H1 …');
+      const id = await resolveProject(ctx, ref);
+      const s = await runJob(ctx, '/api/drive/import', {project_id: id, files}, {timeout: o.timeout ?? 14400, what: 'drive import', retry: `reel drive import ${id} (the same --file flags: done files are skipped)`});
+      return [{project: id, added: s.added, skipped: s.skipped}, [`${id}: ${s.added.length} added, ${s.skipped.length} already there`, ...s.added.map((x) => `  + ${takeRow(x)}`), ...s.skipped.map((x) => `  = ${takeRow(x)}`)].join('\n')];
+    }},
+
   {name: 'autocut', args: '<project|name>', flags: {'dry-run': {type: 'boolean', description: 'print the plan (clips before / after, segments kept) and change nothing'}, timeout: {type: 'string', description: 'seconds to wait for the analysis (default 1800)'}},
     summary: 'remove the silence at the ends of each clip and the long pauses inside it (the editor\'s / MCP\'s autocut step): clips are split into their speech segments, B-roll follows them; the project by id or name',
     output: '{project, changed, dryRun, before: {clips, durationSec}, after: {clips, durationSec}, removedSec, plan: [{id, segments: [{inSec, outSec}]}]}', examples: ['reel autocut promo-cafe --dry-run --json', 'reel autocut promo-cafe --json'],
@@ -665,7 +695,7 @@ export function helpDoc() {
     env: {REEL_URL: 'backend address (default http://127.0.0.1:3333)', REEL_TOKEN: 'your token (else ~/.config/reel/token, mode 0600)'},
     output: 'with --json: one JSON document on stdout — the command\'s output, or {error, code, hint, ...} with a non-zero exit code',
     exitCodes: {0: 'ok', 1: 'other error', 2: 'bad usage / confirmation required', 3: 'no or bad token, not allowed', 4: 'not found', 5: 'conflict: exists, busy (one render per user), changed meanwhile', 6: 'resources: disk, memory, size', 7: 'backend unreachable', 8: 'render failed or cancelled', 9: 'validation errors', 124: 'timeout (the work goes on)'},
-    flow: ['reel projects create "<name>"', 'reel projects set <project> --lang es --caption-style <pack>', 'reel clips add <project> <files|folder>', 'reel autocut <project> [--dry-run]', 'reel captions generate <project>', 'reel captions get <project> --json > caps.json  (edit)  reel captions diff/set <project> caps.json', 'reel captions validate <project>', 'reel render start <project> --wait', 'reel review-link <project>'],
+    flow: ['reel projects create "<name>"', 'reel projects set <project> --lang es --caption-style <pack>', 'reel clips add <project> <files|folder>  (or: reel drive list <folder>, then reel drive import <project> --file <id>=<take>)', 'reel autocut <project> [--dry-run]', 'reel captions generate <project>', 'reel captions get <project> --json > caps.json  (edit)  reel captions diff/set <project> caps.json', 'reel captions validate <project>', 'reel render start <project> --wait', 'reel review-link <project>'],
     commands: COMMANDS.map(describe),
   };
 }

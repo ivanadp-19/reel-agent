@@ -109,6 +109,20 @@ file, or one anyone can read — and otherwise uploads it in 8 MB chunks that
 resume after a dropped connection (files of hundreds of MB are fine). `--upload`
 always uploads.
 
+## Drive
+
+`reel drive list <folder>` lists the videos of a Google Drive folder the backend's
+service account can read (the folder id or its link), each with the take its name
+suggests (`proposed.stem`: `G2_H1`, `G2_C1`, `G2` for the body every variant
+shares, `G3_V2`) — a proposal. `--project <p>` says whether each fits that
+project's identity (`fits: null`, else why not). Confirm the mapping, then state
+it: `reel drive import <project> --file <fileId>=G2_H1 --file <fileId>=G2 --json`
+(a take of another script or variant than the project's is refused, exit 2
+`bad_mapping`). The backend downloads (a cut download resumes), ingests and
+appends; a file already imported is skipped (`skipped[].why`), so a retry is safe.
+Exit 3 `drive_auth`: the credential or the folder's sharing; 4 `not_found`; 6
+`low_disk`.
+
 ## Your own token (remote users)
 
 Signed in to the editor in a browser (form login or basic auth)? Open

@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {pct, uploadClip} from './upload';
+import {DriveImport} from './DriveImport';
 import {placeClips, clipDurationSec} from '../src/timeline';
 import {fmtDb, musicOf} from '../src/audio';
 
@@ -18,6 +19,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [drive, setDrive] = useState(false); // the Importar de Drive dialog
   const [tags, setTags] = useState<Record<string, string[]>>({}); // library tags per asset id (suggest_broll matches on them)
   const loadTags = () => fetch('/api/broll-library').then((r) => (r.ok ? r.json() : [])).then((l: LibRow[]) => setTags(Object.fromEntries(l.map((a) => [a.id, a.tags ?? []])))).catch(() => {});
   useEffect(() => { loadTags(); }, [brollAssets.length]);
@@ -105,10 +107,16 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
       <input ref={clipInput} type="file" accept="video/*" multiple onChange={onPickClips} className="hidden" />
       <div className="p-4 border-b border-outline-variant flex justify-between items-center">
         <span className="text-label-bold font-label-bold uppercase tracking-wider text-on-surface-variant">Assets</span>
-        <button onClick={() => clipInput.current?.click()} title="Add video clips" className="text-primary material-symbols-outlined text-[20px] hover:brightness-125">
-          add_circle
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setDrive(true)} title="Importar de Drive" aria-label="Importar de Drive" className="text-on-surface-variant material-symbols-outlined text-[20px] hover:text-primary">
+            add_to_drive
+          </button>
+          <button onClick={() => clipInput.current?.click()} title="Add video clips" className="text-primary material-symbols-outlined text-[20px] hover:brightness-125">
+            add_circle
+          </button>
+        </div>
       </div>
+      {drive && <DriveImport onClose={() => setDrive(false)} />}
 
       {importing && (
         <div className="px-4 py-2 text-[11px] text-primary border-b border-outline-variant/30 flex items-center gap-2">
