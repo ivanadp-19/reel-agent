@@ -18,7 +18,7 @@ import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
 import {PRESETS} from '../src/captionPresets.ts';
 import {projectTiers, repage} from '../src/paging.ts';
-import {applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
+import {addedClip, applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
 import {newProject} from '../mcp/checks.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -195,15 +195,20 @@ async function uploadFile(ctx, file, st, key) {
   const bar = ctx.progress(path.basename(file), st.size);
   const fd = fs.openSync(file, 'r');
   try {
-    for (let fails = 0; size < st.size;) {
+    for (let fails = 0, busy = 0; size < st.size;) {
       bar(size);
       const buf = Buffer.alloc(Math.min(CHUNK, st.size - size));
       fs.readSync(fd, buf, 0, buf.length, size);
       try {
-        size = (await api(ctx, 'PUT', `/api/uploads/${id}?offset=${size}`, {body: buf, headers: {'content-type': 'application/octet-stream', 'content-length': buf.length}})).size;
-        fails = 0;
+        size = (await api(ctx, 'PUT', `/api/uploads/${id}?offset=${size}&total=${st.size}`, {body: buf, headers: {'content-type': 'application/octet-stream', 'content-length': buf.length}})).size;
+        fails = busy = 0;
       } catch (e) {
-        if (e.code === 'offset_mismatch' && Number.isInteger(e.extra.size)) { size = e.extra.size; continue; }
+        // a chunk that landed though its answer was lost, or another request still writing the part: wait, ask, go on
+        if (e.code === 'offset_mismatch' && Number.isInteger(e.extra.size)) {
+          await sleep(Math.min(15e3, 500 * 2 ** Math.min(++busy, 5)));
+          size = await api(ctx, 'GET', `/api/uploads/${id}`).then((r) => r.size, () => e.extra.size);
+          continue;
+        }
         if (!['backend_unreachable', 'timeout', 'server_error'].includes(e.code) || ++fails > 8) throw e;
         await sleep(Math.min(15e3, 500 * 2 ** fails));
         size = (await api(ctx, 'GET', `/api/uploads/${id}`)).size;
@@ -420,10 +425,23 @@ export const COMMANDS = [
         const key = ingestKey(file, st);
         if (known.has(key)) { skipped.push({file, clip: known.get(key)}); continue; }
         const {clip: r, via} = await ingest(ctx, file, st, key, o);
-        const {ingest: note, ...clip} = r;
-        clip.srcKey = key;
-        // saved clip by clip: a failure later keeps what is in
-        await updateProject(ctx, id, (p) => ((p.clips ?? []).some((c) => c.srcKey === key) ? null : {clips: [...(p.clips ?? []), clip]}));
+        const {ingest: note, ...raw} = r;
+        let clip = {...raw, srcKey: key}, dup = null;
+        // saved clip by clip: a failure later keeps what is in. A source the project has already (the backend handed
+        // an identical file back as it) is not added twice (src/timeline.ts addedClip)
+        await updateProject(ctx, id, (p) => {
+          const now = p.clips ?? [];
+          if (now.some((c) => c.srcKey === key)) return null;
+          const c = addedClip(now, {...raw, srcKey: key});
+          dup = c ? null : now.find((x) => x.src === raw.src).id;
+          return c && {clips: [...now, (clip = c)]};
+        });
+        if (dup) {
+          skipped.push({file, clip: dup, note: `same file as ${raw.src}, already on the timeline: split or trim ${dup} to use it twice`});
+          known.set(key, dup);
+          if (!ctx.json) ctx.err(`${path.basename(file)} is ${raw.src}, already on the timeline as ${dup} — not added twice`);
+          continue;
+        }
         known.set(key, clip.id);
         added.push({file, clip: clip.id, via, ...(note ? {ingest: note} : {})});
         if (!ctx.json) ctx.err(`added ${clip.id} (${(clip.outSec ?? 0).toFixed(1)}s, ${via})${note ? ` — ${note}` : ''}`);

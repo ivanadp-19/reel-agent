@@ -10,6 +10,7 @@ import {spawnSync} from 'node:child_process';
 import {createClipIngest, progressSec} from '../server/ingest.mjs';
 import {openForUser} from '../server/tokens.mjs';
 import {partFile} from '../server/uploads.mjs';
+import {addedClip} from '../src/timeline.ts';
 
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 const TOKEN = 'tok-primary';
@@ -23,11 +24,11 @@ const opens = []; // every descriptor openForUser handed out, and whether it was
 const uid = process.getuid?.() ?? 0;
 let free = Infinity; // the disk the clips land on (the backend: statfs of public/), over a 1 MB floor here
 
-// a small test video: h264 (remuxed) or mpeg4 (transcoded)
+// a small test video: h264 (remuxed) or mpeg4 (transcoded); its name in its metadata, so no two are the same bytes
 const video = (name, codec) => {
   const f = path.join(dir, name);
   spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=25:duration=2', '-f', 'lavfi', '-i', 'sine=duration=2',
-    '-c:v', codec, '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', f]);
+    '-c:v', codec, '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-metadata', `title=${name}`, '-shortest', f]);
   return f;
 };
 
@@ -155,9 +156,9 @@ test('an upload cut off halfway: no job, the tmp is removed', async () => {
 });
 
 test('two uploads of one name in flight get different ids', {skip: !hasFfmpeg}, async () => {
-  const data = fs.readFileSync(video('twin.mp4', 'libx264'));
-  const ids = await Promise.all([0, 1].map(async () => {
-    const r = await fetch(`${base}/api/add-clip?name=twin.mp4`, {method: 'POST', body: data});
+  const files = [video('twin.mp4', 'libx264'), video('twin-b.mp4', 'libx264')]; // two files, one name
+  const ids = await Promise.all(files.map(async (f) => {
+    const r = await fetch(`${base}/api/add-clip?name=twin.mp4`, {method: 'POST', body: fs.readFileSync(f)});
     return (await poll((await r.json()).jobId)).clip.id;
   }));
   assert.deepEqual(ids.sort(), ['twin', 'twin-2']);
@@ -213,6 +214,86 @@ test('?upload=<id> complete: synchronous 200 with the clip, the part is removed'
   assert.equal(clip.src, 'clips/chunked.mp4');
   assert.ok(fs.existsSync(path.join(clips, 'chunked.mp4')));
   assert.ok(!fs.existsSync(part), 'the ingested part is removed');
+});
+
+test('?upload=<id>&async=1 (the editor): 202 {jobId} at once, the job ends with the clip, the part is removed', {skip: !hasFfmpeg}, async () => {
+  const id = 'e'.repeat(32);
+  const part = partFile(uploadsDir, 'local', id); // a browser without a user: the loopback's namespace
+  fs.mkdirSync(uploadsDir, {recursive: true});
+  fs.copyFileSync(video('edited.mp4', 'mpeg4'), part);
+  const r = await post(`name=edited.mov&upload=${id}&size=${fs.statSync(part).size}&async=1`);
+  assert.equal(r.status, 202);
+  const {jobId} = await r.json();
+  const s = await poll(jobId);
+  assert.equal(s.status, 'done', JSON.stringify(s));
+  assert.equal(s.clip.id, 'edited');
+  assert.equal(s.clip.src, 'clips/edited.mp4');
+  assert.ok(fs.existsSync(path.join(clips, 'edited.mp4')));
+  assert.ok(!fs.existsSync(part), 'the ingested part is removed');
+  assert.ok(logs.some((l) => l.includes(`${jobId.slice(0, 8)} edited: start (upload ${id}, `)));
+});
+
+test('a file with the same bytes as a source in public/clips is that source: no new clip, its transcripts kept (path, copy, upload)', {skip: !hasFfmpeg}, async () => {
+  const kept = path.join(clips, 'take.mp4'); // ingested by the ?path= test above
+  const before = fs.readdirSync(clips).sort();
+  const same = (c) => {
+    assert.equal(c.id, 'take');
+    assert.equal(c.src, 'clips/take.mp4', 'the source its transcript caches are keyed by');
+    assert.ok(Math.abs(c.sourceDurationSec - 2) < 0.2 && c.outSec === c.sourceDurationSec);
+    assert.match(c.ingest, /same file as clips\/take\.mp4/);
+  };
+  fs.rmSync(path.join(clips, 'thumbs', 'take.jpg')); // as a file put in clips/ by hand: no thumbnail yet
+  const byPath = await fetch(`${base}/api/add-clip?name=take.mp4&path=${encodeURIComponent(kept)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}});
+  assert.equal(byPath.status, 200);
+  same(await byPath.json());
+  assert.ok(fs.existsSync(path.join(clips, 'thumbs', 'take.jpg')), 'the reused source gets the thumbnail it lacked');
+  const copy = path.join(dir, 'again.mp4');
+  fs.copyFileSync(kept, copy);
+  same(await (await fetch(`${base}/api/add-clip?name=again.mp4&path=${encodeURIComponent(copy)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}})).json());
+  const body = await fetch(`${base}/api/add-clip?name=again.mp4`, {method: 'POST', body: fs.readFileSync(kept)});
+  same((await poll((await body.json()).jobId)).clip);
+  assert.deepEqual(fs.readdirSync(clips).sort(), before, 'nothing new in public/clips');
+  assert.ok(fs.existsSync(kept) && fs.existsSync(copy), 'the source and the caller\'s file stay');
+  assert.deepEqual(uploads(), [], 'the upload tmp is removed');
+  assert.ok(logs.some((l) => /ingest .*take-\d+: same bytes as clips\/take\.mp4 → reused/.test(l)));
+});
+
+test('a file ingested before from outside public/clips (clips/ has its transcode: other bytes) is that source again — one after another or at once', {skip: !hasFfmpeg}, async () => {
+  const shoot = video('shoot.mp4', 'mpeg4');
+  const add = () => post(`name=shoot.mp4&path=${encodeURIComponent(shoot)}`, {'x-reel-token': TOKEN}).then((r) => r.json());
+  const both = await Promise.all([add(), add()]); // neither has an output yet when both start
+  assert.deepEqual(both.map((c) => c.id), ['shoot', 'shoot']);
+  assert.equal(both.filter((c) => c.ingest).length, 1, 'one made it, the other reused it');
+  assert.notEqual(fs.statSync(path.join(clips, 'shoot.mp4')).size, fs.statSync(shoot).size, 'transcoded: the clip is other bytes');
+  const again = await add();
+  assert.deepEqual([again.id, again.src], ['shoot', 'clips/shoot.mp4']);
+  assert.match(again.ingest, /reused with its transcripts/);
+  assert.deepEqual(fs.readdirSync(clips).filter((n) => n.startsWith('shoot')), ['shoot.mp4']);
+});
+
+test('?upload&async=1 asked again for one part (a second tab, a 202 lost on the way) answers the job it has — also after it is done', {skip: !hasFfmpeg}, async () => {
+  const id = 'f'.repeat(32);
+  const part = partFile(uploadsDir, 'local', id);
+  const src = video('tab.mp4', 'mpeg4');
+  fs.copyFileSync(src, part);
+  const q = `name=tab.mp4&upload=${id}&size=${fs.statSync(part).size}&async=1`;
+  const [a, b] = await Promise.all([post(q), post(q)]);
+  const jobs = [(await a.json()).jobId, (await b.json()).jobId];
+  assert.deepEqual([a.status, b.status, jobs[0]], [202, 202, jobs[1]]);
+  assert.equal((await poll(jobs[0])).clip.id, 'tab');
+  fs.copyFileSync(src, part); // the same file uploaded again once it is a clip
+  const c = await post(q);
+  assert.deepEqual([c.status, (await c.json()).jobId], [202, jobs[0]]);
+  assert.ok(!fs.existsSync(part), 'the new part goes');
+  assert.deepEqual(fs.readdirSync(clips).filter((n) => n.startsWith('tab')), ['tab.mp4']);
+});
+
+test('addedClip: a source the project has already is not added twice (its words would share ids); a new source whose id is taken gets the next one', () => {
+  const take = {id: 'take', src: 'clips/take.mp4'};
+  assert.equal(addedClip([], take), take);
+  assert.equal(addedClip([take], take), null);
+  assert.equal(addedClip([{id: 'take-s2', src: 'clips/take.mp4'}], take), null, 'a piece of it counts');
+  assert.deepEqual(addedClip([{id: 'take', src: 'clips/other.mp4'}], take), {id: 'take-c1', src: 'clips/take.mp4'});
 });
 
 test('?upload=<id> incomplete → 409 upload_incomplete with its size (kept); absent → 404; bad id → 400; another user\'s part is not found', async () => {

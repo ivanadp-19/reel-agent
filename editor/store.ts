@@ -6,7 +6,7 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
+import {addedClip, applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -77,7 +77,7 @@ type EditorState = {
   deleteCaption: (id: string) => void;
 
   // clips track (multi-clip timeline)
-  addClip: (clip: Clip) => void;
+  addClip: (clip: Clip) => string | null; // null: added; else why not (src/timeline.ts addedClip)
   setClipOrder: (orderedIds: string[]) => void;
   splitClipAtFrame: (frame: number) => void;
   setKeyframe: (clipId: string, t: number, tr: {scale: number; x: number; y: number}) => void;
@@ -264,11 +264,16 @@ export const useEditor = create<EditorState>((set) => ({
     })),
 
   // ---- clips track ----
-  addClip: (clip) =>
+  addClip: (added) => {
+    let why: string | null = null;
     set((s) => {
+      const clip = addedClip(s.clips, added);
+      if (!clip) { why = `already on the timeline as ${s.clips.find((c) => c.src === added.src)!.id} — split or trim it to use it twice`; return s; }
       const clips = [...s.clips, clip];
       return {...withHistory(s), clips, meta: withMeta(s.meta, clips), selectedClipId: clip.id};
-    }),
+    });
+    return why;
+  },
   // reorder clips to match an explicit id order (unknown ids appended, missing kept)
   setClipOrder: (orderedIds) =>
     set((s) => {

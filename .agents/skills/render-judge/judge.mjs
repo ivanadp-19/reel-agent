@@ -176,7 +176,8 @@ export function timelineSpeech(clips, tr, fps = FPS) {
 // odd pauses in the narration: gaps between consecutive spoken words as the viewer hears them.
 // A pause that reads as dramatic — after a full stop, after "…" / "," / ":", or right before an
 // emphasized word — is a candidate (the judge listens with the frame, it never auto-fails);
-// a long gap mid-sentence is a rule, and so is dead air past T.deadAirMs.
+// a long gap mid-sentence is a rule, and so is dead air past T.deadAirMs. emphasized null: the key
+// words are not known yet (the cut's gate, mcp/checks.mjs stageChecks) — any pause may be dramatic.
 const DRAMATIC_BEFORE = /[,;:…—–-]["')\]]*$/;
 export function pauseFindings(words, clips, emphasized = new Set()) {
   const out = [];
@@ -196,13 +197,14 @@ export function pauseFindings(words, clips, emphasized = new Set()) {
     const gap = (b.t0 - a.t1) * 1000;
     const across = a.clipId !== b.clipId;
     const ended = SENT_END.test(a.word);
-    const dramatic = ended || DRAMATIC_BEFORE.test(a.word) || emphasized.has(b.wid);
+    const hot = emphasized?.has(b.wid) ?? true;
+    const dramatic = ended || DRAMATIC_BEFORE.test(a.word) || hot;
     const fix = pauseFix(a, b, byId);
     const ev = {gapMs: Math.round(gap), from: a.wid, to: b.wid};
     const s1 = (gap / 1000).toFixed(2);
     if (gap >= T.deadAirMs) out.push(F('pause', 'major', 'rule', a.t1, b.t0, `aire muerto de ${s1} s entre "${a.word}" y "${b.word}"${across ? ' (en un corte)' : ''}`, ev, fix));
     else if (!dramatic && gap >= T.pauseMidMs) out.push(F('pause', 'major', 'rule', a.t1, b.t0, `pausa rara de ${s1} s a mitad de frase entre "${a.word}" y "${b.word}"${across ? ' (en un corte)' : ''}`, ev, fix));
-    else if (dramatic && gap >= (ended ? T.pauseAfterMs : T.pauseMidMs)) out.push(F('pause', 'minor', 'candidate', a.t1, b.t0, `pausa de ${s1} s entre "${a.word}" y "${b.word}" — ¿dramática? ${ended ? '(tras punto)' : emphasized.has(b.wid) ? '(antes de la palabra resaltada)' : '(tras coma / puntos suspensivos)'}; cuenta solo si suena a error`, ev, fix));
+    else if (dramatic && gap >= (ended ? T.pauseAfterMs : T.pauseMidMs)) out.push(F('pause', 'minor', 'candidate', a.t1, b.t0, `pausa de ${s1} s entre "${a.word}" y "${b.word}" — ¿dramática? ${ended ? '(tras punto)' : emphasized?.has(b.wid) ? '(antes de la palabra resaltada)' : DRAMATIC_BEFORE.test(a.word) ? '(tras coma / puntos suspensivos)' : '(¿antes de una palabra resaltada? aún no se sabe)'}; cuenta solo si suena a error`, ev, fix));
     else if (!ended && gap >= T.pauseMinorMs) out.push(F('pause', 'minor', 'candidate', a.t1, b.t0, `pausa de ${s1} s a mitad de frase entre "${a.word}" y "${b.word}"`, ev, fix));
     if (across && !a.jl && !b.jl && gap < T.tightMs) out.push(F('cut-tight', 'minor', 'heuristic', a.t1, b.t0, `corte pegado: "${a.word}" → "${b.word}" con ${Math.max(0, Math.round(gap))} ms — respiración/consonante comida`, {gapMs: Math.round(gap)}, [{tool: 'trim_clip', args: {clip_id: b.clipId, in_sec: r2(Math.max(0, b.srcStartMs / 1000 - 0.1))}}]));
   }
