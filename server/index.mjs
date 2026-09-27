@@ -497,9 +497,9 @@ async function handle(req, res) {
       next.captions = placedCaptions(p, PUBLIC);
       const moved = next.captions.filter((c, i) => c.topPct !== prev.captions?.[i]?.topPct || c.slot !== prev.captions?.[i]?.slot).length;
       const changed = moved > 0 || next.faceShift !== prev.faceShift || next.faceHold !== prev.faceHold;
-      if (changed) writeProject(PUBLIC, pl[1], prev, next, g.user ?? g.via);
+      if (changed) { next.updatedAt = nextRev(prev); writeProject(PUBLIC, pl[1], prev, next, g.user ?? g.via); } // a new revision: an editor holding the old one gets 409, never writes its stale tops over these
       const k = faceKnobs(next);
-      return {changed, moved, faceShift: k.shift, faceHold: k.hold, issues: [...captionFaceIssues({...p, captions: next.captions}, facesOf(p, PUBLIC), deliveryFps(p)), ...faceGaps(p, PUBLIC, {kick: (s) => gradeScans.kick(s, 'faces')})]};
+      return {changed, moved, updatedAt: next.updatedAt ?? null, faceShift: k.shift, faceHold: k.hold, issues: [...captionFaceIssues({...p, captions: next.captions}, facesOf(p, PUBLIC), deliveryFps(p)), ...faceGaps(p, PUBLIC, {kick: (s) => gradeScans.kick(s, 'faces')})]};
     });
     return json(res, 200, {project: pl[1], ...r});
   }
