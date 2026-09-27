@@ -223,10 +223,10 @@ export function compositeArgs({master, overlays, outFile, fps, draft = false, co
 // done), both copied — no re-encode
 export const remuxArgs = ({video, audio, outFile}) => ['-hide_banner', '-nostats', '-y', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-movflags', '+faststart', outFile];
 // frames, rate and length of a file's picture: mp4 and mov carry the frame count in their header (no decode)
-export const parityProbeArgs = (file) => ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=nb_frames,r_frame_rate,duration', '-of', 'json', file];
+export const parityProbeArgs = (file) => ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=nb_frames,r_frame_rate,duration,width,height,sample_aspect_ratio', '-of', 'json', file];
 export function parseParity(stdout) {
   const s = JSON.parse(stdout).streams?.[0] ?? {};
-  return {frames: +s.nb_frames, fps: s.r_frame_rate ?? null, sec: +s.duration};
+  return {frames: +s.nb_frames, fps: s.r_frame_rate ?? null, sec: +s.duration, w: +s.width, h: +s.height, sar: s.sample_aspect_ratio ?? null};
 }
 // the master and another deliverable (`name`: the caption layer, the supers, master_supers) must lay over
 // each other frame for frame, at the delivery fps when given (src/timeline.ts deliveryFps) → [] or what
@@ -241,6 +241,8 @@ export function parityIssues(master, layer, {fps, name = 'captions'} = {}) {
   if (!(Math.abs(rate - rateOf(layer.fps)) < 1e-6)) out.push(`fps: master ${master.fps}, ${name} ${layer.fps}`);
   else if (fps && !(Math.abs(rate - fps) < 1e-6)) out.push(`fps: ${master.fps}, want ${rateText(fps)}`);
   if (!(Math.abs(master.sec - layer.sec) < 0.5 / rate)) out.push(`duration: master ${master.sec}s, ${name} ${layer.sec}s`);
+  // the frame size when both files report one (the zip's PNGs do not)
+  if (master.w > 0 && layer.w > 0 && (master.w !== layer.w || master.h !== layer.h)) out.push(`size: master ${master.w}x${master.h}, ${name} ${layer.w}x${layer.h}`);
   return out;
 }
 

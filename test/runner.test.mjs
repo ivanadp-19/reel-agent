@@ -33,7 +33,8 @@ test('the reel MCP server has no shell, file-write or network-fetch tool', async
 
 test('the Codex runner ignores the user config, pre-approves only the reel server and keeps the shell read-only', () => {
   const sh = fs.readFileSync('scripts/codex-edit.sh', 'utf8');
-  for (const flag of ['--ignore-user-config', '-s read-only', '--ephemeral', `approval_policy="never"`, `mcp_servers.reel.default_tools_approval_mode="approve"`]) assert.ok(sh.includes(flag), flag);
+  // Codex 0.156 starts an MCP server with HOME, PATH, USER… only: REEL_AGENT (review_notes' text, the lock holder) is passed by name
+  for (const flag of ['--ignore-user-config', '-s read-only', '--ephemeral', `approval_policy="never"`, `mcp_servers.reel.default_tools_approval_mode="approve"`, `mcp_servers.reel.env_vars=["REEL_AGENT","REEL_API"]`]) assert.ok(sh.includes(flag), flag);
   assert.doesNotMatch(sh, /approve-for-me|danger-full-access|workspace-write|dangerously/);
   assert.equal((sh.match(/mcp_servers\.(\w+)\.command/g) ?? []).length, 1);
 });
@@ -44,7 +45,12 @@ test('the Codex runner ignores the user config, pre-approves only the reel serve
 test('review_notes: the note text only inside the restricted runner, quoted as data; classify_note goes through the backend; no tool confirms', async () => {
   const {backendStub} = await import('./backend-stub.mjs');
   const {recordVersion, loadReviews} = await import('../scripts/reviews.mjs');
-  for (const sh of ['scripts/claude-edit.sh', 'scripts/codex-edit.sh']) assert.match(fs.readFileSync(sh, 'utf8'), /export REEL_AGENT="(claude|codex)-edit \$\{PROJECT\}/, sh);
+  for (const sh of ['scripts/claude-edit.sh', 'scripts/codex-edit.sh']) {
+    const t = fs.readFileSync(sh, 'utf8');
+    assert.match(t, /export REEL_AGENT="(claude|codex)-edit \$\{PROJECT\}/, sh);
+    // a draft records no version: resolve_note needs the final (both prompts: the brief and --reply)
+    assert.equal(t.match(/when review_notes listed notes TO FIX, render the final \(a draft records no version\) and resolve_note/g)?.length, 2, sh);
+  }
   const id = `p-notestest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const pub = 'public', dir = path.join(pub, 'reviews');
   fs.mkdirSync(path.join(pub, 'projects'), {recursive: true});

@@ -40,7 +40,7 @@ import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
 import {agentNoteStep, createLink, inReviewsRow, judgeText, judgeVersion, keepUnapproved, loadReviews, playableVersions, publicLink, pruneAll, resumeJudges, retentionText, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, mayRejudge, projectClients, seesClient, servePublic, serveFile, tokenOk} from './http.mjs';
+import {gate, mayPrune, mayRejudge, projectClients, seesClient, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
 import {handleBandeja, handleReview, linkAccess, refreshInbox} from './review.mjs';
 import {actorOf, byVariant, openNotes, variantName, variantState, versionLabel} from '../scripts/review-states.mjs';
@@ -861,7 +861,7 @@ async function handle(req, res) {
   //                                                     descartar and verificar are 403 here: the bandeja's, a human's (E-2)
   //   POST   /api/review-retention {apply?, keep?}    → the retention pass over every project (scripts/reviews.mjs pruneAll):
   //                                                     a dry run unless apply — node scripts/reviews.mjs prune runs it here
-  //                                                     while the backend is up; the backend token, loopback or an owner's login
+  //                                                     while the backend is up; the primary backend token, loopback or an owner's login
   const rj0 = url.pathname.match(/^\/api\/reviews\/([\w-]+)\/versions\/(\d{1,6})\/judge$/);
   if (rj0) {
     if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
@@ -882,7 +882,7 @@ async function handle(req, res) {
   }
   if (url.pathname === '/api/review-retention') {
     if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
-    if (!mayRejudge(g)) return json(res, 403, {error: 'the retention pass needs the backend token, loopback or an owner login', code: 'forbidden'});
+    if (!mayPrune(g)) return json(res, 403, {error: 'the retention pass needs the primary backend token, loopback or an owner login', code: 'forbidden'});
     let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
     const r = await pruneAll(REVIEWS, PUBLIC, {apply: b.apply === true, keep: keepUnapproved(b.keep == null ? undefined : String(b.keep))});
     console.log(retentionText(r));

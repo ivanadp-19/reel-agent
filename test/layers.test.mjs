@@ -187,9 +187,11 @@ test('the pair: the master remuxed without re-encoding (its picture, the final a
   assert.ok(!r.includes('libx264') && r.includes('+faststart') && r.at(-1) === 'master.mp4');
   assert.ok(r.indexOf('m.part-pair-1.mp4') < r.indexOf('edited-1.mp4'));
   const p = parityProbeArgs('c.mov');
-  assert.ok(p.includes('stream=nb_frames,r_frame_rate,duration') && p.includes('v:0') && p.at(-1) === 'c.mov' && !p.includes('-count_frames'), 'header only, no decode');
-  const m = parseParity(JSON.stringify({streams: [{nb_frames: '300', r_frame_rate: '30/1', duration: '10.000000'}]}));
-  assert.deepEqual(m, {frames: 300, fps: '30/1', sec: 10});
+  assert.ok(p.includes('stream=nb_frames,r_frame_rate,duration,width,height,sample_aspect_ratio') && p.includes('v:0') && p.at(-1) === 'c.mov' && !p.includes('-count_frames'), 'header only, no decode');
+  const m = parseParity(JSON.stringify({streams: [{nb_frames: '300', r_frame_rate: '30/1', duration: '10.000000', width: 1080, height: 1920}]}));
+  assert.deepEqual(m, {frames: 300, fps: '30/1', sec: 10, w: 1080, h: 1920, sar: null});
+  assert.deepEqual(parityIssues(m, {...m, w: 720, h: 1280}), ['size: master 1080x1920, captions 720x1280'], 'a 720x1280 master under a 1080x1920 layer');
+  assert.deepEqual(parityIssues(m, {frames: 300, fps: '30/1', sec: 10}), [], 'a file without a size (the zip\'s PNGs) is not compared on it');
   assert.deepEqual(parityIssues(m, {frames: 300, fps: '30/1', sec: 10.01}), [], 'a length within half a frame (other timescale) is the same');
   assert.match(parityIssues(m, {...m, frames: 299}).join(), /frames: master 300, captions 299/);
   assert.match(parityIssues(m, {...m, fps: '25/1'}).join(), /fps/);
@@ -334,4 +336,7 @@ test('originalMaster: captions only over one whole untouched clip — its file i
   assert.match(why({audio: {clean: 'light'}}), /audio cleanup/);
   assert.match(why({audio: {sfx: true}}), /SFX/);
   assert.match(why({captionStyle: 'stack'}), /the stack pack opens on the footage \(zoomBlur\)/);
+  for (const src of ['../../../Users/x/secret.mp4', '/etc/x.mp4', 'clips/../../x.mp4', 'clips/..', 'broll/x.mp4']) {
+    assert.equal(why({clips: [{...clip, src}]}), 'c0\'s source is not a file of public/clips/', src);
+  }
 });

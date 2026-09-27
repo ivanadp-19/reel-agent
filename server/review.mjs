@@ -463,7 +463,7 @@ function postNoteStep(x, actor, {form, at}) {
 // the owner's answer to an approved master proposed as a color reference: confirmar writes it to the client's refs/ and
 // profile (in the row: a write that fails saves nothing)
 function postColorRef(x, actor, {form, at, publicDir}) {
-  if (decideColorRef(x, actor, {step: form.step, at}) && x.colorRef.state === 'confirmada') Object.assign(x.colorRef, addColorRef(publicDir, x));
+  if (decideColorRef(x, actor, {step: form.step, at}) && x.colorRef.state === 'confirmada') Object.assign(x.colorRef, addColorRef(publicDir, form.project, x));
   return x.colorRef.state === 'confirmada' ? 'referencia' : 'sin-referencia';
 }
 const POSTS = {'/bandeja/aprobar': postApprove, '/bandeja/revocar': postRevoke, '/bandeja/nota': postNote, '/bandeja/nota/estado': postNoteStep, '/bandeja/referencia': postColorRef};

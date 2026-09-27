@@ -463,16 +463,17 @@ const pairProps = (fake, extra = {}) => props(fake, {fps: 30000 / 1001, ...extra
 const nodeE = (code, ...args) => [process.execPath, ['-e', code, ...args]];
 // layered() + the pair's ffmpeg / ffprobe steps as fakes: encode writes the .mov, remux the master
 // (P.hang: it stalls half-written), probe reports P.frames per file name, else per extension; frameStats finds nothing to repair
-// (P.rate: the r_frame_rate it reports — a client's files come out at 29.97; P.fps: the rate each ffmpeg step was given)
+// (P.rate: the r_frame_rate it reports — a client's files come out at 29.97; P.fps: the rate each ffmpeg step was given;
+// P.size: the width x height per file name, else 1080x1920)
 const paired = () => {
-  const P = {frames: {mp4: 60, mov: 60}, alpha: [], remux: [], hang: false, rate: '30000/1001', fps: []};
+  const P = {frames: {mp4: 60, mov: 60}, alpha: [], remux: [], hang: false, rate: '30000/1001', fps: [], size: {}};
   const more = {
     encode: ({outFile, alpha, fps}) => { P.alpha.push(alpha); P.fps.push(['encode', fps]); return nodeE('require("fs").writeFileSync(process.argv[1], "prores 4444")', outFile); },
     remux: ({video, audio, outFile}) => {
       P.remux.push({video, audio, held: fs.existsSync(video)});
       return P.hang ? nodeE('require("fs").writeFileSync(process.argv[1], "half"); setInterval(() => {}, 1e6)', outFile) : nodeE('require("fs").copyFileSync(process.argv[1], process.argv[2])', video, outFile);
     },
-    probe: ({file}) => { const n = P.frames[path.basename(file)] ?? P.frames[path.extname(file).slice(1)]; const [a, b = 1] = P.rate.split('/').map(Number); return nodeE(`console.log(JSON.stringify({streams: [{nb_frames: '${n}', r_frame_rate: '${P.rate}', duration: '${(n * b) / a}'}]}))`); },
+    probe: ({file}) => { const n = P.frames[path.basename(file)] ?? P.frames[path.extname(file).slice(1)]; const [a, b = 1] = P.rate.split('/').map(Number); const [w, h] = P.size[path.basename(file)] ?? [1080, 1920]; return nodeE(`console.log(JSON.stringify({streams: [{nb_frames: '${n}', r_frame_rate: '${P.rate}', duration: '${(n * b) / a}', width: ${w}, height: ${h}}]}))`); },
     frameStats: () => nodeE(''),
   };
   return {...layered(), more, P, projects: {p1: {name: 'one', identity: IDENTITY}}};
@@ -585,9 +586,11 @@ test('captions only on the client\'s export: its own file is the master — no m
   assert.equal(planRender(JSON.parse(pairProps({}, origReel())), {pair: true, scope: ['captions', 'corte'], masterCache: null, publicDir: s.pub, root: s.root}).fails, true, 'another scope needs the rendered master');
 });
 
-test('captions only, but the file does not lay under the layer frame for frame (or the clip is trimmed): the master is rendered as always, and the job says why', async () => {
-  for (const [frames, clip, why] of [[59, {}, /not the master: clips\/orig\.mp4 is 59 frames at 30000\/1001, the caption layer 60/], [60, {outSec: 1.5}, null]]) {
+test('captions only, but the file does not lay under the layer frame for frame, is not 1080x1920, or the clip is trimmed / outside public/clips: the master is rendered as always, and the job says why', async () => {
+  for (const [frames, clip, why, size] of [[59, {}, /not the master: clips\/orig\.mp4 is 59 frames at 30000\/1001, the caption layer 60/], [60, {outSec: 1.5}, null],
+    [60, {}, /not the master: clips\/orig\.mp4 is 720x1280, the composition 1080x1920/, [720, 1280]], [60, {src: '../../etc/orig.mp4'}, null]]) {
     const {L} = captionsOnly(frames);
+    if (size) L.P.size['orig.mp4'] = size;
     const s = setup({...L, record: recording([]), unrecord: null});
     fs.mkdirSync(path.join(s.pub, 'clips'), {recursive: true});
     fs.writeFileSync(path.join(s.pub, 'clips', 'orig.mp4'), 'orig');
@@ -596,7 +599,7 @@ test('captions only, but the file does not lay under the layer frame for frame (
     const j = readJob(s.dir, job.id);
     assert.equal(j.status, 'done', j.error);
     assert.deepEqual([j.result.master, s.calls.master, L.P.remux.length], ['rendered', 1, 1]);
-    if (why) assert.match(j.result.original, why); else assert.equal(j.result.original, undefined, 'a trimmed clip is not an original: nothing to say');
+    if (why) assert.match(j.result.original, why); else assert.equal(j.result.original, undefined, 'a trimmed clip (or a path out of clips/) is not an original: nothing to say');
     const v = loadReviews(path.join(s.pub, 'reviews'), 'p1').versions[0];
     assert.ok(!v.original && v.masterKey);
   }
@@ -746,6 +749,31 @@ test('the pair: what a dead backend left (layer, remuxed master, proxy temps, he
   assert.equal(left(requeued), 0);
   assert.equal(left(other), 8, 'a job this store never ended is not touched');
   assert.ok(fs.existsSync(path.join(L.cacheDir, 'k-same-f.mp4')), 'the cached master stays');
+});
+
+// a backend killed by SIGTERM exits before the job's finally: a re-queued pair job finds its .tmp-pair-<id>/ as it was left,
+// its master.mp4 a hard link to an earlier version's master or to the client's clip — never written through (ffmpeg -y
+// truncates the inode in place)
+test('the pair: a re-queued job never writes into a hard link its first attempt left (an earlier version\'s master, the client\'s clip)', async () => {
+  const L = paired();
+  L.more.remux = ({outFile}) => { L.P.remux.push(outFile); return nodeE('require("fs").writeFileSync(process.argv[1], "REMUXED")', outFile); }; // like ffmpeg -y: O_TRUNC in place
+  const s = setup({...L, record: recording([]), unrecord: null});
+  fs.mkdirSync(path.join(s.pub, 'clips'), {recursive: true});
+  const victim = path.join(s.pub, 'clips', 'orig.mp4');
+  fs.writeFileSync(victim, 'CLIENT BYTES'); // César's export (or v1's delivered master): bytes that must never change
+  const id = '1700000000000aaaaaa', tmp = path.join(s.pub, 'reviews', 'p1', `.tmp-pair-${id}`);
+  fs.mkdirSync(tmp, {recursive: true});
+  fs.linkSync(victim, path.join(tmp, 'master.mp4')); // what attempt 1 linked (captions only) before its backend died
+  writeJob(s.dir, {id, seq: +id.slice(0, 13), status: 'running', owner: deadPid(), attempts: 1, draft: false, projectId: 'p1', identity: IDENTITY, createdAt: new Date().toISOString()});
+  fs.writeFileSync(path.join(s.dir, `${id}.props.json`), pairProps({frames: 2}, origReel()));
+  s.jobs.recover(); // re-queued; the scope is no longer captions only: this attempt renders the master and remuxes it
+  s.jobs.pump();
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, id).status, 'done', readJob(s.dir, id).error);
+  assert.equal(L.P.remux.length, 1);
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'CLIENT BYTES', 'the linked file is untouched');
+  const v = loadReviews(path.join(s.pub, 'reviews'), 'p1').versions[0];
+  assert.equal(fs.readFileSync(path.join(s.pub, v.deliverables.master), 'utf8'), 'REMUXED', 'the version has its own master');
 });
 
 test('R-2: a draft with an identity, a layered final and a full final without one render exactly as before', async () => {

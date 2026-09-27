@@ -81,6 +81,8 @@ export function originalMaster(props: OriginalProps, scope: unknown, fps: number
   else {
     const half = 0.5 / fps;
     if (Math.abs(c.inSec) > half || Math.abs(c.outSec - c.sourceDurationSec) > half) out.push(`${c.id} is trimmed (${c.inSec}–${c.outSec} of ${c.sourceDurationSec} s)`);
+    // a file of public/clips/ (the runner hard-links it into the version): never a path out of it, never said back
+    if (!/^clips\/[^/.][^/]*$/.test(String(c.src))) out.push(`${c.id}'s source is not a file of public/clips/`);
     if ((c.speed ?? 1) !== 1 || (c.volume ?? 1) !== 1 || c.muted || c.transform?.length || (c.enter && c.enter !== 'cut') || c.jSec || c.lSec) out.push(`${c.id} has speed, volume, keyframes, a transition or a J/L cut`);
   }
   const has = (x: unknown) => (Array.isArray(x) ? x.length > 0 : !!x);

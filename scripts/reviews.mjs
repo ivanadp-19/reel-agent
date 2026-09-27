@@ -366,10 +366,10 @@ export function listFixtures(publicDir) {
 export async function agentNoteStep(dir, publicDir, projectId, v, noteId, body, actor, {now = Date.now()} = {}) {
   const step = body?.step;
   if (!AGENT_NOTE_STEPS.includes(step)) return [403, {error: `${step ?? 'that step'} is not an agent's: confirmar and descartar are the owner's, verificar the client's — in the bandeja, with their login`, code: 'human_only'}];
-  if (step === 'resolver' && !loadReviews(dir, projectId).versions.some((y) => y.v === body.v)) return [400, {error: `resolver needs the version that fixes it, rendered already: there is no v${body.v}`, code: 'bad_version'}];
   let note, fixture = null, fixtureError;
   try {
-    const x = await withVersion(dir, projectId, v, (y) => {
+    const x = await withVersion(dir, projectId, v, (y, r) => {
+      if (step === 'resolver') fixedIn(r, y, String(noteId), body.v);
       note = moveNote(y, String(noteId), step, actor, {at: new Date(now).toISOString(), kind: body.kind, v: body.v});
       if (step !== 'resolver') return;
       try { fixture = writeFixture(publicDir, projectId, y, note, {now}); if (fixture) note.fixture = fixture; } catch (e) { fixtureError = e.message; }
@@ -382,16 +382,31 @@ export async function agentNoteStep(dir, publicDir, projectId, v, noteId, body, 
   return [200, {projectId, v, note, ...(fixture ? {fixture} : {}), ...(fixtureError ? {fixtureError} : {})}];
 }
 
+// the version a confirmed note is resolved in: one that exists, of the note's variant, whole (not stripped by the
+// retention) and rendered after the owner confirmed the note — an earlier one cannot hold the fix. Else it throws
+function fixedIn(r, x, noteId, fv) {
+  if (!Number.isInteger(fv) || fv <= x.v) return; // not a later version: moveNote says so
+  const fix = r.versions.find((y) => y.v === fv);
+  const confirmed = (x.notes ?? []).find((n) => n.id === noteId)?.history?.findLast((h) => h.state === 'confirmada')?.at;
+  const why = !fix ? `there is no v${fv}`
+    : variantName(fix.identity) !== variantName(x.identity) ? `v${fv} is another variant (${variantName(fix.identity) ?? 'none'})`
+    : fix.pruned ? `v${fv} was stripped by the retention`
+    : confirmed && !(Date.parse(fix.createdAt) > Date.parse(confirmed)) ? `v${fv} was rendered before the note was confirmed (${confirmed}): render the fix, then resolve it with that version`
+    : null;
+  if (why) throw Object.assign(new Error(`resolver needs the version that fixes it: ${why}`), {status: fix ? 409 : 400, code: 'bad_version'});
+}
+
 // ---- an approved master as a color reference (§7, T17): proposed in the owner's inbox, written on the owner's confirm ----
 // The master is linked (copied across filesystems) into public/clients/<client>/refs/ and listed in the client's
 // profile.json colorRefs with the identity's development: the render judge's color-ref compares a reel only with the
 // references of its own development (judge.mjs colorRefGroups). Idempotent. A profile that does not parse throws —
 // never written over. → {file, label, development}
-export function addColorRef(publicDir, x) {
+export function addColorRef(publicDir, projectId, x) {
   const client = x.identity?.client;
   const master = x.deliverables?.master ? path.join(publicDir, x.deliverables.master) : null;
   if (!CLIENT_RE.test(client ?? '') || !master || !fs.existsSync(master)) throw Object.assign(new Error(`v${x.v}: su master ya no está en disco`), {status: 409, code: 'no_master'});
-  const base = path.join(publicDir, 'clients', client), name = path.basename(master), ref = path.join(base, 'refs', name);
+  // named by project too: v<n> and the variant's name repeat across projects (one identity can move to another project)
+  const base = path.join(publicDir, 'clients', client), name = `${projectId}-${path.basename(master)}`, ref = path.join(base, 'refs', name);
   fs.mkdirSync(path.dirname(ref), {recursive: true});
   if (!fs.existsSync(ref)) { try { fs.linkSync(master, ref); } catch { fs.copyFileSync(master, ref); } }
   const pf = path.join(base, 'profile.json');
@@ -462,7 +477,7 @@ export const withVersion = (dir, projectId, v, fn) => inReviewsRow(dir, projectI
   const r = loadReviews(dir, projectId, {strict: true});
   const x = r.versions.find((y) => y.v === v);
   if (!x) return null;
-  fn(x);
+  fn(x, r);
   saveReviews(dir, r);
   return x;
 });
@@ -590,7 +605,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const headers = {'content-type': 'application/json', ...(tok ? {'x-reel-token': tok} : {})};
   let r = null;
   if (await fetch(`${api}/api/health`, {headers, signal: AbortSignal.timeout(2500)}).then((x) => x.ok, () => false)) {
-    const res = await fetch(`${api}/api/review-retention`, {method: 'POST', headers, body: JSON.stringify({apply, keep})});
+    const res = await fetch(`${api}/api/review-retention`, {method: 'POST', headers, body: JSON.stringify({apply, ...(at >= 0 ? {keep} : {})})}); // no --keep: the backend's own REEL_REVIEW_KEEP_UNAPPROVED
     r = await res.json().catch(() => ({}));
     if (!res.ok) { console.error(`the backend refused the retention pass: ${r.error ?? res.status}`); process.exit(1); }
   } else r = await pruneAll(reviewsDir(publicDir), publicDir, {keep, apply});

@@ -341,6 +341,9 @@ export function createRenderRunner({
     // master held by a hard link next to the cache's (`.part-` keeps another job's trim off it)
     const pair = !draft && job.projectId && job.identity?.client ? job.identity : null;
     const pairTmp = pair ? path.join(reviewsDir, job.projectId, `.tmp-pair-${id}`) : null;
+    // an earlier attempt's (re-queued after its backend died, no finally ran): its master.mp4 can be a hard link to an
+    // earlier version's master or to the client's clip — never written through (ffmpeg -y truncates the inode in place)
+    if (pairTmp) fs.rmSync(pairTmp, {recursive: true, force: true});
     let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null, pairParity = null, pairAudio = null, pairOriginal = null;
     // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
     const cleanUp = async () => {
@@ -492,9 +495,11 @@ export function createRenderRunner({
           if (orig?.src) {
             const abs = path.join(publicDir, orig.src), want = totalDurationFrames(props.clips, fps);
             const m = fs.existsSync(abs) ? await probeOf(abs) : null;
-            if (m && Math.abs(rateOf(m.fps) - fps) < 1e-6 && m.frames === want) original = {src: orig.src, abs};
+            // the composition's size (src/Root.tsx), square pixels: compositeArgs lays the layer over at the file's own size
+            const size = m && (m.w !== 1080 || m.h !== 1920 || !['1:1', '0:1', null].includes(m.sar)) ? `${orig.src} is ${m.w}x${m.h}${m.sar && m.sar !== '1:1' ? ` (SAR ${m.sar})` : ''}, the composition 1080x1920` : null;
+            if (m && !size && Math.abs(rateOf(m.fps) - fps) < 1e-6 && m.frames === want) original = {src: orig.src, abs};
             else {
-              result.original = `not the master: ${m ? `${orig.src} is ${m.frames} frames at ${m.fps}, the caption layer ${want} at ${fps}` : `${orig.src} is missing`}`;
+              result.original = `not the master: ${!m ? `${orig.src} is missing` : size ?? `${orig.src} is ${m.frames} frames at ${m.fps}, the caption layer ${want} at ${fps}`}`;
               log(`render ${id}: ${result.original} — the master is rendered`);
               if (!masterCache) throw new RenderError(`deliverables need the layered render: ${result.original}; no master cache on this backend`);
             }
