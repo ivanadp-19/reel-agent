@@ -1,0 +1,188 @@
+// The life cycle of a client's review versions and of the notes on them (docs/designs/cesar-etapas-bandeja.md §6-§7,
+// CEO-6, CEO-12 / D22, CEO-19) — pure: no file, no clock (the caller passes `at`), no request. The bandeja
+// (server/review.mjs) runs every step inside the reviews row (scripts/reviews.mjs withVersion), so a step checks the
+// state it writes over — the judge's label included, when it changes while the reviewer approves.
+//
+//  version QC      versionQc — the ONE reader of version.judge: en curso → superado | n hallazgos | no disponible
+//  version review  por revisar → aprobada   only from QC superado, by the client's reviewer, who retypes the variant name
+//                  por revisar ⇄ cambios    derived: an open note on it
+//                  aprobada → revocar (the reviewer, with a reason) → por revisar
+//                  a note on an approved version leaves it approved; the note is flagged afterApproval
+//                  ('nota después de aprobar': the owner asks the reviewer to revoke, or carries it to vN+1).
+//                  The owner never writes an approval, and no token does (only a login session is a human).
+//  variant         sin versiones → por revisar → cambios → aprobada = vK: the newest approved version is the one
+//                  delivered; an older approved one reads 'aprobada, reemplazada'
+//  note            abierta → clasificada (agent) → confirmada (owner) → resuelta in vN+1 (agent) → verificada (reviewer)
+//                  abierta | clasificada | confirmada → descartada (owner, with a reason the reviewer sees)
+//                  open (cambios, the approve confirmation, the inbox) = neither verificada nor descartada
+// Anything else throws {status: 409 (the state does not allow it) | 403 (not this principal's step) | 400 (bad input)}.
+// Every step lands in the version's log with its principal (Sección 8).
+import {locateSec, renderFps, deliveryFps} from '../src/timeline.ts';
+import {identityStem, validateIdentity, validateProject} from '../src/validate.ts';
+
+const fail = (status, code, message) => { throw Object.assign(new Error(message), {status, code}); };
+// a note's second as people read it: 0:20.4
+export const noteClock = (sec) => { const t = Math.round(sec * 10) / 10; return `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`; };
+
+// ---- QC técnico: the ONE reader of a version's judge (the bandeja, approval, the inbox) ----
+// ponytail: every counting finding blocks today; the project's scope (etapas/backend-alcance: a captions-only job) turns
+// the out-of-scope ones advisory HERE — a captions-only version whose in-scope checks pass is then 'superado'.
+// the label as people read it (the editor, list_versions, the bandeja): "QC técnico en curso", "QC técnico: 2 hallazgos"
+export const judgeText = (j) => (j?.label ? `QC técnico${/hallazgo/.test(j.label) ? ':' : ''} ${j.label}` : null);
+// → {state: 'en curso' | 'superado' | 'hallazgos' | 'no disponible' | 'sin QC', label, approvable, findings}
+// 'superado (evidencia reducida)' approves like 'superado' and keeps its suffix in the label
+export function versionQc(x) {
+  const j = x?.judge;
+  const state = !j?.label ? 'sin QC' : /^superado/.test(j.label) ? 'superado' : /hallazgo/.test(j.label) ? 'hallazgos' : j.label === 'en curso' ? 'en curso' : 'no disponible';
+  return {state, label: judgeText(j) ?? 'Sin QC técnico', approvable: state === 'superado', findings: j?.findings ?? []};
+}
+
+// ---- who acts ----
+// the gate's answer (server/http.mjs gate) → the principal a step checks: a login session is its user's role; anything
+// else (the backend token, a user token, loopback, basic auth) is an agent — never a human
+export const actorOf = (g) => (g?.via === 'session' && g.user
+  ? {kind: g.role === 'owner' || g.role === 'reviewer' ? g.role : 'nobody', user: g.user, clients: g.clients ?? []}
+  : {kind: 'agent', user: g?.user ?? g?.via ?? 'agent', clients: []});
+function mustReview(actor, x, what) {
+  if (actor?.kind !== 'reviewer') fail(403, 'forbidden', `Solo el revisor del cliente puede ${what}${actor?.kind === 'owner' ? ' — el owner nunca escribe la aprobación ni las notas del cliente' : ', con su login en la VM'}`);
+  if (!actor.clients.includes(x.identity?.client)) fail(403, 'forbidden', `${actor.user} no revisa el cliente ${x.identity?.client ?? '(sin cliente)'}`);
+}
+const logOf = (x) => (x.log ??= []);
+// the reviewer's words: plain text (no control characters but line breaks), trimmed, bounded — never cut silently
+export function cleanText(s, max) {
+  const t = String(s ?? '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim();
+  if (t.length > max) fail(400, 'too_long', `Máximo ${max} caracteres (van ${t.length})`);
+  return t;
+}
+
+// ---- review of a version ----
+export const isOpen = (n) => n.state !== 'verificada' && n.state !== 'descartada';
+export const openNotes = (x) => (x?.notes ?? []).filter(isOpen);
+export const reviewState = (x) => (x.approval ? 'aprobada' : openNotes(x).length ? 'cambios' : 'por revisar');
+// versions of one variant (one project) → {state, delivered: the newest approved v | null}
+export function variantState(versions) {
+  if (!versions.length) return {state: 'sin versiones', delivered: null};
+  const ok = versions.filter((x) => x.approval).sort((a, b) => b.v - a.v);
+  if (ok.length) return {state: 'aprobada', delivered: ok[0].v};
+  return {state: versions.some((x) => openNotes(x).length) ? 'cambios' : 'por revisar', delivered: null};
+}
+// a version as the bandeja labels it (delivered: variantState's)
+export const versionLabel = (x, delivered) => (x.approval && delivered != null && x.v < delivered ? 'aprobada, reemplazada' : reviewState(x));
+// the name a reviewer retypes to approve (and the stem of the delivered files): VIBEM_G2_H1_C1
+export const variantName = (identity) => { const i = validateIdentity(identity).identity; return i ? identityStem(i) : null; };
+
+// approve vN (the version object, mutated) → true, or false when it already was (a double click, the form sent twice)
+export function approve(x, actor, {name, at, ipHash, userAgent} = {}) {
+  mustReview(actor, x, 'aprobar');
+  if (x.approval) return false;
+  const qc = versionQc(x);
+  if (!qc.approvable) fail(409, 'qc_not_passed', `No se puede aprobar v${x.v}: ${qc.label}`);
+  const want = variantName(x.identity);
+  if (!want || String(name ?? '').trim().toUpperCase() !== want) fail(400, 'confirm_mismatch', `Para aprobar v${x.v}, escribe el nombre de la variante: ${want}`);
+  x.approval = {by: actor.user, at, ...(ipHash ? {ipHash} : {}), ...(userAgent ? {userAgent: String(userAgent).slice(0, 200)} : {})};
+  logOf(x).push({action: 'aprobar', by: actor.user, at, openNotes: openNotes(x).length});
+  return true;
+}
+export function revoke(x, actor, {reason, at} = {}) {
+  mustReview(actor, x, 'revocar');
+  if (!x.approval) fail(409, 'not_approved', `v${x.v} no está aprobada: no hay nada que revocar`);
+  const why = cleanText(reason, 500);
+  if (!why) fail(400, 'reason_required', 'Revocar pide una razón');
+  logOf(x).push({action: 'revocar', by: actor.user, at, reason: why, approval: x.approval});
+  delete x.approval;
+  return true;
+}
+
+// ---- notes ----
+// a note {v, atSec, text} on the version (anchor: anchorAt on its snapshot) → the note
+export function addNote(x, actor, {atSec, text, anchor = null, at} = {}) {
+  mustReview(actor, x, 'dejar una nota');
+  const t = cleanText(text, 2000);
+  if (!t) fail(400, 'text_required', 'La nota está vacía');
+  if (!Number.isFinite(atSec) || atSec < 0 || atSec > (x.durationSec ?? Infinity) + 0.5) fail(400, 'bad_time', `El segundo de la nota tiene que estar entre 0 y ${x.durationSec ?? '?'} s`);
+  const notes = (x.notes ??= []);
+  const id = `n${notes.reduce((m, n) => Math.max(m, +String(n.id).slice(1) || 0), 0) + 1}`;
+  const note = {id, v: x.v, atSec: Math.round(atSec * 100) / 100, text: t, anchor, by: actor.user, at, state: 'abierta', history: [{state: 'abierta', by: actor.user, at}], ...(x.approval ? {afterApproval: true} : {})};
+  notes.push(note);
+  logOf(x).push({action: 'nota', by: actor.user, at, note: id});
+  return note;
+}
+export const NOTE_KINDS = ['fix', 'parametro', 'regla', 'preferencia']; // §7: what a note asks for, the agent proposes it
+export const NOTE_STEPS = {
+  clasificar: {from: ['abierta'], to: 'clasificada', who: 'agent'},
+  confirmar: {from: ['clasificada'], to: 'confirmada', who: 'owner'},
+  resolver: {from: ['confirmada'], to: 'resuelta', who: 'agent'},
+  verificar: {from: ['resuelta'], to: 'verificada', who: 'reviewer'},
+  descartar: {from: ['abierta', 'clasificada', 'confirmada'], to: 'descartada', who: 'owner'},
+};
+// one step of note `noteId` of version x → the note. The same step twice is no change (a double click).
+// clasificar needs `kind` (NOTE_KINDS), resolver the later version `v` that fixes it, descartar a `reason`.
+export function moveNote(x, noteId, step, actor, {at, kind, v, reason} = {}) {
+  const s = Object.hasOwn(NOTE_STEPS, step) ? NOTE_STEPS[step] : fail(400, 'bad_step', `Paso desconocido: ${step}`);
+  const n = (x.notes ?? []).find((y) => y.id === noteId) ?? fail(404, 'not_found', `v${x.v} no tiene la nota ${noteId}`);
+  if (s.who === 'reviewer') mustReview(actor, x, step);
+  else if (actor?.kind !== s.who) fail(403, 'forbidden', `${step} una nota es del ${s.who === 'owner' ? 'owner, con su login en la VM' : 'agente'}`);
+  if (n.state === s.to) return n;
+  if (!s.from.includes(n.state)) fail(409, 'invalid_transition', `La nota ${n.id} está ${n.state}: no se puede ${step}${step === 'verificar' ? ' (solo una nota resuelta se verifica)' : ''}`);
+  const extra = {};
+  if (step === 'clasificar') { if (!NOTE_KINDS.includes(kind)) fail(400, 'bad_kind', `clasificar pide kind: ${NOTE_KINDS.join(' | ')}`); extra.kind = kind; }
+  if (step === 'resolver') { if (!Number.isInteger(v) || v <= x.v) fail(400, 'bad_version', `resolver pide la versión que la arregla (después de v${x.v})`); extra.resolvedIn = v; }
+  if (step === 'descartar') { const why = cleanText(reason, 500); if (!why) fail(400, 'reason_required', 'Descartar pide una razón (el cliente la ve)'); extra.reason = why; }
+  Object.assign(n, extra, {state: s.to});
+  n.history.push({state: s.to, by: actor.user, at, ...extra});
+  logOf(x).push({action: step, by: actor.user, at, note: n.id});
+  return n;
+}
+
+// Where a note's second falls in the version AS IT WAS RENDERED (its snapshot, never the live project — a note on v1
+// still resolves after the project moved on): the clip under it (placeClips at the version's own fps, speed ramps and
+// all), the source second, and the word being said there — the caption word of that source spanning it, else the
+// nearest one ≤ 1 s away (a breath, a cut), else none. → {clipId, src, srcSec, wordId} or null (no snapshot, no clips)
+export function anchorAt(snapshot, atSec) {
+  const clips = snapshot?.clips;
+  if (!Array.isArray(clips) || !clips.length) return null;
+  const hit = locateSec(clips, renderFps(snapshot), atSec);
+  if (!hit) return null;
+  const {clip, sourceSec} = hit;
+  const ms = sourceSec * 1000, inMs = clip.inSec * 1000, outMs = clip.outSec * 1000;
+  const words = (snapshot.captions ?? []).filter((c) => c.src === clip.src).flatMap((c) => c.words ?? []).filter((w) => w.wid && w.endMs > inMs && w.startMs < outMs);
+  const on = words.find((w) => w.startMs <= ms && ms < w.endMs);
+  const near = on ?? words.map((w) => [Math.max(w.startMs - ms, ms - w.endMs), w]).filter(([d]) => d <= 1000).sort((a, b) => a[0] - b[0])[0]?.[1];
+  return {clipId: clip.id, src: clip.src, srcSec: Math.round(sourceSec * 1000) / 1000, wordId: near?.wid ?? null};
+}
+
+// ---- the owner's inbox (CEO-19, D28) ----
+// rows: every client project as the bandeja loads it ({projectId, stem, identity, versions, project: the live JSON});
+// disk: {freeDiskMb, minDiskMb}. → items {key, kind, text, projectId?} — kind nota (to confirm: abierta / clasificada),
+// guion (guion-conflict from validate, on the live project), juez (the newest version's QC técnico no disponible),
+// rojos (the last 3 versions of a variant red), disco (free disk under the render floor), metrica (notes on v1 per
+// variant, by G). `key` changes when the item does: the log names each one once (server/review.mjs).
+export function ownerInbox(rows, {disk} = {}) {
+  const items = [];
+  const one = (s) => String(s).replace(/\s+/g, ' ').slice(0, 160);
+  for (const r of rows) {
+    const vs = [...r.versions].sort((a, b) => a.v - b.v);
+    for (const x of vs) for (const n of x.notes ?? []) {
+      if (n.state !== 'abierta' && n.state !== 'clasificada') continue;
+      items.push({key: `nota:${r.projectId}:${x.v}:${n.id}:${n.at}:${n.state}`, kind: 'nota', projectId: r.projectId, text: `${r.stem} v${x.v} @${noteClock(n.atSec)}, de ${n.by} (${n.state}${n.afterApproval ? ', nota después de aprobar' : ''}): «${one(n.text)}»`});
+    }
+    const newest = vs.at(-1);
+    if (newest && versionQc(newest).state === 'no disponible') items.push({key: `juez:${r.projectId}:${newest.v}:${newest.judge.at}`, kind: 'juez', projectId: r.projectId, text: `${r.stem} v${newest.v}: QC técnico no disponible${newest.judge.error ? ` — ${one(newest.judge.error)}` : ''} (re-juzgar, sin re-render)`});
+    const last3 = vs.slice(-3);
+    if (last3.length === 3 && last3.every((x) => versionQc(x).state === 'hallazgos')) items.push({key: `rojos:${r.projectId}:${newest.v}`, kind: 'rojos', projectId: r.projectId, text: `${r.stem}: 3 versiones seguidas con hallazgos (v${last3[0].v}–v${newest.v}) — mirar antes de otra vuelta`});
+    let conflicts = [];
+    try { if (r.project?.guion?.trim()) conflicts = validateProject({...r.project, clips: r.project.clips ?? [], captions: r.project.captions ?? []}, deliveryFps(r.project)).filter((i) => i.code === 'guion-conflict'); } catch {}
+    for (const i of conflicts) items.push({key: `guion:${r.projectId}:${i.msg}`, kind: 'guion', projectId: r.projectId, text: `${r.stem}: ${one(i.msg)}`});
+  }
+  if (disk?.freeDiskMb != null && disk.freeDiskMb < disk.minDiskMb) items.push({key: `disco:${Math.round(disk.freeDiskMb / 256)}`, kind: 'disco', text: `Disco bajo: ${(disk.freeDiskMb / 1024).toFixed(1)} GB libres (piso de render ${(disk.minDiskMb / 1024).toFixed(1)} GB) — cleanup-exports --apply y la retención`});
+  // the metric: notes on v1 per variant, by G (a variant with no v1 yet is not counted)
+  const byG = new Map();
+  for (const r of rows) {
+    const v1 = r.versions.find((x) => x.v === 1);
+    if (!v1) continue;
+    const g = `${r.identity.client.toUpperCase()} G${r.identity.script}`;
+    byG.set(g, [...(byG.get(g) ?? []), `${r.stem} ${v1.notes?.length ?? 0}`]);
+  }
+  for (const [g, list] of [...byG].sort()) items.push({key: `metrica:${g}:${list.join()}`, kind: 'metrica', text: `Notas en v1, ${g}: ${list.sort().join(' · ')}`});
+  return items;
+}

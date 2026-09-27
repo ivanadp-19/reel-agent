@@ -126,7 +126,8 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
   return {user: await check};
 }
 
-// Who may reach a path. The review pages (/r/...) are public in both modes — the
+// Who may reach a path. The bandeja (/bandeja, server/review.mjs) takes only the login session — the gate hands it the
+// session user (public mode) or none, in both modes and before any other credential. The review pages (/r/...) are public in both modes — the
 // token in the URL is the credential — and read-only; the gate hands them the login session
 // (public mode only) and whether the primary token came along, because the page of a client's
 // project needs a login of that client as well (server/review.mjs, seesClient; E-1). Everything else keeps the
@@ -151,10 +152,12 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
 // A reviewer (a client's login: session, basic auth or user token) passes only for /reviews/* (scoped by servePublic)
 // besides /r/ and /login: 403 on the editor, the API, every other media path and /cli-token (reviewerOff).
 // Async: basic auth runs bcrypt off the event loop.
-// → {kind: 'review' | 'ping' | 'login' | 'mcp' | 'ok', user?, admin?, uid?, via?, primary?, role?, clients?} or {kind: 'deny', status, headers, body}
+// → {kind: 'review' | 'bandeja' | 'ping' | 'login' | 'mcp' | 'ok', user?, admin?, uid?, via?, primary?, role?, clients?} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 export const isReviewPath = (pathname) => pathname === '/r' || pathname.startsWith('/r/');
+// the bandeja (server/review.mjs handleBandeja): a client's reviewer and the owner, by login session only
+export const isBandejaPath = (pathname) => pathname === '/bandeja' || pathname.startsWith('/bandeja/');
 export const isLoginPath = (pathname) => pathname === '/login' || pathname === '/logout';
 export const isMcpPath = (pathname) => pathname === '/mcp' || pathname.startsWith('/mcp/');
 // The media the editor reads by URL from public/: the <video> / <audio> / <img> sources of
@@ -172,12 +175,17 @@ const reviewerPath = (pathname) => { try { return /^[/\\]reviews[/\\]/.test(clea
 // /login, /logout (above) and the /reviews/ files of their clients (servePublic) — never the editor, the API, other
 // media or /cli-token → the 403, else null
 const reviewerOff = (user, pathname, roles) => (roles && Object.hasOwn(roles, user) && roles[user].role === 'reviewer' && !reviewerPath(pathname)
-  ? denyJson(403, 'a reviewer login opens only review links', 'forbidden', 'open the /r/ link you were sent') : null);
+  ? denyJson(403, 'a reviewer login opens only the bandeja and review links', 'forbidden', 'open /bandeja, or the /r/ link you were sent') : null);
 const human = (user, roles) => { const r = roles && Object.hasOwn(roles, user) ? roles[user] : null; return {user, via: 'session', role: r?.role ?? null, clients: r?.clients ?? []}; };
 export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0, users = null, requireToken = false, roles = null} = {}) {
   if (isReviewPath(url.pathname)) {
     const su = publicMode ? sessionUser(req, sessionSecret, auth) : null;
     return {kind: 'review', ...(su ? human(su, roles) : {user: null}), ...(tokenOk(tokens.slice(0, 1), req.headers['x-reel-token']) && {primary: true})};
+  }
+  // the bandeja: the login session or nobody (no token, basic auth or loopback — not even the primary token: it approves)
+  if (isBandejaPath(url.pathname)) {
+    const su = publicMode ? sessionUser(req, sessionSecret, auth) : null;
+    return {kind: 'bandeja', ...(su ? human(su, roles) : {user: null})};
   }
   const mcp = isMcpPath(url.pathname);
   if (mcp && !tokenOk(tokens, req.headers['x-reel-token'])) return {kind: 'deny', status: 401, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error: 'x-reel-token required'})};

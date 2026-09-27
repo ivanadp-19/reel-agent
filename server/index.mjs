@@ -41,7 +41,8 @@ import {createLink, inReviewsRow, judgeText, judgeVersion, loadReviews, playable
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, mayRejudge, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
-import {handleReview, linkAccess} from './review.mjs';
+import {handleBandeja, handleReview, linkAccess, refreshInbox} from './review.mjs';
+import {openNotes, variantState, versionLabel} from '../scripts/review-states.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
@@ -246,7 +247,9 @@ async function prepareRender(raw, id, {signal, setPid, progress} = {}) {
 const RENDER_JOBS = jobsDir(PUBLIC);
 // full or layers (master from the cache, caption layer, composite), then loudness + QC and the review version;
 // a client's version is then judged in the background (QC técnico en curso → superado | n hallazgos | no disponible)
-const judge = ({projectId, v}, o = {}) => judgeVersion({dir: REVIEWS, publicDir: PUBLIC, projectId, v, ...o});
+// the owner's inbox (server/review.mjs): each new item a line in the log — after a judge settles, at start, after a bandeja step
+const inboxNow = () => { try { refreshInbox({publicDir: PUBLIC, disk: resources()}); } catch (e) { console.error(`[owner-inbox] not refreshed: ${e.message}`); } };
+const judge = ({projectId, v}, o = {}) => judgeVersion({dir: REVIEWS, publicDir: PUBLIC, projectId, v, ...o}).then((r) => { r?.done.then(inboxNow, inboxNow); return r; });
 const runRender = createRenderRunner({root: ROOT, publicDir: PUBLIC, exportsDir: EXPORTS, reviewsDir: REVIEWS, plan: PLAN, prepare: prepareRender, masterCache, captionAlpha: CAPTION_ALPHA, logStage, judge, env: () => ({...readEnvFile(), ...process.env})});
 const renderJobs = createRenderJobs({
   dir: RENDER_JOBS,
@@ -258,7 +261,7 @@ const renderJobs = createRenderJobs({
 for (const sig of ['SIGTERM', 'SIGINT']) process.once(sig, () => { renderJobs.shutdown(); process.exit(0); });
 console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concurrency}, default mode ${DEFAULT_MODE} — jobs in ${path.relative(ROOT, RENDER_JOBS)}/`);
 // a judge a dead backend left 'en curso': judged again once, then 'no disponible'
-resumeJudges({dir: REVIEWS, publicDir: PUBLIC}).catch((e) => console.error(`judges not resumed: ${e.message}`));
+resumeJudges({dir: REVIEWS, publicDir: PUBLIC}).catch((e) => console.error(`judges not resumed: ${e.message}`)).finally(inboxNow);
 
 // Who may reach what (server/http.mjs gate): loopback Host + localhost Origin
 // locally (the editor, the MCP server, curl — DNS-rebinding and CSRF pages are
@@ -278,6 +281,7 @@ const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
 const AUTH = Object.fromEntries((process.env.REEL_AUTH_BCRYPT || '').split(',').filter(Boolean).map((pair) => { const i = pair.indexOf(':'); return [pair.slice(0, i), pair.slice(i + 1)]; }));
 const SESSION_SECRET = process.env.REEL_SESSION_SECRET || TOKEN;
 const LOGIN_LIMITER = createLoginLimiter({max: 5, windowMs: 60e3});
+const BANDEJA_LIMITER = createLoginLimiter({max: 30, windowMs: 60e3}); // the bandeja's POSTs, per login user
 const TRUST_HOPS = trustedHops();
 // per-user tokens (server/tokens.mjs): the reel CLI's users, revocable one by one; REEL_REQUIRE_TOKEN=1
 // makes loopback /api/* calls carry a token too (a box shared over SSH)
@@ -327,6 +331,7 @@ async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN, roles: ROLES});
   if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC, g, login: PUBLIC_MODE}); // token-gated (+ the client's login for a client's project), read-only, never /exports/*
+  if (g.kind === 'bandeja') return handleBandeja(req, res, url, {publicDir: PUBLIC, g, login: PUBLIC_MODE, secret: SESSION_SECRET, hops: TRUST_HOPS, limiter: BANDEJA_LIMITER, disk: resources}); // login session only: approve, revoke, notes, the owner's inbox
   if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
@@ -813,7 +818,9 @@ async function handle(req, res) {
   }
 
   // ---- review links (scripts/reviews.mjs): the editor's Share button and the MCP share_version / list_versions / revoke_review_link ----
-  //   GET    /api/reviews/<projectId>                → {versions, links}
+  //   GET    /api/reviews/<projectId>                → {versions, links}; a client's version also says its review state (review:
+  //                                                     por revisar | cambios | aprobada | aprobada, reemplazada) and openNotes —
+  //                                                     approving, revoking and notes are the bandeja's (/bandeja, login only)
   //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt, clients, access} (the token is shown once;
   //                                                     access = what a client's link needs besides itself, server/review.mjs linkAccess)
   //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
@@ -837,7 +844,8 @@ async function handle(req, res) {
     if (req.method === 'GET' && !withLinks) {
       const r = loadReviews(REVIEWS, projectId);
       const playable = new Set(playableVersions(r, PUBLIC).map((x) => x.v));
-      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v), qcLabel: judgeText(x.judge)})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
+      const {delivered} = variantState(r.versions.filter((x) => x.identity)); // a client's version: its review state in the bandeja (read-only here)
+      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v), qcLabel: judgeText(x.judge), ...(x.identity ? {review: versionLabel(x, delivered), openNotes: openNotes(x).length} : {})})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
     }
     if (req.method === 'POST' && withLinks && !linkId) {
       let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }

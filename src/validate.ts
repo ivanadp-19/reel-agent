@@ -496,8 +496,8 @@ export const identityOf = ({client, script, family, hook, cta, v, development}: 
 };
 
 // VIBEM_G2_H1_C1: client, script and variant (C for the CTA, the client's own H1_C1) — the key of one project
-// each (identityTaken) and the stem of its file names
-const identityStem = ({client, script, variant}: Identity) =>
+// each (identityTaken), the stem of its file names and the variant name a reviewer retypes to approve (scripts/review-states.mjs)
+export const identityStem = ({client, script, variant}: Identity) =>
   [client.toUpperCase(), `G${script}`, ...(!variant ? [] : 'v' in variant ? [`V${variant.v}`] : [variant.hook && `H${variant.hook}`, variant.cta && `C${variant.cta}`])].filter(Boolean).join('_');
 
 // another project (rows: {id, identity}) already holding this client + script + variant → why, else null

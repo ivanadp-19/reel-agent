@@ -85,7 +85,7 @@ export function parseRoles(raw) {
 }
 
 const isHttps = (req) => Boolean(req.socket?.encrypted) || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
-function cookieHeader(req, value, maxAgeSec, forceSecure) {
+export function cookieHeader(req, value, maxAgeSec, forceSecure) {
   return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${forceSecure || isHttps(req) ? '; Secure' : ''}`;
 }
 
@@ -213,7 +213,7 @@ export function loginPage({error = '', next = '/'} = {}) {
 </form></body></html>`;
 }
 
-function readBody(req, limit = 8192) {
+export function readBody(req, limit = 8192) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
     req.on('data', (c) => { size += c.length; if (size > limit) { reject(Object.assign(new Error('body too large'), {status: 413})); req.destroy(); } else chunks.push(c); });
