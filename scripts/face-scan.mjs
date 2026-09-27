@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
-import {LOOKS_VF, frameLooks, sameShot} from './grade-scan.mjs';
+import {frameLooks, looksVf, rangeOf, sameShot} from './grade-scan.mjs';
 import {acquireLock, releaseLock} from './project-lock.mjs';
 import {faceCacheName} from '../src/faces.ts';
 
@@ -78,8 +78,9 @@ function run(cmd, args, name, {onOut, onErr} = {}) {
     });
   });
 }
+// → {fps, range}: the frame rate, and the file's own range (grade-scan.mjs rangeOf: the shot rule reads its frames in it)
 const probe = async (file, name) => {
-  try { const s = JSON.parse(String(await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate,r_frame_rate', '-of', 'json', file], name))).streams[0]; const f = (r) => { const [n, d] = String(r).split('/').map(Number); return d ? n / d : n; }; return f(s.avg_frame_rate) || f(s.r_frame_rate) || 30; } catch { return 30; }
+  try { const s = JSON.parse(String(await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=avg_frame_rate,r_frame_rate,color_range,pix_fmt', '-of', 'json', file], name))).streams[0]; const f = (r) => { const [n, d] = String(r).split('/').map(Number); return d ? n / d : n; }; return {fps: f(s.avg_frame_rate) || f(s.r_frame_rate) || 30, range: rangeOf(s)}; } catch { return {fps: 30, range: 'tv'}; }
 };
 const median = (xs) => { const a = [...xs].sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -126,16 +127,16 @@ async function scanFile(publicDir, src, out, cuts) {
   try {
     const still = /\.(jpe?g|png|webp|gif|bmp|tiff?)$/i.test(file); // an image B-roll: its one frame, no shots
     cuts &&= !still;
-    const fps = still ? 30 : await probe(file, name), every = Math.max(1, Math.round(fps / RATE));
+    const {fps, range} = still ? {fps: 30, range: 'tv'} : await probe(file, name), every = Math.max(1, Math.round(fps / RATE));
     const looks = [], pts = [];
     let rest = Buffer.alloc(0), line = '';
     const faces = still ? 'null' : `select=not(mod(n\\,${every})),showinfo`; // full resolution: face.py scales it for the search
-    const graph = cuts ? `[0:v]split=2[a][b];[a]${LOOKS_VF}[l];[b]${faces}[f]` : `[0:v]${faces}[f]`;
+    const graph = cuts ? `[0:v]split=2[a][b];[a]${looksVf(range)}[l];[b]${faces}[f]` : `[0:v]${faces}[f]`;
     await run('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-nostats', '-threads', '1', '-filter_complex_threads', '1', '-i', file, '-an', '-filter_complex', graph,
       '-map', '[f]', '-fps_mode', 'passthrough', '-q:v', '4', path.join(dir, '%06d.jpg'), ...(cuts ? ['-map', '[l]', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-'] : [])], name, {
       onOut: (d) => {
         const buf = Buffer.concat([rest, d]), whole = buf.length - (buf.length % LOOK);
-        for (const f of frameLooks(buf.subarray(0, whole))) looks.push(f);
+        for (const f of frameLooks(buf.subarray(0, whole), range)) looks.push(f);
         rest = buf.subarray(whole);
       },
       onErr: (d) => { // showinfo: each face frame's own time
