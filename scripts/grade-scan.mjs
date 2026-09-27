@@ -237,21 +237,23 @@ export async function scanSource(publicDir, src, {force = false} = {}) {
 // The backend's background lane: kick(srcs) queues each unscanned source (a second kick of one queued
 // or running joins it) and never throws; one scan at a time for the whole backend. read: what counts as
 // scanned (the backend's lane also runs the wind scan, scripts/wind-scan.mjs, and wants both current)
+// kind: what to scan of each ('all' by default; the backend's lane also takes 'faces' for a B-roll, scripts/face-scan.mjs)
 export function createGradeScans({publicDir, log = console.log, scan = (src) => scanSource(publicDir, src), read = readScan} = {}) {
   const queued = new Set();
   let chain = Promise.resolve();
-  const kick = (srcs) => {
+  const kick = (srcs, kind = 'all') => {
     for (const src of [].concat(srcs)) {
-      if (queued.has(src) || read(publicDir, src) !== null) continue; // current, or no such file
-      queued.add(src);
+      const key = `${kind}:${src}`;
+      if (queued.has(key) || read(publicDir, src, kind) !== null) continue; // current, or no such file
+      queued.add(key);
       chain = chain.then(async () => {
         const t0 = Date.now();
-        try { const e = await scan(src); log(`grade scan ${src}: ${e.frames} frames, ${e.steps.length} half-graded step(s) in ${((Date.now() - t0) / 1000).toFixed(1)} s`); } catch (e) { log(`grade scan ${src}: ${String(e?.message ?? e).slice(0, 300)}`); } finally { queued.delete(src); }
+        try { const e = await scan(src, kind); log(`${kind === 'all' ? 'grade' : kind} scan ${src}: ${e.frames != null ? `${e.frames} frames, ${e.steps.length} half-graded step(s)` : `${e.samples?.length ?? 0} samples`} in ${((Date.now() - t0) / 1000).toFixed(1)} s`); } catch (e) { log(`${kind === 'all' ? 'grade' : kind} scan ${src}: ${String(e?.message ?? e).slice(0, 300)}`); } finally { queued.delete(key); }
       });
     }
     return chain;
   };
-  return {kick, pending: (src) => queued.has(src)};
+  return {kick, pending: (src, kind = 'all') => queued.has(`${kind}:${src}`)};
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

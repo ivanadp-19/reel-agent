@@ -47,7 +47,7 @@ import {parseEnv} from 'node:util';
 const SKILL = import.meta.dirname;
 const ROOT = path.resolve(SKILL, '..', '..', '..');
 const src = (f) => path.join(ROOT, 'src', f);
-const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform, MIN_PIECE_SEC, FLASH_SEC} = await import(src('timeline.ts'));
+const {placeClips, continuesPrev, deliveryFps, renderFps, sampleTransform, MIN_PIECE_SEC, FLASH_SEC, shotsOf} = await import(src('timeline.ts'));
 const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('captions.ts'));
 const {validateProject, validateIdentity, transcriptIssues, unbackedData, dataIssue, SAFE} = await import(src('validate.ts'));
 const {DUR_MS, heldScale, startScale} = await import(src('transitions.ts'));
@@ -787,20 +787,9 @@ export function colorJumpFindings(clipLooks, shots) {
 }
 
 // ---------- the edit's shots: what the viewer sees as one uninterrupted shot ----------
-// placed: placeClips. Clips joined where the source runs on (continuesPrev: a split that removed nothing — a
-// pre-edit split at its own shot change, a half-graded head split off by grade-coverage's fix) with a plain cut
-// and the same framing either side are one shot: the edit adds nothing on screen there (whatever the source
-// shows there is source-cut's). → [{clip (its first), startMs, endMs, ids}]. Every rule that counts shots uses
-// this: flash-cut, color-jump, color-burnt / dark, static and the cuts sheet
-export function shotsOf(placed) {
-  const shots = [];
-  placed.forEach((pc, k) => {
-    const prev = placed[k - 1]?.clip, a = prev && sampleTransform(prev.transform, prev.outSec), b = sampleTransform(pc.clip.transform, pc.clip.inSec);
-    if (continuesPrev(prev, pc.clip) && startScale(pc.clip) === heldScale(prev) && Math.abs(a.scale - b.scale) + Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 1e-3) Object.assign(shots.at(-1), {endMs: pc.endMs, ids: [...shots.at(-1).ids, pc.clip.id]});
-    else shots.push({clip: pc.clip, startMs: pc.startMs, endMs: pc.endMs, ids: [pc.clip.id]});
-  });
-  return shots;
-}
+// src/timeline.ts shotsOf (plainJoin: the captions' takes read the same rule). Every rule that counts shots uses
+// it: flash-cut, color-jump, color-burnt / dark, static and the cuts sheet
+export {shotsOf};
 
 // ---------- cuts: a flash, jump cuts inside one take ----------
 // a flash is a SHOT under flashMs (shotsOf: a 10-frame piece a split runs on through is no flash, two tiny pieces
@@ -978,6 +967,7 @@ export function frameZeroFindings(frames, {fades = {}, video = null} = {}) {
 // finding per page, at its worst moment. No clean master: the captioned render itself, said in skipped (a face the
 // captions hide may not be seen); no venv or model: skipped, never a crash.
 export async function captionFaceFindings({p, rate, file, role, pair, snapshot, publicDir, skipped}) {
+  if ((process.env.REEL_FACE_AWARE ?? '1') === '0') { skipped.push('caption-face: switched off here (REEL_FACE_AWARE=0)'); return []; }
   if (!canScanFaces()) { skipped.push('caption-face: no YuNet here (.venv / .models/yunet.onnx) — captions over a face not checked on the render'); return []; }
   const near = snapshot && fs.existsSync(path.dirname(snapshot)) ? fs.readdirSync(path.dirname(snapshot)).filter((f) => f.endsWith('_master.mp4')).map((f) => path.join(path.dirname(snapshot), f))[0] : null;
   const master = (role === 'captioned' && pair && fs.existsSync(pair) ? pair : null) ?? near;

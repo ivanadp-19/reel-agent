@@ -27,7 +27,7 @@ export type OffMic = 'mark' | 'cut' | 'off';
 const HISTORY_LIMIT = 100;
 
 // one undo step = the full editable state
-type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
+type Snapshot = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; faceShift: number | null; faceHold: FaceHold | null};
 
 type EditorState = {
   meta: Meta | null;
@@ -55,6 +55,7 @@ type EditorState = {
   captionsOff: boolean; // captions switched off (set_captions): pages kept, none rendered
   faceShift: number | null; // this project's reach to clear a face, ± % (set_captions face_shift); null = the kit's / the default (src/faces.ts)
   faceHold: FaceHold | null; // how long one caption position holds: toma / video / pagina (set_captions face_hold); null = the kit's / the default
+  restores: number; // undo / redo count: a knob they bring back carries its own tops (Editor: no re-place)
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
   identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
   scope?: Scopable[] | null; // the stages the job asks for (set_scope / Settings → Stages); null or undefined = all
@@ -149,8 +150,9 @@ const withMeta = (meta: Meta | null, clips: Clip[]): Meta | null =>
   meta ? {...meta, durationInFrames: totalDurationFrames(clips, meta.fps)} : meta;
 
 // capture the undoable slice of state
-type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]};
-const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls, graphics: s.graphics});
+// (the face knobs with the pages: one knob change and the tops it placed are one step)
+type Snappable = {clips: Clip[]; music: Music; captions: Caption[]; brolls: BrollItem[]; graphics: Graphic[]; faceShift: number | null; faceHold: FaceHold | null};
+const snap = (s: Snappable): Snapshot => ({clips: s.clips, music: s.music, captions: s.captions, brolls: s.brolls, graphics: s.graphics, faceShift: s.faceShift, faceHold: s.faceHold});
 // returns the {past, future} patch to prepend to a mutation that should be undoable
 const withHistory = (s: Snappable & {past: Snapshot[]}) => ({
   past: [...s.past, snap(s)].slice(-HISTORY_LIMIT),
@@ -188,6 +190,7 @@ export const useEditor = create<EditorState>((set) => ({
   captionsOff: false,
   faceShift: null,
   faceHold: null,
+  restores: 0,
   guion: '',
   past: [],
   future: [],
@@ -546,13 +549,13 @@ export const useEditor = create<EditorState>((set) => ({
     set((s) => {
       if (!s.past.length) return s;
       const prev = s.past[s.past.length - 1];
-      return {...prev, meta: withMeta(s.meta, prev.clips), past: s.past.slice(0, -1), future: [snap(s), ...s.future], selectedId: null, selectedClipId: null};
+      return {...prev, meta: withMeta(s.meta, prev.clips), past: s.past.slice(0, -1), future: [snap(s), ...s.future], selectedId: null, selectedClipId: null, restores: s.restores + 1};
     }),
 
   redo: () =>
     set((s) => {
       if (!s.future.length) return s;
       const next = s.future[0];
-      return {...next, meta: withMeta(s.meta, next.clips), past: [...s.past, snap(s)], future: s.future.slice(1), selectedId: null, selectedClipId: null};
+      return {...next, meta: withMeta(s.meta, next.clips), past: [...s.past, snap(s)], future: s.future.slice(1), selectedId: null, selectedClipId: null, restores: s.restores + 1};
     }),
 }));

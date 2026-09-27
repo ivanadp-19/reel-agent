@@ -16,7 +16,7 @@ import {assembleWords} from './lib-transcribe.mjs';
 import {yellowWords, applyGuionPunctuation} from '../src/highlights.ts';
 import {pageWords} from '../src/paging.ts';
 import {canScanFaces, readFaces, scanFaces} from './face-scan.mjs';
-import {placedCaptions} from '../mcp/checks.mjs';
+import {faceAware, faceGaps, faceSources, placedCaptions} from '../mcp/checks.mjs';
 import {reconcileWords, reconciliationLine, applyGlossary, joinFigures} from '../src/guion.ts';
 import {presetOf} from '../src/captionPresets.ts';
 
@@ -82,17 +82,21 @@ if (guionPathP) {
 }
 
 // clear of the faces (src/faces.ts): every source on screen — the clips and the project's own B-roll — scanned first
-// when it is not yet (scripts/face-scan.mjs), then each page placed by the project's knobs (faceShift / faceHold).
-// No venv or model (the VM): the pages stay at the pack's top, with a warning. REEL_FACE_AWARE=0: no scan, no move
+// when it is not yet (scripts/face-scan.mjs; one scan of a file at a time: a scan the backend's lane is running is
+// waited for), then each page placed by the project's knobs (faceShift / faceHold). What the check could not see is
+// said (WARN: lines, in the job's done status: the MCP, the editor and the reel CLI show them) — no venv or model on
+// the box, a scan that failed: those pages stay at the pack's top. REEL_FACE_AWARE=0: no scan, no move (checks.mjs)
 let captions = pageWords(words, presetOf(style));
-if ((process.env.REEL_FACE_AWARE ?? '1') !== '0') {
-  const srcs = [...new Set([...clips, ...(saved?.brolls ?? [])].map((c) => c.src).filter((s) => !/^https?:/i.test(s) && fs.existsSync(path.join(PUBLIC, s))))];
-  const todo = srcs.filter((s) => !readFaces(PUBLIC, s));
+if (faceAware()) {
+  const p = {...(saved ?? {}), clips, captions, captionStyle: style, brolls: saved?.brolls ?? [], graphics: saved?.graphics ?? []};
+  const todo = faceSources(p).filter((s) => fs.existsSync(path.join(PUBLIC, s)) && !readFaces(PUBLIC, s));
   for (const [k, src] of todo.entries()) {
+    if (!canScanFaces()) break;
     progress(88 + Math.round((k / todo.length) * 10), `Finding faces (${k + 1}/${todo.length})`);
-    try { await scanFaces(PUBLIC, src); } catch (e) { console.error(`face scan skipped — captions stay at the pack's top where it is missing: ${String(e?.message ?? e).slice(0, 200)}`); if (e?.retry && !canScanFaces()) break; }
+    try { await scanFaces(PUBLIC, src); } catch (e) { console.error(`face scan of ${src}: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
-  captions = placedCaptions({...(saved ?? {}), clips, captions, captionStyle: style, brolls: saved?.brolls ?? [], graphics: saved?.graphics ?? []}, PUBLIC);
+  for (const w of faceGaps(p, PUBLIC)) console.log(`WARN:${w.code}: ${w.msg}`);
+  captions = placedCaptions(p, PUBLIC);
 }
 fs.writeFileSync(process.argv[3] ?? path.join(PUBLIC, 'captions.multi.json'), JSON.stringify(captions, null, 2));
 progress(100, `Done — ${captions.length} captions`);

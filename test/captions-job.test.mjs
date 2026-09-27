@@ -20,7 +20,7 @@ function run(payload, files, env = {}, prep = () => {}) {
     for (const k of ['REEL_GUION', 'HF_TOKEN', ...(env.DEEPGRAM_API_KEY ? ['REEL_STT'] : ['DEEPGRAM_API_KEY'])]) delete e[k];
     const r = spawnSync(process.execPath, [JOB, 'job.json'], {cwd, env: e, encoding: 'utf8'});
     const pages = fs.existsSync(path.join(cwd, 'public/captions.multi.json')) ? JSON.parse(fs.readFileSync(path.join(cwd, 'public/captions.multi.json'), 'utf8')) : null;
-    return {status: r.status, stderr: r.stderr, pages};
+    return {status: r.status, stderr: r.stderr, stdout: r.stdout, pages};
   } finally { fs.rmSync(cwd, {recursive: true, force: true}); }
 }
 const shown = (pages) => pages.flatMap((c) => c.words).map((w) => `${w.text}${w.tier ? '*' : ''}`).join(' ');
@@ -61,9 +61,9 @@ test('captions clear of the faces: the job places the pages from the face scans 
     const file = path.join(cwd, 'public/clips/a.mp4');
     fs.writeFileSync(file, 'not a real video: the scan is cached for these bytes');
     const st = fs.statSync(file);
-    const samples = Array.from({length: 20}, (_, k) => ({t: k / 2, faces: [face(k / 2)]}));
+    const samples = Array.from({length: 20}, (_, k) => ({t: k / 2, faces: [{...face(k / 2), score: 0.93}]}));
     fs.mkdirSync(path.join(cwd, 'public/clips/faces'), {recursive: true});
-    fs.writeFileSync(path.join(cwd, 'public/clips/faces/a.json'), JSON.stringify({version: FACE_VERSION, src: 'clips/a.mp4', size: st.size, mtimeMs: Math.round(st.mtimeMs), rate: 2, width: 360, height: 640, cuts: [3.1, 6.2], samples}));
+    fs.writeFileSync(path.join(cwd, 'public/clips/faces/clips_a.mp4.json'), JSON.stringify({version: FACE_VERSION, src: 'clips/a.mp4', size: st.size, mtimeMs: Math.round(st.mtimeMs), rate: 2, width: 360, height: 640, cuts: [3.1, 6.2], samples}));
   };
   const files = {
     'public/clips/transcripts/a.es.json': said('Hola. Esta es la torre. Tiene alberca. Y un roof garden. Te espera. Ven hoy. Agenda tu cita.'),
@@ -79,4 +79,14 @@ test('captions clear of the faces: the job places the pages from the face scans 
   const second = low.pages.filter((c) => c.startMs >= 3100 && c.startMs < 6200).map((c) => c.topPct);
   assert.ok(second.length && new Set(second).size === 1 && second[0] !== 53 && Math.abs(second[0] - 53) <= 12, JSON.stringify(low.pages.map((c) => [c.startMs, c.topPct])));
   assert.deepEqual([...new Set(low.pages.filter((c) => c.startMs < 3100).map((c) => c.topPct))], [53], 'the first take stays');
+});
+
+// what the face check could not see is said in the job's output (WARN lines: the backend hands them to the MCP, the
+// editor and the reel CLI in the done status), never a silent "clear"
+test('captions job: a source it could not scan for faces is a warning, the pages stay at the pack\'s top', () => {
+  const r = run({style: 'vibem', project_id: 'p1'}, {'public/clips/transcripts/a.es.json': said('Hola. Esta es la torre.'), 'public/projects/p1.json': {}}, {REEL_FACE_AWARE: '1'},
+    (cwd) => fs.writeFileSync(path.join(cwd, 'public/clips/a.mp4'), 'not a video'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /WARN:caption-face-(pending: clips\/a\.mp4 could not be scanned for faces|unavailable: captions not checked against the faces of clips\/a\.mp4)/);
+  assert.deepEqual([...new Set(r.pages.map((c) => c.topPct))], [53]);
 });

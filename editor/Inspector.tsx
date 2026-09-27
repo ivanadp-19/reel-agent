@@ -291,11 +291,11 @@ export const Inspector: React.FC<{
             {/* set_captions face_shift / face_hold (src/faces.ts): how far and how long a position holds to clear every face; the pages re-place, their words stay */}
             <div className="mb-5" title="set_captions face_shift: how far (± % of the height) the captions may move from the pack's position so they never cover a face — 0 = never move (Validate reports it). Pages placed by hand stay">
               <Label>Cuánto puede moverse para no tapar caras (±{knobs.shift}%)</Label>
-              <input type="range" min={0} max={66} step={1} value={knobs.shift} onChange={(e) => setFaceKnobs({faceShift: Number(e.target.value)})} aria-label="Cuánto puede moverse para no tapar caras (±%)" className="w-full mt-1 mb-2 accent-primary" />
+              <input type="range" min={0} max={66} step={1} value={knobs.shift} onPointerDown={pushHistory} onKeyDown={pushHistory} onChange={(e) => setFaceKnobs({faceShift: Number(e.target.value)})} aria-label="Cuánto puede moverse para no tapar caras (±%)" className="w-full mt-1 mb-2 accent-primary" />
               <div className="flex items-center gap-2" title="set_captions face_hold: one position per take (never moves inside it), for the whole reel, or per page (the most free)">
                 <Label>Posición</Label>
-                <Select value={knobs.hold} onChange={(v) => setFaceKnobs({faceHold: v as FaceHold})} options={[{value: 'toma', label: 'por toma'}, {value: 'video', label: 'por video'}, {value: 'pagina', label: 'por página'}]} />
-                {faceShift != null || faceHold != null ? <Btn onClick={() => setFaceKnobs({faceShift: null, faceHold: null})}>Kit</Btn> : null}
+                <Select value={knobs.hold} onChange={(v) => { pushHistory(); setFaceKnobs({faceHold: v as FaceHold}); }} options={[{value: 'toma', label: 'por toma'}, {value: 'video', label: 'por video'}, {value: 'pagina', label: 'por página'}]} />
+                {faceShift != null || faceHold != null ? <Btn onClick={() => { pushHistory(); setFaceKnobs({faceShift: null, faceHold: null}); }}>Kit</Btn> : null}
               </div>
             </div>
             <div className="mb-5" title="set_guion: generated captions take the script's wording where it aligns with the audio (ASR timing kept); where they disagree the audio stays and Validate reports it">

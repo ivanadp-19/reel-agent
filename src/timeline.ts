@@ -92,6 +92,32 @@ export const clipDurationSec = (c: Clip) => Math.max(0, (c.outSec - c.inSec) / (
 export const continuesPrev = (prev: Clip | undefined, c: Clip | undefined) =>
   !!prev && !!c && prev.src === c.src && Math.abs(c.inSec - prev.outSec) < 0.001;
 
+// The edit shows no cut between prev and c: a plain cut (no transition in, or a punch carried on at the same scale —
+// a split piece keeps its punch) into the same framing. The one rule of
+// what reads as one uninterrupted picture — the render judge's shots (shotsOf) and the captions' takes (src/faces.ts)
+// the scale a clip holds once in (a punch or a zoom lands at PUNCH_SCALE), and the one it starts at with no transition
+// of its own (cut or a carried punch); null: a transition, never one shot with the clip before
+export const PUNCH_SCALE = 1.12;
+export const heldScale = (c?: Clip) => (c?.enter === 'punch' || c?.enter === 'zoom' ? PUNCH_SCALE : 1);
+export const startScale = (c: Clip) => (!c.enter || c.enter === 'cut' ? 1 : c.enter === 'punch' ? PUNCH_SCALE : null);
+export const plainJoin = (prev: Clip, c: Clip) => {
+  const a = sampleTransform(prev.transform, prev.outSec), b = sampleTransform(c.transform, c.inSec);
+  return startScale(c) === heldScale(prev) && Math.abs(a.scale - b.scale) + Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 1e-3;
+};
+// The edit's shots: clips joined where the source runs on (continuesPrev: a split that removed nothing — a pre-edit
+// split at its own shot change, a half-graded head split off) with a plainJoin are one shot: the edit adds nothing on
+// screen there (whatever the source shows there is the judge's source-cut). placed: placeClips → [{clip (its first),
+// startMs, endMs, ids}]
+export function shotsOf(placed: PlacedClip[]): {clip: Clip; startMs: number; endMs: number; ids: string[]}[] {
+  const shots: {clip: Clip; startMs: number; endMs: number; ids: string[]}[] = [];
+  placed.forEach((pc, k) => {
+    const prev = placed[k - 1]?.clip;
+    if (prev && continuesPrev(prev, pc.clip) && plainJoin(prev, pc.clip)) Object.assign(shots[shots.length - 1], {endMs: pc.endMs, ids: [...shots[shots.length - 1].ids, pc.clip.id]});
+    else shots.push({clip: pc.clip, startMs: pc.startMs, endMs: pc.endMs, ids: [pc.clip.id]});
+  });
+  return shots;
+}
+
 // J/L-cuts (timeline seconds, clamped to what actually works):
 // a J-cut plays the clip's first j seconds of audio under the previous clip's
 // tail (the main clip mutes those first frames so the lead flows straight

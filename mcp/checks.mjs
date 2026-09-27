@@ -15,8 +15,8 @@ import {readScan} from '../scripts/grade-scan.mjs';
 import {scopeFindings, stageFindings} from '../src/stages.ts';
 import {readWind} from '../scripts/wind-scan.mjs';
 import {windIssues} from '../src/audio.ts';
-import {captionFaceIssues, faceCacheName, placeCaptions} from '../src/faces.ts';
-import {canScanFaces, readFaces} from '../scripts/face-scan.mjs';
+import {captionFaceIssues, faceCacheName, legacyFaceCacheName, placeCaptions} from '../src/faces.ts';
+import {faceScanProblem, readFaces} from '../scripts/face-scan.mjs';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -26,9 +26,28 @@ export function withDefaults(p) {
   return p;
 }
 
-// the face scans (scripts/face-scan.mjs, public/clips/faces/<source>.json) of the project's clips and local B-roll, by src:
-// samples over time for the captions (src/faces.ts), the summary box for the graphics' face rule (src/validate.ts)
-export const facesOf = (p, publicDir) => Object.fromEntries([...new Set([...p.clips, ...(p.brolls ?? [])].map((c) => c.src).filter((s) => !/^https?:/i.test(s)))].map((src) => { try { return [src, JSON.parse(fs.readFileSync(path.join(publicDir, 'clips', 'faces', faceCacheName(src)), 'utf8'))]; } catch { return [src, undefined]; } }));
+// Faces on screen (src/faces.ts): REEL_FACE_AWARE=0 turns the whole feature off — no scan, no move, no finding
+export const faceAware = () => (process.env.REEL_FACE_AWARE ?? '1') !== '0';
+// the sources a face scan covers: the project's clips and its local B-roll (a stock URL has no scan)
+export const faceSources = (p) => [...new Set([...p.clips, ...(p.brolls ?? [])].map((c) => c.src).filter((s) => !/^https?:/i.test(s)))];
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return undefined; } };
+// the face scans (scripts/face-scan.mjs, public/clips/faces/<its path>.json; the first scans' basename files as a
+// fallback), by src: samples over time for the captions (src/faces.ts), the summary box for the graphics' face rule
+export const facesOf = (p, publicDir) => (faceAware() ? Object.fromEntries(faceSources(p).map((src) => [src, readJson(path.join(publicDir, 'clips', 'faces', faceCacheName(src))) ?? readJson(path.join(publicDir, 'clips', 'faces', legacyFaceCacheName(src)))])) : {});
+// What the face check could not see, said instead of a silent "clear": sources with no current scan (queued: kick),
+// scans that failed, or a box that cannot scan at all (the VM without the venv or the model)
+export function faceGaps(p, publicDir, {kick} = {}) {
+  if (!faceAware() || !p.captions?.length || p.captionsOff) return [];
+  const srcs = faceSources(p).filter((src) => fs.existsSync(path.join(publicDir, src)));
+  const pending = srcs.filter((src) => readFaces(publicDir, src) === null), failed = srcs.filter((src) => readFaces(publicDir, src)?.error);
+  const why = pending.length ? faceScanProblem() : null;
+  if (pending.length && !why) try { kick?.(pending); } catch {}
+  return [
+    ...(why ? [{level: 'warn', code: 'caption-face-unavailable', msg: `captions not checked against the faces of ${pending.join(', ')}: this box cannot scan them (${why}) — they stay where the pack puts them; scan them where YuNet runs (node scripts/face-scan.mjs <file>) or check the frames (caption_proof)`}]
+      : pending.length ? [{level: 'warn', code: 'caption-face-pending', msg: `${pending.join(', ')} not scanned for faces yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute, then re-place the captions (set_captions face_shift) (or: node scripts/face-scan.mjs ${pending.join(' ')})`}] : []),
+    ...failed.map((src) => ({level: 'warn', code: 'caption-face-pending', msg: `${src} could not be scanned for faces (${readFaces(publicDir, src).error}) — retry: node scripts/face-scan.mjs ${src} --force`})),
+  ];
+}
 
 // the pack's own font file read, so a page's lines are measured as rendered (src/captionLayout.ts realAdvances):
 // validate's caption band and the face placement. Missing or not a font: the estimate (validate: font-missing)
@@ -54,7 +73,7 @@ export const datosPorConfirmar = (p, publicDir, env) => unbackedData(p, projectW
 // createGradeScans, which runs the wind scan too) — validate itself never decodes. A finding of a stage the job did
 // not ask for (scopeFindings: a captions-only job on the client's finished export — its color is theirs) is a
 // warning that says so: reported, never fixed here
-export async function projectIssues(p, publicDir, env, {kick} = {}) {
+export async function projectIssues(p, publicDir, env, {kick, kickFaces} = {}) {
   const fps = deliveryFps(p);
   // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name);
   // the pack's own file also gives validate's caption band its real widths (realAdvances, as the render judge)
@@ -64,13 +83,15 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const scans = Object.fromEntries(srcs.map((src) => [src, readScan(publicDir, src)]));
   const winds = Object.fromEntries(srcs.map((src) => [src, readWind(publicDir, src)]));
   const pending = srcs.filter((src) => scans[src] === null), failed = srcs.filter((src) => scans[src]?.error);
-  const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null || (canScanFaces() && readFaces(publicDir, src) === null));
+  const kicked = srcs.filter((src) => scans[src] === null || winds[src] === null || (faceAware() && readFaces(publicDir, src) === null && !faceScanProblem()));
   if (kicked.length) try { kick?.(kicked); } catch {}
+  // the B-roll's faces (its own lane job: faces only); the clips' ride with their grade and wind scans (kick)
+  const gaps = faceGaps(p, publicDir, {kick: (pending) => kickFaces?.(pending.filter((src) => !srcs.includes(src)))});
   const words = await projectWords(p, publicDir, env);
   // wind is the take's: the quiet of each whole source (between its first and last word), not only what the cut keeps
   const takes = Object.fromEntries((await projectWords({...p, clips: srcs.map((src) => ({id: src, src, inSec: 0, outSec: Infinity}))}, publicDir, env)).map((t) => [t.clipId, t.words]));
   const faces = facesOf(p, publicDir);
-  const {inScope, advisory} = scopeFindings([...validateProject(p, fps, faces, fonts), ...captionFaceIssues(p, faces, fps), ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
+  const {inScope, advisory} = scopeFindings([...validateProject(p, fps, faces, fonts), ...(faceAware() ? captionFaceIssues(p, faces, fps) : []), ...gaps, ...transcriptIssues(p, words), ...halfGradedIssues(p, scans, fps), ...windIssues(p, winds, takes),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
     ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))], p.scope);
   return [...inScope, ...advisory.map(({advisory: _, ...i}) => ({...i, level: 'warn', msg: `${i.msg.split(' Fix: ')[0]} — ${i.omitted} omitida (the job did not ask for it): advisory, report it, do not fix it`}))];

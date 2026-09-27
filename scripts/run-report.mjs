@@ -10,6 +10,7 @@ import {validateProject} from '../src/validate.ts';
 import {placeClips} from '../src/timeline.ts';
 import {transcribeClip} from './lib-transcribe.mjs';
 import {stageReport} from './stages.mjs';
+import {facesOf} from '../mcp/checks.mjs';
 
 const [logFile, id, flag] = process.argv.slice(2);
 if (!logFile || !id) { console.error('usage: node scripts/run-report.mjs <log.jsonl> <project_id> [--json]'); process.exit(1); }
@@ -49,7 +50,7 @@ for (const c of p.clips) {
   try { words = await transcribeClip(c, p.lang ?? 'auto', 'mark'); } catch {}
   offKept += words.filter((w) => w.off && w.endMs > c.inSec * 1000 && w.startMs < c.outSec * 1000).length;
 }
-const faces = Object.fromEntries(p.clips.map((c) => { try { return [c.src, JSON.parse(fs.readFileSync(path.join(PUBLIC, 'clips', 'faces', `${path.basename(c.src).replace(/\.[^.]+$/, '')}.json`), 'utf8'))]; } catch { return [c.src, undefined]; } }));
+const faces = facesOf({brolls: [], ...p}, PUBLIC); // the face scans (mcp/checks.mjs: by path, the basename files as a fallback)
 const issues = validateProject(p, 30, faces);
 const placed = placeClips(p.clips, 30);
 const out = {

@@ -4,7 +4,7 @@
 
 import {projectCaptions, type Caption} from './captions.ts';
 import {floatSlot, pageScale, presetOf, type Preset} from './captionPresets.ts';
-import {fitPage} from './captionLayout.ts';
+import {fitPage, wrapUnits} from './captionLayout.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {applyGlossary, coreOf, guionIssues, joinFigures, normKey, numberOf, type GlossaryEntry} from './guion.ts';
@@ -22,29 +22,41 @@ const W = 1080, H = 1920;
 
 export type Band = {top: number; bottom: number}; // % of frame height
 
-// a page's block, % of the frame, as the renderer lays it out (src/captionLayout.ts fitPage — a pack's own font measured
-// once its file is read: mcp/checks.mjs, the render judge): its height (its lines at its size, + a container's padding)
-// and its widest line (src/faces.ts: which faces it can meet)
-export function captionBlock(c: Caption, p: Preset, float: boolean): {h: number; w: number} {
-  const {lines, units, fontSize} = fitPage(c, p, {float});
-  const gap = (p.font.wordGapEm ?? 0.26) * fontSize, pad = p.container !== 'none' ? p.font.sizePx * 0.5 : 0;
-  const widths = lines.map((a, k) => units.slice(a, lines[k + 1] ?? units.length).reduce((n, u, j) => n + u.em * fontSize + (j ? gap : 0), 0));
-  return {h: ((Math.max(1, lines.length) * fontSize * p.font.lineHeight + pad) / H) * 100, w: ((Math.max(0, ...widths) + 2 * pad) / W) * 100};
+// A page's ink, % of the frame, never smaller than what the renderer draws (src/captionLayout.ts fitPage — a pack's own
+// font measured once its file is read: mcp/checks.mjs, the editor, the render judge): its lines, each as tall as its
+// biggest word (a key word's tier scale grows its line: prism 1.45×), + a container's padding; `up` = how far the ink
+// rises over topPct (an accent over a capital: Á, Í); w = its widest line (src/faces.ts: which faces it can meet).
+// Lines: a balance pack draws fitPage's rows as they are; any other pack is left to the browser's flex-wrap, which a
+// line within INK_SLACK of the wrap width may break once more (Morantes 4.1 c0: 934 px of 934) — counted as if it did.
+const INK_SLACK = 0.97, ACCENT_EM = 0.2;
+export function captionBlock(c: Caption, p: Preset, float: boolean): {h: number; w: number; up: number} {
+  const {lines, units, fontSize, wrapPx} = fitPage(c, p, {float});
+  const gapEm = p.font.wordGapEm ?? 0.26, gap = gapEm * fontSize, pad = p.container !== 'none' ? p.font.sizePx * 0.5 : 0;
+  const rows = p.layout.balance || units.some((u) => u.br) ? lines : wrapUnits(units, fontSize, wrapPx * INK_SLACK, gapEm);
+  const scaleOf = (k: number) => Math.max(1, ...c.words.slice(units[k].from, units[k].to + 1).map((w) => p.tiers[(w.tier ?? 0) as 0 | 1 | 2]?.scale ?? 1));
+  const span = (a: number, b: number) => units.slice(a, b);
+  const hPx = rows.reduce((n, a, k) => n + fontSize * p.font.lineHeight * Math.max(...span(a, rows[k + 1] ?? units.length).map((_, j) => scaleOf(a + j))), 0);
+  const widths = lines.map((a, k) => span(a, lines[k + 1] ?? units.length).reduce((n, u, j) => n + u.em * fontSize + (j ? gap : 0), 0));
+  // an accent over a capital on the first line rises over the line box (the lowercase ones stay under the cap height)
+  const first = c.words.slice(0, units[rows[1] ?? units.length]?.from ?? c.words.length).map((w) => (p.font.case === 'upper' ? w.text.toUpperCase() : w.text)).join(' ');
+  const up = /[ÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÄËÏÖÜÑ]/.test(first) ? (ACCENT_EM * fontSize * scaleOf(0)) / H * 100 : 0;
+  return {h: ((Math.max(fontSize * p.font.lineHeight, hPx) + pad) / H) * 100 + up, w: ((Math.max(0, ...widths) + 2 * pad) / W) * 100, up};
 }
-// on-screen band of a caption page for its preset, for validate's warnings and the face placement (src/faces.ts);
-// index = its place in the projected list (floating presets cycle their slots by it, like the renderer, unless the
-// face placement gave it one: floatSlot)
+// on-screen band of a caption page for its preset — the ink, from its top to its bottom — for validate's warnings and the
+// face placement (src/faces.ts); index = its place in the projected list (floating presets cycle their slots by it, like
+// the renderer, unless the face placement gave it one: floatSlot)
 export function captionBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
   const float = p.position === 'float' && !c.pin;
-  const top = float ? floatSlot(c, index).top : c.topPct;
-  return {top, bottom: top + captionBlock(c, p, float).h};
+  const {h, up} = captionBlock(c, p, float);
+  const top = (float ? floatSlot(c, index).top : c.topPct) - up;
+  return {top, bottom: top + h};
 }
 // the band avoidGraphics PLACES a page by, inside every render: characters over maxCharsLine, never a font's
 // widths — MultiClipVideo places the pages before any font file is read, so fitPage's band would move a page
 // by the estimate in the export and by the real face in the judge (a vibem page pinned 7 % up for nothing).
 // ponytail: an estimate; place by fitPage once MultiClipVideo holds its frame for the pack font (useProjectFont)
-function placeBand(c: Caption, style: string | undefined, index: number): Band {
+export function placeBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
   const chars = c.words.reduce((n, w) => n + w.text.length + 1, -1);
   const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
@@ -88,15 +100,17 @@ function graphicBand(g: Graphic): Band | null {
   const top = CENTERED.has(g.template) ? y - (h / H) * 50 : y;
   return {top, bottom: top + (h / H) * 100};
 }
-const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
+export const overlap = (a: Band, b: Band) => a.top < b.bottom && b.top < a.bottom;
 
 // Captions step out of the way of a text graphic on screen at the same time
 // (run 6: the hook sat on the first caption). The page moves just under the
 // graphics it meets, or just above them, whichever stays inside the safe zone,
 // and is pinned there so floating presets keep it. With no room it stays put
 // and validate reports the overlap. caps/gfx: projected (timeline) items.
+// the text graphics a caption page steps out of the way of, with their bands (src/faces.ts places around them too)
+export const textBlockers = (gfx: Graphic[]) => gfx.filter((g) => !g.behind && !CENTERED.has(g.template)).map((g) => ({g, band: graphicBand(g)})).filter((x): x is {g: Graphic; band: Band} => !!x.band);
 export function avoidGraphics(caps: Caption[], gfx: Graphic[], style?: string): Caption[] {
-  const blockers = gfx.filter((g) => !g.behind && !CENTERED.has(g.template)).map((g) => ({g, band: graphicBand(g)})).filter((x): x is {g: Graphic; band: Band} => !!x.band);
+  const blockers = textBlockers(gfx);
   if (!blockers.length) return caps;
   return caps.map((c, i) => {
     const band = placeBand(c, style, i);

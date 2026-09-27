@@ -17,6 +17,7 @@ import {pipeline} from 'node:stream/promises';
 import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
 import {PRESETS} from '../src/captionPresets.ts';
+import {FACE_HOLDS, MAX_SHIFT} from '../src/faces.ts';
 import {projectTiers, repage} from '../src/paging.ts';
 import {addedClip, applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
 import {parseStem} from '../src/validate.ts';
@@ -154,8 +155,23 @@ export function projectPatch(o) {
     if (!o.name.trim()) throw new CliError('bad_usage', '--name cannot be empty');
     patch.name = o.name;
   }
+  // the captions' reach and hold to clear the faces (src/faces.ts); "kit" = back to the client's kit / the default
+  if (o['face-shift'] != null) {
+    const v = o['face-shift'].trim().toLowerCase(), n = Number(v);
+    if (v !== 'kit' && !(v !== '' && Number.isFinite(n) && n >= 0 && n <= MAX_SHIFT)) throw new CliError('bad_usage', `--face-shift takes 0–${MAX_SHIFT} (± % of the height) or kit, not "${o['face-shift']}"`);
+    patch.faceShift = v === 'kit' ? null : n;
+  }
+  if (o['face-hold'] != null) {
+    const v = o['face-hold'].trim().toLowerCase();
+    if (v !== 'kit' && !FACE_HOLDS.includes(v)) throw new CliError('bad_usage', `--face-hold takes ${FACE_HOLDS.join(', ')} or kit, not "${o['face-hold']}"`);
+    patch.faceHold = v === 'kit' ? null : v;
+  }
   return patch;
 }
+// the pages placed clear of the faces by the backend (POST …/place-captions, src/faces.ts — the MCP's and the editor's
+// one function), with the knobs given → {moved, faceShift, faceHold, issues}
+const placeFaces = (ctx, id, knobs = {}) => api(ctx, 'POST', `/api/projects/${id}/place-captions`, {json: knobs});
+const facesLine = (f) => (f ? ` — faces: ±${f.faceShift} % by ${f.faceHold}, ${f.moved} page(s) moved${f.issues?.length ? `\n${f.issues.map((i) => `WARN ${i.code}: ${i.msg}`).join('\n')}` : ''}` : '');
 // the autocut plan against the clips it was made for: the clips after it and what it removes
 export function autocutPlan(clips, plan) {
   const {clips: after, remap} = applyAutocut(clips, plan);
@@ -384,12 +400,12 @@ export const COMMANDS = [
       await api(ctx, 'POST', `/api/projects/${id}`, {json: newProject(name)});
       return [{id, name, created: true}, `created ${id}`];
     }},
-  {name: 'projects set', args: '<project|name>', flags: {lang: {type: 'string', description: `transcription language code: ${LANGS.join(', ')} (auto = detect per clip)`}, 'caption-style': {type: 'string', description: 'the caption style pack (reel help projects set --json lists them)', choices: Object.keys(PRESETS)}, name: {type: 'string', description: 'rename the project'}, timeout: {type: 'string', description: 'seconds to wait for the re-paging (default 1800)'}},
+  {name: 'projects set', args: '<project|name>', flags: {lang: {type: 'string', description: `transcription language code: ${LANGS.join(', ')} (auto = detect per clip)`}, 'caption-style': {type: 'string', description: 'the caption style pack (reel help projects set --json lists them)', choices: Object.keys(PRESETS)}, name: {type: 'string', description: 'rename the project'}, 'face-shift': {type: 'string', description: `how far (± % of the height, 0–${MAX_SHIFT}) the captions may move to clear a face; 0 = never; kit = the client kit's / the default`}, 'face-hold': {type: 'string', description: `how long one caption position holds: ${FACE_HOLDS.join(', ')}; kit = the kit's / the default`}, timeout: {type: 'string', description: 'seconds to wait for the re-paging (default 1800)'}},
     summary: 'set the language, the caption style pack or the name of a project (the project by id or name); a new style re-pages the generated captions, keeping tiers and hand-made pages; setting what is already set changes nothing',
     output: '{project, changed, set: {lang?, captionStyle?, name?}, captions}', examples: ['reel projects set promo-cafe --lang es --json', 'reel projects set "Promo café" --caption-style caja --json'],
     run: async (ctx, [ref], o) => {
       const patch = projectPatch(o);
-      if (!Object.keys(patch).length) throw new CliError('bad_usage', 'nothing to set', 'reel projects set <project> --lang es | --caption-style <pack> | --name "<name>"');
+      if (!Object.keys(patch).length) throw new CliError('bad_usage', 'nothing to set', 'reel projects set <project> --lang es | --caption-style <pack> | --name "<name>" | --face-shift 12 | --face-hold toma');
       const id = await resolveProject(ctx, ref);
       const p = await getProject(ctx, id);
       // a new pack re-pages the generated captions, as the MCP's set_caption_style does
@@ -399,8 +415,10 @@ export const COMMANDS = [
         if (!Array.isArray(s.result)) throw new CliError('job_failed', 'the captions job returned no pages', 'is the backend up to date?');
         fresh = s.result;
       }
+      const {faceShift, faceHold, ...rest} = patch;
+      const knobs = {...(faceShift !== undefined ? {faceShift} : {}), ...(faceHold !== undefined ? {faceHold} : {})};
       const {project, changed} = await updateProject(ctx, id, (cur) => {
-        const next = {...patch};
+        const next = {...rest};
         if (fresh) {
           // a new pack: re-paged as the MCP's set_caption_style does (src/paging.ts repage)
           const r = repage(cur.captions ?? [], fresh, cur.clips ?? [], {hidden: cur.hiddenWids ?? [], replace: true, repropose: true});
@@ -408,8 +426,11 @@ export const COMMANDS = [
         }
         return Object.entries(next).every(([k, v]) => JSON.stringify(cur[k]) === JSON.stringify(v)) ? null : next;
       });
-      const set = Object.fromEntries(Object.keys(patch).map((k) => [k, project[k]]));
-      return [{project: id, changed, set, captions: (project.captions ?? []).length}, `${id}: ${Object.entries(set).map(([k, v]) => `${k} ${v}`).join(', ')}${changed ? '' : ' (already set)'}${fresh ? ` — ${project.captions.length} caption pages re-paged` : ''}`];
+      // re-paged, or a knob: the pages placed clear of the faces again (never re-paged for a knob)
+      const faces = (fresh || Object.keys(knobs).length) && (project.captions ?? []).length ? await placeFaces(ctx, id, knobs) : null;
+      const set = Object.fromEntries(Object.keys(rest).map((k) => [k, project[k]]));
+      if (faces) Object.assign(set, knobs);
+      return [{project: id, changed: changed || !!faces?.changed, set, captions: (project.captions ?? []).length, ...(faces ? {faces} : {})}, `${id}: ${Object.entries(set).map(([k, v]) => `${k} ${v}`).join(', ')}${changed || faces?.changed ? '' : ' (already set)'}${fresh ? ` — ${project.captions.length} caption pages re-paged` : ''}${facesLine(faces)}`];
     }},
   {name: 'projects delete', args: '<project>', flags: {yes: {type: 'boolean', description: 'required: deleting cannot be undone'}}, summary: 'delete a project (its media stays); deleting one that is gone is not an error', output: '{id, deleted}', examples: ['reel projects delete old-test --yes --json'],
     run: async (ctx, [id], o) => {
@@ -523,7 +544,9 @@ export const COMMANDS = [
         added = r.added;
         return {captions: r.captions, hiddenWids: r.hidden};
       });
-      return [{project: id, added, captions: project.captions.length}, `${id}: +${added} caption pages (${project.captions.length} total)`];
+      const faces = project.captions.length ? await placeFaces(ctx, id) : null; // the merged pages clear of the faces, hand-made ones too
+      const warnings = s.warnings ?? [];
+      return [{project: id, added, captions: project.captions.length, ...(faces ? {faces} : {}), ...(warnings.length ? {warnings} : {})}, `${id}: +${added} caption pages (${project.captions.length} total)${facesLine(faces)}${warnings.map((w) => `\nWARN ${w}`).join('')}`];
     }},
   {name: 'captions set', args: '<project> <file.json|->', flags: {'expected-revision': {type: 'string', description: 'the revision `captions get` printed: refused (exit 5, revision_mismatch) when the pages changed since'}},
     summary: 'replace the caption pages with a JSON file (or stdin); only the captions change, so a layers render reuses the cached master; the same pages again change nothing',
