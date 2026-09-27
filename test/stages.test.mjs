@@ -229,7 +229,7 @@ test('scope: what the gates find in an omitted stage is a warning of the deliver
 });
 
 test('scope: the render judge\'s findings on an omitted stage are advisory and never count in the QC label', async () => {
-  const {verdictOf} = await import('../.agents/skills/render-judge/judge.mjs');
+  const {verdictOf, versionSummary} = await import('../.agents/skills/render-judge/judge.mjs');
   const judged = [
     {check: 'grade-coverage', severity: 'blocker', kind: 'heuristic', msg: 'look changes inside a shot'},
     {check: 'insert-missing', severity: 'major', kind: 'rule', msg: 'no insert'},
@@ -245,6 +245,9 @@ test('scope: the render judge\'s findings on an omitted stage are advisory and n
   assert.equal(verdictOf(judged).verdict, 'FAIL', 'the whole pipeline: they count');
   const v = verdictOf([...kept, ...advisory]);
   assert.deepEqual([v.verdict, v.label, v.advisories], ['PASS', 'QC técnico superado', 4]);
+  // the label the render queue writes on the version (scripts/reviews.mjs judgeVersion, judge.mjs --summary)
+  const s = versionSummary({...v, findings: [...kept, ...advisory], skipped: [], profile: null});
+  assert.deepEqual([s.label, s.findings.map((f) => f.check)], ['superado', ['sync', 'black-flash']]);
   assert.deepEqual(scopeFindings(judged, null), {inScope: judged, advisory: []}, 'no scope: nothing advisory');
   // the gate of the delivery reads them the same way
   const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-stages-'));
