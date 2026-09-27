@@ -129,17 +129,19 @@ export function invalidate(prev: Fields | null | undefined, next: Fields | null 
 // here. entregables reads the judge's findings on the final render. A code in no list lands in entregables.
 // A rule that reads the graphics too — where captions land around them (safe-*: avoidGraphics), the pages an
 // end-card hides (layer-blocker) — is broll's: the first stage both captions and graphics edits reopen.
-// ponytail: J rules only; the probe (P) rules — durations, LUT copies, clipping, voice level, wind — and
-// crew talk / script coverage / caption text come with their phases (12, 16, 18)
+// ponytail: J rules and the wind scan only; the other probe (P) rules — durations, LUT copies, clipping, voice
+// level — come with their phase (16)
 export const RULES: Record<Stage, string[]> = {
   ingest: ['untranscribed', 'identity'],
-  corte: ['cut-word', 'off-mic', 'pause', 'cut-tight', 'jcut-gap'],
-  guion: [],
+  corte: ['cut-word', 'off-mic', 'pause', 'cut-tight', 'jcut-gap', 'crew-talk'], // crew-talk: src/cuts.ts isCrewRun, cut_words
+  guion: ['script-coverage'], // src/validate.ts transcriptIssues: the guion against the kept words, before captions
   color: ['half-graded', 'half-graded-pending'], // src/validate.ts halfGradedIssues, mcp/checks.mjs (the scan not done yet)
-  audio: [],
+  audio: ['wind'], // src/audio.ts windIssues: set_audio clean wind
   captions: ['font-missing', 'font-wrong', 'glue', 'short', 'long', 'timing', 'overlap-captions', 'fast-words',
-    'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing'],
-  broll: ['safe-top', 'safe-bottom', 'face', 'behind-hidden', 'overlap-graphic', 'overlap-graphics', 'supers-order', 'matte', 'hook', 'layer-blocker', 'supers-blocker'],
+    'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing',
+    'caption-text'], // the judge's: a page word that is not the word said, edit_caption
+  broll: ['safe-top', 'safe-bottom', 'face', 'behind-hidden', 'overlap-graphic', 'overlap-graphics', 'supers-order', 'matte', 'hook', 'layer-blocker', 'supers-blocker',
+    'data-from-audio'], // src/validate.ts unbackedData: a graphic's figure / name its audio does not say, edit_graphic
   entregables: [],
 };
 

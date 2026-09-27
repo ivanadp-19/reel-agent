@@ -1371,7 +1371,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     // datosPorConfirmar (the agent never decides a figure), never fails the verdict; a capitalized word taken for
     // a name is a candidate (is it one? on the frame), figures and glossary names are rule
     for (const d of unbackedData(p, tr, spellings)) {
-      const g = projectGraphics(p.graphics ?? [], p.clips, FPS).find((x) => x.id === d.ref);
+      const g = projectGraphics(p.graphics ?? [], p.clips, rate).find((x) => x.id === d.ref);
       findings.push(F('data-from-audio', 'major', d.guess ? 'candidate' : 'rule', g ? g.startMs / 1000 : null, g ? g.endMs / 1000 : null, dataIssue(d).msg, {graphic: d.ref, dato: d.dato}, [{tool: 'edit_graphic', note: 'what the audio says; or the client confirms it (datosPorConfirmar)', args: {graphic_id: d.ref}}]));
     }
     if (p.offMic !== 'off') findings.push(...offMicFindings(words, profile?.crewWords ?? []));
