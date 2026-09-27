@@ -38,12 +38,12 @@ import {oomReason} from '../scripts/render-memory.mjs';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
 import {ALPHA, createMasterCache} from '../scripts/layers.mjs';
 import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mjs';
-import {createLink, inReviewsRow, judgeText, judgeVersion, loadReviews, playableVersions, publicLink, resumeJudges, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
+import {agentNoteStep, createLink, inReviewsRow, judgeText, judgeVersion, keepUnapproved, loadReviews, playableVersions, publicLink, pruneAll, resumeJudges, retentionText, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
-import {gate, mayRejudge, servePublic, serveFile, tokenOk} from './http.mjs';
+import {gate, mayRejudge, projectClients, seesClient, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
 import {handleBandeja, handleReview, linkAccess, refreshInbox} from './review.mjs';
-import {byVariant, openNotes, variantName, variantState, versionLabel} from '../scripts/review-states.mjs';
+import {actorOf, byVariant, openNotes, variantName, variantState, versionLabel} from '../scripts/review-states.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
@@ -855,6 +855,13 @@ async function handle(req, res) {
   //                                                     (the MCP rejudge, the editor's Re-judge) — the backend token, an owner's
   //                                                     login, or the local editor (loopback); never a reviewer. 409 no_snapshot:
   //                                                     a version without the props it was rendered from
+  //   POST   /api/reviews/<projectId>/versions/<v>/notes/<note> {step: clasificar {kind} | resolver {v}} → {note, fixture?}: the
+  //                                                     agent's steps on a client's note (MCP classify_note / resolve_note) —
+  //                                                     whoever sees the client (the primary token: the MCP); confirmar,
+  //                                                     descartar and verificar are 403 here: the bandeja's, a human's (E-2)
+  //   POST   /api/review-retention {apply?, keep?}    → the retention pass over every project (scripts/reviews.mjs pruneAll):
+  //                                                     a dry run unless apply — node scripts/reviews.mjs prune runs it here
+  //                                                     while the backend is up; the backend token, loopback or an owner's login
   const rj0 = url.pathname.match(/^\/api\/reviews\/([\w-]+)\/versions\/(\d{1,6})\/judge$/);
   if (rj0) {
     if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
@@ -863,6 +870,23 @@ async function handle(req, res) {
     if (r instanceof Error) return json(res, 409, {error: r.message, code: r.code});
     if (!r) return json(res, 404, {error: `no version v${rj0[2]} of ${rj0[1]}`, code: 'not_found'});
     return json(res, 202, {projectId: rj0[1], v: r.version.v, judge: r.version.judge, qcLabel: judgeText(r.version.judge)});
+  }
+  const rn = url.pathname.match(/^\/api\/reviews\/([\w-]+)\/versions\/(\d{1,6})\/notes\/(n\d{1,6})$/);
+  if (rn) {
+    if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
+    if (!seesClient(g, projectClients(PUBLIC, rn[1]))) return json(res, 403, {error: 'the notes of a client\'s version take the backend token (the MCP) — or, for the owner\'s and the client\'s steps, their login in the bandeja', code: 'forbidden'});
+    let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
+    const [status, out] = await agentNoteStep(REVIEWS, PUBLIC, rn[1], +rn[2], rn[3], b, actorOf(g));
+    if (status === 200) inboxNow();
+    return json(res, status, out);
+  }
+  if (url.pathname === '/api/review-retention') {
+    if (req.method !== 'POST') return json(res, 405, {error: 'method not allowed'});
+    if (!mayRejudge(g)) return json(res, 403, {error: 'the retention pass needs the backend token, loopback or an owner login', code: 'forbidden'});
+    let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }
+    const r = await pruneAll(REVIEWS, PUBLIC, {apply: b.apply === true, keep: keepUnapproved(b.keep == null ? undefined : String(b.keep))});
+    console.log(retentionText(r));
+    return json(res, 200, r);
   }
   const rv = url.pathname.match(/^\/api\/reviews\/([\w-]+)(?:\/links(?:\/([0-9a-f]{8}))?)?$/);
   if (rv) {
@@ -938,13 +962,13 @@ async function handle(req, res) {
     }
     // what it will do — layers over a cached master, or a complete render and why (scripts/render-runner.mjs)
     let plan = null;
-    try { plan = planRender(JSON.parse(raw), {requested: mode, draft, root: ROOT, publicDir: PUBLIC, masterCache, pair: !!identity}); } catch (e) { console.error('render plan:', e.message); }
+    try { plan = planRender(JSON.parse(raw), {requested: mode, draft, root: ROOT, publicDir: PUBLIC, masterCache, pair: !!identity, scope: identity ? savedProject(PROJECTS_DIR, projectId).scope : null}); } catch (e) { console.error('render plan:', e.message); }
     if (url.searchParams.get('plan') === '1') return json(res, 200, {plan});
     // the pair cannot run layered here: refused now, not queued to fail (the runner would, with the same reasons)
     if (plan?.fails) return json(res, 400, {error: `render: deliverables need the layered render: ${plan.reasons.join('; ')}`.slice(0, 300), code: 'pair_needs_layers', plan});
     // one render at a time per token user (a retry with the same props gets that job back), none under the resource floors
     const tokenUser = g.via === 'user-token' ? g.user : null;
-    const admit = admitRender(renderJobs.list(), {user: tokenUser, props: raw, mode, identity}, resources());
+    const admit = admitRender(renderJobs.list(), {user: tokenUser, props: raw, mode, identity, expectSec}, resources());
     if (admit?.reuse) return json(res, 200, {jobId: admit.reuse.id, status: admit.reuse.status, ahead: renderJobs.ahead(admit.reuse.id), reused: true, plan});
     if (admit) return json(res, admit.status, admit);
     // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
@@ -1008,12 +1032,14 @@ try { ensureSfx(); } catch (e) { console.error('sfx:', e.message); }
 
 // Export cleanup for a deploy with no system cron that can reach public/ (Railway's volume):
 // REEL_CLEANUP_EVERY_H=N runs scripts/cleanup-exports.mjs every N hours (first run 5 min after boot),
-// in a child process, DRY-RUN unless REEL_CLEANUP_APPLY=1. Off when unset. On the VM use cron instead.
+// in a child process, and the review versions' retention (pruneAll: REEL_REVIEW_KEEP_UNAPPROVED) here, in the reviews
+// rows — both DRY-RUN unless REEL_CLEANUP_APPLY=1. Off when unset. On the VM use cron instead.
 const CLEANUP_EVERY_H = +(process.env.REEL_CLEANUP_EVERY_H || 0);
 if (CLEANUP_EVERY_H >= 1) {
   const sweep = () => {
     const c = spawn('node', ['scripts/cleanup-exports.mjs', ...(process.env.REEL_CLEANUP_APPLY === '1' ? ['--apply'] : [])], {cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit']});
     c.on('error', (e) => console.error('cleanup-exports could not start:', e.message));
+    pruneAll(REVIEWS, PUBLIC, {apply: process.env.REEL_CLEANUP_APPLY === '1'}).then((r) => console.log(retentionText(r)), (e) => console.error(`reviews retention: ${e.message}`));
   };
   setTimeout(sweep, 5 * 60e3).unref();
   setInterval(sweep, CLEANUP_EVERY_H * 3600e3).unref();

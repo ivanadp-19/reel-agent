@@ -18,8 +18,13 @@
 //                   _captions.mov, _captions.png.zip, _supers.mov, _master_supers.mp4 (src/validate.ts
 //                   DELIVERABLES), NAME the system name (deliverableName: VIBEM_G2_H1_C1_v3)
 //     snapshot      reviews/<projectId>/v<n>/project.json — the props that were rendered
-//     masterKey     the cached master it was cut from (scripts/layers.mjs masterKey): an unchanged master —
-//                   same key, same bytes (the final audio too) — is a hard link to the earlier version's, not a copy
+//                   A reel with no text graphic has no supers and no master_supers (it would be the master): both
+//                   are left out and named in `omitted` {supers, masterSupers: why} — the pair stays master + captions
+//     masterKey     the cached master it was cut from (scripts/layers.mjs masterKey); audioHash the sha256 of the final
+//                   audio remuxed into it: an unchanged master — same key, same audio — is a hard link to the earlier
+//                   version's (priorMaster: the runner links it instead of remuxing), never a copy
+//     original      {src, sha256, bytes}: a captions-only job on the client's own export (src/layers.ts originalMaster) —
+//                   the master IS that file (public/<src>), hard-linked, never re-encoded; no masterKey
 //     qc            {lufs, truePeak, parity: {frames, fps}}: the final's loudness as the QC gate measured it and the
 //                   frames / rate every file of the pair matched (scripts/render-runner.mjs)
 //     judge         QC técnico (CEO-6): {label, findings, at, profile, report?, error?} (+ attempt, owner, pid while it
@@ -29,8 +34,10 @@
 //                 say (CEO-21, src/validate.ts unbackedData) — the client confirms them; absent = none (the runner logs a check that failed)
 //     approval      {by, at, ipHash, userAgent}: its client's reviewer approved it in the bandeja (server/review.mjs, the only
 //                   writer); notes [{id, v, atSec, text, anchor: {clipId, src, srcSec, wordId}, by, at, state, history,
-//                   afterApproval?, kind?, resolvedIn?, reason?}]; log [{action, by, at, …}]: every bandeja step with its
+//                   afterApproval?, kind?, resolvedIn?, reason?, fixture?}]; log [{action, by, at, …}]: every bandeja step with its
 //                   principal — the life cycle is scripts/review-states.mjs
+//     colorRef      {state: confirmada | descartada, by, at, file?, development?}: the owner's answer to the proposal of
+//                   an approved master as a color reference (addColorRef)
 //   link: {id, hash, createdAt, expiresAt, revokedAt} — the token itself is never stored, only sha256(token)
 //
 // Only finals that passed the QC gate are recorded (the backend calls recordVersion
@@ -42,14 +49,15 @@
 // skips that set. The /r/ page hides a version whose proxy is gone and drops the
 // download button when the full render is gone, so purging an unlinked project's
 // files never breaks a page — it only shortens its version list. scripts/cleanup-exports.mjs
-// never touches public/reviews/; the versions' own retention is pruneVersions below.
+// never touches public/reviews/; the versions' own retention is pruneVersions / pruneAll below (and the CLI at the end:
+// node scripts/reviews.mjs prune [--apply] [--keep N] [--json]), which honors this set.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {DELIVERABLES, deliverableName} from '../src/validate.ts';
 import {killTree, pidAlive, pidCmdline} from './render-jobs.mjs';
-import {judgeText} from './review-states.mjs';
+import {AGENT_NOTE_STEPS, byVariant, judgeText, moveNote, variantName} from './review-states.mjs';
 export {judgeText}; // the QC técnico label as people read it: one definition, next to versionQc (scripts/review-states.mjs)
 
 export const LINK_DAYS = 30;
@@ -105,7 +113,10 @@ export const publicLink = (l, now = Date.now()) => ({id: l.id, createdAt: l.crea
 // pair's files, on this filesystem) and its `identity`, they move into v<n>/ under their
 // system names next to the `snapshot` of the rendered props. The JSON is written last: a
 // step that fails leaves no file of this version behind.
-export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc, datosPorConfirmar}) {
+// A deliverable left out (null: supers and master_supers of a reel with no text graphic) is named in `omitted`
+// {key: why}; `original` {src, sha256, bytes}: the master is the client's own file (a captions-only job);
+// `audioHash`: the sha256 of the final audio the master was remuxed with (priorMaster).
+export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durationSec, sizeBytes, publicDir, jobId, now = Date.now(), deliverables, identity, snapshot, masterKey, qc, datosPorConfirmar, omitted, original, audioHash}) {
   const r = loadReviews(dir, projectId, {strict: true});
   const v = r.versions.reduce((m, x) => Math.max(m, x.v), 0) + 1;
   const sub = path.join(dir, projectId);
@@ -136,10 +147,14 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
       };
       version.identity = identity;
       if (masterKey) version.masterKey = masterKey;
+      if (audioHash) version.audioHash = audioHash;
+      if (original) version.original = original;
+      if (omitted && Object.keys(omitted).length) version.omitted = omitted;
       version.qc = qc ?? null;
       version.judge = {label: 'en curso', at: version.createdAt}; // at once (D18): the judge's rules run after, on this vN
       version.deliverables = {};
       for (const [key, src] of Object.entries(deliverables)) {
+        if (!src) continue; // left out: `omitted` says why
         const d = DELIVERABLES.find((x) => x.key === key);
         if (!d) throw new Error(`unknown deliverable: ${key}`);
         version.deliverables[key] = put(d, src);
@@ -157,16 +172,27 @@ export function recordVersion(dir, projectId, {file, proxyTmp, posterTmp, durati
   }
 }
 
-// two files with the same bytes (a missing one: no), read 1 MB at a time
+// two files with the same bytes (a missing one: no), read 1 MB at a time — one file under two names at once
 function sameBytes(a, b) {
   let fa, fb;
   try {
-    if (fs.statSync(a).size !== fs.statSync(b).size) return false;
+    const [sa, sb] = [fs.statSync(a), fs.statSync(b)];
+    if (sa.ino === sb.ino && sa.dev === sb.dev) return true;
+    if (sa.size !== sb.size) return false;
     fa = fs.openSync(a, 'r'); fb = fs.openSync(b, 'r');
     const x = Buffer.alloc(1 << 20), y = Buffer.alloc(1 << 20);
     for (let n; (n = fs.readSync(fa, x)) > 0;) if (fs.readSync(fb, y, 0, n) !== n || !x.subarray(0, n).equals(y.subarray(0, n))) return false;
     return true;
   } catch { return false; } finally { for (const fd of [fa, fb]) if (fd !== undefined) fs.closeSync(fd); }
+}
+
+// An unchanged master (plan phase 7): the newest earlier version's master cut from the same cached master (masterKey)
+// with the same final audio (audioHash) is these very bytes — the runner hard-links it instead of remuxing a new file.
+// → its absolute path, or null
+export function priorMaster(dir, projectId, publicDir, {masterKey, audioHash}) {
+  if (!masterKey || !audioHash) return null;
+  return loadReviews(dir, projectId).versions.filter((x) => x.masterKey === masterKey && x.audioHash === audioHash && x.deliverables?.master).sort((a, b) => b.v - a.v)
+    .map((x) => path.join(publicDir, x.deliverables.master)).find((f) => fs.existsSync(f)) ?? null;
 }
 
 // Take a version back (its render job was cancelled while it was being recorded):
@@ -241,30 +267,140 @@ export function retainedFiles(dir, publicDir, {now = Date.now()} = {}) {
   return keep;
 }
 
-// RETENTION of the versions (CEO-12, T6): the newest `keep` unapproved versions of a project (one project =
-// one variant) and every approved one stay whole — REEL_REVIEW_KEEP_UNAPPROVED, unset = all of them until the
-// T2 measurements fix the number. An older one loses its deliverables (the GBs of v<n>/); one without notes
-// loses its proxy, poster and snapshot too — a version with notes keeps those for good, and so does every
-// version while a link of the project lives (its page plays the proxies). The entry stays, `pruned` saying
-// what went. Runs in the reviews row after each new version (recordFinal) → the paths removed.
-// (at least 1: the version just recorded is always whole)
-export const keepUnapproved = (env = process.env.REEL_REVIEW_KEEP_UNAPPROVED) => (/^[1-9]\d*$/.test(env ?? '') ? +env : Infinity);
-export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(), now = Date.now()} = {}) {
-  if (keep === Infinity) return [];
-  const r = loadReviews(dir, projectId, {strict: true});
-  const linked = r.links.some((l) => linkState(l, now) === 'live');
-  const gone = [];
-  for (const x of r.versions.filter((y) => !y.approval).sort((a, b) => b.v - a.v).slice(keep)) {
-    const files = [...Object.values(x.deliverables ?? {}), ...(x.notes?.length || linked ? [] : [x.proxy, x.poster, x.snapshot])].filter((f) => f && fs.existsSync(path.join(publicDir, f)));
-    if (!files.length) continue;
-    for (const f of files) fs.rmSync(path.join(publicDir, f), {force: true});
-    try { fs.rmdirSync(path.join(dir, projectId, `v${x.v}`)); } catch {} // only when nothing of it is left
-    x.pruned = [...new Set([...(x.pruned ?? []), ...files])];
-    x.prunedAt = new Date(now).toISOString();
-    gone.push(...files);
+// RETENTION of the versions (CEO-12, T6, plan phase 7): a pass run by hand or by cron — DRY-RUN unless --apply, like
+// scripts/cleanup-exports.mjs, which never touches public/reviews/ (R-5). Per variant (byVariant: a project whose
+// identity changed keeps each variant's versions apart), every approved version and the newest `keep` unapproved ones
+// (REEL_REVIEW_KEEP_UNAPPROVED, default 3) stay whole. An older one loses its deliverables (the GBs of v<n>/); one
+// without notes loses its proxy, poster and snapshot too — a version with notes keeps those for good (its anchors, the
+// fixtures). Nothing a live /r/ link of the project names goes (retainedFiles). A hard-linked file (an unchanged master
+// shared by two versions, a captions-only master that is the client's own clip) loses one name: its bytes stay while
+// another name holds them. The entry stays, `pruned` saying what went.
+export const KEEP_UNAPPROVED = 3;
+export const keepUnapproved = (env = process.env.REEL_REVIEW_KEEP_UNAPPROVED) => (/^[1-9]\d*$/.test(env ?? '') ? +env : KEEP_UNAPPROVED);
+// one project → [{v, stem, files: [{path, bytes, nlink, inode}]}]: what goes (apply) or would go (the dry run)
+export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(), now = Date.now(), apply = true, retained = retainedFiles(dir, publicDir, {now})} = {}) {
+  const r = loadReviews(dir, projectId, {strict: apply});
+  const out = [];
+  for (const [stem, versions] of byVariant(r.versions)) {
+    for (const x of versions.filter((y) => !y.approval).sort((a, b) => b.v - a.v).slice(keep)) {
+      const files = [...Object.values(x.deliverables ?? {}), ...(x.notes?.length ? [] : [x.proxy, x.poster, x.snapshot])]
+        .filter((f, i, all) => f && all.indexOf(f) === i && !retained.has(f) && fs.existsSync(path.join(publicDir, f)));
+      if (!files.length) continue;
+      out.push({v: x.v, stem, files: files.map((f) => { const st = fs.statSync(path.join(publicDir, f)); return {path: f, bytes: st.size, nlink: st.nlink, inode: `${st.dev}:${st.ino}`}; })});
+      if (!apply) continue;
+      for (const f of files) fs.rmSync(path.join(publicDir, f), {force: true});
+      try { fs.rmdirSync(path.join(dir, projectId, `v${x.v}`)); } catch {} // only when nothing of it is left
+      x.pruned = [...new Set([...(x.pruned ?? []), ...files])];
+      x.prunedAt = new Date(now).toISOString();
+    }
   }
-  if (gone.length) saveReviews(dir, r);
-  return gone;
+  if (apply && out.length) saveReviews(dir, r);
+  return out.sort((a, b) => a.v - b.v);
+}
+// every project → {keep, apply, versions: [{projectId, v, stem, files}], bytes}: bytes = what the disk gets back (a file
+// counts once every name of it goes). apply: each project written in its reviews row
+export async function pruneAll(dir, publicDir, {keep = keepUnapproved(), apply = false, now = Date.now()} = {}) {
+  const retained = retainedFiles(dir, publicDir, {now});
+  const versions = [];
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort(); } catch {}
+  for (const f of names) {
+    const projectId = f.slice(0, -5);
+    if (!ID_RE.test(projectId)) continue;
+    const one = () => pruneVersions(dir, projectId, publicDir, {keep, now, apply, retained});
+    for (const x of apply ? await inReviewsRow(dir, projectId, one) : one()) versions.push({projectId, ...x});
+  }
+  const inodes = new Map();
+  for (const f of versions.flatMap((x) => x.files)) { const i = inodes.get(f.inode) ?? {...f, names: 0}; i.names++; inodes.set(f.inode, i); }
+  return {keep, apply, versions, bytes: [...inodes.values()].filter((i) => i.names >= i.nlink).reduce((s, i) => s + i.bytes, 0)};
+}
+export const retentionText = (r) => {
+  const mb = (b) => `${(b / 1e6).toFixed(1)} MB`;
+  const head = `reviews retention — ${r.apply ? 'APPLIED' : 'DRY RUN (nothing deleted; --apply deletes)'} · per variant: every approved version + the newest ${r.keep} unapproved stay whole`;
+  const lines = r.versions.map((x) => `${x.projectId} ${x.stem} v${x.v}: ${x.files.map((f) => `${path.basename(f.path)} ${mb(f.bytes)}${f.nlink > 1 ? ' (hard link)' : ''}`).join(', ')}`);
+  return [head, ...(lines.length ? lines : ['nothing to remove']), `${r.versions.length} version${r.versions.length === 1 ? '' : 's'}, ${mb(r.bytes)} ${r.apply ? 'freed' : 'to free'}`].join('\n');
+};
+
+// ---- notes → fixtures (T17, §7): a note the agent resolved becomes a regression case of its client, keyed by ids ----
+// public/clients/<client>/fixtures/<projectId>-v<n>-<note>.json (the volume, never git): the note — its text is the
+// client's words, data —, its anchor {clipId, src, srcSec, wordId} and a copy of the snapshot it was anchored on
+// (<id>.snapshot.json: the retention never takes it); `media`, the files it needs. test/fixtures.test.mjs runs them
+// through listFixtures and skips, with a warning, one whose media this machine lacks. → the fixture's public path, or
+// null when there is nothing to key it by (no client, no anchor, no snapshot)
+const CLIENT_RE = /^[a-z0-9-]{1,32}$/;
+const writeJson = (f, x) => { fs.mkdirSync(path.dirname(f), {recursive: true}); const t = `${f}.${process.pid}.tmp`; fs.writeFileSync(t, JSON.stringify(x, null, 2)); fs.renameSync(t, f); };
+const relOf = (publicDir, abs) => path.relative(publicDir, abs).split(path.sep).join('/');
+export function writeFixture(publicDir, projectId, x, note, {now = Date.now()} = {}) {
+  const client = x.identity?.client;
+  if (!CLIENT_RE.test(client ?? '') || !note.anchor || !x.snapshot || !fs.existsSync(path.join(publicDir, x.snapshot))) return null;
+  const id = `${projectId}-v${x.v}-${note.id}`, d = path.join(publicDir, 'clients', client, 'fixtures');
+  fs.mkdirSync(d, {recursive: true});
+  fs.copyFileSync(path.join(publicDir, x.snapshot), path.join(d, `${id}.snapshot.json`));
+  writeJson(path.join(d, `${id}.json`), {id, client, projectId, stem: variantName(x.identity), v: x.v, resolvedIn: note.resolvedIn ?? null,
+    note: {id: note.id, kind: note.kind ?? null, atSec: note.atSec, text: note.text, by: note.by}, anchor: note.anchor, snapshot: `${id}.snapshot.json`,
+    media: [note.anchor.src].filter(Boolean), at: new Date(now).toISOString()});
+  return relOf(publicDir, path.join(d, `${id}.json`));
+}
+// every client's fixtures → [{client, id, file, fixture, snapshot, missing: [media not on this machine]}]
+export function listFixtures(publicDir) {
+  const ls = (d) => { try { return fs.readdirSync(d).sort(); } catch { return []; } };
+  const out = [];
+  for (const client of ls(path.join(publicDir, 'clients'))) {
+    const d = path.join(publicDir, 'clients', client, 'fixtures');
+    for (const n of ls(d).filter((f) => f.endsWith('.json') && !f.endsWith('.snapshot.json'))) {
+      const fixture = JSON.parse(fs.readFileSync(path.join(d, n), 'utf8')); // a broken fixture fails its test, never skips it
+      let snapshot = null;
+      try { snapshot = JSON.parse(fs.readFileSync(path.join(d, path.basename(String(fixture.snapshot))), 'utf8')); } catch {}
+      const missing = (fixture.media ?? []).filter((m) => typeof m !== 'string' || m.includes('..') || !fs.existsSync(path.join(publicDir, m)));
+      out.push({client, id: fixture.id ?? n.slice(0, -5), file: path.join(d, n), fixture, snapshot, missing});
+    }
+  }
+  return out;
+}
+
+// ---- the agent's steps on a client's note (T17): POST /api/reviews/<id>/versions/<v>/notes/<note> {step, kind?, v?} ----
+// clasificar {kind} and resolver {v: the later version that fixes it — rendered already} (AGENT_NOTE_STEPS): a token may
+// take these two, as the agent it is (actor). confirmar / descartar / verificar are a human's, in the bandeja only
+// (E-2): 403 here. A note resolved becomes a fixture of its client (writeFixture), a fixture that fails to write never
+// undoes the step. → [status, body]
+export async function agentNoteStep(dir, publicDir, projectId, v, noteId, body, actor, {now = Date.now()} = {}) {
+  const step = body?.step;
+  if (!AGENT_NOTE_STEPS.includes(step)) return [403, {error: `${step ?? 'that step'} is not an agent's: confirmar and descartar are the owner's, verificar the client's — in the bandeja, with their login`, code: 'human_only'}];
+  if (step === 'resolver' && !loadReviews(dir, projectId).versions.some((y) => y.v === body.v)) return [400, {error: `resolver needs the version that fixes it, rendered already: there is no v${body.v}`, code: 'bad_version'}];
+  let note, fixture = null, fixtureError;
+  try {
+    const x = await withVersion(dir, projectId, v, (y) => {
+      note = moveNote(y, String(noteId), step, actor, {at: new Date(now).toISOString(), kind: body.kind, v: body.v});
+      if (step !== 'resolver') return;
+      try { fixture = writeFixture(publicDir, projectId, y, note, {now}); if (fixture) note.fixture = fixture; } catch (e) { fixtureError = e.message; }
+    });
+    if (!x) return [404, {error: `no version v${v} of ${projectId}`, code: 'not_found'}];
+  } catch (e) {
+    if (!e.status) throw e;
+    return [e.status, {error: e.message, code: e.code}];
+  }
+  return [200, {projectId, v, note, ...(fixture ? {fixture} : {}), ...(fixtureError ? {fixtureError} : {})}];
+}
+
+// ---- an approved master as a color reference (§7, T17): proposed in the owner's inbox, written on the owner's confirm ----
+// The master is linked (copied across filesystems) into public/clients/<client>/refs/ and listed in the client's
+// profile.json colorRefs with the identity's development: the render judge's color-ref compares a reel only with the
+// references of its own development (judge.mjs colorRefGroups). Idempotent. A profile that does not parse throws —
+// never written over. → {file, label, development}
+export function addColorRef(publicDir, x) {
+  const client = x.identity?.client;
+  const master = x.deliverables?.master ? path.join(publicDir, x.deliverables.master) : null;
+  if (!CLIENT_RE.test(client ?? '') || !master || !fs.existsSync(master)) throw Object.assign(new Error(`v${x.v}: su master ya no está en disco`), {status: 409, code: 'no_master'});
+  const base = path.join(publicDir, 'clients', client), name = path.basename(master), ref = path.join(base, 'refs', name);
+  fs.mkdirSync(path.dirname(ref), {recursive: true});
+  if (!fs.existsSync(ref)) { try { fs.linkSync(master, ref); } catch { fs.copyFileSync(master, ref); } }
+  const pf = path.join(base, 'profile.json');
+  const profile = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf, 'utf8')) : {id: client};
+  const development = x.identity.development ?? null;
+  const entry = {label: `${variantName(x.identity)} v${x.v} aprobado`, paths: [`refs/${name}`], ...(development ? {development} : {})};
+  profile.colorRefs = Array.isArray(profile.colorRefs) ? profile.colorRefs : [];
+  if (!profile.colorRefs.some((g) => g.paths?.includes(entry.paths[0]))) { profile.colorRefs.push(entry); writeJson(pf, profile); }
+  return {file: relOf(publicDir, ref), label: entry.label, development};
 }
 
 // The step after a render: only a FINAL whose QC passed, rendered for a known project,
@@ -274,7 +410,7 @@ export function pruneVersions(dir, projectId, publicDir, {keep = keepUnapproved(
 // deliverables / identity / snapshot / masterKey / qc: the pair of a project with an identity (recordVersion).
 // verify: run in the row right before the version is numbered — throws to record nothing (the
 // runner checks the pair's identity is still the project's).
-export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, datosPorConfirmar, makeProxy: proxy = makeProxy}) {
+export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicDir, jobId = String(Date.now()), signal, deliverables, identity, snapshot, masterKey, qc, verify, datosPorConfirmar, omitted, original, audioHash, makeProxy: proxy = makeProxy}) {
   if (draft || !qcOk || !projectId) return null;
   if (signal?.aborted) throw signal.reason;
   const tmp = path.join(dir, projectId, `.tmp-${jobId}`);
@@ -287,9 +423,7 @@ export async function recordFinal({draft, qcOk, projectId, outFile, dir, publicD
     return await inReviewsRow(dir, projectId, () => {
       if (signal?.aborted) throw signal.reason;
       verify?.();
-      const version = recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, datosPorConfirmar, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc} : {})});
-      try { pruneVersions(dir, projectId, publicDir); } catch (e) { console.error(`reviews of ${projectId}: retention not applied: ${e.message}`); } // never the new version's fault
-      return version;
+      return recordVersion(dir, projectId, {file: outFile, proxyTmp: `${tmp}.mp4`, posterTmp: `${tmp}.jpg`, durationSec, sizeBytes, publicDir, jobId, datosPorConfirmar, ...(deliverables ? {deliverables, identity, snapshot, masterKey, qc, omitted, original, audioHash} : {})});
     });
   } finally {
     fs.rmSync(`${tmp}.mp4`, {force: true}); fs.rmSync(`${tmp}.jpg`, {force: true});
@@ -440,4 +574,25 @@ export async function makeProxy(input, proxyOut, posterOut, {signal} = {}) {
   const at = Math.min(1, durationSec / 3);
   await runFf('ffmpeg', ['-y', '-v', 'error', '-ss', at.toFixed(2), '-i', proxyOut, '-frames:v', '1', '-q:v', '6', posterOut], {signal});
   return {durationSec};
+}
+
+// ---- the retention pass from a terminal or cron: node scripts/reviews.mjs prune [--apply] [--keep N] [--json] ----
+// DRY-RUN unless --apply. With the backend up it runs there (POST /api/review-retention: every write of a project's
+// reviews JSON goes through that process's row); with it down, here. REEL_API / the primary token as the render CLI.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf('--keep'), keep = at >= 0 ? keepUnapproved(argv[at + 1]) : keepUnapproved();
+  if (argv[0] !== 'prune' || (at >= 0 && !/^[1-9]\d*$/.test(argv[at + 1] ?? ''))) { console.error('usage: node scripts/reviews.mjs prune [--apply] [--keep N ≥ 1] [--json]'); process.exit(2); }
+  const apply = argv.includes('--apply');
+  const root = path.join(import.meta.dirname, '..'), publicDir = path.join(root, 'public');
+  const api = process.env.REEL_API || `http://127.0.0.1:${process.env.REEL_PORT || 3333}`;
+  const tok = (process.env.REEL_BACKEND_TOKEN || (() => { try { return fs.readFileSync(path.join(root, '.backend-token'), 'utf8'); } catch { return ''; } })()).split(',')[0].trim();
+  const headers = {'content-type': 'application/json', ...(tok ? {'x-reel-token': tok} : {})};
+  let r = null;
+  if (await fetch(`${api}/api/health`, {headers, signal: AbortSignal.timeout(2500)}).then((x) => x.ok, () => false)) {
+    const res = await fetch(`${api}/api/review-retention`, {method: 'POST', headers, body: JSON.stringify({apply, keep})});
+    r = await res.json().catch(() => ({}));
+    if (!res.ok) { console.error(`the backend refused the retention pass: ${r.error ?? res.status}`); process.exit(1); }
+  } else r = await pruneAll(reviewsDir(publicDir), publicDir, {keep, apply});
+  console.log(argv.includes('--json') ? JSON.stringify(r, null, 2) : retentionText(r));
 }

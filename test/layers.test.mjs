@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {captionLayout, chooseRenderMode, layerBlockers, supersBlockers} from '../src/layers.ts';
+import {captionLayout, chooseRenderMode, layerBlockers, originalMaster, supersBlockers} from '../src/layers.ts';
 import {PRESETS} from '../src/captionPresets.ts';
 import {SOLID_DENSER, TEMPLATES, backing, fieldsOf, isTextGraphic} from '../src/graphicTemplates.ts';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
@@ -311,4 +311,27 @@ test('supers: parity names the file; the composite stacks supers under captions 
   const a = compositeArgs({master: 'm.mp4', overlays: [{file: 'supers.mov', alpha: 'prores'}, {file: 'frames'}], outFile: 'o.mp4', fps: 30000 / 1001});
   assert.ok(a.indexOf('supers.mov') < a.indexOf(path.join('frames', '*.png')), 'supers is input 1, the captions input 2');
   assert.match(a[a.indexOf('-filter_complex') + 1], /\[l0\]\[o0\]overlay.*\[l1\]\[o1\]overlay/, 'the captions over the supers over the master');
+});
+
+test('originalMaster: captions only over one whole untouched clip — its file is the master; anything else the master would draw or play says why not', () => {
+  const clip = {id: 'c0', src: 'clips/Morantes2_1.mp4', inSec: 0, outSec: 43.221333, sourceDurationSec: 43.221333};
+  const base = {clips: [clip], captions: [], captionStyle: 'vibem', graphics: [], brolls: [], mattes: [], music: null, grade: null, audio: {clean: 'off'}};
+  const fps = 30000 / 1001;
+  assert.deepEqual(originalMaster(base, ['captions'], fps), {src: 'clips/Morantes2_1.mp4', reasons: []});
+  const why = (props, scope = ['captions']) => originalMaster({...base, ...props}, scope, fps).reasons.join('; ');
+  assert.match(why({}, null), /does not ask for captions only/);
+  assert.match(why({}, ['captions', 'corte']), /does not ask for captions only/);
+  assert.match(why({clips: [{...clip, inSec: 1}]}), /c0 is trimmed/);
+  assert.equal(why({clips: [{...clip, outSec: 43.221333 - 0.01}]}), '', 'within half a frame: whole');
+  assert.match(why({clips: [clip, {...clip, id: 'c1'}]}), /2 clips/);
+  assert.match(why({clips: [{...clip, speed: 1.2}]}), /speed, volume/);
+  assert.match(why({clips: [{...clip, transform: [{t: 0, scale: 1.1, x: 0, y: 0}]}]}), /keyframes/);
+  assert.match(why({graphics: [{id: 'g', template: 'sticker'}]}), /graphics on the reel/);
+  assert.match(why({brolls: [{id: 'b'}]}), /B-roll/);
+  assert.match(why({music: {src: 'music/x.mp3'}}), /music/);
+  assert.match(why({grade: {look: 'warm', intensity: 0.8}}), /a grade on the clip/);
+  assert.equal(why({grade: {look: 'none'}}), '', 'a grade that changes nothing is none');
+  assert.match(why({audio: {clean: 'light'}}), /audio cleanup/);
+  assert.match(why({audio: {sfx: true}}), /SFX/);
+  assert.match(why({captionStyle: 'stack'}), /the stack pack opens on the footage \(zoomBlur\)/);
 });

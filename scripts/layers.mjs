@@ -232,7 +232,7 @@ export function parseParity(stdout) {
 // each other frame for frame, at the delivery fps when given (src/timeline.ts deliveryFps) → [] or what
 // differs. Rates compare as numbers ('60000/2002' is '30000/1001'); the length within half a frame: the
 // containers keep time on different scales
-const rateOf = (r) => { const [n, d = 1] = String(r).split('/').map(Number); return n > 0 && d > 0 ? n / d : NaN; };
+export const rateOf = (r) => { const [n, d = 1] = String(r).split('/').map(Number); return n > 0 && d > 0 ? n / d : NaN; };
 const rateText = (fps) => (Math.abs(fps - 30000 / 1001) < 1e-9 ? '30000/1001' : String(fps));
 export function parityIssues(master, layer, {fps, name = 'captions'} = {}) {
   const out = [];
@@ -244,39 +244,49 @@ export function parityIssues(master, layer, {fps, name = 'captions'} = {}) {
   return out;
 }
 
-// ---- the caption layer as a PNG sequence (CEO-14): the pass's frames zipped with fps.json, the rate to import
-// them at. Stored, not deflated (a PNG is compressed already); a plain zip, so at most 65 535 frames and 4 GB —
-// past that it fails with the reason. ponytail: ZIP64 when a layer outgrows it (a reel: ~1 800 frames of KBs)
+// ---- stored zips: the caption layer's PNG sequence (zipFrames) and the pair download (server/review.mjs) ----
+// A plain zip, stored (a PNG or a video is compressed already), so at most 65 535 entries and 4 GB — past that it fails
+// with the reason. zipLocal: an entry's local header (+ name), its data follows; zipCentral: the directory and its end,
+// from the entries with the offset each was written at. ponytail: ZIP64 when a layer or a pair outgrows it.
+const DATE = 0x21; // 1980-01-01: the same bytes for the same files
+export function zipLocal({name, size, crc}) {
+  const n = Buffer.from(name), h = Buffer.alloc(30); // version 2.0, no flags, stored
+  h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(DATE, 12); h.writeUInt32LE(crc >>> 0, 14);
+  h.writeUInt32LE(size, 18); h.writeUInt32LE(size, 22); h.writeUInt16LE(n.length, 26);
+  return Buffer.concat([h, n]);
+}
+export function zipCentral(entries, at) {
+  if (entries.length > 0xffff) throw new Error(`zip: ${entries.length} entries, a plain zip holds 65 535`);
+  const cd = Buffer.concat(entries.flatMap(({name, crc, size, at: off}) => {
+    const n = Buffer.from(name), c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(DATE, 14); c.writeUInt32LE(crc >>> 0, 16);
+    c.writeUInt32LE(size, 20); c.writeUInt32LE(size, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
+    return [c, n];
+  }));
+  if (at + cd.length > 0xffffffff) throw new Error(`zip: ${Math.round(at / 2 ** 20)} MB, a plain zip holds 4 GB`);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(at, 16);
+  return Buffer.concat([cd, end]);
+}
+// the caption layer as a PNG sequence (CEO-14): the pass's frames zipped with fps.json, the rate to import them at
 const PNG = /\.png$/i;
 export async function zipFrames(dir, outFile, {fps}) {
   const names = fs.readdirSync(dir).filter((n) => PNG.test(n)).sort(); // the order ffmpeg's glob reads them in
   const entries = [...names.map((n, i) => ({name: `captions_${String(i).padStart(6, '0')}.png`, file: path.join(dir, n)})),
     {name: 'fps.json', data: Buffer.from(JSON.stringify({fps: rateText(fps), frames: names.length}))}];
   if (entries.length > 0xffff) throw new Error(`captions PNG zip: ${names.length} frames, a plain zip holds 65 534`);
-  const DATE = 0x21; // 1980-01-01: the zip is the same bytes for the same frames
   const fh = await fs.promises.open(outFile, 'w');
   const central = [];
   let at = 0;
   try {
     for (const e of entries) {
-      const data = e.data ?? await fs.promises.readFile(e.file), name = Buffer.from(e.name), crc = zlib.crc32(data);
-      const h = Buffer.alloc(30); // local header: version 2.0, no flags, stored
-      h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(DATE, 12); h.writeUInt32LE(crc, 14);
-      h.writeUInt32LE(data.length, 18); h.writeUInt32LE(data.length, 22); h.writeUInt16LE(name.length, 26);
-      await fh.write(Buffer.concat([h, name, data]));
-      central.push({name, crc, size: data.length, at});
-      at += 30 + name.length + data.length;
+      const data = e.data ?? await fs.promises.readFile(e.file);
+      const x = {name: e.name, crc: zlib.crc32(data), size: data.length, at};
+      await fh.write(Buffer.concat([zipLocal(x), data]));
+      central.push(x);
+      at += 30 + Buffer.byteLength(e.name) + data.length;
     }
-    const cd = Buffer.concat(central.flatMap(({name, crc, size, at: off}) => {
-      const c = Buffer.alloc(46);
-      c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(DATE, 14); c.writeUInt32LE(crc, 16);
-      c.writeUInt32LE(size, 20); c.writeUInt32LE(size, 24); c.writeUInt16LE(name.length, 28); c.writeUInt32LE(off, 42);
-      return [c, name];
-    }));
-    if (at + cd.length > 0xffffffff) throw new Error(`captions PNG zip: ${Math.round(at / 2 ** 20)} MB, a plain zip holds 4 GB`);
-    const end = Buffer.alloc(22);
-    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(central.length, 8); end.writeUInt16LE(central.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(at, 16);
-    await fh.write(Buffer.concat([cd, end]));
+    await fh.write(zipCentral(central, at));
   } finally { await fh.close(); }
 }
 // the zip's side of parityIssues: its PNG frames (central directory) and the rate its fps.json says — no extraction

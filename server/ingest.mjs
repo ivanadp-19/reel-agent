@@ -1,4 +1,6 @@
-// Clip ingest (POST /api/add-clip): probe → remux or transcode → thumbnail → a clip.
+// Clip ingest (POST /api/add-clip): probe → kept as it is, remuxed or transcoded → thumbnail → a clip. An h264 mp4 that
+// already streams (faststart) with one picture and at most one sound — a client's finished export — is kept byte for
+// byte (faststartMp4): a captions-only job then delivers that very file as its master.
 //   ?path=<file> (the MCP with the primary token; the reel CLI with a user token, only for files that user
 //     could read anyway — server/tokens.mjs openForUser) — synchronous: answers with the clip JSON
 //   ?upload=<id>&size=n (the reel CLI) — a part it uploaded in chunks (server/uploads.mjs), taken whole and
@@ -47,6 +49,26 @@ export function progressSec(chunk) {
 // an ingest failure: `error` for the user, `detail` the ffmpeg stderr tail (the sync answer keeps both)
 class IngestError extends Error {
   constructor(message, detail = '') { super(message); this.detail = detail; }
+}
+
+// An mp4 that streams as it is: its top-level atoms put `moov` (the index) before `mdat` (the picture), and it is an
+// MP4, not a QuickTime file under another name (ftyp major brand 'qt  ')
+export function faststartMp4(file) {
+  const fd = fs.openSync(file, 'r'), b = Buffer.alloc(16);
+  try {
+    const size = fs.fstatSync(fd).size;
+    for (let at = 0; at + 8 <= size;) {
+      fs.readSync(fd, b, 0, 16, at);
+      const type = b.toString('latin1', 4, 8);
+      let n = b.readUInt32BE(0);
+      if (n === 1) n = Number(b.readBigUInt64BE(8));
+      if (at === 0 && (type !== 'ftyp' || b.toString('latin1', 8, 12) === 'qt  ')) return false;
+      if (type === 'moov') return true;
+      if (type === 'mdat' || n < 8) return false;
+      at += n;
+    }
+    return false;
+  } finally { fs.closeSync(fd); }
 }
 
 // progress bands of one ingest: probe 0–5, remux/transcode 5–95, thumbnail 95–100
@@ -124,14 +146,18 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       duration = parseFloat(p.format?.duration ?? '0') || 0;
     } catch {}
 
-    // Already 1080p-class h264/yuv420 and not rotated → fast remux. Anything
+    // Already 1080p-class h264/yuv420 and not rotated → fast remux (or the file itself, below). Anything
     // else (4K phones, HEVC, rotation metadata, 10-bit) is re-encoded: rotation
     // baked in, fitted inside 1080×1920 (portrait) or 1920×1080 (landscape).
     // Remotion's compositor cannot read 2160-tall sources.
     const lut = hdrLut(trc);
     const hdr = !!lut;
     const compatible = codec === 'h264' && pix.startsWith('yuv420') && !rotated && w <= 1080 && h <= 1920 && !hdr;
-    const verb = compatible ? 'Remuxing' : 'Transcoding';
+    // already what the remux would make — faststart, one picture and at most one sound: kept byte for byte, so a
+    // captions-only job on a client's finished export delivers the client's own file as its master (src/layers.ts originalMaster)
+    const kinds = compatible ? (await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', tmp], {cwd: root})).stdout.trim().split('\n') : [];
+    const asIs = compatible && kinds.filter((k) => k === 'video').length === 1 && kinds.filter((k) => k === 'audio').length <= 1 && kinds.length <= 2 && faststartMp4(tmp);
+    const verb = asIs ? 'Copying' : compatible ? 'Remuxing' : 'Transcoding';
     log(`ingest ${tag}: probed ${codec} ${pix} ${w}x${h}${rotated ? ' rotated' : ''}${hdr ? ` ${trc}` : ''} ${duration.toFixed(1)}s → ${verb.toLowerCase()}`);
     const fit = "scale=w='if(gt(iw,ih),1920,1080)':h='if(gt(iw,ih),1080,1920)':force_original_aspect_ratio=decrease:force_divisible_by=2";
     // HDR: fit first (cheaper), then BT.2020 YUV → RGB → LUT → BT.709 YUV
@@ -141,7 +167,9 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     report(5, verb);
     const onStdout = (d) => { const s = progressSec(d); if (s != null && duration > 0) report(pctIn(5, 95, s / duration), verb); };
     const t0 = Date.now();
-    const enc = compatible
+    const enc = asIs
+      ? await fs.promises.copyFile(tmp, out, fs.constants.COPYFILE_FICLONE).then(() => ({code: 0}), (e) => ({code: 1, stderr: e.message}))
+      : compatible
       ? await run('ffmpeg', ['-y', '-nostats', '-progress', 'pipe:1', '-i', tmp, '-c', 'copy', '-movflags', '+faststart', out], {cwd: root, onStdout})
       : await run('ffmpeg', ['-y', '-nostats', '-progress', 'pipe:1', '-i', tmp, '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
           ...(hdr ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709'] : []),
@@ -150,7 +178,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       fs.rmSync(out, {force: true});
       throw new IngestError('transcode failed', enc.stderr.slice(-300));
     }
-    log(`ingest ${tag}: ${verb === 'Remuxing' ? 'remux' : 'transcode'} done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    log(`ingest ${tag}: ${{Copying: 'kept as it is (byte for byte)', Remuxing: 'remux', Transcoding: 'transcode'}[verb]} done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
     // re-probe duration from the output (authoritative)
     const dur = (await durationOf(out)) || duration || 0;

@@ -36,7 +36,7 @@ usuario ──► editor (Vite + React + @remotion/player)       cliente ──�
                 └─ /api/tokens, /api/uploads, /api/validate… ◄── reel CLI (cli/reel.mjs, token por usuario, por SSH en la VM)
 
 agente local (claude -p | codex exec) ──► mcp/server.mjs (stdio) ──► backend por loopback (token primario)
-  stdio y /mcp: el mismo registro de 72 tools
+  stdio y /mcp: el mismo registro de 79 tools
 
 src/: composición Remotion = preview (editor) y export (render), la misma
 ```

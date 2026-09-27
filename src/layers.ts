@@ -10,6 +10,7 @@ import {presetOf} from './captionPresets.ts';
 import {isTextGraphic, projectGraphics, type Graphic} from './graphicTemplates.ts';
 import type {Clip} from './timeline.ts';
 import {avoidGraphics} from './validate.ts';
+import {gradeFor, lutBakes, type ProjectGrade} from './grade.ts';
 
 type Span = {startMs: number; endMs: number};
 export type LayerProps = {clips?: Clip[]; captions?: Caption[]; graphics?: Graphic[]; captionStyle?: string; captionsOff?: boolean; textOff?: boolean};
@@ -63,6 +64,33 @@ export function layerBlockers(props: LayerProps, fps: number): string[] {
 export function supersBlockers({clips = [], graphics = []}: LayerProps, fps: number): string[] {
   return projectGraphics(graphics, clips, fps).filter((g) => isTextGraphic(g.template) && g.behind)
     .map((g) => `text graphic behind the presenter: ${g.template} ${g.id} (drawn under the person matte, it cannot be its own supers layer)`);
+}
+
+// A captions-only job on the client's finished export (Felipe, 2026-09-26: "sí solo quiero captions está bien"):
+// the project asks for captions alone (scope ['captions']) and its one clip is the whole source, untouched, with
+// nothing drawn or heard over it but the captions. Its master IS the client's file — delivered as it is (a hard
+// link), never re-rendered or re-encoded (scripts/render-runner.mjs). → {src} or {src: null, reasons: why not}.
+// The runner still probes the file: its frame rate and frame count must be the caption layer's.
+export type OriginalProps = LayerProps & {brolls?: unknown[]; mattes?: unknown[]; music?: unknown; grade?: ProjectGrade | null; audio?: {clean?: string; sfx?: boolean} | null};
+export function originalMaster(props: OriginalProps, scope: unknown, fps: number): {src: string | null; reasons: string[]} {
+  const out: string[] = [];
+  if (!Array.isArray(scope) || scope.length !== 1 || scope[0] !== 'captions') out.push('the project does not ask for captions only (set_scope stages: [captions])');
+  const clips = props.clips ?? [];
+  const c = clips.length === 1 ? clips[0] : null;
+  if (!c) out.push(`${clips.length} clips: captions-only delivers one whole source`);
+  else {
+    const half = 0.5 / fps;
+    if (Math.abs(c.inSec) > half || Math.abs(c.outSec - c.sourceDurationSec) > half) out.push(`${c.id} is trimmed (${c.inSec}–${c.outSec} of ${c.sourceDurationSec} s)`);
+    if ((c.speed ?? 1) !== 1 || (c.volume ?? 1) !== 1 || c.muted || c.transform?.length || (c.enter && c.enter !== 'cut') || c.jSec || c.lSec) out.push(`${c.id} has speed, volume, keyframes, a transition or a J/L cut`);
+  }
+  const has = (x: unknown) => (Array.isArray(x) ? x.length > 0 : !!x);
+  for (const [k, why] of [['graphics', 'graphics'], ['brolls', 'B-roll'], ['mattes', 'person mattes'], ['music', 'music']] as const) if (has(props[k])) out.push(`${why} on the reel`);
+  if (c && (gradeFor(props.grade, c.src, c.id) || lutBakes(props.grade, clips).length)) out.push('a grade on the clip');
+  if ((props.audio?.clean ?? 'off') !== 'off' || props.audio?.sfx) out.push('audio cleanup or SFX');
+  const {preset} = captionLayout(props, fps);
+  if (preset.opening !== 'none') out.push(`the ${preset.id} pack opens on the footage (${preset.opening})`);
+  out.push(...layerBlockers(props, fps));
+  return out.length ? {src: null, reasons: out} : {src: c!.src, reasons: []};
 }
 
 // The mode a render runs in: `layers` when asked and possible, `full` otherwise.

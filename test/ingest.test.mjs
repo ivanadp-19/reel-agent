@@ -2,12 +2,13 @@
 // ?path= (user token) / ?upload= stay synchronous.
 import {after, before, test} from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {spawnSync} from 'node:child_process';
-import {createClipIngest, progressSec} from '../server/ingest.mjs';
+import {createClipIngest, faststartMp4, progressSec} from '../server/ingest.mjs';
 import {openForUser} from '../server/tokens.mjs';
 import {partFile} from '../server/uploads.mjs';
 import {addedClip} from '../src/timeline.ts';
@@ -335,4 +336,21 @@ test('a clip the disk cannot take over its floor is refused 507 low_disk before 
   } finally { free = Infinity; }
   assert.deepEqual(uploads(), [], 'no upload left on disk');
   assert.deepEqual(fs.existsSync(clips) ? fs.readdirSync(clips) : [], before, 'no clip');
+});
+
+test('an h264 mp4 that already streams (faststart, one picture, one sound — a client\'s finished export) is kept byte for byte; one with its index at the end is remuxed', {skip: !hasFfmpeg}, async () => {
+  const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+  const fast = path.join(dir, 'export-fast.mp4'), slow = video('export-slow.mp4', 'libx264');
+  spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', slow, '-c', 'copy', '-movflags', '+faststart', '-metadata', 'title=fast', fast]);
+  assert.deepEqual([faststartMp4(fast), faststartMp4(slow)], [true, false]);
+  const add = (f) => fetch(`${base}/api/add-clip?name=${path.basename(f)}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOKEN}}).then((r) => r.json());
+  const kept = await add(fast), remuxed = await add(slow);
+  assert.equal(sha(path.join(pub, kept.src)), sha(fast), 'the client\'s file itself');
+  assert.notEqual(sha(path.join(pub, remuxed.src)), sha(slow), 'remuxed');
+  assert.equal(faststartMp4(path.join(pub, remuxed.src)), true);
+  assert.ok(logs.some((l) => l.includes(`ingest ${kept.id}: kept as it is (byte for byte)`)));
+  // a QuickTime file under an .mp4 name is not an mp4: remuxed
+  const mov = path.join(dir, 'export.mov');
+  spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', slow, '-c', 'copy', '-f', 'mov', '-movflags', '+faststart', '-metadata', 'title=mov', mov]);
+  assert.equal(faststartMp4(mov), false);
 });
