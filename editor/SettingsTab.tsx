@@ -78,8 +78,22 @@ const StagesSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => vo
       const r = await fetch(`${at}/${stage}/check`, {method: 'POST'}).then((x) => x.json());
       if (r.error) throw new Error(r.error);
       if (r.discarded) notify(`${stage}: the project changed while it ran — its result was discarded, check again`, 'error');
+      else if (r.superseded) notify(`${stage}: a newer check started meanwhile — its result is the one shown`, 'ok');
       await refresh();
     } catch (e) { notify(`Check ${stage}: ${(e as Error).message}`, 'error'); }
+    setBusy(null);
+  };
+  // the captions gate asks for a caption_proof and a motion_proof: a person who watched the captions in the preview
+  // (which is the render) records both, of the revision this editor shows (the same route as the MCP's proofs)
+  const proofed = async () => {
+    setBusy('proof');
+    try {
+      for (const kind of ['caption_proof', 'motion_proof']) {
+        const r = await fetch(`${at}/captions/proof`, {method: 'POST', body: JSON.stringify({kind, rev: useEditor.getState().rev})}).then((x) => x.json());
+        if (r.error || !r.recorded) throw new Error(r.error ?? `${r.reason} (wait for the autosave)`);
+      }
+      notify('captions: proofed in the preview — Check captions now', 'ok');
+    } catch (e) { notify(`Proof: ${(e as Error).message}`, 'error'); }
     setBusy(null);
   };
   const asked: Scopable[] = scope ?? [...SCOPABLE];
@@ -102,6 +116,7 @@ const StagesSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => vo
               : <span className="w-[13px]" title={s === 'guion' ? 'goes with captions' : 'always runs'} />}
             <span className="flex-1 font-mono">{s}</span>
             <span className={status === 'rojo' ? 'text-error' : status === 'verde' ? 'text-[#39d98a]' : 'text-on-surface-variant'}>{status}{row?.infra ? ' (infra)' : ''}{errs ? ` · ${errs} err` : ''}{row?.waitingOn?.length ? ` · waits on ${row.waitingOn.join(', ')}` : ''}</span>
+            {s === 'captions' && <Btn onClick={proofed} disabled={!projectId || !!busy || !on.includes(s)} title="I watched the captions in the preview, stills and motion: records the caption_proof and motion_proof the captions check asks for">{busy === 'proof' ? '…' : 'Proofed'}</Btn>}
             <Btn onClick={() => check(s)} disabled={!projectId || !!busy || !on.includes(s)}>{busy === s ? '…' : 'Check'}</Btn>
           </div>
         );

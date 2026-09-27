@@ -121,12 +121,15 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
 const DEFAULTS: Record<string, unknown> = {offMic: 'mark', audio: {clean: 'off'}, lang: 'auto', accentColor: '#FFB020', captionStyle: 'palabra'};
 // equal for the gates: key order ignored, and absent / null / '' / [] / false / the field's default are one
 // "nothing" (a writer that fills a default must not reopen a stage)
-const canon = (v: unknown) => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x));
+export const canon = (v: unknown) => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x));
 const nothing = (v: unknown, dflt?: unknown) => v == null || v === '' || v === false || (Array.isArray(v) && !v.length) || (dflt !== undefined && canon(v) === canon(dflt));
 const same = (a: unknown, b: unknown, dflt?: unknown) => (nothing(a, dflt) && nothing(b, dflt)) || canon(a) === canon(b);
 const row = <T>(map: Record<string, T>, k: string) => (Object.hasOwn(map, k) ? map[k] : null);
 
 type Fields = Record<string, any>;
+// the fields an edit changes, by that equality — context fields included; none = a save that changes nothing
+export const changedFields = (a: Fields, b: Fields): string[] =>
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !same(a[k], b[k], row(DEFAULTS, k) ?? undefined));
 // What an edit leaves stale: the stages owning each changed field and every stage after them, in STAGES
 // order; `unmapped` names the changed fields no stage owns (clips.<f> inside a clip) — they stale everything
 // after ingest, the safe default, and the backend logs them (UnmappedField)
@@ -137,8 +140,7 @@ export function invalidate(prev: Fields | null | undefined, next: Fields | null 
     if (!stages) unmapped.push(field);
     for (const s of stages ?? dependents('ingest')) owners.add(s);
   };
-  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if (same(a[k], b[k], row(DEFAULTS, k) ?? undefined)) continue;
+  for (const k of changedFields(a, b)) {
     if (k !== 'clips') { own(row(FIELD_STAGE, k), k); continue; }
     const was: Fields[] = Array.isArray(a.clips) ? a.clips : [], now: Fields[] = Array.isArray(b.clips) ? b.clips : [];
     const srcs = new Set(was.map((c) => c.src));
@@ -174,7 +176,8 @@ export function stageSlice(p: Fields | null | undefined, stage: Stage): Fields {
 // transcriptIssues), the judge's rules on the words as heard (mcp/checks.mjs stageChecks) and the ones made
 // here. entregables reads the judge's findings on the final render. A code in no list lands in entregables.
 // A rule that reads the graphics too — where captions land around them (safe-*: avoidGraphics), the pages an
-// end-card hides (layer-blocker) — is broll's: the first stage both captions and graphics edits reopen.
+// end-card hides (layer-blocker) — is broll's: the first stage both captions and graphics edits reopen; a job
+// without broll hands the ones about the pages to captions (CAPTION_READS below).
 // ponytail: J rules and the wind scan only; the other probe (P) rules — durations, LUT copies, clipping, voice
 // level — come with their phase (16)
 export const RULES: Record<Stage, string[]> = {
@@ -212,6 +215,11 @@ export const findingStage = (code: string): Stage => {
   const c = code.replace(/^validate-/, '');
   return STAGES.find((s) => RULES[s].includes(c)) ?? row(JUDGE_STAGE, code) ?? 'entregables';
 };
+// broll's rules that read the caption pages too (where a page lands, pages behind the presenter and their matte,
+// the caption effects a layer cannot draw): in a job without broll they are the captions' — the pages it asked for
+const CAPTION_READS = new Set(['safe-top', 'safe-bottom', 'matte', 'layer-blocker']);
+const ownerIn = (s: Stage, code: string, on: Stage[]): Stage =>
+  !on.includes(s) && on.includes('captions') && CAPTION_READS.has(code.replace(/^validate-/, '')) ? 'captions' : s;
 // The findings (the render judge's {check}, or the gates' {code}) split by the project's scope: one about a
 // stage the job did not ask for is advisory — marked `advisory` (judge.mjs isAdvisory: it never counts toward
 // the verdict nor the version's QC label) and `omitted: <stage>`. No scope: nothing is advisory.
@@ -219,10 +227,19 @@ export function scopeFindings<T extends {check?: string; code?: string}>(finding
   const on = inScope(scope);
   const out = {inScope: [] as T[], advisory: [] as (T & {advisory: true; omitted: Stage})[]};
   for (const f of findings) {
-    const s = findingStage(f.check ?? f.code ?? '');
+    const code = f.check ?? f.code ?? '', s = ownerIn(findingStage(code), code, on);
     if (on.includes(s)) out.inScope.push(f);
     else out.advisory.push({...f, advisory: true, omitted: s});
   }
+  return out;
+}
+// the check a note of the judge's `skipped` names: "source-cut: …", "music vs voice: …", "color vs "<ref>": …"
+const skipCheck = (note: string) => note.split(/:| \(| —/)[0].trim().toLowerCase().replace(/^color vs .*/, 'color-ref').replace(/\s+/g, '-');
+// The judge's skipped checks split the same way: one of a stage the job did not ask for (no references for the color
+// of a captions-only job) was never the job's, so it never makes the label "(evidencia reducida)"
+export function scopeSkips(notes: string[], scope: unknown): {inScope: string[]; omitted: string[]} {
+  const on = inScope(scope), out = {inScope: [] as string[], omitted: [] as string[]};
+  for (const n of notes) (on.includes(findingStage(skipCheck(n))) ? out.inScope : out.omitted).push(n);
   return out;
 }
 
@@ -241,15 +258,15 @@ export function stageFindings({p, fps, issues, untranscribed = [], judged = []}:
   const id = validateIdentity(p.identity);
   // a client's deliverables: the captions and the text graphics are layers of their own, or the render fails
   const layers = {clips: p.clips, captions: p.captions, graphics: p.graphics, captionStyle: p.captionStyle, captionsOff: p.captionsOff};
+  const on = inScope(p.scope);
   for (const i of [
     ...untranscribed.map((s): Issue => ({level: 'error', code: 'untranscribed', msg: `${s} has no transcript yet — get_transcript`, ref: s})),
     ...(id.error ? [{level: 'error', code: 'identity', msg: id.error} as Issue] : []),
     ...(id.identity ? layerBlockers(layers, fps).map((msg): Issue => ({level: 'error', code: 'layer-blocker', msg})) : []),
     ...(id.identity ? supersBlockers(layers, fps).map((msg): Issue => ({level: 'error', code: 'supers-blocker', msg})) : []),
     ...issues,
-  ]) out[STAGES.find((s) => RULES[s].includes(i.code)) ?? 'entregables'].push(i);
+  ]) out[ownerIn(STAGES.find((s) => RULES[s].includes(i.code)) ?? 'entregables', i.code, on)].push(i);
   out.entregables.push(...judged);
-  const on = inScope(p.scope);
   for (const s of STAGES.filter((x) => !on.includes(x))) {
     out.entregables.push(...out[s].map((i) => ({...i, level: 'warn' as const, omitted: s})));
     out[s] = [];

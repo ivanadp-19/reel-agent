@@ -96,7 +96,7 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
             return;
           }
           const x = await r.json();
-          if (x?.updatedAt) lastSeenUpdate.current = x.updatedAt;
+          if (x?.updatedAt) { lastSeenUpdate.current = x.updatedAt; useEditor.setState({rev: x.updatedAt}); }
           savedIdentity.current = identity;
         })
         .catch(() => {});

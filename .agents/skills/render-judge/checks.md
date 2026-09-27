@@ -28,8 +28,9 @@ live in the client's profile on the volume (see the end of this file).
 confirmations. **Advisory** checks (`source-cut`, `color-jump`, `validate-guion-conflict`) never count toward the
 verdict, whatever their state: the client decides on them. So does every finding about a stage the job did not
 ask for (`project.scope`, `set_scope`: a captions-only job on a finished export → its cut, color, audio and B-roll
-are the client's): marked advisory with the stage it belongs to (src/stages.ts `scopeFindings`). The label is **`QC técnico superado`**, or
-`… (evidencia reducida)` when a rule check was skipped. Otherwise the label
+are the client's): marked advisory with the stage it belongs to (src/stages.ts `scopeFindings`; a broll rule about the
+caption pages — `safe-*`, `matte`, `layer-blocker` — stays the captions' when captions are asked for). The label is **`QC técnico superado`**, or
+`… (evidencia reducida)` when a rule check of a stage in scope was skipped (one of an omitted stage is listed apart, `scopeSkips`). Otherwise the label
 is `QC técnico: n hallazgos` with the prioritized list.
 
 The label is never "aprobado": only the client approves. It never gates the

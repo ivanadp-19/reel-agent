@@ -59,7 +59,7 @@ const {contentWords} = await import(src('brollMatch.ts'));
 const {CREW_WORDS, isCrewRun} = await import(src('cuts.ts'));
 const {numberOf} = await import(src('guion.ts'));
 const {toDisplay, endsSentence} = await import(src('paging.ts'));
-const {scopeFindings} = await import(src('stages.ts'));
+const {STAGES, inScope, scopeFindings, scopeSkips} = await import(src('stages.ts'));
 const {qc} = await import(path.join(ROOT, 'scripts', 'qc.mjs'));
 // frame looks, the structure hash and the step rule: one implementation for the source scan and this judge
 const gradeScan = await import(path.join(ROOT, 'scripts', 'grade-scan.mjs'));
@@ -1561,7 +1561,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   findings.length = 0; findings.push(...uniq);
   findings.sort((x, y) => order(x) - order(y));
   const diff = diffWithPrev(findings, prev);
-  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, fps: rate, snapshot, role, profile: profile?.id ?? null, profileFile: profile?.file ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), ...verdictOf(findings, {reduced: skipped.length > 0}), findings, diff, skipped, evidence, plan: p.plan ?? null};
+  const skips = scopeSkips(skipped, p.scope); // a check of an omitted stage not run is not the job's: never "evidencia reducida"
+  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, fps: rate, snapshot, role, profile: profile?.id ?? null, profileFile: profile?.file ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), scope: p.scope ?? null, ...verdictOf(findings, {reduced: skips.inScope.length > 0}), findings, diff, skipped: skips.inScope, skippedOmitted: skips.omitted, evidence, plan: p.plan ?? null};
 }
 
 // ---------- report ----------
@@ -1573,6 +1574,8 @@ export function reportText(r) {
   L.push('  Etiqueta para la entrega: la de arriba. Nunca "aprobado": solo el cliente aprueba. El master base se entrega igual; esto acompaña a la entrega.');
   L.push(`render: ${r.render}${r.pair ? `  (vs ${r.pair})` : ''}`);
   L.push(r.profile ? `perfil de cliente: ${r.profile} (${r.profileFile})` : 'perfil de cliente: ninguno — solo la rúbrica genérica (el de un cliente va en public/clients/<cliente>/profile.json)');
+  const on = inScope(r.scope), off = STAGES.filter((s) => !on.includes(s)), brollOff = off.includes('broll');
+  if (off.length) L.push(`ALCANCE: ${on.join(' → ')} — omitidas: ${off.join(', ')} (set_scope: lo que se encuentre de ellas, por regla o a ojo, es un aviso: nunca cuenta para el veredicto ni la etiqueta, y no se corrige en este trabajo)`);
   if (r.diff) L.push(`vs previous: fixed ${r.diff.fixed.length}, regressions ${r.diff.regressions.length ? r.diff.regressions.join(', ') : 'none'}, stuck (3+ iterations) ${r.diff.stuck.length ? r.diff.stuck.join(', ') : 'none'}`);
   const live = r.findings.filter(counts), cand = r.findings.filter((f) => !counts(f) && !f.dismissed && !isAdvisory(f)), advice = r.findings.filter((f) => !f.dismissed && isAdvisory(f));
   const top = live.filter((f) => f.severity === 'blocker' || f.severity === 'major');
@@ -1596,16 +1599,17 @@ export function reportText(r) {
     for (const f of advice) { L.push(`  ${line(f)}${f.confirmed ? ' — confirmado en el frame' : ''}${f.omitted ? ` — fuera del alcance del trabajo (${f.omitted})` : ''}`); for (const x of f.fix) L.push(`  ${fixLine(x, 'if he wants it changed')}`); }
   }
   if (r.skipped.length) L.push('', 'SKIPPED (no evidence — not checked, so not passed):', ...r.skipped.map((s) => `  - ${s}`));
+  if (r.skippedOmitted?.length) L.push('', `SKIPPED FUERA DEL ALCANCE (etapas omitidas: ${off.join(', ')} — no reducen la evidencia):`, ...r.skippedOmitted.map((s) => `  - ${s}`));
   L.push('', 'EVIDENCE FOR THE JUDGE (snapshot of the project when the render was judged' + (r.projectUpdatedAt ? `, updatedAt ${r.projectUpdatedAt}` : '') + ')');
   for (const [k, f] of Object.entries(r.evidence.sheets)) if (f) L.push(`  sheet ${k}: ${f}`);
   L.push(`  look at (frame_at video=<render>): ${r.evidence.lookAt.map((t) => `${t}s`).join(', ') || '—'}`);
   L.push(`  tech: ${JSON.stringify(r.evidence.tech)}`, `  audio: ${JSON.stringify(r.evidence.audio)}`);
   if (r.evidence.profileDoc) L.push(`  client rules by eye: ${r.evidence.profileDoc}`);
   if (r.evidence.claims?.length) {
-    L.push('', 'PROMESAS DEL VO A VERIFICAR (heuristic — no es regla: el juez mira los frames; claim-image = major con timestamp + la promesa sin ilustrar; nunca auto-fix):');
+    L.push('', brollOff ? 'PROMESAS DEL VO (AVISO — broll fuera del alcance: claim-image va a AVISOS, nunca cuenta ni se corrige en este trabajo):' : 'PROMESAS DEL VO A VERIFICAR (heuristic — no es regla: el juez mira los frames; claim-image = major con timestamp + la promesa sin ilustrar; nunca auto-fix):');
     for (const c of r.evidence.claims) L.push(`  @${tc(c.t0)}–${tc(c.t1)} "${c.text.slice(0, 90)}"${c.cues.length ? `  [prueba: ${c.cues.join(', ')}]` : ''}  en pantalla: ${c.inserts.join(', ') || 'solo el presentador'}  → frame_at ${c.lookAt.map((t) => `${t}s`).join(', ')}`);
   }
-  if (r.evidence.inserts.length) L.push('  script inserts checked:', ...r.evidence.inserts.map((x) => `    ${x}`));
+  if (r.evidence.inserts.length) L.push(`  script inserts checked${brollOff ? ' (AVISO — broll fuera del alcance: un inserto faltante no cuenta)' : ''}:`, ...r.evidence.inserts.map((x) => `    ${x}`));
   L.push('  captions (proofread every one):', ...(r.evidence.captions.length ? r.evidence.captions.map((c) => `    ${c}`) : ['    (none on screen)']));
   if (r.evidence.graphics.length) L.push('  graphics:', ...r.evidence.graphics.map((g) => `    ${g}`));
   if (r.evidence.broll.length) L.push('  B-roll (what is said under each cue):', ...r.evidence.broll.map((b) => `    ${b.id} @${tc(b.at)}–${tc(b.end)} ${b.mode} ${b.src} [${b.tags}] ← "${b.said}"`));

@@ -92,7 +92,8 @@ render vN ──► DELIVER vN now, labeled "QC técnico en curso"
    its prioritized findings to vN, as it wrote them. Never hide findings or
    soften them, and never hold vN back because of them.
 4. **Iterate on FAIL.** Fix only what a finding names, with the exact tool calls
-   the report gives. Ids and seconds come from the script, so never recompute them.
+   the report gives — never an AVISO: an advisory, or anything about a stage
+   outside the report's `ALCANCE` (the job did not ask for it), stays as it is. Ids and seconds come from the script, so never recompute them.
    Order matters, because some fixes change ids:
    - **First, every fix without ⟲.** These keep ids: `edit_caption` with the same
      word count, `edit_caption starts_at_wid` (moves one page break; every word keeps

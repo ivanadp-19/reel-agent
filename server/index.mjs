@@ -47,7 +47,7 @@ import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
 import {pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
-import {checkStage, inRow, nextRev, readProject, recordProof, saveProject, sliceHash, stageView, writeProject} from '../scripts/stages.mjs';
+import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, stageView, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
 import {createGradeScans, readScan, scanSource} from '../scripts/grade-scan.mjs';
@@ -912,8 +912,9 @@ async function handle(req, res) {
     if (admit?.reuse) return json(res, 200, {jobId: admit.reuse.id, status: admit.reuse.status, ahead: renderJobs.ahead(admit.reuse.id), reused: true, plan});
     if (admit) return json(res, admit.status, admit);
     // drafts keep their project (job list, timing log); only finals become review versions (the runner checks draft)
-    // which revision of the saved project it renders: the delivery's gate counts it only for that one (scripts/stages.mjs)
-    const stageHash = projectId && !draft ? sliceHash(savedProject(PROJECTS_DIR, projectId), 'entregables') : null;
+    // which version of the saved project it renders — none when the props are not what it renders now: the delivery's
+    // gate counts it only for that one (scripts/stages.mjs finalStageHash)
+    const stageHash = projectId && !draft ? finalStageHash(JSON.parse(raw), savedProject(PROJECTS_DIR, projectId)) : null;
     const {job, ahead} = renderJobs.submit({props: raw, draft, expectSec, clean, projectId, mode, user: g.user ?? null, identity, stageHash});
     if (ahead) console.log(`render ${job.id} queued (${ahead} ahead)`);
     return json(res, 200, {jobId: job.id, status: job.status, ahead, ...(ahead ? {queued: ahead} : {}), plan});

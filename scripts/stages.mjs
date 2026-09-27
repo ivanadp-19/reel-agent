@@ -1,12 +1,13 @@
 // Stage records (docs/designs/cesar-etapas-bandeja.md §3, CEO-1, CEO-11, CEO-13; plan phase 10): each stage's
 // state and its log, OUTSIDE the project JSON — the editor's compare-and-swap on updatedAt never sees them, and
 // GET /api/projects, list_projects and projectRows (every *.json of public/projects/) never list them.
-//   public/stages/<id>.json    {projectId, stages: {<stage>: {status, rev, at, by, findings, reds, infra?, job?, proofs?}}}
+//   public/stages/<id>.json    {projectId, stages: {<stage>: {status, rev, hash, at, by, findings, reds, redHash?, check, infra?, job?, proofs?}}}
 //   public/stages/<id>.jsonl   append-only: {at, stage, from, to, actor, rev, findings?, discarded?}, and
 //                              {at, event: 'UnmappedField' | 'proof' | 'dependency', actor, …}
 // status: pendiente → trabajando → chequeando → verde | rojo, plus stale (an edit reopened it); the view adds
-// omitida (outside project.scope: src/stages.ts inScope). reds = red checks of the stage in a row — 3 → stop and
-// ask Felipe; the machine's failures (infra) never count. Written in the backend only, inside the project's row:
+// omitida (outside project.scope: src/stages.ts inScope). reds = red checks of the stage in a row, one per version of
+// what it reads (hash: a re-check of the same edit is no new attempt) — 3 → stop and ask Felipe; the machine's
+// failures (infra) never count. Written in the backend only, inside the project's row:
 //   saveProject / writeProject  the one project write (POST /api/projects/<id>, PUT …/captions): the server's
 //                               own fields dropped, invalidate() → the stages it reopens marked stale
 //   checkStage                  the only writer of verde / rojo / trabajando / chequeando, bound to the
@@ -16,7 +17,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {STAGES, inScope, invalidate, stageSlice, waitingOn} from '../src/stages.ts';
+import {STAGES, canon, changedFields, inScope, invalidate, stageSlice, waitingOn} from '../src/stages.ts';
+import {projectRenderProps} from '../src/renderProps.ts';
 import {identityWrite, stageChecks, withDefaults} from '../mcp/checks.mjs';
 import {ACTIVE, jobsDir, listJobs} from './render-jobs.mjs';
 
@@ -61,8 +63,9 @@ export function inRow(id, fn) {
 function setStage(publicDir, id, stage, next, actor, extra = {}) {
   const all = readStages(publicDir, id);
   const prev = all[stage] ?? {status: 'pendiente'};
-  const reds = next.status === 'verde' ? 0 : (prev.reds ?? 0) + (next.status === 'rojo' && !next.infra ? 1 : 0);
-  const rec = {...prev, ...next, reds, at: new Date().toISOString(), by: actor};
+  const counted = next.status === 'rojo' && !next.infra && next.hash !== prev.redHash; // a new version of the stage, red again
+  const reds = next.status === 'verde' ? 0 : (prev.reds ?? 0) + (counted ? 1 : 0);
+  const rec = {...prev, ...next, reds, redHash: next.status === 'verde' ? undefined : counted ? next.hash : prev.redHash, at: new Date().toISOString(), by: actor};
   all[stage] = JSON.parse(JSON.stringify(rec)); // an undefined infra / job clears the previous one
   writeStages(publicDir, id, all);
   logStage(publicDir, id, {stage, from: prev.status, to: rec.status, actor, rev: rec.rev ?? null, ...(next.findings ? {findings: brief(next.findings)} : {}), ...(next.infra ? {infra: true} : {}), ...extra});
@@ -70,18 +73,18 @@ function setStage(publicDir, id, stage, next, actor, extra = {}) {
 }
 
 // Write a project and reopen what the change reaches: invalidate(prev, next) → its stages stale (one never
-// checked stays pendiente), a field no stage owns logged (UnmappedField). → {stale, unmapped}
+// checked stays pendiente), a field no stage owns logged (UnmappedField). The stale marks go first: a failure or a
+// crash before the project is written leaves a stage stale over an edit that did not land (the safe side), never
+// green over one that did. → {stale, unmapped}
 export function writeProject(publicDir, id, prev, next, actor = null) {
-  writeJson(path.join(publicDir, 'projects', `${id}.json`), next);
-  const r = invalidate(prev, next);
-  if (r.unmapped.length) logStage(publicDir, id, {event: 'UnmappedField', fields: r.unmapped, actor, rev: next.updatedAt ?? null});
-  const all = readStages(publicDir, id);
-  const hit = r.stale.filter((s) => all[s] && !['pendiente', 'stale'].includes(all[s].status));
-  for (const s of hit) {
-    logStage(publicDir, id, {stage: s, from: all[s].status, to: 'stale', actor, rev: next.updatedAt ?? null});
-    all[s] = {...all[s], status: 'stale', at: new Date().toISOString(), by: actor};
-  }
+  const r = invalidate(prev, next), rev = next.updatedAt ?? null;
+  const all = readStages(publicDir, id), at = new Date().toISOString();
+  const hit = r.stale.filter((s) => all[s] && !['pendiente', 'stale'].includes(all[s].status)).map((s) => [s, all[s].status]);
+  for (const [s] of hit) all[s] = {...all[s], status: 'stale', at, by: actor};
   if (hit.length) writeStages(publicDir, id, all);
+  if (r.unmapped.length) logStage(publicDir, id, {event: 'UnmappedField', fields: r.unmapped, actor, rev});
+  for (const [s, from] of hit) logStage(publicDir, id, {stage: s, from, to: 'stale', actor, rev});
+  writeJson(path.join(publicDir, 'projects', `${id}.json`), next);
   return r;
 }
 
@@ -92,42 +95,49 @@ export const nextRev = (prev, now = new Date().toISOString()) => new Date(Math.m
 // POST /api/projects/<id> — the editor's autosave, every MCP edit, the reel CLI → [status, body]. Compare-and-swap
 // on updatedAt (a writer that read an older version is refused instead of overwriting the other's work), the
 // identity check (mcp/checks.mjs), the server's fields dropped, merge (a field the writer does not know is kept;
-// clearing is null / []), write, invalidate. Synchronous from the read to the write; the backend runs it in the row.
+// clearing is null / []), write, invalidate. A save that changes nothing (the editor's echo of an outside write)
+// writes nothing and keeps the revision: proofs and checks of it stay current. Synchronous from the read to the
+// write; the backend runs it in the row.
 export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
   if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return [400, {error: 'bad json: a project object'}];
-  const prev = readProject(publicDir, id) ?? {}; // missing, or corrupt: overwritten
+  const was = readProject(publicDir, id), prev = was ?? {}; // missing, or corrupt: overwritten
   if (incoming.updatedAt && prev.updatedAt && incoming.updatedAt !== prev.updatedAt) return [409, {error: 'stale: project changed since you read it', updatedAt: prev.updatedAt}];
   const dropped = SERVER_FIELDS.filter((k) => Object.hasOwn(incoming, k));
   for (const k of dropped) delete incoming[k];
   // a new or changed identity must be valid and not another project's client + script + variant
   const badIdentity = identityWrite(path.join(publicDir, 'projects'), id, prev, incoming);
   if (badIdentity) return [400, {error: badIdentity, code: 'bad_identity'}];
+  const kept = dropped.length ? {dropped} : {};
+  if (was && !changedFields(prev, {...prev, ...incoming, createdAt: prev.createdAt, updatedAt: prev.updatedAt}).length) return [200, {ok: true, updatedAt: prev.updatedAt ?? null, stale: [], unchanged: true, ...kept}];
   now = nextRev(prev, now);
   const saved = {...prev, ...incoming, createdAt: prev.createdAt || now, updatedAt: now};
   const {stale} = writeProject(publicDir, id, prev, saved, actor);
-  return [200, {ok: true, updatedAt: now, stale, ...(dropped.length ? {dropped} : {})}];
+  return [200, {ok: true, updatedAt: now, stale, ...kept}];
 }
 
 // check_stage (POST /api/projects/<id>/stages/<stage>/check): a stage's gate on the project as saved now, its
 // result recorded — the only writer of verde, rojo, trabajando and chequeando → [status, body]. Bound to the
 // revision it read (CEO-11, D21): the rules run outside the row (other writers are never held), and when the
-// project's updatedAt moved meanwhile the result is discarded and the stage left stale. A stage outside the
-// scope is omitida: nothing runs, nothing is written. A rule that throws is a red of the machine (infra).
-// `pause` (tests): awaited between the rules and the write.
+// project's updatedAt moved meanwhile the result is discarded and the stage left stale. The newest check of a
+// stage settles it: one that started meanwhile (its id on the record) drops this result unwritten (superseded).
+// A stage outside the scope is omitida: nothing runs, nothing is written. A rule that throws is a red of the
+// machine (infra). `pause` (tests): awaited between the rules and the write.
 export async function checkStage(publicDir, id, stage, {actor = null, env = process.env, pause} = {}) {
   if (!STAGES.includes(stage)) return [400, {error: `stage: one of ${STAGES.join(', ')}`, code: 'bad_request'}];
   const p = readProject(publicDir, id);
   if (!p) return [404, {error: `project ${id} not found`, code: 'not_found'}];
-  const rev = p.updatedAt ?? null;
+  const rev = p.updatedAt ?? null, check = crypto.randomUUID();
   if (!inScope(p.scope).includes(stage)) return [200, {stage, status: 'omitida', rev, findings: []}];
-  await inRow(id, () => setStage(publicDir, id, stage, {status: 'chequeando', rev}, actor));
+  await inRow(id, () => setStage(publicDir, id, stage, {status: 'chequeando', rev, check}, actor));
   let r;
   try { r = await gate(publicDir, id, p, stage, env); } catch (e) { r = {status: 'rojo', infra: true, findings: [{level: 'error', code: 'check-failed', msg: `the check itself failed: ${String(e?.message ?? e).slice(0, 300)}`}]}; }
   await pause?.();
   return inRow(id, () => {
+    const rec = readStages(publicDir, id)[stage];
+    if (rec?.check !== check) return [200, {stage, ...rec, superseded: {rev, ...r}}];
     const now = readProject(publicDir, id)?.updatedAt ?? null;
     if (now !== rev) return [200, {stage, ...setStage(publicDir, id, stage, {status: 'stale', rev: now}, actor, {discarded: rev}), discarded: {rev, ...r}}];
-    return [200, {stage, ...setStage(publicDir, id, stage, {infra: undefined, job: undefined, ...r, rev}, actor)}];
+    return [200, {stage, ...setStage(publicDir, id, stage, {infra: undefined, job: undefined, ...r, rev, hash: sliceHash(p, stage)}, actor)}];
   });
 }
 
@@ -143,7 +153,7 @@ async function gate(publicDir, id, p, stage, env) {
   if (stage !== 'entregables') return {status: red ? 'rojo' : 'verde', findings};
   const finals = listJobs(jobsDir(publicDir), {projectId: id}).filter((j) => !j.draft);
   const job = finals.find((j) => j.stageHash === sliceHash(p, 'entregables'));
-  if (!job) return {status: red ? 'rojo' : 'pendiente', findings: [...findings, {level: 'warn', code: 'no-render', msg: finals.length ? `the last final render (${finals[0].id}) is of an earlier version of the project — render a final again` : 'no final render yet — start_render (a final), then check_stage entregables'}]};
+  if (!job) return {status: red ? 'rojo' : 'pendiente', findings: [...findings, {level: 'warn', code: 'no-render', msg: finals.length ? `the last final render (${finals[0].id}) is not of the project as saved now — render a final again` : 'no final render yet — start_render (a final), then check_stage entregables'}]};
   // queued again after a backend restart = its single retry: still working, red only if that fails too
   if (ACTIVE.has(job.status)) return {status: 'trabajando', job: job.id, findings: [...findings, {level: 'warn', code: 'render-running', msg: job.requeuedAt ? `render ${job.id} runs again after a backend restart (its single retry)` : `render ${job.id} is ${job.status}`}]};
   if (job.status === 'done') return {status: red ? 'rojo' : 'verde', job: job.id, findings};
@@ -151,8 +161,17 @@ async function gate(publicDir, id, p, stage, env) {
   return {status: 'rojo', infra: infra || undefined, job: job.id, findings: [...findings, {level: 'error', code: infra ? 'render-infra' : 'render-failed', msg: `render ${job.id} ${job.status}${job.error ? `: ${job.error}` : ''}${infra ? ' (the machine, not the reel: render again)' : ''}`}]};
 }
 
-// A proof the MCP took of the project at `rev` (caption_proof, motion_proof): kept with the hash of the stage's
-// slice, so it counts until an edit reaches that slice; one of an older revision is not recorded (CEO-11, R2-8).
+// POST /api/render: the version a final renders, for the delivery's gate — the saved project's entregables slice, only
+// when the body's props are what that project renders. An editor store that has not pulled an outside edit yet (its
+// 2 s poll) or not saved its own (600 ms autosave), or a load() an edit overtook, render another version: none (null)
+export function finalStageHash(props, saved) {
+  const renders = (x) => canon(projectRenderProps({...x, identity: saved?.identity}));
+  return saved && renders(props) === renders(saved) ? sliceHash(saved, 'entregables') : null;
+}
+
+// A proof of the project at `rev` — the MCP's caption_proof / motion_proof, or the editor's Proofed (a person who
+// watched the preview, which is the render): kept with the hash of the stage's slice, so it counts until an edit
+// reaches that slice; one of an older revision is not recorded (CEO-11, R2-8).
 export function recordProof(publicDir, id, stage, {kind, rev} = {}, actor = null) {
   if (!PROOFS[stage]?.includes(kind)) return Promise.resolve([400, {error: `proof: ${stage} takes ${PROOFS[stage]?.join(', ') || 'none'}`, code: 'bad_request'}]);
   return inRow(id, () => {

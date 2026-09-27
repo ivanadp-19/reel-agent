@@ -6,11 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, inScope, invalidate, scopeFindings, scopeInput, stageFindings, stageSlice, waitingOn} from '../src/stages.ts';
+import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, inScope, invalidate, scopeFindings, scopeInput, scopeSkips, stageFindings, stageSlice, waitingOn} from '../src/stages.ts';
+import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
+import {normalizeCaption} from '../src/captions.ts';
 import {splitClip, trimClip} from '../src/timeline.ts';
 import {validateProject} from '../src/validate.ts';
 import {newProject, stageChecks, withDefaults} from '../mcp/checks.mjs';
-import {SERVER_FIELDS, checkStage, readProject, readStages, recordProof, saveProject, sliceHash, stageView, stagesDir} from '../scripts/stages.mjs';
+import {SERVER_FIELDS, checkStage, finalStageHash, readProject, readStages, recordProof, saveProject, sliceHash, stageView, stagesDir} from '../scripts/stages.mjs';
 import {createRenderJobs, jobsDir, readJob, writeJob} from '../scripts/render-jobs.mjs';
 import {backendStub} from './backend-stub.mjs';
 
@@ -254,6 +256,45 @@ test('scope: the render judge\'s findings on an omitted stage are advisory and n
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });
 
+test('scope: without broll, broll\'s rules about the caption pages (layer-blocker, matte, safe-*) stay the captions\' — red, and a judge FAIL', async () => {
+  const {verdictOf} = await import('../.agents/skills/render-judge/judge.mjs');
+  const p = {clips: [clip()], identity: {client: 'acme', script: 2}, scope: ['captions'], captions: [page('c1', [w('hola', 100, 400)], {behind: true})], graphics: []};
+  const issues = [{level: 'error', code: 'matte', msg: 'no matte'}, {level: 'warn', code: 'safe-bottom', msg: 'low', ref: 'c1'}, {level: 'warn', code: 'face', msg: 'on the face', ref: 'g1'}];
+  const f = stageFindings({p, fps: 30000 / 1001, issues});
+  assert.ok(f.captions.some((i) => i.code === 'layer-blocker' && i.level === 'error' && /behind the presenter/.test(i.msg)), JSON.stringify(f.captions));
+  assert.deepEqual(f.captions.filter((i) => i.code !== 'layer-blocker').map((i) => `${i.code}:${i.level}`), ['matte:error', 'safe-bottom:warn']);
+  assert.deepEqual(f.entregables.map((i) => `${i.code}:${i.omitted}`), ['face:broll'], 'a graphic\'s own rule stays advisory');
+  assert.deepEqual(stageFindings({p: {...p, scope: ['color']}, fps: 30000 / 1001, issues}).captions, [], 'captions omitted too: advisory');
+  assert.ok(stageFindings({p: {...p, scope: null}, fps: 30000 / 1001, issues}).broll.some((i) => i.code === 'layer-blocker'), 'everything asked: broll\'s, as before');
+  const judged = [{check: 'validate-matte', severity: 'blocker', kind: 'rule', msg: 'no matte'}, {check: 'validate-safe-bottom', severity: 'major', kind: 'rule', msg: 'low'}, {check: 'claim-image', severity: 'major', kind: 'heuristic', msg: 'no gym'}];
+  const s = scopeFindings(judged, ['captions']);
+  assert.deepEqual([s.inScope.map((x) => x.check), s.advisory.map((x) => x.check)], [['validate-matte', 'validate-safe-bottom'], ['claim-image']]);
+  assert.equal(verdictOf([...s.inScope, ...s.advisory]).verdict, 'FAIL');
+});
+
+test('scope: a check the judge skipped for an omitted stage never makes the label "evidencia reducida"; the report states the scope', async () => {
+  const {reportText, verdictOf} = await import('../.agents/skills/render-judge/judge.mjs');
+  const judgeSrc = fs.readFileSync(path.join(ROOT, '.agents', 'skills', 'render-judge', 'judge.mjs'), 'utf8');
+  const notes = ['color-ref: the project has no identity.development — set_identity development', 'color vs "Thula": no encuentro a.jpg — put the approved references there',
+    'grade-coverage: k0 — every frame under B-roll', 'source-cut (--no-source-scan)', 'music vs voice: no music-only stretch ≥ 0.8 s to measure the bed',
+    'phone filter: could not measure the voice bands', 'parity: x.mp4 not found', 'contact sheets (boom) — use frame_at', 'audio analysis did not finish in 60 s — its checks are partial'];
+  for (const n of notes) assert.ok(judgeSrc.includes(n.replace(/"[^"]*"/, '').split(/[:(]/)[0].split(' ').slice(0, 3).join(' ')), `the judge still skips "${n}"`);
+  const s = scopeSkips(notes, ['captions']);
+  assert.deepEqual([s.omitted, s.inScope], [notes.slice(0, 6), notes.slice(6)]);
+  assert.deepEqual(scopeSkips(notes, ['color']).omitted, notes.slice(3, 6));
+  assert.deepEqual(scopeSkips(notes, null), {inScope: notes, omitted: []});
+  // judge(): only checks of the omitted stages skipped → not reduced
+  const r = {label: '', iteration: 1, role: null, draft: false, durationSec: 9, profile: null, scope: ['captions'], ...verdictOf([], {reduced: scopeSkips(notes.slice(0, 6), ['captions']).inScope.length > 0}), findings: [], diff: null,
+    skipped: [], skippedOmitted: s.omitted, evidence: {sheets: {}, lookAt: [], tech: {}, audio: {}, claims: [{t0: 1, t1: 2, text: 'con gimnasio', cues: [], inserts: [], lookAt: [1.5]}], inserts: ['gimnasio @0:34'], captions: [], graphics: [], broll: []}};
+  assert.equal(r.label, 'QC técnico superado');
+  const text = reportText(r);
+  assert.match(text, /ALCANCE: ingest → guion → captions → entregables — omitidas: corte, color, audio, broll/);
+  assert.match(text, /SKIPPED FUERA DEL ALCANCE[^\n]*\n {2}- color-ref/);
+  assert.match(text, /PROMESAS DEL VO \(AVISO — broll fuera del alcance/);
+  assert.match(text, /script inserts checked \(AVISO/);
+  assert.doesNotMatch(reportText({...r, scope: null, skippedOmitted: []}), /ALCANCE|AVISO — broll/);
+});
+
 test('every check the render judge emits has a stage (RULES or JUDGE_STAGE, never both), and every JUDGE_STAGE row is a judge check', () => {
   const judge = fs.readFileSync(path.join(ROOT, '.agents', 'skills', 'render-judge', 'judge.mjs'), 'utf8');
   const checksMd = fs.readFileSync(path.join(ROOT, '.agents', 'skills', 'render-judge', 'checks.md'), 'utf8');
@@ -343,6 +384,105 @@ test('CEO-11: a check that read R while an edit moved the project to R+1 ends st
     // the editor that read R+1 before that check saves again: still no 409 (the records are outside its compare-and-swap)
     assert.equal(saveProject(pub, 'p1', {name: 'renamed', updatedAt: b.updatedAt})[0], 200);
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+// a check that stops between its rules and its write until released (checkStage's `pause`)
+const paused = () => {
+  let reached, release;
+  const at = new Promise((r) => { reached = r; }), gate = new Promise((r) => { release = r; });
+  return {at, release, pause: () => { reached(); return gate; }};
+};
+
+test('two checks of one stage: the newest started settles it — an older one ending last never overwrites it', async () => {
+  const pub = pubDir();
+  try {
+    saveProject(pub, 'p1', PROJ());
+    // A reads R and waits; set_grade (not corte's) moves the project to R+1; B checks corte there and ends first
+    const a = paused();
+    const A = checkStage(pub, 'p1', 'corte', {...ENV, actor: 'A', pause: a.pause});
+    await a.at;
+    saveProject(pub, 'p1', {grade: {look: 'warm', intensity: 0.5}, updatedAt: readProject(pub, 'p1').updatedAt});
+    const [, b] = await checkStage(pub, 'p1', 'corte', {...ENV, actor: 'B'});
+    assert.ok(['verde', 'rojo'].includes(b.status), b.status);
+    a.release();
+    const [, ra] = await A;
+    assert.ok(ra.superseded, 'A\'s result is dropped unwritten');
+    assert.deepEqual([readStages(pub, 'p1').corte.status, readStages(pub, 'p1').corte.by], [b.status, 'B']);
+    assert.ok(!log(pub, 'p1').some((e) => e.stage === 'corte' && e.to === 'stale'), 'nothing reopened corte');
+    // one revision: A reads the final render while it is queued, it ends, B settles the delivery — A's trabajando is dropped
+    const dir = jobsDir(pub);
+    writeJob(dir, {id: 'job000001', seq: 1, status: 'queued', draft: false, projectId: 'p1', stageHash: sliceHash(readProject(pub, 'p1'), 'entregables'), attempts: 0, createdAt: new Date().toISOString()});
+    const c = paused();
+    const C = checkStage(pub, 'p1', 'entregables', {...ENV, pause: c.pause});
+    await c.at;
+    writeJob(dir, {...readJob(dir, 'job000001'), status: 'done', result: {file: '/exports/x.mp4'}});
+    const [, d] = await checkStage(pub, 'p1', 'entregables', ENV);
+    c.release();
+    const [, rc] = await C;
+    assert.equal(rc.superseded.status, 'trabajando');
+    assert.equal(d.job, 'job000001');
+    assert.notEqual(d.status, 'trabajando');
+    assert.equal(readStages(pub, 'p1').entregables.status, d.status);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('a save that changes nothing (the editor\'s echo of an outside write) writes nothing and keeps the revision: the proof and the check of it stand', async () => {
+  const pub = pubDir();
+  try {
+    const [, a] = saveProject(pub, 'p1', withDefaults(PROJ())); // saved by the MCP: defaults filled, pages normalized
+    const file = path.join(pub, 'projects', 'p1.json'), before = fs.readFileSync(file, 'utf8');
+    const c = paused();
+    const check = checkStage(pub, 'p1', 'captions', {...ENV, pause: c.pause});
+    await c.at;
+    // the editor pulls the project (its 2 s poll) and its autosave sends the same content back, as it holds it
+    const {createdAt: _c, ...held} = readProject(pub, 'p1');
+    const [code, e] = saveProject(pub, 'p1', {...held, captions: held.captions.map(normalizeCaption), music: null, grade: null, brand: null, identity: undefined, scope: null}, {actor: 'editor'});
+    assert.deepEqual([code, e.updatedAt, e.stale, e.unchanged], [200, a.updatedAt, [], true]);
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'not written');
+    assert.equal((await recordProof(pub, 'p1', 'captions', {kind: 'caption_proof', rev: a.updatedAt}))[1].recorded, true, 'a proof of the revision the agent read');
+    c.release();
+    const [, r] = await check;
+    assert.ok(!r.discarded && r.rev === a.updatedAt, JSON.stringify(r));
+    // a rename is a change: written, a new revision; a stale writer is still refused
+    const [, n] = saveProject(pub, 'p1', {name: 'renamed', updatedAt: a.updatedAt});
+    assert.ok(n.updatedAt > a.updatedAt && !n.unchanged);
+    assert.equal(saveProject(pub, 'p1', {name: 'renamed', updatedAt: a.updatedAt})[0], 409);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('the stale marks are written before the project: a failure between them never leaves a stage green over an edit that landed', {skip: process.getuid?.() === 0 && 'root ignores file modes'}, async () => {
+  const pub = pubDir();
+  try {
+    const [, a] = saveProject(pub, 'p1', PROJ());
+    await checkStage(pub, 'p1', 'color', ENV);
+    const was = readStages(pub, 'p1').color.status;
+    const grade = {grade: {look: 'warm', intensity: 0.5}, updatedAt: a.updatedAt};
+    const readOnly = (dir, fn) => { fs.chmodSync(dir, 0o555); try { return fn(); } finally { fs.chmodSync(dir, 0o755); } };
+    // the records cannot be written (disk full, a read-only volume): the save fails and nothing of it lands
+    assert.throws(() => readOnly(stagesDir(pub), () => saveProject(pub, 'p1', grade)), /EACCES|EPERM/);
+    assert.deepEqual([readProject(pub, 'p1').updatedAt, readStages(pub, 'p1').color.status], [a.updatedAt, was]);
+    // the project cannot be written after its marks: the stage is left stale — over-stale, the safe side
+    assert.throws(() => readOnly(path.join(pub, 'projects'), () => saveProject(pub, 'p1', grade)), /EACCES|EPERM/);
+    assert.deepEqual([readProject(pub, 'p1').updatedAt, readStages(pub, 'p1').color.status], [a.updatedAt, 'stale']);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('a final render counts for the delivery only when it renders the project as saved — not the editor before its poll, nor a load() an edit overtook', () => {
+  for (const identity of [undefined, {client: 'acme', script: 2}]) {
+    const saved = {...PROJ(), identity, updatedAt: '2026-09-27T00:00:00.000Z'};
+    const route = (props) => finalStageHash(withDeliveryFps(props, saved), saved); // as POST /api/render: the saved project's fps
+    const want = sliceHash(saved, 'entregables');
+    // the MCP (render, start_render) and the reel CLI: projectRenderProps of the project loaded with its defaults
+    assert.equal(route({...projectRenderProps(withDefaults(structuredClone(saved))), draft: false, project_id: 'p1', mode: 'full'}), want);
+    // the editor: its store, pages normalized, nulls where the project has nothing
+    const store = {clips: saved.clips, music: null, captions: saved.captions.map(normalizeCaption), brolls: [], graphics: [], mattes: [], accentColor: '#FFB020', captionStyle: 'palabra', brand: null, grade: null, audio: null, captionsOff: false};
+    assert.equal(route({...store, draft: false, mode: 'layers', project_id: 'p1'}), want);
+    // an agent changed a word; the editor exports before its poll pulls it (or the MCP's load() came before the edit)
+    const edited = {...saved, captions: [page('c1', [w('HOLA', 100, 400, {wid: 'a:0'}), w('amigos', 500, 900, {wid: 'a:1'})])]};
+    assert.equal(finalStageHash(withDeliveryFps(store, edited), edited), null);
+    // the editor's own edit not autosaved yet: the render is of a newer version than the saved one — none either
+    assert.equal(route({...store, grade: {look: 'warm', intensity: 0.5}}), null);
+  }
 });
 
 test('check_stage during an edit through the backend (HTTP) gives the edit no 409, and the check result follows the revision', async () => {
@@ -438,10 +578,20 @@ test('an omitted stage: check_stage runs nothing and writes nothing; the view sa
     const [, b] = saveProject(pub, 'p1', {scope: null, updatedAt: a.updatedAt});
     assert.ok(stageView(pub, 'p1', readProject(pub, 'p1')).stages.every((s) => s.status !== 'omitida'));
     assert.deepEqual(b.stale, [], 'the scope changes no content');
-    for (let i = 0; i < 3; i++) await checkStage(pub, 'p1', 'captions', ENV); // no proofs: red three times
+    // no proofs: red. The same version checked again (the editor's Check, the agent's check_stage, both at once) is
+    // no new attempt; three versions red in a row (three fixes that did not fix it) escalate
+    const red = async () => (await checkStage(pub, 'p1', 'captions', ENV))[1];
+    const both = await Promise.all([red(), red()]); // the first is superseded by the second, started after it
+    assert.deepEqual(both.map((r) => (r.superseded ? 'superseded' : r.reds)), ['superseded', 1]);
+    assert.equal((await red()).reds, 1);
+    let rev = b.updatedAt;
+    for (const text of ['hola!', 'hola!!']) {
+      rev = saveProject(pub, 'p1', {captions: [page('c1', [w(text, 100, 400, {wid: 'a:0'}), w('amigos', 500, 900, {wid: 'a:1'})])], updatedAt: rev})[1].updatedAt;
+      await red(); await red();
+    }
     const cap = stageView(pub, 'p1', readProject(pub, 'p1')).stages.find((s) => s.stage === 'captions');
     assert.deepEqual([cap.status, cap.reds, cap.escalate], ['rojo', 3, true]);
-    saveProject(pub, 'p1', {clips: 'broken', updatedAt: b.updatedAt});
+    saveProject(pub, 'p1', {clips: 'broken', updatedAt: rev});
     const [, t] = await checkStage(pub, 'p1', 'corte', ENV);
     assert.deepEqual([t.status, t.infra, t.findings[0].code], ['rojo', true, 'check-failed']);
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }

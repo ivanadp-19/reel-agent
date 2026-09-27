@@ -55,13 +55,14 @@ type EditorState = {
   guion: string; // the client's script (set_guion): captions reconcile with it, validate checks its coverage
   identity?: Identity | null; // client, script, variant (set_identity / Settings); undefined = the project never had one, the save leaves it out
   scope?: Scopable[] | null; // the stages the job asks for (set_scope / Settings → Stages); null or undefined = all
+  rev?: string | null; // the saved revision (updatedAt) this editor shows — loaded, pulled or its own save; a proof from the preview is of it
 
   // undo/redo: снапшоты ВСЕГО редактируемого состояния (clips/music/captions/brolls).
   // Толкаем ОДИН раз в начале логической правки — драг не флудит историю.
   past: Snapshot[];
   future: Snapshot[];
 
-  init: (meta: Meta, p?: Partial<ProjectData>) => void;
+  init: (meta: Meta, p?: Partial<ProjectData> & {updatedAt?: string}) => void;
   addBrollAsset: (asset: BrollAsset) => void;
   removeBrollAsset: (id: string) => void;
   select: (id: string | null) => void;
@@ -212,6 +213,7 @@ export const useEditor = create<EditorState>((set) => ({
         guion: p.guion ?? '',
         identity: p.identity,
         scope: p.scope,
+        rev: p.updatedAt ?? null,
         past: [],
         future: [],
       };
