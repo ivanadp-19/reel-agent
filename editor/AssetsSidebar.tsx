@@ -3,6 +3,7 @@ import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
 import {pct, uploadClip} from './upload';
 import {DriveImport} from './DriveImport';
+import {pollJob} from './jobs';
 import {placeClips, clipDurationSec} from '../src/timeline';
 import {fmtDb, musicOf} from '../src/audio';
 
@@ -20,6 +21,7 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [drive, setDrive] = useState(false); // the Importar de Drive dialog
+  const [driving, setDriving] = useState<string | null>(null); // a Drive import job's progress
   const [tags, setTags] = useState<Record<string, string[]>>({}); // library tags per asset id (suggest_broll matches on them)
   const loadTags = () => fetch('/api/broll-library').then((r) => (r.ok ? r.json() : [])).then((l: LibRow[]) => setTags(Object.fromEntries(l.map((a) => [a.id, a.tags ?? []])))).catch(() => {});
   useEffect(() => { loadTags(); }, [brollAssets.length]);
@@ -56,6 +58,18 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
       }
     }
     setImporting(null);
+  };
+
+  // a Drive import runs on the backend (up to hours of download + transcode): followed here, next to the uploads,
+  // never in a modal; its clips reach the timeline through the live reload
+  const followDrive = (jobId: string) => {
+    setDrive(false); setDriving('Drive import · starting');
+    const url = '/api/drive/import';
+    pollJob(url, jobId, (s) => setDriving(`Drive · ${s.progress ?? 0}% · ${s.label ?? ''}`), async () => {
+      const s = await fetch(`${url}/${jobId}`).then((r) => r.json()).catch(() => null);
+      setDriving(null);
+      setImportErrors((l) => [...l, ...(s?.skipped ?? []).map((x: {name: string; why: string}) => `${x.name}: ${x.why}`)]); // as an upload's "already on the timeline"
+    }, (m) => { setDriving(null); setImportErrors((l) => [...l, `Drive: ${m}`]); }, 9600);
   };
 
   const onPickClips = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -116,14 +130,14 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
           </button>
         </div>
       </div>
-      {drive && <DriveImport onClose={() => setDrive(false)} />}
+      {drive && <DriveImport onClose={() => setDrive(false)} onStarted={followDrive} />}
 
-      {importing && (
-        <div className="px-4 py-2 text-[11px] text-primary border-b border-outline-variant/30 flex items-center gap-2">
+      {[importing, driving].map((busy, i) => busy && (
+        <div key={i} className="px-4 py-2 text-[11px] text-primary border-b border-outline-variant/30 flex items-center gap-2">
           <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-          <span className="truncate">{importing}</span>
+          <span className="truncate">{busy}</span>
         </div>
-      )}
+      ))}
       {importErrors.length > 0 && !importing && (
         <div role="alert" className="px-4 py-2 text-[11px] text-error border-b border-outline-variant/30 flex items-start gap-2">
           <span className="flex-1 break-words">{importErrors.join(' · ')}</span>

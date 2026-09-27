@@ -33,7 +33,7 @@ export const EXIT = {
   no_token: 3, bad_token: 3, token_required: 3, token_file_mode: 3, unauthorized: 3, forbidden: 3,
   not_found: 4, conflict: 5, revision_mismatch: 5, render_busy: 5, exists: 5, upload_incomplete: 5,
   too_large: 6, low_disk: 6, low_memory: 6, backend_unreachable: 7, render_failed: 8, invalid: 9, timeout: 124,
-  drive_auth: 3, bad_mapping: 2,
+  drive_auth: 3, bad_mapping: 2, drive_changed: 5,
 };
 export class CliError extends Error {
   constructor(code, message, hint, extra = {}) { super(message); this.code = code; this.hint = hint; this.extra = extra; }

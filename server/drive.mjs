@@ -8,7 +8,7 @@
 //        of that project's identity (takeFits)
 //   POST /api/drive/import {project_id, files: [{fileId, script, variant}]} → 202 {jobId}: the mapping stated
 //        explicitly (the editor's dialog, the MCP's import_drive, `reel drive import`); 400 bad_mapping before
-//        anything runs — a take of another script or variant than the project's identity included
+//        anything runs — a take of another script or variant than the project's identity, or a row with another key
 //   GET  /api/drive/import/<jobId> → {status: running | done | error, progress, label, added, skipped, failed, error?, code?}
 // Each file: files.get (its size and modifiedTime) → downloaded as an upload part (server/uploads.mjs partFile, a
 // namespace no token user can have) resuming with Range from what the part holds (a backend killed mid-download
@@ -18,7 +18,8 @@
 // import a no-op: a clip of it already on the timeline is skipped, and one ingested before for any project is
 // reused without downloading (its record in <uploads>/drive/).
 // Errors: 401/403 → DriveAuth (no retry), 404 → NotFound, 429 (or a 403 rateLimitExceeded) → backoff honoring
-// Retry-After, at most `retries` (3) times → RateLimit; a full disk → LowDisk (the part removed).
+// Retry-After, at most `retries` (3) times → RateLimit; a full disk → LowDisk (the part removed); a part whose md5 is
+// not the file's md5Checksum (replaced on Drive mid-download) → Changed, that file fails (the part removed).
 // The key: REEL_DRIVE_SA_KEY, a path outside public/ that group and others cannot read, read when a token is minted
 // and never logged, returned, or reachable through a tool (they take a folder id and file ids only). File names
 // from Drive are untrusted: sanitized for display and labels, never part of a path.
@@ -40,8 +41,9 @@ const VIDEO = /\.(mp4|mov|m4v|webm|mkv|avi|mts)$/i;
 const DRIVE_ID = /^[\w-]{1,200}$/;
 const mb = (n) => Math.round(n / 2 ** 20);
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const md5Of = async (file) => { const h = crypto.createHash('md5'); for await (const c of fs.createReadStream(file)) h.update(c); return h.digest('hex'); };
 
-// name: DriveAuth | NotFound | RateLimit | LowDisk | DriveNet | DriveError | NotVideo | IngestFailed | BadRequest;
+// name: DriveAuth | NotFound | RateLimit | LowDisk | DriveNet | DriveError | Changed | NotVideo | IngestFailed | BadRequest;
 // code: what the API answers (and the reel CLI's exit family); status: the HTTP status of the answer
 export class DriveError extends Error {
   constructor(name, code, message, status = 502) { super(message); this.name = name; this.code = code; this.status = status; }
@@ -106,7 +108,12 @@ export function readKey(file, publicDir) {
   let k;
   try { k = JSON.parse(fs.readFileSync(real, 'utf8')); } catch { throw authError('the service-account key is not a JSON key file'); }
   if (typeof k?.client_email !== 'string' || typeof k?.private_key !== 'string') throw authError('the service-account key has no client_email / private_key: it must be a service account\'s JSON key');
-  return {client_email: k.client_email, private_key: k.private_key};
+  // parsed here, so a truncated, hand-edited (literal \n), encrypted or non-RSA key is DriveAuth — never a
+  // network failure at signing time, nor an ECDSA signature under an RS256 header
+  let pk;
+  try { pk = crypto.createPrivateKey(k.private_key); } catch { throw authError('the service-account key\'s private_key is not a usable private key: download a fresh JSON key and do not edit it'); }
+  if (pk.asymmetricKeyType !== 'rsa') throw authError('the service-account key\'s private_key is not an RSA key: Google signs service accounts with RS256');
+  return {client_email: k.client_email, private_key: pk};
 }
 const b64u = (x) => Buffer.from(x).toString('base64url');
 // RS256 (RSASSA-PKCS1-v1_5 + SHA-256) over header.claims, as Google's OAuth 2.0 for service accounts asks
@@ -129,9 +136,10 @@ export function createDrive({keyFile, publicDir, api = DRIVE_API, tokenUrl = TOK
   // one request with the rate-limit backoff → the Response (2xx), else a DriveError
   async function send(url, init = {}, {what, auth = true} = {}) {
     for (let attempt = 0; ; attempt++) {
+      const headers = auth ? {...init.headers, authorization: `Bearer ${await token()}`} : init.headers; // outside the try: a key problem is not the network's
       let r;
-      try { r = await fetch(url, auth ? {...init, headers: {...init.headers, authorization: `Bearer ${await token()}`}} : init); }
-      catch (e) { if (e instanceof DriveError) throw e; throw new DriveError('DriveNet', 'drive_unreachable', `cannot reach Google Drive (${e.cause?.code ?? e.message})`); }
+      try { r = await fetch(url, {...init, headers}); }
+      catch (e) { throw new DriveError('DriveNet', 'drive_unreachable', `cannot reach Google Drive (${e.cause?.code ?? e.message})`); }
       if (r.ok || r.status === 416) return r; // 416: a Range past the end — the caller starts over
       const b = await r.json().catch(() => ({}));
       const reason = String(b?.error?.errors?.[0]?.reason ?? b?.error?.status ?? (typeof b?.error === 'string' ? b.error : '')).slice(0, 60);
@@ -172,17 +180,20 @@ export function createDrive({keyFile, publicDir, api = DRIVE_API, tokenUrl = TOK
     } while (pageToken && files.length < 20000);
     return {folder: id, files};
   }
-  const get = async (fileId) => (await send(`${api}/files/${fileId}?fields=id,name,size,modifiedTime,mimeType&supportsAllDrives=true`, {}, {what: `file ${fileId}`})).json();
+  const get = async (fileId) => (await send(`${api}/files/${fileId}?fields=id,name,size,modifiedTime,mimeType,md5Checksum&supportsAllDrives=true`, {}, {what: `file ${fileId}`})).json();
 
-  // f ({id, name, size}) → dest, resumed from what dest holds (Range); a connection cut mid-file is resumed up to
-  // `retries` times, then fails with the part kept for the next import. ENOSPC: the part removed, LowDisk.
+  // f ({id, name, size, md5Checksum}) → dest, resumed from what dest holds (Range); a connection cut mid-file is
+  // resumed up to `retries` times, then fails with the part kept for the next import. ENOSPC: the part removed,
+  // LowDisk. The whole part must hash to Drive's md5Checksum: a file replaced on Drive between a cut and its resume
+  // leaves the old head + the new tail (alt=media serves the current revision) — removed, Changed. (Drive gives an
+  // md5Checksum for every binary file; one without is not checked.)
   // write(file, flags): the part's stream (tests put a full disk there)
   async function download(f, dest, {onBytes = () => {}, write = (file, flags) => fs.createWriteStream(file, {flags})} = {}) {
     const size = +f.size;
     for (let attempt = 0; ; attempt++) {
       let have = partSize(dest);
       if (have > size) { fs.rmSync(dest, {force: true}); have = 0; }
-      if (have === size) return;
+      if (have === size) break;
       const r = await send(`${api}/files/${f.id}?alt=media&supportsAllDrives=true`, {headers: have ? {range: `bytes=${have}-`} : {}}, {what: f.name});
       if (r.status === 416) { await r.body?.cancel().catch(() => {}); fs.rmSync(dest, {force: true}); if (attempt >= retries) throw new DriveError('DriveError', 'drive_error', `Google Drive would not resume ${f.name}`); continue; }
       let got = r.status === 206 ? have : 0; // a 200 to a Range: the whole file again
@@ -190,12 +201,16 @@ export function createDrive({keyFile, publicDir, api = DRIVE_API, tokenUrl = TOK
       const count = new Transform({transform(c, _e, cb) { got += c.length; onBytes(got, size); cb(null, c); }});
       try {
         await pipeline(Readable.fromWeb(r.body), count, write(dest, got ? 'a' : 'w'));
-        if (partSize(dest) === size) return;
+        if (partSize(dest) === size) break;
       } catch (e) {
         if (e.code === 'ENOSPC') { fs.rmSync(dest, {force: true}); throw new DriveError('LowDisk', 'low_disk', `disk full while downloading ${f.name}: its partial file was removed — free space and import again`, 507); }
       }
       if (attempt >= retries) throw new DriveError('DriveNet', 'drive_unreachable', `the download of ${f.name} broke off at ${mb(partSize(dest))} of ${mb(size)} MB — import again: it goes on from there`);
       await sleep(Math.min(maxWaitMs, 1000 * 2 ** attempt));
+    }
+    if (f.md5Checksum && (await md5Of(dest)) !== f.md5Checksum) {
+      fs.rmSync(dest, {force: true});
+      throw new DriveError('Changed', 'drive_changed', `${f.name} changed on Drive during the download (its bytes are not the file's): import again`, 409);
     }
   }
   return {list, get, download, token};
@@ -209,7 +224,7 @@ const readBody = (req, max = 256e3) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 const json = (res, code, obj) => { res.writeHead(code, {'Content-Type': 'application/json'}); res.end(JSON.stringify(obj)); };
-const PER_FILE = new Set(['not_found', 'not_video', 'ingest_failed']); // the next file may still work; anything else stops the job
+const PER_FILE = new Set(['not_found', 'not_video', 'ingest_failed', 'drive_changed']); // the next file may still work; anything else stops the job
 
 // drive: createDrive(); ingestPart(part, name, report) → clip (server/ingest.mjs); freeBytes / minFreeBytes: the
 // disk the parts and clips land on and its floor (the backend's REEL_RENDER_MIN_FREE_DISK_MB); logStage(project, stage,
@@ -321,6 +336,8 @@ export function createDriveImport({drive, publicDir, uploadsDir, ingestPart, fre
       files.forEach((f, i) => {
         const at = `files[${i}]`;
         if (typeof f?.fileId !== 'string' || !DRIVE_ID.test(f.fileId)) return issues.push(`${at}.fileId: a Drive file id`);
+        const odd = Object.keys(f).filter((k) => !['fileId', 'script', 'variant'].includes(k)); // a hook beside variant is refused, never dropped into a body take
+        if (odd.length) return issues.push(`${at}: unknown ${odd.join(', ')} — a row is {fileId, script, variant}`);
         if (seen.has(f.fileId)) return issues.push(`${at}: ${f.fileId} is listed twice`);
         seen.add(f.fileId);
         const t = takeOf(f);

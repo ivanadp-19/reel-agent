@@ -120,8 +120,9 @@ it: `reel drive import <project> --file <fileId>=G2_H1 --file <fileId>=G2 --json
 (a take of another script or variant than the project's is refused, exit 2
 `bad_mapping`). The backend downloads (a cut download resumes), ingests and
 appends; a file already imported is skipped (`skipped[].why`), so a retry is safe.
-Exit 3 `drive_auth`: the credential or the folder's sharing; 4 `not_found`; 6
-`low_disk`.
+Exit 3 `drive_auth`: the credential or the folder's sharing; 4 `not_found`; 5
+`drive_changed`: the file was replaced on Drive during its download — import again;
+6 `low_disk`.
 
 ## Your own token (remote users)
 

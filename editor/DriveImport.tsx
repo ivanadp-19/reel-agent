@@ -1,14 +1,12 @@
 import React, {useEffect, useState} from 'react';
 import {createPortal} from 'react-dom';
 import {useEditor} from './store';
-import {pollJob} from './jobs';
 import {Btn} from './ui';
 import {identityStem, parseStem} from '../src/validate';
 
 type Take = {script: number | null; variant: Record<string, number> | null; stem: string | null};
 type DriveFile = {id: string; name: string; size: number; modifiedTime: string | null; proposed: Take; fits?: string | null};
 type Row = DriveFile & {on: boolean; stem: string};
-type Done = {added: {name: string; clip: string}[]; skipped: {name: string; why: string}[]};
 
 const FOLDER_KEY = 'reel.driveFolder'; // this viewer's last folder, a convenience only
 const lastFolder = () => { try { return localStorage.getItem(FOLDER_KEY) ?? ''; } catch { return ''; } };
@@ -16,22 +14,22 @@ const input = 'bg-surface-container-lowest text-on-surface border border-outline
 
 // "Importar de Drive" (server/drive.mjs, the MCP's list_drive / import_drive, `reel drive`): the backend lists a
 // folder its service account can read and proposes each file's take from its name; the user confirms or corrects
-// it here (R2-27), then the import runs as a job. The clips arrive through the editor's live reload of the project.
-export const DriveImport: React.FC<{onClose: () => void}> = ({onClose}) => {
+// it here (R2-27), then the import runs as a job on the backend: the dialog hands it to onStarted (the Assets column
+// follows it, like an upload) and closes — the editor stays usable; the clips arrive through its live reload.
+export const DriveImport: React.FC<{onClose: () => void; onStarted: (jobId: string) => void}> = ({onClose, onStarted}) => {
   const {projectId, identity} = useEditor();
   const [folder, setFolder] = useState(lastFolder);
   const [rows, setRows] = useState<Row[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<Done | null>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [busy, onClose]);
+  }, [onClose]);
 
   const list = async () => {
-    setError(null); setDone(null); setBusy('Listing the folder…');
+    setError(null); setBusy('Listing the folder…');
     try { localStorage.setItem(FOLDER_KEY, folder.trim()); } catch {}
     try {
       const r = await fetch(`/api/drive/list?${new URLSearchParams({folder: folder.trim(), ...(projectId ? {project: projectId} : {})})}`);
@@ -56,23 +54,21 @@ export const DriveImport: React.FC<{onClose: () => void}> = ({onClose}) => {
       const r = await fetch('/api/drive/import', {method: 'POST', body: JSON.stringify({project_id: projectId, files})});
       const b = await r.json();
       if (!b.jobId) throw new Error(b.error ?? `HTTP ${r.status}`);
-      await new Promise<void>((resolve, reject) => pollJob('/api/drive/import', b.jobId, (s) => setBusy(`${s.progress ?? 0}% · ${s.label ?? ''}`), resolve, (m) => reject(new Error(m)), 9600));
-      setDone(await fetch(`/api/drive/import/${b.jobId}`).then((x) => x.json()));
-      setRows(null);
+      onStarted(b.jobId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setBusy(null);
     }
-    setBusy(null);
   };
 
   // on document.body: the Assets column's stacking context would put the timeline over it
   return createPortal(
-    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => !busy && onClose()}>
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
       <div role="dialog" aria-modal="true" aria-labelledby="drive-title" onClick={(e) => e.stopPropagation()}
         className="bg-surface-container w-full max-w-[640px] max-h-[85vh] flex flex-col rounded-xl border border-outline-variant shadow-xl">
         <div className="p-4 border-b border-outline-variant flex items-center justify-between">
           <h2 id="drive-title" className="text-label-bold font-label-bold uppercase tracking-wider text-on-surface-variant">Importar de Drive</h2>
-          <button onClick={onClose} disabled={!!busy} title="Close" className="material-symbols-outlined text-[18px] text-on-surface-variant hover:text-on-surface disabled:opacity-30">close</button>
+          <button onClick={onClose} title="Close" className="material-symbols-outlined text-[18px] text-on-surface-variant hover:text-on-surface">close</button>
         </div>
         <div className="p-4 space-y-3 overflow-y-auto">
           <label className="text-[11px] text-on-surface-variant block" htmlFor="drive-folder">Folder shared with the backend's service account — its id or its link</label>
@@ -83,12 +79,6 @@ export const DriveImport: React.FC<{onClose: () => void}> = ({onClose}) => {
           </div>
           {busy && <p className="text-[11px] text-primary flex items-center gap-2"><span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span><span className="truncate">{busy}</span></p>}
           {error && <p role="alert" className="text-[11px] text-error break-words">{error}</p>}
-          {done && (
-            <p className="text-[11px] text-on-surface break-words">
-              {done.added.length} added{done.added.length ? `: ${done.added.map((a) => a.name).join(', ')}` : ''}
-              {done.skipped.length ? ` · ${done.skipped.length} already there (${done.skipped.map((s) => `${s.name}: ${s.why}`).join('; ')})` : ''} — they appear on the timeline in a moment.
-            </p>
-          )}
           {rows && (
             <>
               <p className="text-[11px] text-on-surface-variant/70">
@@ -119,7 +109,7 @@ export const DriveImport: React.FC<{onClose: () => void}> = ({onClose}) => {
         </div>
         {rows && rows.length > 0 && (
           <div className="p-4 border-t border-outline-variant flex items-center justify-between gap-3">
-            <span className="text-[11px] text-on-surface-variant">{unreadable.length ? `${unreadable.length} take(s) to fix (G2, G2_H1, G2_C1, G3_V2)` : `${picked.length} of ${rows.length} selected`}</span>
+            <span className="text-[11px] text-on-surface-variant">{unreadable.length ? `${unreadable.length} take(s) to fix (G2, G2_H1, G2_C1, G3_V2)` : `${picked.length} of ${rows.length} selected — the import runs in the background, followed in Assets`}</span>
             <Btn primary onClick={start} disabled={!picked.length || !!unreadable.length || !!busy || !projectId}>Import {picked.length || ''}</Btn>
           </div>
         )}

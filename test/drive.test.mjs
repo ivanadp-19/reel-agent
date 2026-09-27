@@ -43,7 +43,7 @@ add('closeId', 'g02-close.mp4');
 add('nastyId', '../../etc/\u001b[31mG2 H1\u202e.mp4');
 add('docId', 'Guion G2', 'F1', Buffer.from('doc'), 'application/vnd.google-apps.document');
 add('otherId', 'G3_V2.mp4', 'F2');
-const drv = {tokens: 0, media: [], revoked: false, limited: {}, cut: new Set(), assertions: []};
+const drv = {tokens: 0, media: [], revoked: false, limited: {}, cut: new Set(), swap: {}, assertions: []}; // swap: id → what the file becomes when its cut download breaks off
 let fake, api, tokenUrl;
 const sendJson = (res, code, obj, headers = {}) => { res.writeHead(code, {'content-type': 'application/json', ...headers}); res.end(JSON.stringify(obj)); };
 function fakeDrive(req, res) {
@@ -73,13 +73,17 @@ function fakeDrive(req, res) {
   const id = u.pathname.match(/^\/drive\/v3\/files\/([\w-]+)$/)?.[1];
   const f = FILES[id];
   if (!f) return sendJson(res, 404, {error: {code: 404, errors: [{reason: 'notFound'}]}});
-  if (u.searchParams.get('alt') !== 'media') return sendJson(res, 200, {id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: String(f.bytes.length)});
+  if (u.searchParams.get('alt') !== 'media') return sendJson(res, 200, {id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, size: String(f.bytes.length), md5Checksum: crypto.createHash('md5').update(f.bytes).digest('hex')});
   drv.media.push({id, range: req.headers.range ?? null});
   if (drv.limited[id] > 0) { drv.limited[id]--; return sendJson(res, 429, {error: {code: 429, errors: [{reason: 'rateLimitExceeded'}]}}, {'retry-after': '2'}); }
   const from = +(req.headers.range?.match(/^bytes=(\d+)-$/)?.[1] ?? 0);
   const body = f.bytes.subarray(from);
   res.writeHead(req.headers.range ? 206 : 200, {'content-type': 'video/mp4', 'content-length': body.length, ...(req.headers.range ? {'content-range': `bytes ${from}-${f.bytes.length - 1}/${f.bytes.length}`} : {})});
-  if (drv.cut.has(id)) { drv.cut.delete(id); res.write(body.subarray(0, Math.floor(body.length / 2))); setTimeout(() => res.socket.destroy(), 50); return; } // the connection dies halfway
+  if (drv.cut.has(id)) { // the connection dies halfway (and the file is replaced on Drive meanwhile, when swap says so)
+    drv.cut.delete(id); res.write(body.subarray(0, Math.floor(body.length / 2)));
+    if (drv.swap[id]) { Object.assign(f, drv.swap[id]); delete drv.swap[id]; }
+    setTimeout(() => res.socket.destroy(), 50); return;
+  }
   res.end(body);
 }
 
@@ -160,6 +164,16 @@ test('the key: not set, unreadable, readable by others, or under public/ → Dri
   fs.copyFileSync(keyFile, inPublic);
   fs.chmodSync(inPublic, 0o600);
   cases.push([inPublic, /outside public/]);
+  // a private_key that does not parse (truncated, a hand edit leaving literal \n, a passphrase) or is not RSA: DriveAuth
+  // when read — not a network failure at signing, nor an ECDSA signature under an RS256 header
+  const gen = (type, o = {}) => crypto.generateKeyPairSync(type, {...o, privateKeyEncoding: {type: 'pkcs8', format: 'pem', ...o.enc}, publicKeyEncoding: {type: 'spki', format: 'pem'}}).privateKey;
+  for (const [n, pk, why] of [['truncated', privateKey.slice(0, 400), /not a usable private key/], ['escaped', privateKey.replace(/\n/g, '\\n'), /not a usable private key/],
+    ['encrypted', gen('rsa', {modulusLength: 2048, enc: {cipher: 'aes-256-cbc', passphrase: 'pw'}}), /not a usable private key/], ['ec', gen('ec', {namedCurve: 'P-256'}), /not an RSA key/]]) {
+    const f = path.join(dir, 'secrets', `${n}.json`);
+    fs.writeFileSync(f, JSON.stringify({client_email: EMAIL, private_key: pk}), {mode: 0o600});
+    cases.push([f, why]);
+  }
+  const t0 = drv.tokens;
   for (const [file, why] of cases) {
     const e = await drive({keyFile: file}).list('F1').then(() => null, (x) => x);
     assert.equal(e?.name, 'DriveAuth', String(file));
@@ -167,6 +181,7 @@ test('the key: not set, unreadable, readable by others, or under public/ → Dri
     assert.match(e.message, why);
     for (const s of [file ?? '\0', 'secrets', KEY_MARK, EMAIL]) assert.ok(!e.message.includes(s), `${e.message} names ${s}`);
   }
+  assert.equal(drv.tokens, t0, 'no bad key reached the token endpoint');
   fs.rmSync(inPublic);
   assert.deepEqual(Object.keys(readKey(keyFile, pub)).sort(), ['client_email', 'private_key']);
 });
@@ -259,6 +274,29 @@ test('a download cut halfway resumes from the .part with Range — in the same j
   assert.equal(drv.media.length, n0);
 });
 
+test('a file replaced on Drive between a cut and its resume: the spliced part fails its md5, removed — never ingested', async () => {
+  const A = crypto.randomBytes(32081), B = crypto.randomBytes(32081); // same size, other bytes
+  add('swapId', 'g02-swap.mp4', 'F3', A);
+  const d = drive();
+  const meta = await d.get('swapId');
+  drv.cut.add('swapId');
+  drv.swap.swapId = {bytes: B, modifiedTime: '2026-09-21T10:00:00.000Z'};
+  const dest = path.join(dir, 'swap.part');
+  const e = await d.download({...meta, id: 'swapId'}, dest).then(() => null, (x) => x);
+  assert.equal(e?.code, 'drive_changed');
+  assert.match(e.message, /changed on Drive during the download.*import again/);
+  assert.ok(!fs.existsSync(dest), 'the spliced part is removed');
+  // in a job: that file fails alone, nothing reaches the timeline; the next import sees the new revision (a new key)
+  FILES.swapId.bytes = A; FILES.swapId.modifiedTime = T;
+  drv.cut.add('swapId');
+  drv.swap.swapId = {bytes: B, modifiedTime: '2026-09-21T10:00:00.000Z'};
+  project('p-swap');
+  const s = await importJob({project_id: 'p-swap', files: [{fileId: 'swapId', script: 2}]});
+  assert.deepEqual([s.status, s.code, s.failed.map((f) => f.fileId), s.added.length], ['error', 'drive_changed', ['swapId'], 0]);
+  assert.deepEqual(readP('p-swap').clips, []);
+  assert.deepEqual(fs.readdirSync(uploads).filter((f) => f.endsWith('.part')), [], 'no part left to resume from');
+});
+
 test('ENOSPC while writing the part → LowDisk, the partial file removed', async () => {
   const dest = path.join(dir, 'full.part');
   const full = (file) => new Writable({write(c, _e, cb) { fs.appendFileSync(file, c); cb(Object.assign(new Error('ENOSPC: no space left on device, write'), {code: 'ENOSPC'})); }});
@@ -324,7 +362,7 @@ test('list: the folder\'s videos with a proposed take, and whether each fits the
 test('import: the mapping is checked against the identity before anything runs', async () => {
   project('p-map', {identity: {client: 'vibem', family: 'vibem-G2', script: 2, variant: {hook: 1, cta: 1}}});
   const n0 = drv.media.length;
-  for (const files of [[{fileId: 'hookId', script: 2, variant: {hook: 2}}], [{fileId: 'hookId', script: 3}], [{fileId: 'hookId'}], [{fileId: '../x', script: 2}], [{fileId: 'hookId', script: 2}, {fileId: 'hookId', script: 2}], []]) {
+  for (const files of [[{fileId: 'hookId', script: 2, variant: {hook: 2}}], [{fileId: 'hookId', script: 3}], [{fileId: 'hookId'}], [{fileId: '../x', script: 2}], [{fileId: 'hookId', script: 2}, {fileId: 'hookId', script: 2}], [{fileId: 'hookId', script: 2, hook: 2}], []]) {
     const r = await call('POST', '/api/drive/import', {project_id: 'p-map', files});
     assert.equal(r.status, 400, JSON.stringify(files));
     assert.equal(r.body.code, 'bad_mapping');
@@ -411,6 +449,18 @@ test('reel drive list / import: the same routes, --json, the error contract', {s
   assert.deepEqual([missing.code, missing.out.code], [4, 'not_found']);
   const denied = await cli('drive', 'list', 'denied', '--json');
   assert.deepEqual([denied.code, denied.out.code], [3, 'drive_auth']);
+});
+
+test('MCP import_drive takes no key it does not know: a variant beside the numbers is an error, never a body take', async () => {
+  const {Client} = await import('@modelcontextprotocol/sdk/client/index.js');
+  const {StdioClientTransport} = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({name: 'test', version: '0'});
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: path.dirname(path.dirname(new URL(import.meta.url).pathname)), env: {...process.env, REEL_API: 'http://127.0.0.1:9', REEL_AGENT: 'drive-test'}}));
+  try {
+    const r = await client.callTool({name: 'import_drive', arguments: {project_id: 'no-such-drive-project', files: [{file_id: 'hookId', script: 2, variant: {hook: 1}}]}});
+    const said = r.content.map((c) => c.text ?? '').join('\n');
+    assert.ok(r.isError && /unrecognized key.*variant/i.test(said) && !/not found/.test(said), said);
+  } finally { await client.close(); }
 });
 
 test('the key, its path and the token are in no answer, job state or log line', () => {
