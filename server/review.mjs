@@ -86,6 +86,17 @@ ${versions.length > 1 ? `<h2>Versiones</h2><ul>${others}</ul>` : ''}
 `;
 }
 
+// What a new link of the project needs besides itself — the one sentence every Share surface passes on
+// (POST /api/reviews/<id>/links → share_version, the editor's Share panel, reel review-link): a client's
+// project opens only with a login of that client, and local mode has no login. → {clients, access: string | null}
+export function linkAccess(publicDir, projectId, {login}) {
+  const clients = projectClients(publicDir, projectId);
+  const who = clients.join(', ');
+  const access = !clients.length ? null : login ? `This link opens only with a login of client ${who} (a reviewer in REEL_USER_ROLES) or an owner's.`
+    : `This link cannot be opened here: a client's link needs a login of client ${who}, and this backend has no login (local mode; REEL_PUBLIC=1 turns it on).`;
+  return {clients, access};
+}
+
 // `g` = the gate's answer ({kind: 'review', user, via, role, clients, primary}); `login` = public mode,
 // where /login exists. → true when it answered (every /r/ request is answered here)
 export function handleReview(req, res, url, {publicDir, now = Date.now(), g = null, login = false}) {

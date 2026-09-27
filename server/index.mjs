@@ -39,7 +39,7 @@ import {createLink, inReviewsRow, loadReviews, playableVersions, publicLink, rev
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
-import {handleReview} from './review.mjs';
+import {handleReview, linkAccess} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
@@ -78,9 +78,17 @@ const run = (cmd, args, opts = {}) =>
 
 // REEL_USER_ROLES (session.mjs parseRoles): owner / reviewer of which clients, per login user. Read first:
 // a bad value stops the backend here, before it writes .backend-token or listens — never a backend
-// that silently drops everyone's roles
+// that silently drops everyone's roles. A role makes a login session worth more than any token (humanOnly,
+// a client's pages), so in public mode its signing key must be REEL_SESSION_SECRET and none of the tokens:
+// the fallback (the primary token) is in .backend-token, which agents read — they could sign a human's cookie (D14)
 let ROLES;
-try { ROLES = parseRoles(process.env.REEL_USER_ROLES); } catch (e) { console.error(`backend not started: ${e.message}`); process.exit(1); }
+try {
+  ROLES = parseRoles(process.env.REEL_USER_ROLES);
+  const secret = process.env.REEL_SESSION_SECRET;
+  if (process.env.REEL_PUBLIC === '1' && Object.keys(ROLES).length && (!secret || (process.env.REEL_BACKEND_TOKEN || '').split(',').some((t) => t.trim() === secret))) {
+    throw new Error('REEL_USER_ROLES in public mode needs its own REEL_SESSION_SECRET (set, and none of the REEL_BACKEND_TOKEN tokens): a token holder could sign a login session otherwise');
+  }
+} catch (e) { console.error(`backend not started: ${e.message}`); process.exit(1); }
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -254,7 +262,7 @@ console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concu
 // login session is a human (server/http.mjs humanOnly).
 // Browsers that cannot answer the basic-auth dialog use the form at /login instead
 // (server/session.mjs): same users, a signed session cookie keyed by
-// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN; ≤ 5 failed logins per IP per
+// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN (never with roles: see ROLES); ≤ 5 failed logins per IP per
 // minute, form and basic auth alike. The client IP comes from X-Forwarded-For only
 // behind REEL_TRUST_PROXY trusted hops (Railway: 1, set in the Dockerfile).
 const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
@@ -772,7 +780,8 @@ async function handle(req, res) {
 
   // ---- review links (scripts/reviews.mjs): the editor's Share button and the MCP share_version / list_versions / revoke_review_link ----
   //   GET    /api/reviews/<projectId>                → {versions, links}
-  //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt} (the token is shown once)
+  //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt, clients, access} (the token is shown once;
+  //                                                     access = what a client's link needs besides itself, server/review.mjs linkAccess)
   //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
   const rv = url.pathname.match(/^\/api\/reviews\/([\w-]+)(?:\/links(?:\/([0-9a-f]{8}))?)?$/);
   if (rv) {
@@ -788,7 +797,7 @@ async function handle(req, res) {
       if (!playableVersions(loadReviews(REVIEWS, projectId), PUBLIC).length) return json(res, 400, {error: 'no final render to share yet — export a final (not a draft) first'});
       try {
         const l = await inReviewsRow(REVIEWS, projectId, () => createLink(REVIEWS, projectId, {days: b?.days}));
-        return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`});
+        return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`, ...linkAccess(PUBLIC, projectId, {login: PUBLIC_MODE})});
       } catch (e) { return json(res, 400, {error: String(e?.message ?? e).slice(0, 200)}); }
     }
     if (req.method === 'DELETE' && linkId) {

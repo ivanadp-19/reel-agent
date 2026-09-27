@@ -290,6 +290,16 @@ test('a bad REEL_USER_ROLES stops the backend at once with a clear error (before
   assert.match(r.stderr, /backend not started: REEL_USER_ROLES\.rev: role must be "owner" or "reviewer"/);
 });
 
+test('roles in public mode need their own REEL_SESSION_SECRET: unset or equal to a backend token, the backend does not start (a token holder could sign a human\'s cookie)', () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  for (const secret of ['', 'second']) {
+    const env = {...process.env, REEL_PUBLIC: '1', REEL_USER_ROLES: '{"rev":{"role":"reviewer","clients":["acme"]}}', REEL_BACKEND_TOKEN: `${TOKEN},second`, REEL_SESSION_SECRET: secret, REEL_PORT: '1', PORT: ''};
+    const r = spawnSync(process.execPath, ['server/index.mjs'], {cwd: root, env, encoding: 'utf8', timeout: 30e3});
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /backend not started: REEL_USER_ROLES in public mode needs its own REEL_SESSION_SECRET/);
+  }
+});
+
 test('humanOnly: only a login session passes; loopback, basic auth, the backend token and user tokens get 403 "solo con login en la VM"', async () => {
   const pass = crypto.randomBytes(8).toString('hex');
   const auth = {boss: bcrypt.hashSync(pass, 4), rev: bcrypt.hashSync(pass, 4), otro: bcrypt.hashSync(pass, 4), nadie: bcrypt.hashSync(pass, 4)};
@@ -298,7 +308,7 @@ test('humanOnly: only a login session passes; loopback, basic auth, the backend 
   try {
     const users = createTokenStore(path.join(dir, 't.json'));
     const {token: bossToken} = users.create({user: 'boss', admin: true});
-    const at = (headers, publicMode = true) => gate({method: 'POST', headers: {host: '127.0.0.1:3333', 'x-forwarded-for': '203.0.113.90', ...headers}, socket: {}}, new URL('http://x/api/reviews/p-1/approve'), {publicMode, auth, tokens: [TOKEN, 'second'], sessionSecret: SECRET, users, roles, limiter: createLoginLimiter({max: 50})});
+    const at = (headers, publicMode = true, p = '/api/reviews/p-1/approve') => gate({method: 'POST', headers: {host: '127.0.0.1:3333', 'x-forwarded-for': '203.0.113.90', ...headers}, socket: {}}, new URL(`http://x${p}`), {publicMode, auth, tokens: [TOKEN, 'second'], sessionSecret: SECRET, users, roles, limiter: createLoginLimiter({max: 50})});
     const session = (u) => ({cookie: `${SESSION_COOKIE}=${signSession(SECRET, u, {hash: auth[u]})}`});
     const agents = {
       loopback: await at({}, false),
@@ -318,7 +328,9 @@ test('humanOnly: only a login session passes; loopback, basic auth, the backend 
         assert.equal(h.by, undefined);
       }
     }
-    const boss = await at(session('boss')), rev = await at(session('rev')), otro = await at(session('otro')), nadie = await at(session('nadie'));
+    // a reviewer's login passes the gate only for /reviews/ (and /r/) until the bandeja's routes join it (phase 5)
+    assert.equal((await at(session('rev'))).status, 403);
+    const boss = await at(session('boss')), rev = await at(session('rev'), true, '/reviews/p-1/v1.mp4'), otro = await at(session('otro'), true, '/reviews/p-1/v1.mp4'), nadie = await at(session('nadie'));
     assert.deepEqual([boss.via, boss.role, rev.role, rev.clients, nadie.role, nadie.clients], ['session', 'owner', 'reviewer', ['acme'], null, []]);
     assert.deepEqual(humanOnly(boss, {role: 'owner'}), {ok: true, by: 'boss'}, 'by comes from the session');
     assert.deepEqual(humanOnly(boss, {client: 'acme'}), {ok: true, by: 'boss'});

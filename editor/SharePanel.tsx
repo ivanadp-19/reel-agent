@@ -12,7 +12,7 @@ const when = (iso: string) => new Date(iso).toLocaleString(undefined, {month: 's
 export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknown; notify: (msg: string, kind: 'error' | 'ok') => void}> = ({projectId, refreshKey, notify}) => {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<{versions: Version[]; links: Link[]} | null>(null);
-  const [fresh, setFresh] = useState<{id: string; url: string} | null>(null); // the token is shown once, right after creating it
+  const [fresh, setFresh] = useState<{id: string; url: string; access: string | null} | null>(null); // the token is shown once, right after creating it
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
@@ -30,7 +30,7 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
       const r = await fetch(`/api/reviews/${projectId}/links`, {method: 'POST', body: '{}'});
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'failed');
-      setFresh({id: j.id, url: j.url});
+      setFresh({id: j.id, url: j.url, access: j.access ?? null});
       await copy(j.url);
       await load();
     } catch (e) {
@@ -52,7 +52,7 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="A private link (30 days) that plays the final exports of this project on a phone"
+        title="A private link (30 days) that plays the final exports of this project on a phone; a client's project also needs a login of that client"
         className="flex items-center gap-1 text-body-sm text-primary hover:underline"
       >
         <span className="material-symbols-outlined text-[16px]">link</span>Share link
@@ -74,6 +74,7 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
             <div className="space-y-1">
               <input readOnly value={fresh.url} onFocus={(e) => e.currentTarget.select()} className="w-full bg-surface-container-lowest border border-outline-variant/40 rounded px-2 py-1 font-mono text-[11px]" />
               <p className="text-[11px] text-on-surface-variant">Copied. This address is shown only once — keep it.</p>
+              {fresh.access && <p className="text-[11px] text-error">{fresh.access}</p>}
             </div>
           )}
           <button onClick={create} disabled={busy} className="w-full bg-primary-container text-on-primary-container rounded px-2 py-1.5 font-bold disabled:opacity-40">

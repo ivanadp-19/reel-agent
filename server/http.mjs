@@ -47,18 +47,30 @@ export function serveFile(req, res, file, headers = {}) {
 // path is 405, a missing media file 404 — never the editor's page, which a <video> shows
 // as black. Other paths fall back to the editor's index.html (its client-side routes).
 // → true when it answered, false for a request that is not its (the API routes take it).
-// A client's review files (/reviews/<projectId>.json, /reviews/<projectId>/…: versions, proxies, the pair)
-// only for whoever may see that client (seesClient, `g` = the gate's answer); a project without a client
-// keeps the rule above (R-1).
+// A client's files only for whoever may see that client (seesClient, `g` = the gate's answer): its review files
+// (/reviews/<projectId>.json, /reviews/<projectId>/…: versions, proxies, the pair) and its volume
+// (/clients/<client>/…: judge profile, deliveries, research); a project without a client keeps the rule above (R-1).
+// Decided on the path as asked and on the file it opens (realpath: its case on a case-insensitive disk — /REVIEWS/…
+// on a Mac is the same file, the same answer —, symlinks resolved: a reviews/ that links to a volume stays scoped).
+export const cleanPath = (pathname) => path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, ''); // throws on bad %-encoding
 export function servePublic(req, res, pathname, {publicDir, distDir, g}) {
   if (pathname.startsWith('/api/')) return false;
   const media = isMediaPath(pathname);
   const answer = (status, headers, body) => { res.writeHead(status, {'Content-Type': 'application/json', ...headers}); res.end(JSON.stringify(body)); return true; };
   if (!mediaMethodOk(req.method)) return media ? answer(405, {Allow: 'GET, HEAD'}, {error: 'media is read-only', code: 'method_not_allowed'}) : false;
   let clean;
-  try { clean = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, ''); } catch { return answer(400, {}, {error: 'bad path'}); }
-  const rv = clean.match(/^[/\\]reviews[/\\]([\w-]+)/); // the project id leads every name there: <id>.json, its .tmp, <id>/…
-  if (rv && !seesClient(g, projectClients(publicDir, rv[1]))) return answer(403, {'Cache-Control': 'no-store'}, {error: 'a client\'s project: sign in with an account of that client', code: 'forbidden'});
+  try { clean = cleanPath(pathname); } catch { return answer(400, {}, {error: 'bad path'}); }
+  // the first name under reviews/ (the project id leads every name there: <id>.json, its .tmp, <id>/…) or clients/
+  // (the client), read on the path as asked and on the file it opens — both count
+  const real = (p) => { try { return fs.realpathSync.native(p); } catch { return null; } };
+  const opened = real(path.join(publicDir, clean));
+  const clients = ['reviews', 'clients'].flatMap((dir) => {
+    const root = real(path.join(publicDir, dir));
+    return [path.relative(path.join(path.sep, dir), clean), opened && root && path.relative(root, opened)]
+      .map((rel) => rel && /^[\w-]+/.exec(rel)?.[0]).filter(Boolean)
+      .flatMap((id) => (dir === 'reviews' ? projectClients(publicDir, id) : [id]));
+  });
+  if (!seesClient(g, clients)) return answer(403, {'Cache-Control': 'no-store'}, {error: 'a client\'s project: sign in with an account of that client', code: 'forbidden'});
   for (const base of [publicDir, distDir]) {
     const file = path.join(base, clean);
     // a client's footage and renders: never kept by a shared cache between the browser and us
@@ -136,6 +148,8 @@ async function basicUser(header, auth, {limiter, ip, now = Date.now()} = {}) {
 // Who the caller is: `via` loopback | user-token | backend-token (+ `primary` for the first of
 // REEL_BACKEND_TOKEN, the backend's own) | session | basic; a session also carries its user's `role` and
 // `clients` from REEL_USER_ROLES (`roles`, session.mjs parseRoles). Only a session is a human (humanOnly).
+// A reviewer (a client's login: session, basic auth or user token) passes only for /reviews/* (scoped by servePublic)
+// besides /r/ and /login: 403 on the editor, the API, every other media path and /cli-token (reviewerOff).
 // Async: basic auth runs bcrypt off the event loop.
 // → {kind: 'review' | 'ping' | 'login' | 'mcp' | 'ok', user?, admin?, uid?, via?, primary?, role?, clients?} or {kind: 'deny', status, headers, body}
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -153,6 +167,12 @@ export const MEDIA_DIRS = ['exports', 'clips', 'broll', 'broll-assets', 'music',
 export const isMediaPath = (pathname) => MEDIA_DIRS.some((d) => pathname.startsWith(`/${d}/`));
 export const mediaMethodOk = (method) => method === 'GET' || method === 'HEAD';
 const denyJson = (status, error, code, hint) => ({kind: 'deny', status, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({error, code, hint})});
+const reviewerPath = (pathname) => { try { return /^[/\\]reviews[/\\]/.test(cleanPath(pathname)); } catch { return false; } };
+// a reviewer (a client's login — by session, basic auth or a user token alike: the role is the user's) reaches /r/,
+// /login, /logout (above) and the /reviews/ files of their clients (servePublic) — never the editor, the API, other
+// media or /cli-token → the 403, else null
+const reviewerOff = (user, pathname, roles) => (roles && Object.hasOwn(roles, user) && roles[user].role === 'reviewer' && !reviewerPath(pathname)
+  ? denyJson(403, 'a reviewer login opens only review links', 'forbidden', 'open the /r/ link you were sent') : null);
 const human = (user, roles) => { const r = roles && Object.hasOwn(roles, user) ? roles[user] : null; return {user, via: 'session', role: r?.role ?? null, clients: r?.clients ?? []}; };
 export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessionSecret, limiter, hops = 0, users = null, requireToken = false, roles = null} = {}) {
   if (isReviewPath(url.pathname)) {
@@ -172,7 +192,7 @@ export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessio
   }
   const given = req.headers['x-reel-token'];
   const u = users?.find(given);
-  if (u) return {kind: 'ok', user: u.user, admin: u.admin, uid: u.uid, via: 'user-token'};
+  if (u) return reviewerOff(u.user, url.pathname, roles) || {kind: 'ok', user: u.user, admin: u.admin, uid: u.uid, via: 'user-token'};
   const backend = tokenOk(tokens, given);
   if (!backend && typeof given === 'string' && given.startsWith('reel_')) return denyJson(401, 'invalid or revoked token', 'bad_token', 'ask an admin for a new one (reel token create)');
   if (publicMode) {
@@ -180,10 +200,10 @@ export async function gate(req, url, {publicMode, auth = {}, tokens = [], sessio
     // MCP/backend clients authenticate with the shared backend token instead of basic auth
     if (backend) return {kind: 'ok', admin: true, via: 'backend-token', ...(tokenOk(tokens.slice(0, 1), given) && {primary: true})};
     const su = sessionUser(req, sessionSecret, auth);
-    if (su) return {kind: 'ok', ...human(su, roles)};
+    if (su) return reviewerOff(su, url.pathname, roles) || {kind: 'ok', ...human(su, roles)};
     if (h.startsWith('Basic ')) {
       const {user, wait} = await basicUser(h, auth, {limiter, ip: clientIp(req, hops)});
-      if (user) return {kind: 'ok', user, via: 'basic'};
+      if (user) return reviewerOff(user, url.pathname, roles) || {kind: 'ok', user, via: 'basic'};
       if (wait) return {kind: 'deny', status: 429, headers: {'Retry-After': String(wait), 'Content-Type': 'text/plain'}, body: 'too many attempts'};
     }
     const pageLoad = (req.method === 'GET' || req.method === 'HEAD') && !url.pathname.startsWith('/api/') && !h && /text\/html/.test(req.headers.accept || '');

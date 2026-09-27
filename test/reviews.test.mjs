@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
 import {createLink, hashToken, inReviewsRow, keepUnapproved, loadReviews, proxyArgs, pruneVersions, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
-import {handleReview} from '../server/review.mjs';
+import {handleReview, linkAccess} from '../server/review.mjs';
 import {SESSION_COOKIE, parseRoles, signSession} from '../server/session.mjs';
 
 const DAY = 86400e3;
@@ -408,6 +408,7 @@ test('R-1: the /r/ link of a project without a client answers the same to anyone
   try {
     const want = await get(pubSrv, `/r/${l.token}`);
     assert.equal(want.status, 200);
+    assert.deepEqual(linkAccess(pub, 'p-1', {login: true}), {clients: [], access: null}, 'its Share surfaces add nothing');
     for (const [srv, headers] of [[pubSrv, {}], [pubSrv, cookie('otro')], [pubSrv, cookie('nadie')], [pubSrv, {authorization: 'Basic ' + Buffer.from('ana:pw').toString('base64')}], [pubSrv, {'x-reel-token': 'second-tok'}], [localSrv, {}]]) {
       const page = await get(srv, `/r/${l.token}`, headers);
       assert.deepEqual([page.status, page.body.toString()], [200, want.body.toString()], JSON.stringify(headers));
@@ -442,6 +443,10 @@ test('a client\'s /r/ link (CEO-4, E-1): no login → /login, another client or 
       assert.equal((await get(srv, page, headers)).status, 200, who);
       for (const p of media) assert.equal((await get(srv, p, headers)).status, 200, `${who} ${p}`);
     }
+    // what share_version, the Share panel and reel review-link pass on with the link (POST /api/reviews/<id>/links)
+    assert.deepEqual(linkAccess(pub, 'p-1', {login: true}).clients, [IDENTITY.client]);
+    assert.match(linkAccess(pub, 'p-1', {login: true}).access, new RegExp(`only with a login of client ${IDENTITY.client}`));
+    assert.match(linkAccess(pub, 'p-1', {login: false}).access, /cannot be opened here/);
     revokeLink(dir, 'p-1', l.id);
     assert.equal((await get(srv, page, cookie('rev'))).status, 410, 'the link still expires and is revoked as before');
   } finally { srv.close(); local.close(); }

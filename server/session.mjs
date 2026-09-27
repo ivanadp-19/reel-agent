@@ -7,7 +7,8 @@
 // Cookie: reel_session=<base64url(JSON {u, exp})>.<base64url(HMAC-SHA256)>, httpOnly,
 // SameSite=Lax, Secure always in public mode (else when the request came over https),
 // 7 days. The key is REEL_SESSION_SECRET, or the first token of REEL_BACKEND_TOKEN when
-// that is unset (server/index.mjs picks it). The MAC also covers a fragment of the
+// that is unset (server/index.mjs picks it; with REEL_USER_ROLES in public mode the secret is
+// required and must be none of the tokens, or the backend does not start). The MAC also covers a fragment of the
 // user's bcrypt hash, so changing a user's password in REEL_AUTH_BCRYPT ends that
 // user's sessions; a user who left REEL_AUTH_BCRYPT is refused too, both before expiry.
 // POST /login and /logout need an Origin (or Referer) of this site (login CSRF).
@@ -64,9 +65,10 @@ export const sessionUser = (req, secret, users) => verifySession(secret, parseCo
 
 // REEL_USER_ROLES (E-3): what a login user may do, next to REEL_AUTH_BCRYPT —
 // {"<user>": {"role": "owner" | "reviewer", "clients": ["<identity.client>", …]}}. An owner sees and does
-// everything; a reviewer only the projects of their clients. A user without an entry has no human-only
-// action (server/http.mjs humanOnly) and sees no client's project. → a map with no prototype; throws on
-// anything else, and the backend does not start (server/index.mjs).
+// everything; a reviewer's login reaches only /r/ links and the /reviews/* files of their clients (server/http.mjs
+// reviewerOff, seesClient). A user without an entry has no human-only action (humanOnly) and gets 403 on a client's
+// /reviews/*, /clients/* and /r/ — the editor, the API and the other media stay open to them, as to any login.
+// → a map with no prototype; throws on anything else, and the backend does not start (server/index.mjs).
 export function parseRoles(raw) {
   const roles = Object.create(null);
   if (raw == null || !String(raw).trim()) return roles;
