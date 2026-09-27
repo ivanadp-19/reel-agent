@@ -141,11 +141,14 @@ const ff = (args) => spawnSync('ffmpeg', ['-hide_banner', '-nostats', ...args], 
 // Audio follows MultiClipVideo: a J-cut plays the clip's first j seconds of source under the
 // previous clip's tail (and mutes them after the cut), an L-cut plays the source past outSec
 // under the next clip's head; the frames come from placeClips, like the render's. A muted clip
-// is not heard at all. Words in a lead / trail carry `jl` ('lead' | 'trail').
+// is not heard at all. Words in a lead / trail carry `jl` ('lead' | 'trail'). A word a split runs through
+// with nothing cut out (continuesPrev: a half-graded head split off) is heard once, whole — never "eso" → "eso"
 export function timelineSpeech(clips, tr, fps = FPS) {
   const out = [];
   const missing = [];
-  for (const [k, pc] of placeClips(clips, fps).entries()) {
+  const placed = placeClips(clips, fps);
+  for (const [k, pc] of placed.entries()) {
+    const joined = continuesPrev(placed[k - 1]?.clip, pc.clip);
     const t = tr.find((x) => x.clipId === pc.clip.id);
     if (!t) { missing.push(pc.clip.id); continue; }
     if (pc.clip.muted || pc.clip.volume === 0) continue;
@@ -161,7 +164,8 @@ export function timelineSpeech(clips, tr, fps = FPS) {
     for (const w of t.words) {
       if (w.endMs <= inMs || w.startMs >= trailEnd) continue;
       const s0 = Math.max(w.startMs, inMs), s1 = Math.min(w.endMs, trailEnd);
-      const where = part(s0);
+      const where = part(s0), last = out.at(-1);
+      if (joined && where === 'main' && last?.wid === `${t.source}:${w.i}` && !last.jl) { last.t1 = Math.max(last.t1, heard(Math.max(s0, s1 - 1))); continue; }
       out.push({wid: `${t.source}:${w.i}`, word: w.word, t0: heard(s0), t1: Math.max(heard(s0), heard(Math.max(s0, s1 - 1))), srcStartMs: w.startMs, srcEndMs: w.endMs, clipId: pc.clip.id, clipIndex: k, off: !!w.off, ...(where !== 'main' ? {jl: where} : {}), ...(w.speaker ? {speaker: w.speaker} : {})});
     }
   }
@@ -751,7 +755,7 @@ export function gradeCoverageFindings(looks, placed, spans = [], fps = FPS) {
     // that part becomes its own clip: split_clip where it starts / ends inside its clip (0.2 s from an
     // edge at least, as split_clip wants), then the head takes its continuation's grade (create_lut match)
     const odd = placed[clipOf[head ? k - 1 : k]], at = (f) => Math.round((f / fps) * 1000) / 1000;
-    const splits = [s0, e0].filter((f) => f - odd.fromFrame >= 0.2 * fps && odd.fromFrame + odd.durFrames - f >= 0.2 * fps);
+    const splits = [e0, s0].filter((f) => f - odd.fromFrame >= 0.2 * fps && odd.fromFrame + odd.durFrames - f >= 0.2 * fps); // the later first: a split moves what follows it by up to a frame (validate's halfGradedIssues)
     const piece = splits.includes(s0) ? `<the piece from ${at(s0)} s>` : odd.clip.id; // a split keeps the first piece's id
     const fix = [...splits.map((f) => ({tool: 'split_clip', args: {at_sec: at(f)}})), head
       ? {tool: 'create_lut', note: 'the head takes the grade of the clip continuing it', args: {clip_id: piece, ...(a === b ? {} : {to_clip_id: b.id}), match: true, name: `${a.id}-match`.slice(0, 40)}}

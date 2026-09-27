@@ -19,6 +19,14 @@ test('timelineSpeech places transcript words on the timeline through the clips',
   assert.deepEqual(timelineSpeech(clips, []).missing, ['a', 'b']);
 });
 
+test('timelineSpeech: a word a continuing split runs through (a half-graded head) is heard once — no cut-tight, no repeat', () => {
+  const clips = [clip('a', 'a', 0, 9.209), clip('b', 'a', 9.209, 12)];
+  const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'por', 8900, 9100), TW(1, 'eso,', 9150, 9500)]}, {clipId: 'b', source: 'a', words: [TW(1, 'eso,', 9150, 9500), TW(2, 'nuestros', 9600, 10000)]}];
+  const w = words(clips, tr);
+  assert.deepEqual(w.map((x) => [x.wid, +(x.t1 - x.t0).toFixed(2)]), [['a:0', 0.2], ['a:1', 0.34], ['a:2', 0.4]]); // "eso," whole (the second clip lands 9 ms early at 30 fps)
+  assert.deepEqual(pauseFindings(w, clips), []);
+});
+
 test('pauses: mid-sentence gap is major, after a full stop only past the longer threshold', () => {
   const clips = [clip('a', 'a', 0, 10)];
   const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'tiene', 0, 300), TW(1, 'noventa', 1000, 1300), TW(2, 'metros.', 1320, 1600), TW(3, 'Y', 2300, 2400), TW(4, 'cuesta', 2420, 2800)]}];

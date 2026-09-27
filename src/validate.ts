@@ -325,8 +325,10 @@ export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<
       // the timeline), and a head too short to be a clip is trimmed away.
       // ponytail: a clip ending < 0.2 s after the change (or a tail's split that close to an edge) gets a split that split_clip refuses (and says why)
       const pre = before && u0 - c.inSec >= SPLIT, piece = pre ? `the new piece at ${tl(u0)} s` : c.id;
-      const at = [...(pre || (st.off && before) ? [tl(u0)] : []), ...(c.outSec > u1 + EPS ? [tl(u1)] : [])];
-      const splits = at.length ? `split_clip at_sec ${at.join(' and at_sec ')} (timeline), then ` : '';
+      // the later split first: each clip is whole frames, so a split moves the timeline AFTER it by up to a frame
+      // (G10 followed first-to-last: 24.992 landed on 25.010, 0.55 of a frame) — never what comes before
+      const at = [...(c.outSec > u1 + EPS ? [tl(u1)] : []), ...(pre || (st.off && before) ? [tl(u0)] : [])];
+      const splits = at.length ? `split_clip at_sec ${at.join(', then at_sec ')} (timeline), then ` : '';
       const fix = own ? `it is its own clip with its own grade: once the join looks right (caption_proof), set_clip graded: true on ${c.id}`
         : st.off ? `${splits}set_grade target ${before ? `the new piece at ${tl(u0)} s` : c.id} like the shot before it (compare the join with caption_proof), then set_clip graded: true on it`
         : c.outSec < st.at - EPS ? `the clip ends inside the head: trim it off (trim_clip) or grade it (set_grade target ${c.id})`
@@ -337,7 +339,7 @@ export function halfGradedIssues(p: {clips: Clip[]; grade?: {overrides?: Record<
       out.push({level: 'warn', code: 'half-graded', msg: `${c.id}: ${c.src} is half-graded — in the shot from ${st.from} s of the source ${what}${st.off ? ' (' : '; '}ΔY ${st.dY > 0 ? '+' : ''}${st.dY}, saturation ${st.sat[0]} → ${st.sat[1]}). Fix: ${fix}`, ref: c.id});
     }
   }
-  return out;
+  return out.reverse(); // the latest first, for the same reason: fixed in this order, no split moves a time a later fix names
 }
 
 // ---------- identity (set_identity): whose reel this is and which cut of it ----------
