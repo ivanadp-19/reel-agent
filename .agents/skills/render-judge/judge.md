@@ -76,6 +76,15 @@ Open every sheet with `Read`. Then call `frame_at video=<render>` at each
 
 Then judge, with a timestamp for everything:
 
+- **Scope first.** When the report has an `ALCANCE` line, the job asked only
+  for some stages (the project's `scope`, `set_scope`): a captions-only job on a
+  finished export leaves its cut, look, mix and B-roll to the client. Anything
+  you find by eye about an omitted stage — script coverage, inserts,
+  `claim-image` and B-roll (broll), cuts (corte), the look (color), the mix
+  (audio) — goes under AVISOS with the stage it belongs to. It never counts
+  toward the verdict or the label, gets no fix in this job, and is never a
+  reason for the editor to add or cut anything.
+
 - **Hook (0–2 s)** from the hook sheet: does the first frame already say what
   the reel is about, sound off? Is there text in the first second, off the
   face and inside the safe zone? A blank, black, slow or generic opening is a
@@ -138,7 +147,10 @@ a plainly missing brief or script requirement can be a `blocker`.
 PASS (`QC técnico superado`) only if, after your dismissals and
 confirmations, there are 0 blockers, 0 majors, and no check with 3 or more
 minors. Everything else is `QC técnico: n hallazgos`. Do not round up, and
-do not count a skipped rule check as passed.
+do not count a skipped rule check as passed. Advisories — the advisory
+checks and everything about a stage outside the `ALCANCE` — never count, and
+a check skipped only for an omitted stage (`SKIPPED FUERA DEL ALCANCE`) does
+not make the evidence reduced.
 
 ## 4. Output (exactly this shape; finding text in the client's language)
 

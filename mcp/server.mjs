@@ -52,6 +52,8 @@ import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.
 import {projectRenderProps} from '../src/renderProps.ts';
 import {aheadOf, describeJob, jobsDir, listJobs, readJob} from '../scripts/render-jobs.mjs';
 import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
+import {SCOPABLE, STAGES, TOOL_STAGE, inScope, scopeInput, waitingOn} from '../src/stages.ts';
+import {logStage, readStages} from '../scripts/stages.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -173,6 +175,8 @@ const identityLine = (identity) => {
   const r = validateIdentity(identity);
   return r.identity ? `${DELIVERABLES.map(({kind, ext}) => deliverableName({identity: r.identity, v: 1, kind, ext})).join(' + ')} (family ${r.identity.family}${r.identity.development ? `; development ${r.identity.development}` : ''}; v<n> = the review version; renders at ${+deliveryFps({identity: r.identity}).toFixed(3)} fps)` : `not valid — ${r.error}`;
 };
+// what the job asks for (project.scope, src/stages.ts) — set_scope and get_project
+const scopeLine = (p) => { const on = inScope(p.scope), off = STAGES.filter((s) => !on.includes(s)); return `runs ${on.join(' → ')}${off.length ? `; omitida: ${off.join(', ')} — skip their steps; their checks do not run and what the checks or the render judge find there is advisory` : ' (everything, the default)'}`; };
 // the music's level in dB (the project keeps a gain), its fades and ducking — set_music and get_project
 const musicLine = (m) => `vol ${fmtDb(m.volume)} (gain ${+m.volume.toFixed(4)}), fade in ${m.fadeInSec ?? 0}s / out ${m.fadeOutSec ?? 0}s, duck ${m.duck ? 'on' : 'off'}`;
 function summary(id, p) {
@@ -181,6 +185,7 @@ function summary(id, p) {
   if (p.brand?.style) out.push('', `CLIENT STYLE (brand kit ${p.brand.name ?? ''}, plan with it):`, ...JSON.stringify(p.brand.style, null, 2).split('\n').slice(1, -1));
   if (p.plan) out.push('', `PLAN (set_plan) — ${planStatus(p, planMode(p))}:`, ...p.plan.split('\n').map((l) => `  ${l}`));
   if (p.identity) out.push('', `IDENTITY (set_identity): ${identityLine(p.identity)}`);
+  if (inScope(p.scope).length < STAGES.length) out.push('', `SCOPE (set_scope): ${scopeLine(p)}`);
   if (p.guion) out.push('', `GUION (set_guion): ${p.guion.trim().split(/\s+/).length} words — captions take its wording where it aligns with the audio; validate reports guion-conflict / guion-missing / guion-altered`);
   out.push('', 'CLIPS (timeline order):');
   place(p).forEach((pc, i) => {
@@ -287,7 +292,7 @@ const sec = (d) => z.number().describe(d);
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_guion', 'set_identity', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
-  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge',
+  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge', 'set_scope', 'check_stage', 'stage_status',
 ]);
 // Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
 // and the last save would drop the others: a call that may write a project waits for the one before
@@ -299,6 +304,7 @@ const OPEN_BEFORE_APPROVAL = new Set([
 const READ_ONLY = new Set([
   'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
   'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link', 'rejudge',
+  'check_stage', 'stage_status', // they write the stage records only (the backend's), never the project
 ]);
 const queues = new Map(); // project id → its last queued call
 const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
@@ -315,10 +321,25 @@ server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name)
       const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
       if (why) throw new Error(why);
     }
+    if (args?.project_id && TOOL_STAGE[name]?.length) logDependencies(name, args.project_id);
     return cb(args, extra);
   };
   return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
 });
+
+// Stages (scripts/stages.mjs, advisory — plan phase 10): a tool of stage S that starts while a stage S depends on
+// is red or stale (in the project's scope) is logged to public/stages/<id>.jsonl, never refused yet (enforce: phase
+// 11). stagesMode off: nothing; absent: advisory. A log that cannot be written never stops the tool.
+function logDependencies(name, id) {
+  try {
+    const p = load(id);
+    if (p.stagesMode === 'off') return;
+    const own = TOOL_STAGE[name], recs = readStages(PUBLIC, id);
+    const deps = Object.fromEntries(own.flatMap((s) => waitingOn(recs, p.scope, s)).filter((d) => !own.includes(d)).map((d) => [d, recs[d].status]));
+    const tag = callCtx.getStore()?.tag;
+    if (Object.keys(deps).length) logStage(PUBLIC, id, {event: 'dependency', tool: name, stages: own, deps, mode: p.stagesMode ?? 'advisory', actor: tag ? `mcp http session ${tag}` : OWNER});
+  } catch {}
+}
 
 server.registerTool('list_projects', {description: 'List reel-agent projects (id, name, clip count, identity family, last update).', inputSchema: {}}, async () => {
   fs.mkdirSync(PROJECTS, {recursive: true});
@@ -1155,8 +1176,9 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
   const {sheet, cols} = await renderProof(projectProps(p), times, outDir);
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
+  const proof = await stageProof(project_id, 'caption_proof', p.updatedAt);
   return {content: [
-    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.\n\nvalidate:\n${issuesText(await allIssues(p))}`},
+    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.${proof}\n\nvalidate:\n${issuesText(await allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });
@@ -1167,7 +1189,42 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   const {sheet, first, fps} = await renderStrip(projectProps(p), at_sec, outDir);
   const data = fs.readFileSync(sheet).toString('base64');
   fs.rmSync(outDir, {recursive: true, force: true});
-  return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
+  return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down${await stageProof(project_id, 'motion_proof', p.updatedAt)}`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
+});
+
+// ---------- the stages of the reel (src/stages.ts, scripts/stages.mjs), through the backend — advisory ----------
+const stagesApi = async (route, opts) => {
+  let r;
+  try { r = await fetch(`${API}/api/projects/${route}`, opts); } catch { throw new Error(`reel-agent backend is not running at ${API} — run \`npm start\` in the reel-agent folder`); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `stages ${route}: HTTP ${r.status}`);
+  return j;
+};
+// a proof of the captions stage, of the revision it showed (the backend keeps it only if the project did not change since)
+const stageProof = async (id, kind, rev) => {
+  try { const r = await stagesApi(`${id}/stages/captions/proof`, {method: 'POST', body: JSON.stringify({kind, rev})}); return r.recorded ? `\n(${kind} recorded for check_stage captions)` : `\n(${kind} NOT recorded for check_stage captions: ${r.reason})`; }
+  catch (e) { return `\n(${kind} not recorded for check_stage captions: ${e.message})`; }
+};
+const findingLine = (f) => `  ${f.level === 'error' ? 'ERR ' : 'WARN'} ${f.code}${f.omitted ? ` (${f.omitted} omitida: advisory)` : ''}: ${f.msg ?? ''}`;
+server.registerTool('set_scope', {description: `What the job asks for: the stages of the reel the brief requests — ${SCOPABLE.join(', ')}. ["captions"] = captions only (a finished export, e.g. César's Morantes: no cut, no color, no B-roll), ["corte","captions"] = cut and captions, all five = everything (the default when the brief does not narrow it). ingest and the delivery always run; the script (guion) goes with captions. A stage left out is omitida: its checks do not run, it never blocks another, and what the checks or the render judge find about it is advisory (reported, never counted in the QC label) — and you skip its steps (reel-edit step 0). Set it first, from the brief's own words; never narrow what the brief did not.`, inputSchema: {project_id: pid, stages: z.array(z.enum(SCOPABLE)).min(1).describe('the stages the brief asks for')}}, async ({project_id, stages}) => {
+  const r = scopeInput(stages);
+  if (r.error) throw new Error(r.error);
+  const p = load(project_id); p.scope = r.scope; await save(project_id, p);
+  return text(`Scope ${r.scope ? r.scope.join(' + ') : 'everything'}: ${scopeLine(p)}.`);
+});
+server.registerTool('check_stage', {description: `Run the gate of one stage (${STAGES.join(' → ')}) on the project as saved now and record the result: verde (no error; warnings listed), rojo (errors to fix, each with its code), trabajando (its final render is still running, or retrying after a backend restart), pendiente (entregables: no final render of this version yet), stale (the project changed while it ran: its result was discarded — check again), omitida (outside the scope, set_scope: nothing runs). captions needs a caption_proof and a motion_proof of the captions as they are now; entregables reads the newest final render of this version of the project. A red from the machine (out of memory, a stall, a restart) says so and does not count toward the 3 reds in a row that mean: stop and ask Felipe (one per version of the stage: checking the same edit again is no new attempt). Advisory: nothing is refused yet. stage_status shows every stage.`, inputSchema: {project_id: pid, stage: z.enum(STAGES)}}, async ({project_id, stage}) => {
+  projFile(project_id);
+  const r = await stagesApi(`${project_id}/stages/${stage}/check`, {method: 'POST', body: '{}'});
+  const f = r.findings ?? [];
+  const head = r.discarded ? `${stage}: stale — the project changed while the check ran (read ${r.discarded.rev}, now ${r.rev}); its result (${r.discarded.status}) was discarded: check again`
+    : `${stage}: ${r.status.toUpperCase()}${r.superseded ? ' (a newer check of this stage, started while this one ran, settles it)' : ''}${r.status === 'chequeando' ? ' — still running: stage_status shows it when it ends' : ''}${r.infra ? ' (the machine, not the reel)' : ''}${r.reds >= 3 ? ` — ${r.reds} reds in a row: stop and ask Felipe` : ''}`;
+  return text([head, ...(r.discarded || r.status === 'chequeando' ? [] : f.map(findingLine))].join('\n'));
+});
+server.registerTool('stage_status', {description: 'Where each stage of the reel stands (pendiente, trabajando, chequeando, verde, rojo, stale = an edit reopened it, omitida = outside the scope), what each waits on (a stage it depends on that is red or stale), and 3 reds in a row (stop and ask Felipe). check_stage runs one.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+  projFile(project_id);
+  const v = await stagesApi(`${project_id}/stages`);
+  const lines = v.stages.map((s) => `  ${s.stage.padEnd(12)}${s.status}${s.infra ? ' (infra)' : ''}${s.findings?.length ? `  ${s.findings.filter((x) => x.level === 'error').length} err / ${s.findings.filter((x) => x.level !== 'error').length} warn` : ''}${s.waitingOn?.length ? `  — waits on ${s.waitingOn.join(', ')}` : ''}${s.escalate ? `  — ${s.reds} reds in a row: stop and ask Felipe` : ''}`);
+  return text([`Stages of ${project_id} (mode ${v.mode}; ${v.scope ? `scope ${v.scope.join(' + ')}` : 'scope: everything'}):`, ...lines].join('\n'));
 });
 
 const renderModeArg = z.enum(['full', 'layers']).optional().describe('default: the backend\'s (REEL_RENDER_MODE, else full)');

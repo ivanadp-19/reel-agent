@@ -4,6 +4,7 @@ import {CLEAN, dbToGain, fmtDb, gainToDb, musicOf} from '../src/audio';
 import {spansWithoutMatte} from '../src/graphicTemplates';
 import {DELIVERABLES, deliverableName, eachTarget, identityOf, identityTaken, projectTargets, validateIdentity, type Issue} from '../src/validate';
 import type {Matte} from '../src/Person';
+import {SCOPABLE, STAGES, inScope, scopeInput, type Scopable} from '../src/stages';
 import {runJob, readPublic} from './jobs';
 import {Btn, Label, Row, Section, Select, TextInput, Toggle} from './ui';
 
@@ -11,7 +12,8 @@ type MusicRow = {id: string; title: string; creator: string; license: string; du
 
 // Settings tab: music (set_music: level in dB, fades, duck), audio options (set_audio) and the music on
 // the whole family (set_music targets), the agent's plan
-// (set_plan), the identity (set_identity), the pre-render checks (validate, prepare_mattes) and project info.
+// (set_plan), the identity (set_identity), the stages (set_scope, check_stage, stage_status), the pre-render
+// checks (validate, prepare_mattes) and project info.
 
 // set_identity: client, script and variant — the delivered files are named from it. The same rules as the
 // MCP and the backend (src/validate.ts); a repeated one is caught against the project list before saving
@@ -53,6 +55,73 @@ const IdentitySection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => 
       </div>
       {shown.identity && DELIVERABLES.map(({kind, ext}) => deliverableName({identity: shown.identity, v: 1, kind, ext})).map((n) => <p key={n} className="text-[11px] font-mono text-on-surface-variant truncate" title={n}>{n}</p>)}
       {shown.error && <p className="text-[11px] text-error">{shown.error}</p>}
+    </Section>
+  );
+};
+
+// The stages of the reel (src/stages.ts; the MCP's set_scope, check_stage, stage_status — one backend for both):
+// what the job asks for — a stage left out is omitida: its gate does not run and what is found there is advisory —
+// and each stage's gate, run on the saved project (autosaved 600 ms after an edit). Advisory: nothing is refused.
+type StageRow = {stage: string; status: string; findings?: Issue[]; waitingOn?: string[]; infra?: boolean};
+const StagesSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => void}> = ({notify}) => {
+  const {projectId, scope, setScope} = useEditor();
+  const [rows, setRows] = useState<StageRow[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const at = `/api/projects/${encodeURIComponent(projectId ?? '')}/stages`;
+  const refresh = async () => {
+    try { const v = await fetch(at).then((r) => r.json()); if (!Array.isArray(v.stages)) throw new Error(v.error ?? 'no answer'); setRows(v.stages); }
+    catch (e) { notify(`Stages: ${(e as Error).message}`, 'error'); }
+  };
+  const check = async (stage: string) => {
+    setBusy(stage);
+    try {
+      const r = await fetch(`${at}/${stage}/check`, {method: 'POST'}).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      if (r.discarded) notify(`${stage}: the project changed while it ran — its result was discarded, check again`, 'error');
+      else if (r.superseded) notify(`${stage}: a newer check started meanwhile — its result is the one shown`, 'ok');
+      await refresh();
+    } catch (e) { notify(`Check ${stage}: ${(e as Error).message}`, 'error'); }
+    setBusy(null);
+  };
+  // the captions gate asks for a caption_proof and a motion_proof: a person who watched the captions in the preview
+  // (which is the render) records both, of the revision this editor shows (the same route as the MCP's proofs)
+  const proofed = async () => {
+    setBusy('proof');
+    try {
+      for (const kind of ['caption_proof', 'motion_proof']) {
+        const r = await fetch(`${at}/captions/proof`, {method: 'POST', body: JSON.stringify({kind, rev: useEditor.getState().rev})}).then((x) => x.json());
+        if (r.error || !r.recorded) throw new Error(r.error ?? `${r.reason} (wait for the autosave)`);
+      }
+      notify('captions: proofed in the preview — Check captions now', 'ok');
+    } catch (e) { notify(`Proof: ${(e as Error).message}`, 'error'); }
+    setBusy(null);
+  };
+  const asked: Scopable[] = scope ?? [...SCOPABLE];
+  const toggle = (s: Scopable) => {
+    const r = scopeInput(asked.includes(s) ? asked.filter((x) => x !== s) : [...asked, s]);
+    if (r.error) return notify(r.error, 'error');
+    setScope(r.scope);
+  };
+  const on = inScope(scope);
+  return (
+    <Section title="Stages" hint="What the job asks for (set_scope): a stage left out is omitted — its checks do not run and what is found there is only advisory. Check runs a stage's gate on the saved project (check_stage).">
+      {STAGES.map((s) => {
+        const row = rows?.find((x) => x.stage === s);
+        const status = !on.includes(s) ? 'omitida' : row && row.status !== 'omitida' ? row.status : '—';
+        const errs = row?.findings?.filter((i) => i.level === 'error').length ?? 0;
+        return (
+          <div key={s} className="flex items-center gap-2 text-[12px]" title={row?.findings?.map((i) => `${i.level === 'error' ? 'ERR' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') || undefined}>
+            {(SCOPABLE as readonly string[]).includes(s)
+              ? <input type="checkbox" checked={asked.includes(s as Scopable)} onChange={() => toggle(s as Scopable)} className="accent-primary" aria-label={`${s} in scope`} />
+              : <span className="w-[13px]" title={s === 'guion' ? 'goes with captions' : 'always runs'} />}
+            <span className="flex-1 font-mono">{s}</span>
+            <span className={status === 'rojo' ? 'text-error' : status === 'verde' ? 'text-[#39d98a]' : 'text-on-surface-variant'}>{status}{row?.infra ? ' (infra)' : ''}{errs ? ` · ${errs} err` : ''}{row?.waitingOn?.length ? ` · waits on ${row.waitingOn.join(', ')}` : ''}</span>
+            {s === 'captions' && <Btn onClick={proofed} disabled={!projectId || !!busy || !on.includes(s)} title="I watched the captions in the preview, stills and motion: records the caption_proof and motion_proof the captions check asks for">{busy === 'proof' ? '…' : 'Proofed'}</Btn>}
+            <Btn onClick={() => check(s)} disabled={!projectId || !!busy || !on.includes(s)}>{busy === s ? '…' : 'Check'}</Btn>
+          </div>
+        );
+      })}
+      <Btn onClick={refresh} disabled={!projectId}>Show status</Btn>
     </Section>
   );
 };
@@ -221,6 +290,8 @@ export const SettingsTab: React.FC<{notify: (msg: string, kind: 'error' | 'ok') 
       </Section>
 
       <IdentitySection key={JSON.stringify(identity ?? null)} notify={notify} />
+
+      <StagesSection notify={notify} />
 
       <Section title="Checks" hint="Safe zones, glue words, timing, emphasis density, overlaps, missing mattes and hook — estimated geometry; the preview is the truth.">
         <div className="flex gap-2">

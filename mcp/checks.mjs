@@ -10,7 +10,7 @@ import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, unbackedDa
 import {readFont} from '../src/sfnt.ts';
 import {cacheName, projectTranscript, sourceKey} from '../scripts/transcript-cache.mjs';
 import {readScan} from '../scripts/grade-scan.mjs';
-import {stageFindings} from '../src/stages.ts';
+import {scopeFindings, stageFindings} from '../src/stages.ts';
 import {readWind} from '../scripts/wind-scan.mjs';
 import {windIssues} from '../src/audio.ts';
 
@@ -64,14 +64,16 @@ export async function stageChecks(p, publicDir, env, judged = []) {
   const {counts, pauseFindings, timelineSpeech} = await import('../.agents/skills/render-judge/judge.mjs');
   const fps = deliveryFps(p);
   // a judge finding as a gate reads it: a rule that counts toward its verdict blocks, the rest are warnings
-  const asIssue = (f) => ({level: f.kind === 'rule' && counts(f) && ['blocker', 'major'].includes(f.severity) ? 'error' : 'warn', code: f.check, msg: f.msg, ...(f.ref ? {ref: f.ref} : {})});
+  // (one about a stage the job did not ask for is advisory: scopeFindings)
+  const asIssue = (f) => ({level: f.kind === 'rule' && counts(f) && ['blocker', 'major'].includes(f.severity) ? 'error' : 'warn', code: f.check, msg: f.msg, ...(f.ref ? {ref: f.ref} : {}), ...(f.omitted ? {omitted: f.omitted} : {})});
+  const scoped = scopeFindings(judged, p.scope);
   // corte judges the cut, never what later stages own: every clip heard (muting is the mix's, audio), and every
   // pause possibly dramatic (the key words are the captions') — only dead air blocks it; the judge on the final
   // render hears the rest
   const heard = timelineSpeech(p.clips.map(({muted, volume, ...c}) => c), await projectWords(p, publicDir, env), fps).words;
   const cached = (key) => [true, false].some((dg) => fs.existsSync(path.join(publicDir, 'clips', 'transcripts', cacheName(key, p.lang ?? 'auto', dg))));
   return stageFindings({p, fps, issues: [...await projectIssues(p, publicDir, env), ...pauseFindings(heard, p.clips, null).map(asIssue)],
-    untranscribed: [...new Set(p.clips.map(sourceKey))].filter((k) => !cached(k)), judged: judged.map(asIssue)});
+    untranscribed: [...new Set(p.clips.map(sourceKey))].filter((k) => !cached(k)), judged: [...scoped.inScope, ...scoped.advisory].map(asIssue)});
 }
 
 // A project's identity (set_identity) checked against the others saved here (public/projects/*.json):
