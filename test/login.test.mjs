@@ -2,9 +2,14 @@ import {after, before, test} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
-import {gate, tokenOk} from '../server/http.mjs';
-import {SESSION_COOKIE, clientIp, createLoginLimiter, handleLogin, parseCookies, safeNext, sameSite, signSession, trustedHops, verifySession} from '../server/session.mjs';
+import {gate, humanOnly, tokenOk} from '../server/http.mjs';
+import {SESSION_COOKIE, clientIp, createLoginLimiter, handleLogin, parseCookies, parseRoles, safeNext, sameSite, signSession, trustedHops, verifySession} from '../server/session.mjs';
+import {createTokenStore} from '../server/tokens.mjs';
 
 // users made here, never a real secret: random passwords, hashed at low cost
 const PASS = crypto.randomBytes(12).toString('hex');
@@ -265,4 +270,75 @@ test('helpers: next stays on this site, cookies parse', () => {
   assert.equal(safeNext('/a?b=1'), '/a?b=1');
   for (const bad of ['//evil.example', '/\\evil.example', 'https://evil.example', '', null, '/a\r\nSet-Cookie: x', '/\t/evil.example', '/\x00/evil', '/\x7f/x']) assert.equal(safeNext(bad), '/');
   assert.deepEqual(parseCookies('a=1; b=x%20y; a=2; junk'), {a: '1', b: 'x y'});
+});
+
+// ---- roles and human-only actions (CEO-2, E-2, E-3) ----
+test('REEL_USER_ROLES: owner / reviewer with clients; anything else is refused with the reason', () => {
+  assert.deepEqual({...parseRoles(undefined)}, {});
+  assert.deepEqual({...parseRoles('')}, {});
+  assert.deepEqual({...parseRoles('{"f":{"role":"owner"},"c":{"role":"reviewer","clients":["acme"]}}')}, {f: {role: 'owner', clients: []}, c: {role: 'reviewer', clients: ['acme']}});
+  assert.equal(Object.getPrototypeOf(parseRoles('{}')), null, 'no prototype: a user named "constructor" has no role');
+  for (const [bad, why] of [['{bad', /not JSON/], ['[]', /must be an object/], ['"x"', /must be an object/], ['{"f":{"role":"admin"}}', /f: role must be "owner" or "reviewer"/], ['{"f":"owner"}', /role must be/], ['{"c":{"role":"reviewer","clients":"acme"}}', /clients must be a list/], ['{"c":{"role":"reviewer","clients":[""]}}', /clients must be a list/]]) {
+    assert.throws(() => parseRoles(bad), why, bad);
+  }
+});
+
+test('a bad REEL_USER_ROLES stops the backend at once with a clear error (before it writes or listens)', () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const r = spawnSync(process.execPath, ['server/index.mjs'], {cwd: root, env: {...process.env, REEL_USER_ROLES: '{"rev":{"role":"reviewr"}}', REEL_PORT: '1', PORT: ''}, encoding: 'utf8', timeout: 30e3});
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /backend not started: REEL_USER_ROLES\.rev: role must be "owner" or "reviewer"/);
+});
+
+test('roles in public mode need their own REEL_SESSION_SECRET: unset or equal to a backend token, the backend does not start (a token holder could sign a human\'s cookie)', () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  for (const secret of ['', 'second']) {
+    const env = {...process.env, REEL_PUBLIC: '1', REEL_USER_ROLES: '{"rev":{"role":"reviewer","clients":["acme"]}}', REEL_BACKEND_TOKEN: `${TOKEN},second`, REEL_SESSION_SECRET: secret, REEL_PORT: '1', PORT: ''};
+    const r = spawnSync(process.execPath, ['server/index.mjs'], {cwd: root, env, encoding: 'utf8', timeout: 30e3});
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /backend not started: REEL_USER_ROLES in public mode needs its own REEL_SESSION_SECRET/);
+  }
+});
+
+test('humanOnly: only a login session passes; loopback, basic auth, the backend token and user tokens get 403 "solo con login en la VM"', async () => {
+  const pass = crypto.randomBytes(8).toString('hex');
+  const auth = {boss: bcrypt.hashSync(pass, 4), rev: bcrypt.hashSync(pass, 4), otro: bcrypt.hashSync(pass, 4), nadie: bcrypt.hashSync(pass, 4)};
+  const roles = parseRoles(JSON.stringify({boss: {role: 'owner'}, rev: {role: 'reviewer', clients: ['acme']}, otro: {role: 'reviewer', clients: ['other']}}));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-roles-'));
+  try {
+    const users = createTokenStore(path.join(dir, 't.json'));
+    const {token: bossToken} = users.create({user: 'boss', admin: true});
+    const at = (headers, publicMode = true, p = '/api/reviews/p-1/approve') => gate({method: 'POST', headers: {host: '127.0.0.1:3333', 'x-forwarded-for': '203.0.113.90', ...headers}, socket: {}}, new URL(`http://x${p}`), {publicMode, auth, tokens: [TOKEN, 'second'], sessionSecret: SECRET, users, roles, limiter: createLoginLimiter({max: 50})});
+    const session = (u) => ({cookie: `${SESSION_COOKIE}=${signSession(SECRET, u, {hash: auth[u]})}`});
+    const agents = {
+      loopback: await at({}, false),
+      'a session cookie in local mode': await at(session('boss'), false),
+      'basic auth of the owner': await at({authorization: 'Basic ' + Buffer.from(`boss:${pass}`).toString('base64')}),
+      'the primary backend token': await at({'x-reel-token': TOKEN}),
+      'another backend token': await at({'x-reel-token': 'second'}),
+      'the owner\'s own user token': await at({'x-reel-token': bossToken}),
+    };
+    assert.equal(agents.loopback.via, 'loopback');
+    assert.equal(agents['a session cookie in local mode'].via, 'loopback', 'local mode knows no session');
+    assert.deepEqual([agents['the primary backend token'].primary, agents['another backend token'].primary], [true, undefined]);
+    for (const [who, g] of Object.entries(agents)) {
+      for (const need of [{}, {role: 'owner'}, {client: 'acme'}]) {
+        const h = humanOnly(g, need);
+        assert.deepEqual([h.ok, h.status, h.error, h.code], [false, 403, 'solo con login en la VM', 'human_only'], `${who} ${JSON.stringify(need)}`);
+        assert.equal(h.by, undefined);
+      }
+    }
+    // a reviewer's login passes the gate only for /reviews/ (and /r/) until the bandeja's routes join it (phase 5)
+    assert.equal((await at(session('rev'))).status, 403);
+    const boss = await at(session('boss')), rev = await at(session('rev'), true, '/reviews/p-1/v1.mp4'), otro = await at(session('otro'), true, '/reviews/p-1/v1.mp4'), nadie = await at(session('nadie'));
+    assert.deepEqual([boss.via, boss.role, rev.role, rev.clients, nadie.role, nadie.clients], ['session', 'owner', 'reviewer', ['acme'], null, []]);
+    assert.deepEqual(humanOnly(boss, {role: 'owner'}), {ok: true, by: 'boss'}, 'by comes from the session');
+    assert.deepEqual(humanOnly(boss, {client: 'acme'}), {ok: true, by: 'boss'});
+    assert.deepEqual(humanOnly(rev, {client: 'acme'}), {ok: true, by: 'rev'});
+    assert.equal(humanOnly(rev, {role: 'owner', client: 'acme'}).status, 403, 'a reviewer never does an owner\'s action');
+    assert.equal(humanOnly(rev, {client: 'other'}).status, 403, 'nor acts on another client');
+    assert.equal(humanOnly(rev, {}).status, 403, 'nor on a project without a client');
+    assert.equal(humanOnly(otro, {client: 'acme'}).status, 403);
+    assert.match(humanOnly(nadie, {client: 'acme'}).error, /no tiene rol/, 'a user without an entry has no human-only action');
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });

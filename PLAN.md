@@ -2,7 +2,7 @@
 
 Editor de reels open source cuyo cerebro es **Claude Code o Codex** (lo elige el usuario). El agente decide *qué* hacer (cortes, énfasis, B-roll, look, titulares); código determinista decide *dónde y cuándo* en milisegundos y renderiza. Cuatro problemas: **recorte**, **color grade**, **captions premium** y **B-roll** (propio, stock y motion graphics).
 
-Actualizado: 2026-09-24. Evidencia en `research/`.
+Actualizado: 2026-09-26. Evidencia en `research/`.
 
 ## 1. Decisiones tomadas
 
@@ -19,16 +19,26 @@ Actualizado: 2026-09-24. Evidencia en `research/`.
 ## 2. Arquitectura
 
 ```
-usuario ──► editor (Vite + React + @remotion/player)  ◄── live reload del proyecto
-                │ /api (solo loopback, Origin localhost, CAS por updatedAt)
-                ▼
-         backend node (127.0.0.1:3333) ── spawn ──► scripts/: transcribe · captions · autocut
-                │                                    (WhisperX venv, ffmpeg, YuNet)
-                │ remotion render
-                ▼
-         src/: composición Remotion = preview y export (la misma)
+usuario ──► editor (Vite + React + @remotion/player)       cliente ──► /r/<token> (link de revisión)
+                │ /api + media por URL                                  │
+                ▼                                                        ▼
+         backend node (server/index.mjs, 127.0.0.1:3333) ─ gate (server/http.mjs):
+           · local: loopback + Origin localhost
+           · público (REEL_PUBLIC=1, la VM): x-reel-token | cookie de /login | basic auth; roles en REEL_USER_ROLES
+           · /r/: el token es la credencial; el proyecto de un cliente pide además el login de ese cliente
+                │
+                ├─ proyectos: POST /api/projects, CAS por updatedAt (el único escritor; el MCP también escribe por aquí)
+                ├─ ingest (server/ingest.mjs) y jobs ── spawn ──► scripts/: transcribe (WhisperX | Deepgram) · captions · autocut · matte
+                ├─ cola de render (scripts/render-jobs.mjs: un job en disco por render, serial, slots con lock, piso de memoria)
+                │     └─ render-runner: full | layers (master en caché + capa de captions + composite) → loudnorm + QC
+                │           └─ final con QC → versión vN en public/reviews/ (proxy 720p, póster; con identidad, los 5 entregables)
+                ├─ /mcp (Streamable HTTP, solo x-reel-token) ◄── agente remoto (Claude Code de un colaborador)
+                └─ /api/tokens, /api/uploads, /api/validate… ◄── reel CLI (cli/reel.mjs, token por usuario, por SSH en la VM)
 
-agente (claude -p | codex exec) ──► mcp/server.mjs (stdio, 26 tools) ──► proyecto JSON + backend
+agente local (claude -p | codex exec) ──► mcp/server.mjs (stdio) ──► backend por loopback (token primario)
+  stdio y /mcp: el mismo registro de 72 tools
+
+src/: composición Remotion = preview (editor) y export (render), la misma
 ```
 
 Modelo de datos (`public/projects/<id>.json`):
@@ -86,7 +96,7 @@ Hecho:
 - Gemini eliminado: arrange, acentos y B-roll pasan al agente (`get_transcript`, `reorder_clips`, `delete_clips`, `edit_caption`, `search_stock`, `add_broll`).
 - Idioma por proyecto; cara local (YuNet, 3 frames por fuente); Inter empaquetada.
 - Captions por palabra ancladas a la fuente; `split`/`autocut`/`reanchor`/`mergeCaptions` compartidos; tests (`npm test`); `tsc` cubre `editor/`.
-- CAS por `updatedAt` (409); backend solo loopback + `Origin`; descargas solo pexels.com.
+- CAS por `updatedAt` (409); backend solo loopback + `Origin` en modo local (el modo público con login, `/mcp`, los links `/r/` y el CLI `reel` vinieron después: §2); descargas solo pexels.com.
 - Verificado con `pruebaeditoria.mp4` (es-MX): transcripción correcta, 31 páginas, cara al 57 %, corte a mitad de frase correcto en el render.
 
 Spikes pendientes (cada uno con informe go/no-go):

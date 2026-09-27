@@ -1,0 +1,55 @@
+{
+  "id": "example",
+  "name": "Example client (generic; never picked automatically)",
+  "match": {
+    "captionStyle": [],
+    "brand": []
+  },
+  "captions": {
+    "pagination": "sentence",
+    "accentScale": 1.15,
+    "namesMaySplit": false
+  },
+  "glossary": [
+    {
+      "term": "rooftop",
+      "variants": [
+        "roof top",
+        "ruftop"
+      ]
+    }
+  ],
+  "crewWords": [
+    "action",
+    "rolling",
+    "cut"
+  ],
+  "colorRefs": [
+    {
+      "label": "approved reference",
+      "paths": [
+        ".refs/example/approved.mp4"
+      ],
+      "hint": "a client profile on the volume (public/clients/<client>/profile.json) keeps its references next to it, e.g. refs/approved.mp4"
+    }
+  ],
+  "requireInserts": false,
+  "reels": {
+    "R1": {
+      "inserts": [
+        {
+          "what": "the pool",
+          "need": "broll",
+          "keywords": [
+            "pool",
+            "alberca"
+          ]
+        }
+      ]
+    }
+  },
+  "blackFades": {
+    "startSec": 0,
+    "endSec": 0
+  }
+}

@@ -11,7 +11,7 @@ import path from 'node:path';
 import http from 'node:http';
 import bcrypt from 'bcryptjs';
 import {gate, isMediaPath, servePublic} from '../server/http.mjs';
-import {SESSION_COOKIE, createLoginLimiter, handleLogin, signSession} from '../server/session.mjs';
+import {SESSION_COOKIE, createLoginLimiter, handleLogin, parseRoles, signSession} from '../server/session.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-media-'));
 after(() => fs.rmSync(tmp, {recursive: true, force: true}));
@@ -24,16 +24,17 @@ fs.mkdirSync(dist);
 fs.writeFileSync(path.join(dist, 'index.html'), '<!doctype html><title>editor</title>');
 
 const SECRET = 'session-secret-for-tests';
-const AUTH = {ana: bcrypt.hashSync('pw', 4)};
+const AUTH = Object.fromEntries(['ana', 'boss', 'rev', 'otro'].map((u) => [u, bcrypt.hashSync('pw', 4)]));
+const ROLES = parseRoles(JSON.stringify({boss: {role: 'owner'}, rev: {role: 'reviewer', clients: ['acme']}, otro: {role: 'reviewer', clients: ['other']}}));
 // the same order as server/index.mjs: gate, /login, deny, then the public files, else the API
 function serve({publicMode = true} = {}) {
   const limiter = createLoginLimiter({max: 50});
   const srv = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
-    const g = await gate(req, url, {publicMode, auth: AUTH, tokens: ['backend-tok'], sessionSecret: SECRET, limiter});
+    const g = await gate(req, url, {publicMode, auth: AUTH, tokens: ['backend-tok', 'second-tok'], sessionSecret: SECRET, limiter, roles: ROLES});
     if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SECRET, limiter});
     if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
-    if (publicMode && servePublic(req, res, url.pathname, {publicDir: pub, distDir: dist})) return;
+    if (publicMode && servePublic(req, res, url.pathname, {publicDir: pub, distDir: dist, g})) return;
     res.writeHead(200, {'Content-Type': 'application/json'});
     res.end(JSON.stringify({api: url.pathname, via: g.via, user: g.user ?? null}));
   });
@@ -107,4 +108,53 @@ test('local mode: media keeps loopback Host + localhost Origin for everyone; a s
   assert.equal((await at({host: 'reels.example.com', cookie})).status, 403);
   assert.equal((await at({host: '127.0.0.1:3333', origin: 'https://evil.example', cookie})).status, 403);
   assert.deepEqual(await at({host: '127.0.0.1:3333'}), {kind: 'ok', via: 'loopback'});
+});
+
+test('a client\'s /reviews/ files (CEO-4): its reviewer, the owner and the primary token; another client, basic auth and other tokens get 403; projects without a client as before (R-1)', async () => {
+  const put = (f, body) => { fs.mkdirSync(path.dirname(path.join(pub, f)), {recursive: true}); fs.writeFileSync(path.join(pub, f), body); };
+  put('projects/p-c.json', JSON.stringify({name: 'c', identity: {client: 'acme', family: 'acme-G2', script: 2, variant: null}}));
+  for (const f of ['reviews/p-c/v1.mp4', 'reviews/p-c/v1/ACME_G2_v1_master.mp4', 'reviews/p-c.json', 'reviews/p-c.json.123.tmp']) put(f, 'client bytes');
+  // a project gone (or its identity cleared) whose versions were rendered for a client stays that client's
+  put('reviews/p-gone.json', JSON.stringify({versions: [{v: 1, identity: {client: 'acme'}}]}));
+  put('reviews/p-gone/v1.mp4', 'client bytes');
+  put('projects/p-n.json', JSON.stringify({name: 'n'}));
+  put('reviews/p-n/v1.mp4', 'plain bytes');
+  // the clients' volume (judge profile, deliveries, research), linked in from a disk of its own: scoped all the same
+  fs.mkdirSync(path.join(tmp, 'volume/acme'), {recursive: true});
+  fs.writeFileSync(path.join(tmp, 'volume/acme/profile.json'), 'client bytes');
+  fs.symlinkSync(path.join(tmp, 'volume'), path.join(pub, 'clients'));
+  const srv = await serve();
+  const session = (u) => ({cookie: `${SESSION_COOKIE}=${signSession(SECRET, u, {hash: AUTH[u]})}`});
+  const basic = {authorization: 'Basic ' + Buffer.from('boss:pw').toString('base64')};
+  try {
+    const client = ['/reviews/p-c/v1.mp4', '/reviews/p-c/v1/ACME_G2_v1_master.mp4', '/reviews/p-c.json', '/reviews/p-c.json.123.tmp', '/reviews/%70-c/v1.mp4', '/reviews/p-gone/v1.mp4'];
+    // a case-insensitive disk (a Mac) opens /REVIEWS/… (and APFS /reviewſ/…) as the same file: the same answer
+    const caseless = [...fs.existsSync(path.join(pub, 'REVIEWS/p-c.json')) ? ['/REVIEWS/p-c.json', '/Reviews/p-c/v1.mp4', '/CLIENTS/acme/profile.json'] : [],
+      ...fs.existsSync(path.join(pub, 'review\u017f/p-c.json')) ? ['/review%C5%BF/p-c/v1.mp4'] : []];
+    for (const [who, headers] of [['another client', session('otro')], ['a user without a role', session('ana')], ['basic auth, even the owner', basic], ['a second backend token', {'x-reel-token': 'second-tok'}]]) {
+      for (const p of [...client, ...caseless, '/clients/acme/profile.json']) {
+        const r = await req(srv, p, {headers});
+        assert.deepEqual([r.status, JSON.parse(r.body).code], [403, 'forbidden'], `${who} ${p}`);
+        assert.ok(!r.body.includes('client bytes'));
+      }
+    }
+    assert.equal((await req(srv, '/reviews/p-c/v1.mp4')).status, 401, 'anonymous: the gate first, as before');
+    for (const [who, headers] of [['its reviewer', session('rev')], ['the owner', session('boss')], ['the primary token', {'x-reel-token': 'backend-tok'}]]) {
+      for (const p of client) assert.equal((await req(srv, p, {headers})).status, 200, `${who} ${p}`);
+    }
+    for (const headers of [session('boss'), {'x-reel-token': 'backend-tok'}]) assert.equal((await req(srv, '/clients/acme/profile.json', {headers})).status, 200);
+    // a reviewer's login opens their clients' /reviews/ files and /r/ links, nothing else: no editor, API, other media or
+    // CLI token — by session or basic auth alike
+    for (const headers of [session('rev'), {authorization: 'Basic ' + Buffer.from('rev:pw').toString('base64')}]) {
+      for (const p of ['/', '/api/projects', '/exports/edited-1.mp4', '/clips/take1.mp4', '/cli-token', '/clients/acme/profile.json', '/reviews/..%2fexports/edited-1.mp4']) {
+        const r = await req(srv, p, {headers});
+        assert.deepEqual([r.status, JSON.parse(r.body).code], [403, 'forbidden'], `reviewer ${p}`);
+      }
+    }
+    assert.equal((await req(srv, '/api/projects/p-n', {method: 'POST', headers: session('rev'), body: '{}'})).status, 403);
+    for (const headers of [session('otro'), session('ana'), basic, {'x-reel-token': 'second-tok'}]) {
+      const r = await req(srv, '/reviews/p-n/v1.mp4', {headers});
+      assert.deepEqual([r.status, r.body], [200, 'plain bytes'], 'R-1');
+    }
+  } finally { srv.close(); }
 });

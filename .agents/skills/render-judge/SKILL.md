@@ -1,6 +1,6 @@
 ---
 name: render-judge
-description: Technical QC for every render: a separate, hostile review pass (a subagent with a demanding client's eyes) that checks the WHOLE reel against evidence (contact sheets, ffprobe/loudness, the aligned transcript) and reports prioritized, timestamped findings mapped to reel MCP tool calls. It runs IN PARALLEL with delivery. The base master ships right away, labeled; the judge feeds the next iterations (at most 3, then escalate). A pass is labeled "QC técnico superado", never "aprobado". Generic judge + client profiles (profiles/). Use after every `render` in reel-edit, or when asked to review/critique/QA a rendered reel.
+description: Technical QC for every render: a separate, hostile review pass (a subagent with a demanding client's eyes) that checks the WHOLE reel against evidence (contact sheets, ffprobe/loudness, the aligned transcript) and reports prioritized, timestamped findings mapped to reel MCP tool calls. It runs IN PARALLEL with delivery. The base master ships right away, labeled; the judge feeds the next iterations (at most 3, then escalate). A pass is labeled "QC técnico superado", never "aprobado". Generic judge + client profiles (public/clients/<client>/profile.*, on the volume). Use after every `render` in reel-edit, or when asked to review/critique/QA a rendered reel.
 allowed-tools: Bash(node .agents/skills/render-judge/judge.mjs:*), Read, Agent
 ---
 
@@ -18,14 +18,18 @@ Files in this folder:
   sheets of the whole reel, and a report with a label and prioritized findings.
 - `judge.md`: the brief the judge subagent follows (persona, procedure, output).
 - `checks.md`: the generic rubric. Every check, how it is detected, its severity, the fix, and the thresholds.
-- `profiles/<client>.json` + `profiles/<client>.md`: a client's own rules. The
-  JSON turns on and tunes rule checks (glossary, sentence paging, accent size,
-  color references, crew words, script inserts, known reels). The MD holds what
-  the judge checks with its eyes. `judge.mjs` picks the profile by `--profile`,
-  by the kit's `style.judgeProfile`, or by the profile's `match` (caption
-  style, brand name). Current profile: `cesar` (VIBEM): his reels are made
-  with `set_brand from: vibem`, which applies the `vibem` pack (his approved v11)
-  and names this profile (`judgeProfile`).
+- A client's own rules live on the volume, never in git (the repo is public):
+  `public/clients/<client>/profile.json` + `profile.md`. The JSON turns on and
+  tunes rule checks (glossary, sentence paging, accent size, color references,
+  crew words, script inserts, known reels). The MD holds what the judge checks
+  with its eyes. `judge.mjs` reads them first, then `profiles/` here, which keeps
+  only the generic `example.*`. It picks the profile by `--profile`, by the kit's
+  `style.judgeProfile`, or by the profile's `match` (caption style, brand name).
+  A named profile that is not on the machine stops the judge with where it
+  looked; the report always names the profile it ran with (or none). César
+  (VIBEM): `public/clients/vibem/profile.*`, id `cesar`; his reels are made with
+  `set_brand from: vibem`, which applies the `vibem` pack (his approved v11) and
+  names this profile (`judgeProfile`).
 
 ## Labels (the only words used for a render's state)
 

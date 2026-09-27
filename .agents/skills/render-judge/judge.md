@@ -41,9 +41,10 @@ node .agents/skills/render-judge/judge.mjs <project_id> <render.mp4> [--role mas
     apply `color-ref-*` = the client's approved references over the render and
     `parity` = this version over its pair), times to look at, captions,
     graphics, the script inserts checked, and what is said under each B-roll cue.
-- **Client profile.** If the report names one (`perfil cesar`), read
-  `.agents/skills/render-judge/profiles/<id>.md` now: those rules are part of
-  your rubric for this reel.
+- **Client profile.** If the report names one (`perfil de cliente: cesar
+  (public/clients/vibem/profile.json)`), read the `client rules by eye` file it
+  lists (the `profile.md` next to that JSON) now: those rules are part of your
+  rubric for this reel.
 - **No shell** (Codex read-only, a runner without Bash): run the MCP-only fallback.
   1. Call `qc file=<render>`, `validate`, `get_transcript` and `get_project`.
   2. Call `frame_at video=<render>` at 16 evenly spaced times over the whole

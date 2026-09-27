@@ -38,8 +38,8 @@ import {logTiming, readTiming, summarize, timingText} from '../scripts/timing.mj
 import {createLink, inReviewsRow, loadReviews, playableVersions, publicLink, reviewsDir, revokeLink} from '../scripts/reviews.mjs';
 import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, servePublic, serveFile, tokenOk} from './http.mjs';
-import {createLoginLimiter, handleLogin, trustedHops} from './session.mjs';
-import {handleReview} from './review.mjs';
+import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
+import {handleReview, linkAccess} from './review.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
@@ -75,6 +75,20 @@ const run = (cmd, args, opts = {}) =>
     c.on('close', (code) => resolve({code, stdout: out, stderr: err}));
     c.on('error', () => resolve({code: 1, stdout: out, stderr: err}));
   });
+
+// REEL_USER_ROLES (session.mjs parseRoles): owner / reviewer of which clients, per login user. Read first:
+// a bad value stops the backend here, before it writes .backend-token or listens — never a backend
+// that silently drops everyone's roles. A role makes a login session worth more than any token (humanOnly,
+// a client's pages), so in public mode its signing key must be REEL_SESSION_SECRET and none of the tokens:
+// the fallback (the primary token) is in .backend-token, which agents read — they could sign a human's cookie (D14)
+let ROLES;
+try {
+  ROLES = parseRoles(process.env.REEL_USER_ROLES);
+  const secret = process.env.REEL_SESSION_SECRET;
+  if (process.env.REEL_PUBLIC === '1' && Object.keys(ROLES).length && (!secret || (process.env.REEL_BACKEND_TOKEN || '').split(',').some((t) => t.trim() === secret))) {
+    throw new Error('REEL_USER_ROLES in public mode needs its own REEL_SESSION_SECRET (set, and none of the REEL_BACKEND_TOKEN tokens): a token holder could sign a login session otherwise');
+  }
+} catch (e) { console.error(`backend not started: ${e.message}`); process.exit(1); }
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -242,10 +256,13 @@ console.log(`render queue: ${PLAN.workers} at a time × concurrency ${PLAN.concu
 // refused); in Railway / public mode (REEL_PUBLIC=1) HTTP basic auth instead, with
 // the bcrypt hashes from REEL_AUTH_BCRYPT ("user:$2a$...,user:$2a$...") - the same
 // hashes Caddy uses on the VM, so existing passwords keep working and no secret
-// crosses a chat. The review pages /r/<token> are the one public exception.
+// crosses a chat. The review pages /r/<token> are the one public exception (a client's
+// project also needs a login of that client, server/review.mjs). Roles (owner / reviewer
+// of which clients) come from REEL_USER_ROLES, parsed at the top of this file; only a
+// login session is a human (server/http.mjs humanOnly).
 // Browsers that cannot answer the basic-auth dialog use the form at /login instead
 // (server/session.mjs): same users, a signed session cookie keyed by
-// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN; ≤ 5 failed logins per IP per
+// REEL_SESSION_SECRET, else the first REEL_BACKEND_TOKEN (never with roles: see ROLES); ≤ 5 failed logins per IP per
 // minute, form and basic auth alike. The client IP comes from X-Forwarded-For only
 // behind REEL_TRUST_PROXY trusted hops (Railway: 1, set in the Dockerfile).
 const PUBLIC_MODE = process.env.REEL_PUBLIC === '1';
@@ -292,8 +309,8 @@ const server = createServer((req, res) => handle(req, res).catch((e) => {
 }));
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
-  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN});
-  if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC}); // token-gated, read-only, never /exports/*
+  const g = await gate(req, url, {publicMode: PUBLIC_MODE, auth: AUTH, tokens: TOKENS, sessionSecret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, users: USERS, requireToken: REQUIRE_TOKEN, roles: ROLES});
+  if (g.kind === 'review') return handleReview(req, res, url, {publicDir: PUBLIC, g, login: PUBLIC_MODE}); // token-gated (+ the client's login for a client's project), read-only, never /exports/*
   if (g.kind === 'login') return handleLogin(req, res, url, {auth: AUTH, secret: SESSION_SECRET, limiter: LOGIN_LIMITER, hops: TRUST_HOPS, forceSecure: PUBLIC_MODE});
   if (g.kind === 'ping') return json(res, 200, {ok: true});
   if (g.kind === 'deny') { res.writeHead(g.status, g.headers); return res.end(g.body); }
@@ -304,7 +321,7 @@ async function handle(req, res) {
   // self-service CLI tokens for a user signed in with the browser (session cookie or basic auth)
   if (isCliTokenPath(url.pathname)) return handleCliTokens(req, res, url, g, {users: USERS, base: publicBase(req), hops: TRUST_HOPS, publicUrl: process.env.REEL_PUBLIC_URL});
   // public mode: the editor's pages and the media it reads by URL — for a session user too (server/http.mjs servePublic)
-  if (PUBLIC_MODE && servePublic(req, res, url.pathname, {publicDir: PUBLIC, distDir: DIST})) return;
+  if (PUBLIC_MODE && servePublic(req, res, url.pathname, {publicDir: PUBLIC, distDir: DIST, g})) return;
 
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, await health());
 
@@ -763,7 +780,8 @@ async function handle(req, res) {
 
   // ---- review links (scripts/reviews.mjs): the editor's Share button and the MCP share_version / list_versions / revoke_review_link ----
   //   GET    /api/reviews/<projectId>                → {versions, links}
-  //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt} (the token is shown once)
+  //   POST   /api/reviews/<projectId>/links {days?}  → a new link: {id, token, path, url, expiresAt, clients, access} (the token is shown once;
+  //                                                     access = what a client's link needs besides itself, server/review.mjs linkAccess)
   //   DELETE /api/reviews/<projectId>/links/<linkId> → revoked
   const rv = url.pathname.match(/^\/api\/reviews\/([\w-]+)(?:\/links(?:\/([0-9a-f]{8}))?)?$/);
   if (rv) {
@@ -779,7 +797,7 @@ async function handle(req, res) {
       if (!playableVersions(loadReviews(REVIEWS, projectId), PUBLIC).length) return json(res, 400, {error: 'no final render to share yet — export a final (not a draft) first'});
       try {
         const l = await inReviewsRow(REVIEWS, projectId, () => createLink(REVIEWS, projectId, {days: b?.days}));
-        return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`});
+        return json(res, 200, {...l, url: `${publicBase(req)}${l.path}`, ...linkAccess(PUBLIC, projectId, {login: PUBLIC_MODE})});
       } catch (e) { return json(res, 400, {error: String(e?.message ?? e).slice(0, 200)}); }
     }
     if (req.method === 'DELETE' && linkId) {

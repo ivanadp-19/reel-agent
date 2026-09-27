@@ -13,7 +13,7 @@ severity and the fix. Detection kinds:
 
 Thresholds live in `T` at the top of `judge.mjs`; change them in both places.
 A client profile can override them. Client-specific rules are not here: they
-live in `profiles/` (see the end of this file).
+live in the client's profile on the volume (see the end of this file).
 
 ## Severities, verdict and labels
 
@@ -163,10 +163,11 @@ The judge cannot listen, so all of these are measured.
 
 ## Client profiles
 
-A profile is two files in `profiles/`:
+A profile is two files on the volume, `public/clients/<client>/`, never in git
+(the repo is public; `profiles/example.*` here is the generic template):
 
-- `<id>.json` configures the rule checks.
-- `<id>.md` holds the client's rules for the judge's eyes.
+- `profile.json` configures the rule checks (`id` names it; else the folder).
+- `profile.md` holds the client's rules for the judge's eyes.
 
 `judge.mjs` picks one in this order: `--profile <id>`, the brand kit's
 `style.judgeProfile`, or the profile's `match` (caption style ids, brand-name
@@ -181,7 +182,7 @@ JSON keys (all optional):
 - `crewWords` — words added to the crew-talk list.
 - `blackFades` — `{startSec, endSec}`: black allowed at the head and tail (an intended fade); 0 = none, so every black frame inside the master is a flash.
 - `proofCues` — words added to the VO proof cues (`claim-image` evidence).
-- `colorRefs` — `[{label, paths: [file or folder under the repo, e.g. .refs/<client>/…], hint}]`.
+- `colorRefs` — `[{label, paths: [file or folder, relative to the profile's folder, e.g. refs/approved.mp4], hint}]`.
 - `requireInserts` — true: the plan must list the script's inserts.
 - `detectPhone` — false turns off phone-filter detection.
 - `reels` — the client's known reels, matched on the project name:

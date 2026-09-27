@@ -20,11 +20,13 @@
 // (checks.md has the thresholds). PASS is labeled "QC técnico superado" —
 // never "aprobado": only the client approves. Nothing here edits the project.
 //
-// Generic judge + client profiles: profiles/<client>.json turns on and tunes the
-// client's own checks (glossary, sentence paging, accent size, color references,
-// crew words, script inserts, known reels); profiles/<client>.md holds the rules
-// for the judge's eyes. Chosen by --profile, the kit's style.judgeProfile, or the
-// profile's `match` (caption style / brand name).
+// Generic judge + client profiles: <public>/clients/<client>/profile.json turns on and
+// tunes the client's own checks (glossary, sentence paging, accent size, color references,
+// crew words, script inserts, known reels); profile.md next to it holds the rules for the
+// judge's eyes. Client profiles live on the volume, never in git (the repo is public):
+// profiles/ here keeps only the generic example. Chosen by --profile, the kit's
+// style.judgeProfile, or the profile's `match` (caption style / brand name); a profile that is
+// named but missing stops the judge with where it looked, never a silent generic run.
 //
 // Shared rules are imported, never re-implemented: placement (src/timeline.ts),
 // caption projection (src/captions.ts), validate + transcript issues
@@ -84,14 +86,34 @@ const DEFAULT_T = {...T};
 export const BLACK = {pix: 0.10, pic: 0.98};
 
 // ---------- client profiles ----------
+// The volume's first — <publicDir>/clients/<client>/profile.json (+ profile.md), id = its `id`, else the
+// folder — then the repo's profiles/*.json (the generic example). Each gets `file` (where it came from),
+// `docFile` (its rules by eye) and `base` (what its colorRefs paths are relative to: its folder on the
+// volume, the repo root here). A profile file that does not parse throws: a broken profile is never skipped.
 const PROFILES = path.join(SKILL, 'profiles');
-export function listProfiles() {
-  try { return fs.readdirSync(PROFILES).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(PROFILES, f), 'utf8'))); } catch { return []; }
+const repoRel = (f) => (f.startsWith(ROOT + path.sep) ? path.relative(ROOT, f) : f);
+export function listProfiles(publicDir = path.join(ROOT, 'public')) {
+  const load = (file, id, docFile, base) => {
+    let x;
+    try { x = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`judge profile ${repoRel(file)} cannot be read: ${e.message}`); }
+    x.id ??= id;
+    return {...x, file: repoRel(file), docFile: repoRel(docFile ?? path.join(SKILL, x.doc ?? `profiles/${x.id}.md`)), base};
+  };
+  const ls = (d) => { try { return fs.readdirSync(d).sort(); } catch { return []; } };
+  const clients = path.join(publicDir, 'clients');
+  return [
+    ...ls(clients).filter((c) => fs.existsSync(path.join(clients, c, 'profile.json'))).map((c) => load(path.join(clients, c, 'profile.json'), c, path.join(clients, c, 'profile.md'), path.join(clients, c))),
+    ...ls(PROFILES).filter((f) => f.endsWith('.json')).map((f) => load(path.join(PROFILES, f), f.slice(0, -5), null, ROOT)),
+  ];
 }
 // explicit name > the brand kit's style.judgeProfile > a profile whose `match` names the caption style or the brand
 export function pickProfile(p, name, all = listProfiles()) {
   const want = name ?? p.brand?.style?.judgeProfile;
-  if (want) { const hit = all.find((x) => x.id === want); if (!hit) throw new Error(`no judge profile "${want}" (have: ${all.map((x) => x.id).join(', ') || 'none'})`); return hit; }
+  if (want) {
+    const hit = all.find((x) => x.id === want);
+    if (!hit) throw new Error(`no judge profile "${want}" (have: ${all.map((x) => x.id).join(', ') || 'none'}): a client's profile lives on the volume, public/clients/<client>/profile.json + profile.md — copy it to this machine's public/ (it is never in git)`);
+    return hit;
+  }
   const brand = fold(p.brand?.name ?? '');
   return all.find((x) => (x.match?.captionStyle ?? []).includes(p.captionStyle) || (brand && (x.match?.brand ?? []).some((b) => brand.includes(fold(b))))) ?? null;
 }
@@ -975,10 +997,10 @@ const THREADS = () => String(process.env.REEL_JUDGE_THREADS || 1);
 const TIMEOUT = () => Number(process.env.REEL_JUDGE_TIMEOUT_MS || 600000);
 const timedOut = (r) => !!(r.error?.code === 'ETIMEDOUT' || r.signal);
 const MEDIA = /\.(mp4|mov|m4v|mkv|webm|jpe?g|png|webp|tiff?)$/i;
-function refFiles(paths) {
+function refFiles(paths, base = ROOT) {
   const out = [], missing = [];
   for (const rel of paths) {
-    const f = path.isAbsolute(rel) ? rel : path.join(ROOT, rel);
+    const f = path.isAbsolute(rel) ? rel : path.join(base, rel);
     if (!fs.existsSync(f)) { missing.push(rel); continue; }
     if (fs.statSync(f).isDirectory()) out.push(...fs.readdirSync(f).filter((x) => MEDIA.test(x)).sort().map((x) => path.join(f, x)));
     else out.push(f);
@@ -1051,7 +1073,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   p.clips ??= []; p.captions = (p.captions ?? []).map(normalizeCaption); p.brolls ??= []; p.graphics ??= []; p.mattes ??= []; p.captionStyle ??= 'palabra';
   if (role === 'master') p.captionsOff = true; // what is on screen in this render, whatever the project says now
   if (role === 'captioned') p.captionsOff = false;
-  const profile = pickProfile(p, profileName);
+  const profile = pickProfile(p, profileName, listProfiles(publicDir));
   Object.assign(T, DEFAULT_T, profile?.thresholds ?? {});
   const reel = reelOf(profile, p.name);
   const resolve = (f) => (path.isAbsolute(f) ? f : fs.existsSync(f) ? path.resolve(f) : path.join(publicDir, f.replace(/^\//, '')));
@@ -1278,7 +1300,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   const refSheets = [];
   const renderLook = lookOf(aroll);
   for (const g of profile?.colorRefs ?? []) {
-    const {files, missing: gone} = refFiles(g.paths ?? []);
+    const {files, missing: gone} = refFiles(g.paths ?? [], profile.base);
     if (gone.length) skipped.push(`color vs "${g.label}": no encuentro ${gone.join(', ')} — ${g.hint ?? 'put the approved references there'}`);
     if (!files.length) continue;
     const samples = timed(`refs ${g.label}`, () => refStats(files));
@@ -1332,8 +1354,8 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   evidence.claims = haveTr ? claimEvidence(sentencesOf(words), brolls, gfx, profile?.proofCues ?? []).slice(0, 14) : [];
   evidence.inserts = inserts.map((x) => `${x.what} → ${x.need}: ${x.keywords.join(', ')}${x.anchor ? ` @${x.anchor}` : ''}`);
   evidence.audio = audio;
-  // client rules only eyes can check (profiles/<id>.md)
-  evidence.profileDoc = profile ? path.join('.agents/skills/render-judge', profile.doc ?? `profiles/${profile.id}.md`) : null;
+  // client rules only eyes can check (the profile's .md)
+  evidence.profileDoc = profile?.docFile ?? null;
   evidence.tech = {size: v ? `${v.width}x${v.height}` : null, fps, vcodec: v?.codec_name, pix_fmt: v?.pix_fmt, acodec: a?.codec_name, sampleRate: a?.sample_rate, channels: a?.channels, durationSec: r2(+info?.format?.duration), expectedSec: r2(total)};
 
   const order = (f) => (counts(f) ? 0 : 1e8) + SEVERITIES.indexOf(f.severity) * 1e6 + (f.at ?? -1);
@@ -1341,7 +1363,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
   findings.length = 0; findings.push(...uniq);
   findings.sort((x, y) => order(x) - order(y));
   const diff = diffWithPrev(findings, prev);
-  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, role, profile: profile?.id ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), ...verdictOf(findings, {reduced: skipped.length > 0}), findings, diff, skipped, evidence, plan: p.plan ?? null};
+  return {project: projectId, projectName: p.name ?? null, projectUpdatedAt: p.updatedAt ?? null, role, profile: profile?.id ?? null, profileFile: profile?.file ?? null, reel: reel ? Object.keys(profile.reels).find((k) => profile.reels[k] === reel) : null, render: file, pair: pairFile, draft, iteration: (prev?.iteration ?? 0) + 1, at: new Date().toISOString(), durationSec: r2(total), ...verdictOf(findings, {reduced: skipped.length > 0}), findings, diff, skipped, evidence, plan: p.plan ?? null};
 }
 
 // ---------- report ----------
@@ -1352,6 +1374,7 @@ export function reportText(r) {
   L.push(`  ${r.counts.blocker} bloqueantes · ${r.counts.major} mayores · ${r.counts.minor} menores · ${r.counts.nit} nits · ${r.toConfirm} por confirmar en frame${r.advisories ? ` · ${r.advisories} aviso(s) que no cuentan` : ''}${r.patterns.length ? ` · patrones (3+ menores = mayor): ${r.patterns.join(', ')}` : ''}`);
   L.push('  Etiqueta para la entrega: la de arriba. Nunca "aprobado": solo el cliente aprueba. El master base se entrega igual; esto acompaña a la entrega.');
   L.push(`render: ${r.render}${r.pair ? `  (vs ${r.pair})` : ''}`);
+  L.push(r.profile ? `perfil de cliente: ${r.profile} (${r.profileFile})` : 'perfil de cliente: ninguno — solo la rúbrica genérica (el de un cliente va en public/clients/<cliente>/profile.json)');
   if (r.diff) L.push(`vs previous: fixed ${r.diff.fixed.length}, regressions ${r.diff.regressions.length ? r.diff.regressions.join(', ') : 'none'}, stuck (3+ iterations) ${r.diff.stuck.length ? r.diff.stuck.join(', ') : 'none'}`);
   const live = r.findings.filter(counts), cand = r.findings.filter((f) => !counts(f) && !f.dismissed && !isAdvisory(f)), advice = r.findings.filter((f) => !f.dismissed && isAdvisory(f));
   const top = live.filter((f) => f.severity === 'blocker' || f.severity === 'major');

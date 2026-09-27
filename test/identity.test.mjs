@@ -234,3 +234,19 @@ test('T1: the backend down, an edit fails and the project file is not touched (n
     assert.equal(saved(a).accentColor, undefined);
   });
 });
+
+test('T1: a 401 or a 500 from the backend fails the edit with its status and reason, and the project file is not touched', async () => {
+  const codes = [401, 500];
+  const srv = http.createServer((req, res) => { req.resume(); req.on('end', () => res.writeHead(codes.shift(), {'content-type': 'application/json'}).end(JSON.stringify({error: 'nope'}))); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    await withMcp(`http://127.0.0.1:${srv.address().port}`, async ({call, ids: [a]}) => {
+      const before = fs.readFileSync(path.join(PROJECTS, `${a}.json`), 'utf8');
+      for (const code of [401, 500]) {
+        const r = await call('set_accent_color', {project_id: a, color: '#00FF00'});
+        assert.ok(r.err && r.text.includes(`not saved: the backend refused the project (${code}): nope`), r.text);
+        assert.equal(fs.readFileSync(path.join(PROJECTS, `${a}.json`), 'utf8'), before);
+      }
+    });
+  } finally { srv.close(); }
+});

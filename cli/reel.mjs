@@ -582,7 +582,7 @@ export const COMMANDS = [
 
   {name: 'review-link', args: '<project>', flags: {days: {type: 'string', description: 'days the link lives (default 30, at most 30)'}, list: {type: 'boolean', description: 'the versions and live links instead of a new link'}, revoke: {type: 'string', description: 'revoke this link id'}},
     summary: 'a private review link (mobile page) for the latest final render that passed QC; every call makes a new link — --list shows them, --revoke ends one',
-    output: '{project, url, id, expiresAt} (--list: {versions, links}; --revoke: the link)', examples: ['reel review-link promo-cafe --json', 'reel review-link promo-cafe --list --json', 'reel review-link promo-cafe --revoke 1a2b3c4d --json'],
+    output: '{project, url, id, expiresAt, access} (access: what a client\'s link needs besides itself, else null; --list: {versions, links}; --revoke: the link)', examples: ['reel review-link promo-cafe --json', 'reel review-link promo-cafe --list --json', 'reel review-link promo-cafe --revoke 1a2b3c4d --json'],
     run: async (ctx, [id], o) => {
       needId(id);
       if (o.list) {
@@ -594,7 +594,7 @@ export const COMMANDS = [
         return [l, `revoked ${o.revoke}`];
       }
       const l = await api(ctx, 'POST', `/api/reviews/${id}/links`, {json: o.days ? {days: +o.days} : {}});
-      return [{project: id, url: l.url, id: l.id, expiresAt: l.expiresAt}, `${l.url}\n  link ${l.id}, until ${l.expiresAt} (revoke: reel review-link ${id} --revoke ${l.id})`];
+      return [{project: id, url: l.url, id: l.id, expiresAt: l.expiresAt, access: l.access ?? null}, `${l.url}\n  link ${l.id}, until ${l.expiresAt} (revoke: reel review-link ${id} --revoke ${l.id})${l.access ? `\n  ${l.access}` : ''}`];
     }},
 
   {name: 'jobs list', flags: {project: {type: 'string', description: 'only this project'}, active: {type: 'boolean', description: 'only queued and running'}, mine: {type: 'boolean', description: 'only the ones you submitted'}, limit: {type: 'string', description: 'at most n (default 20)'}},

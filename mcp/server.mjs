@@ -1256,7 +1256,7 @@ server.registerTool('list_versions', {description: 'The review versions of a pro
   const links = r.links.map((l) => `${l.id}  ${l.state}${l.state === 'live' ? ` until ${l.expiresAt.slice(0, 10)}` : l.revokedAt ? ` ${l.revokedAt.slice(0, 10)}` : ''}  (created ${l.createdAt.slice(0, 10)})`);
   return text(`Versions of ${project_id}:\n${lines.join('\n')}\n\nLinks:\n${links.length ? links.join('\n') : 'none — share_version creates one'}`);
 });
-server.registerTool('share_version', {description: 'Create a private review link for the project: a mobile page that plays its latest final (720p, streams on a phone), lists the earlier finals and offers the full render as a download. The link expires (30 days max) and can be revoked with revoke_review_link. version = open the page at that version (default: the latest). The URL is shown once — give it to the user as is; set REEL_PUBLIC_URL on the backend for a public address.', inputSchema: {project_id: pid, version: z.number().int().min(1).optional(), days: z.number().int().min(1).max(30).optional().describe('days until it expires (default and max 30)')}}, async ({project_id, version, days}) => {
+server.registerTool('share_version', {description: 'Create a private review link for the project: a mobile page that plays its latest final (720p, streams on a phone), lists the earlier finals and offers the full render as a download. The link expires (30 days max) and can be revoked with revoke_review_link. version = open the page at that version (default: the latest). The URL is shown once — give it to the user as is; set REEL_PUBLIC_URL on the backend for a public address. A client\'s project (identity.client) opens only with a login of that client: the result says so — pass it on with the link.', inputSchema: {project_id: pid, version: z.number().int().min(1).optional(), days: z.number().int().min(1).max(30).optional().describe('days until it expires (default and max 30)')}}, async ({project_id, version, days}) => {
   projFile(project_id);
   if (version != null) {
     const r = await reviewsApi(project_id);
@@ -1265,7 +1265,7 @@ server.registerTool('share_version', {description: 'Create a private review link
   }
   const l = await reviewsApi(`${project_id}/links`, {method: 'POST', body: JSON.stringify({days})});
   const url = version != null ? `${l.url}?v=${version}` : l.url;
-  return text(`Review link (${l.id}, expires ${l.expiresAt.slice(0, 10)}):\n${url}${/\/\/(127\.0\.0\.1|localhost)[:/]/.test(url) ? '\n(this is the local address — set REEL_PUBLIC_URL on the backend for the address clients can open)' : ''}`);
+  return text(`Review link (${l.id}, expires ${l.expiresAt.slice(0, 10)}):\n${url}${l.access ? `\n${l.access}` : ''}${/\/\/(127\.0\.0\.1|localhost)[:/]/.test(url) ? '\n(this is the local address — set REEL_PUBLIC_URL on the backend for the address clients can open)' : ''}`);
 });
 server.registerTool('revoke_review_link', {description: 'Revoke a review link of the project by its id (from list_versions / share_version): the page and its videos stop working at once.', inputSchema: {project_id: pid, link_id: z.string().regex(/^[0-9a-f]{8}$/)}}, async ({project_id, link_id}) => {
   projFile(project_id);
