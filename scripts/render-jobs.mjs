@@ -177,15 +177,21 @@ export function legacyView(job, ahead = 0) {
 // and none while the disk or the memory is under its floor, so a
 // burst of renders is refused instead of taking the box down. Memory counts only when
 // nothing is rendering: a job queued behind a running one waits for its memory to free.
+// A client's final (identity: the pair, scripts/render-runner.mjs) needs the disk floor PLUS what its files take while it
+// runs — the export, the caption and supers frames, the four files of v<n>/ and the review proxy: pairDiskMb, from
+// the bytes measured per second of reel (research/render-benchmark.md "per-vN size (Mac)"; REEL_PAIR_MB_PER_SEC).
 // ponytail: the floors are checked at submit, not again when a queued job starts.
+export const PAIR_MB_PER_SEC = 25;
+export const pairDiskMb = (sec, rate = +process.env.REEL_PAIR_MB_PER_SEC || PAIR_MB_PER_SEC) => Math.ceil(Math.max(0, +sec || 0) * rate);
 export const propsHash = (props, mode = 'full') => crypto.createHash('sha256').update(`${mode === 'layers' ? 'layers' : 'full'}\n${typeof props === 'string' ? props : JSON.stringify(props)}`).digest('hex').slice(0, 16);
-export function admitRender(jobs, {user = null, props, mode, identity = null}, {freeMemMb = null, freeDiskMb = null, minMemMb = 0, minDiskMb = 0} = {}) {
+export function admitRender(jobs, {user = null, props, mode, identity = null, expectSec = 0}, {freeMemMb = null, freeDiskMb = null, minMemMb = 0, minDiskMb = 0} = {}) {
   const mine = user && jobs.find((j) => j.user === user && ACTIVE.has(j.status));
   if (mine) {
     if (mine.propsHash && mine.propsHash === propsHash(props, mode) && JSON.stringify(mine.identity ?? null) === JSON.stringify(identity ?? null)) return {reuse: mine};
     return {status: 409, code: 'render_busy', jobId: mine.id, error: `${user} already has render ${mine.id} ${mine.status} — one render at a time per user`, hint: `reel render wait ${mine.id}, or reel render cancel ${mine.id}`};
   }
-  if (minDiskMb > 0 && freeDiskMb != null && freeDiskMb < minDiskMb) return {status: 507, code: 'low_disk', error: `only ${Math.round(freeDiskMb)} MB free on the render disk (floor ${minDiskMb} MB)`, hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply) or ask an admin'};
+  const pairMb = identity?.client ? pairDiskMb(expectSec) : 0;
+  if (minDiskMb > 0 && freeDiskMb != null && freeDiskMb < minDiskMb + pairMb) return {status: 507, code: 'low_disk', error: `only ${Math.round(freeDiskMb)} MB free on the render disk (floor ${minDiskMb} MB${pairMb ? ` + ~${pairMb} MB for the ${Math.round(expectSec)} s pair of a client's final` : ''})`, hint: 'free space (old exports: scripts/cleanup-exports.mjs --apply; old versions: node scripts/reviews.mjs prune --apply) or ask an admin'};
   const busy = jobs.some((j) => j.status === 'running');
   if (minMemMb > 0 && freeMemMb != null && !busy && freeMemMb < minMemMb) return {status: 503, code: 'low_memory', error: `only ${Math.round(freeMemMb)} MB of memory available (floor ${minMemMb} MB)`, hint: 'retry later, when the box is less loaded'};
   return null;

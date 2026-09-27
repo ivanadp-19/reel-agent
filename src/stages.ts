@@ -120,6 +120,7 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
   search_catalog: [], search_music: [], search_asset: [], list_assets: [], generate_asset: [], timing_report: [], validate: [], frame_at: [], qc: [],
   render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [], list_drive: [],
+  review_notes: [], classify_note: [], resolve_note: [], // the client's notes: the reviews, not the project (the fix itself goes through its stage's tools)
   set_scope: [], check_stage: [], stage_status: [], waive_finding: [], // what the job asks for, and the gates themselves
 };
 

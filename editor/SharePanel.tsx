@@ -4,8 +4,9 @@ import React, {useEffect, useState} from 'react';
 // share_version / list_versions / revoke_review_link): every final export that
 // passed QC is a version; a link opens a mobile page with the latest one. A client's
 // version carries its QC técnico label (the judge runs after it is recorded, CEO-6);
-// Re-judge runs the judge again without a re-render (the MCP rejudge, the same route).
-type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean; snapshot?: string; qcLabel?: string | null; judge?: {label: string; error?: string; findings?: {check: string; severity: string; at: number | null; msg: string}[]}; datosPorConfirmar?: {graphic: string; dato: string; src: string; atSec: number}[]};
+// Re-judge runs the judge again without a re-render (the MCP rejudge, the same route). What list_versions says about a
+// client's pair shows here too: a master that is the client's own file (captions only), what it left out (no supers).
+type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean; snapshot?: string; qcLabel?: string | null; judge?: {label: string; error?: string; findings?: {check: string; severity: string; at: number | null; msg: string}[]}; datosPorConfirmar?: {graphic: string; dato: string; src: string; atSec: number}[]; original?: {src: string; sha256: string}; omitted?: Record<string, string>; notes?: unknown[]};
 type Link = {id: string; createdAt: string; expiresAt: string; revokedAt: string | null; state: 'live' | 'expired' | 'revoked'};
 
 const mb = (b: number) => `${(b / 1e6).toFixed(1)} MB`;
@@ -83,6 +84,11 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
                     <div className="flex justify-between text-[11px]" title={v.judge?.error ?? (v.judge?.findings ?? []).map((f) => `[${f.severity}] ${f.check}${f.at != null ? ` @${f.at}s` : ''} — ${f.msg}`).join('\n')}>
                       <span className={v.judge?.label?.startsWith('superado') ? 'text-primary' : v.judge?.label === 'en curso' ? 'text-on-surface-variant' : 'text-error'}>{v.qcLabel}</span>
                       {v.judge?.label !== 'en curso' && v.snapshot && <button onClick={() => rejudge(v.v)} className="text-primary hover:underline">Re-judge</button>}
+                    </div>
+                  )}
+                  {(v.original || v.omitted || !!v.notes?.length) && (
+                    <div className="text-[11px] text-on-surface-variant" title={v.original ? `sha256 ${v.original.sha256}` : undefined}>
+                      {[v.original && `master = the client's own ${v.original.src}, never re-encoded`, v.omitted && `no ${Object.keys(v.omitted).join(' / ')}: ${Object.values(v.omitted)[0]}`, v.notes?.length && `${v.notes.length} client note${v.notes.length === 1 ? '' : 's'} (bandeja)`].filter(Boolean).join(' · ')}
                     </div>
                   )}
                   {!!v.datosPorConfirmar?.length && (

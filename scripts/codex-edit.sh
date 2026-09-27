@@ -18,16 +18,18 @@ PROJECT="$1"; shift
 REPLY=""; if [ "${1:-}" = "--reply" ]; then REPLY="$2"; shift 2; else BRIEF="$1"; shift; fi
 LOG="${1:-.captions-tmp/codex-$(date +%s).jsonl}"
 mkdir -p "$(dirname "$LOG")"
-# who holds the project lock while this run edits it (scripts/project-lock.mjs)
+# who holds the project lock while this run edits it (scripts/project-lock.mjs), and what makes review_notes give a
+# note's text (mcp/server.mjs RESTRICTED_RUNNER): Codex starts the MCP server with only HOME, PATH, USER… — env_vars
+# below passes it on (and REEL_API, a backend on another port)
 export REEL_AGENT="codex-edit ${PROJECT} ${LOG}"
 ROOT="$(pwd)"
 
 if [ -n "$REPLY" ]; then
   PROMPT="First read .agents/skills/reel-edit/SKILL.md, .agents/skills/reel-plan/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. You presented this project's plan earlier (get_project shows it and whether it is approved). The user's answer to it: ${REPLY}
-Work only through the reel MCP tools (never edit files or run commands). Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
+Work only through the reel MCP tools (never edit files or run commands). Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. Approved → approve_plan quoting them, then finish the edit with validate + caption_proof, render a draft — or, when review_notes listed notes TO FIX, render the final (a draft records no version) and resolve_note each with the version it made — and say what you did, where you departed from the plan and what you would still improve. Changes → request_plan_changes, set_plan the revision, present it and stop."
 else
   PROMPT="First read .agents/skills/reel-edit/SKILL.md and AGENTS.md and follow that workflow. Project id: ${PROJECT}. Brief: ${BRIEF}
-Work only through the reel MCP tools (never edit files or run commands). Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers with a new run. Finish with validate + caption_proof + stage_status, then render a draft and say what you did, where you departed from the plan and what you would still improve."
+Work only through the reel MCP tools (never edit files or run commands). Work stage by stage as the skill says: set_scope first when the brief narrows the job, check_stage after each stage (fix what it lists, waive a warning with the reason, stop at a blocker), and follow a stages-enforce refusal to the stage it names. After set_plan, show the plan in your message and keep going (plan mode auto) — unless the brief asks to review the plan first: then set_plan_mode review, present it and stop; the user answers with a new run. Finish with validate + caption_proof + stage_status, then render a draft — or, when review_notes listed notes TO FIX, render the final (a draft records no version) and resolve_note each with the version it made — and say what you did, where you departed from the plan and what you would still improve."
 fi
 
 codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config \
@@ -38,6 +40,7 @@ codex exec --json --ephemeral --skip-git-repo-check --ignore-user-config \
   -c 'mcp_servers.reel.default_tools_approval_mode="approve"' \
   -c 'mcp_servers.reel.startup_timeout_sec=60' \
   -c 'mcp_servers.reel.tool_timeout_sec=1800' \
+  -c 'mcp_servers.reel.env_vars=["REEL_AGENT","REEL_API"]' \
   "$PROMPT" \
   | tee "$LOG" \
   | node -e '

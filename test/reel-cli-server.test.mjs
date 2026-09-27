@@ -12,7 +12,7 @@ import {spawnSync} from 'node:child_process';
 import {createTokenStore, openForUser} from '../server/tokens.mjs';
 import {gate} from '../server/http.mjs';
 import {appendChunk, partFile, partSize, sweepParts} from '../server/uploads.mjs';
-import {admitRender, propsHash} from '../scripts/render-jobs.mjs';
+import {admitRender, pairDiskMb, propsHash} from '../scripts/render-jobs.mjs';
 import {planRender} from '../scripts/render-runner.mjs';
 import {localBrollName} from '../scripts/remote-broll.mjs';
 
@@ -158,6 +158,12 @@ test('admitRender: one render per user, a retry of the same one gets it back, fl
   assert.equal(admitRender([], {user: 'ana', props}, {...floors, freeMemMb: 500}).code, 'low_memory');
   assert.equal(admitRender([{id: 'x', status: 'running'}], {user: 'ana', props}, {...floors, freeMemMb: 500}), null, 'memory of a running render frees before a queued one starts');
   assert.equal(admitRender([], {user: 'ana', props}, {...floors, freeMemMb: null, minDiskMb: 0, freeDiskMb: 1}), null, 'unmeasured or turned off');
+  // a client's final: the floor plus what its pair takes while it runs (pairDiskMb, ~25 MB per second of reel)
+  assert.equal(pairDiskMb(50), 1250);
+  assert.equal(admitRender([], {props, identity: H1, expectSec: 50}, {...floors, freeDiskMb: 4000}).code, 'low_disk', '3072 + 1250 > 4000');
+  assert.match(admitRender([], {props, identity: H1, expectSec: 50}, {...floors, freeDiskMb: 4000}).error, /floor 3072 MB \+ ~1250 MB for the 50 s pair/);
+  assert.equal(admitRender([], {props, expectSec: 50}, {...floors, freeDiskMb: 4000}), null, 'a render without identity: the floor alone');
+  assert.equal(admitRender([], {props, identity: H1, expectSec: 50}, {...floors, freeDiskMb: 4400}), null);
 });
 
 test('planRender: full mode, layer blockers, cached master, B-roll downloads still to do', () => {

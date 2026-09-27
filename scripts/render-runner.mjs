@@ -54,9 +54,16 @@
 //   captions       the caption layer as ProRes 4444 (alpha), whatever REEL_CAPTION_ALPHA says, and the
 //                  same frames as a PNG sequence zipped with fps.json (captions.png.zip, CEO-14)
 //   supers         the text graphics (src/graphicTemplates.ts isTextGraphic) as ProRes 4444 (alpha),
-//                  a Remotion pass of their own (layer: 'supers') — transparent when the reel has none
-//   master_supers  the master with the supers burnt in (the composite, audio copied); the master
-//                  itself when the reel has no text graphic
+//                  a Remotion pass of their own (layer: 'supers')
+//   master_supers  the master with the supers burnt in (the composite, audio copied)
+// A reel with no text graphic has neither (no supers pass, no second composite): the version names them in
+// `omitted`, and the pair is master + captions. An unchanged master — the same cached master and the same final audio
+// (its sha256, audioHash) as an earlier version's — is that version's file, hard-linked, not a new remux.
+// CAPTIONS ONLY on the client's finished export (src/layers.ts originalMaster: scope ['captions'], one whole untouched
+// clip, nothing else drawn or heard): the master is the client's own file (public/clips/…) — no master pass, no
+// cache, no remux, never re-encoded; hard-linked into v<n>/ and checked byte for byte (sha256, the version's `original`).
+// Its rate and frame count must be the caption layer's (probed first), else the master is rendered as usual and the
+// result says why (`original`). The export and the review proxy are that file + the captions.
 // The export (and the review proxy) is master + supers + captions, stacked as MultiClipVideo draws
 // them. It always runs layers: a reel the caption or supers layer cannot carry (a text graphic behind
 // the presenter: src/layers.ts supersBlockers) fails with the reasons, never falls back to full. Every
@@ -75,19 +82,20 @@
 // at it, and the caption encode, the composite, the first-frame repair and the master key use the same
 // number (src/timeline.ts renderFps); the pair's parity wants the identity's rate (deliveryFps), so a job
 // queued without it fails instead of delivering a client 30 fps files.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {renderArgs} from './render-queue.mjs';
-import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, masterProps, parityIssues, parityProbeArgs, parseParity, probeColor, remuxArgs, zipFrames, zipParity} from './layers.mjs';
+import {ALPHA, alphaEncodeArgs, captionArgs, codeVersion, compositeArgs, masterArgs, masterKey, masterProps, parityIssues, parityProbeArgs, parseParity, probeColor, rateOf, remuxArgs, zipFrames, zipParity} from './layers.mjs';
 import {blankLead, openingReport, parseStats, repairArgs, statsArgs} from './first-frame.mjs';
-import {captionLayout, chooseRenderMode} from '../src/layers.ts';
-import {deliveryFps, renderFps} from '../src/timeline.ts';
+import {captionLayout, chooseRenderMode, originalMaster} from '../src/layers.ts';
+import {deliveryFps, renderFps, totalDurationFrames} from '../src/timeline.ts';
 import {lutBakes} from '../src/grade.ts';
 import {localBrollName} from './remote-broll.mjs';
 import {linkPublic} from './public-links.mjs';
-import {inReviewsRow, recordFinal, removeVersion} from './reviews.mjs';
+import {inReviewsRow, priorMaster, recordFinal, removeVersion} from './reviews.mjs';
 import {datosPorConfirmar, pairIdentity, savedProject} from '../mcp/checks.mjs';
 import {killTree} from './render-jobs.mjs';
 import {writeRenderRecord} from './render-records.mjs';
@@ -228,7 +236,10 @@ export const defaultCommands = {
   // the pair: the master deliverable remuxed, and each file's frames / rate / length
   remux: (o) => ['ffmpeg', remuxArgs(o)],
   probe: ({file}) => ['ffprobe', parityProbeArgs(file)],
+  // the sha256 of a file's audio packets ("SHA256=…"): the final audio a master is remuxed with (an unchanged master is linked)
+  audioHash: ({file}) => ['ffmpeg', ['-hide_banner', '-v', 'error', '-i', file, '-map', '0:a:0', '-c', 'copy', '-f', 'hash', '-hash', 'sha256', '-']],
 };
+const sha256Of = async (file) => { const h = crypto.createHash('sha256'); for await (const b of fs.createReadStream(file)) h.update(b); return h.digest('hex'); };
 
 // What a render will do, said before it is queued (POST /api/render answers with it,
 // `reel render start` prints it): full or layers, and whether it is a complete render —
@@ -238,11 +249,14 @@ export const defaultCommands = {
 // them, so the master is rendered again), then the master cache.
 // pair (a final of a project with an identity): it never falls back to full, so where the
 // layers cannot run the plan says the render fails ({fails: true, reasons}) — the backend refuses it.
-export function planRender(props, {requested = 'full', draft = false, root, publicDir, masterCache = null, pair = false, keyOf = (p, o) => masterKey(p, {code: codeVersion(root), fps: renderFps(p), draft: o.draft, publicDir})} = {}) {
+// scope (the saved project's): a captions-only job on the client's own export takes that file as its master
+// ({master: 'original'}, src/layers.ts originalMaster) — no master to render, none to cache.
+export function planRender(props, {requested = 'full', draft = false, root, publicDir, masterCache = null, pair = false, scope = null, keyOf = (p, o) => masterKey(p, {code: codeVersion(root), fps: renderFps(p), draft: o.draft, publicDir})} = {}) {
   if (requested !== 'layers' && !pair) return {mode: 'full', full: true, reasons: ['mode full: one pass over everything (mode layers reuses the cached master when only the captions change)']};
   const cannot = (reasons) => (pair ? {mode: 'layers', full: true, fails: true, reasons} : {mode: 'full', full: true, reasons});
   const choice = chooseRenderMode('layers', props, renderFps(props), {supers: pair});
   if (choice.mode === 'full') return cannot(choice.reasons);
+  if (pair && originalMaster(props, scope, renderFps(props)).src) return {mode: 'layers', full: false, master: 'original', captions: true, reasons: ['captions only on the client\'s own export: that file is the master, never re-rendered or re-encoded (its rate and frame count are checked when the job runs)']};
   if (!masterCache) return cannot(['no master cache on this backend']);
   let downloads = 0;
   const brolls = (props.brolls ?? []).map((b) => {
@@ -327,7 +341,10 @@ export function createRenderRunner({
     // master held by a hard link next to the cache's (`.part-` keeps another job's trim off it)
     const pair = !draft && job.projectId && job.identity?.client ? job.identity : null;
     const pairTmp = pair ? path.join(reviewsDir, job.projectId, `.tmp-pair-${id}`) : null;
-    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null, pairParity = null;
+    // an earlier attempt's (re-queued after its backend died, no finally ran): its master.mp4 can be a hard link to an
+    // earlier version's master or to the client's clip — never written through (ffmpeg -y truncates the inode in place)
+    if (pairTmp) fs.rmSync(pairTmp, {recursive: true, force: true});
+    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null, pairParity = null, pairAudio = null, pairOriginal = null;
     // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
     const cleanUp = async () => {
       let names = [];
@@ -380,18 +397,22 @@ export function createRenderRunner({
       const fps = renderFps(props); // every pass, encode and composite at the one rate (Root.tsx reads the same props)
 
       const choice = chooseMode(pair || job.mode === 'layers' ? 'layers' : 'full', props, {supers: !!pair});
+      // a captions-only job on the client's own export: that file is the master (src/layers.ts originalMaster) — no master
+      // pass, no cache; its rate and frame count are checked before it is taken (below)
+      const orig = pair ? originalMaster(props, savedProject(path.join(publicDir, 'projects'), job.projectId).scope, fps) : null;
       // the pair IS the layers: a reel they cannot carry fails with the reasons, never falls back to full
-      if (pair && (choice.mode !== 'layers' || !masterCache)) throw new RenderError(`deliverables need the layered render: ${(choice.reasons?.length ? choice.reasons : ['no master cache on this backend']).join('; ')}`);
+      if (pair && (choice.mode !== 'layers' || (!masterCache && !orig.src))) throw new RenderError(`deliverables need the layered render: ${(choice.reasons?.length ? choice.reasons : ['no master cache on this backend']).join('; ')}`);
       result.mode = choice.mode;
       if (choice.reasons?.length) { result.fallback = choice.reasons; log(`render ${id}: layers → full (${choice.reasons.join('; ')})`); }
-      const layered = choice.mode === 'layers' && masterCache;
-      if (choice.mode === 'layers' && !masterCache) { result.mode = 'full'; result.fallback = ['no master cache on this backend']; }
+      const layered = choice.mode === 'layers' && (masterCache || orig?.src);
+      if (choice.mode === 'layers' && !layered) { result.mode = 'full'; result.fallback = ['no master cache on this backend']; }
       // the pair always has its caption layer — a transparent one when no caption is on screen (MultiClipVideo)
       const captions = choice.captions || !!pair;
-      const ranges = passRanges({mode: layered ? 'layers' : 'full', captions, draft, supers: !!pair});
-      // the pair's master draws no text; its text graphics (the same list the supers layer draws) are the supers
+      // the pair's master draws no text; its text graphics (the same list the supers layer draws) are the supers — a reel
+      // with none has no supers layer and no master_supers (it would be the master): both left out, the version says why
       const mProps = masterProps(props, {text: !pair});
       const supersDrawn = !!pair && captionLayout(props, fps).supers.length > 0;
+      const ranges = passRanges({mode: layered ? 'layers' : 'full', captions, draft, supers: supersDrawn});
 
       // public/ as symlinks: the CLI would otherwise copy every clip, matte and earlier export into its bundle
       const links = linkPublic(publicDir, path.join(tmpDir, `render-public-${id}`));
@@ -440,6 +461,12 @@ export function createRenderRunner({
         if (r.code !== 0) throw new RenderError(`cannot probe ${path.basename(file)}: ${r.tail.trim().split('\n').pop() ?? ''}`.slice(0, 300));
         return parseParity(r.out);
       };
+      // the sha256 of a file's audio packets (null when it cannot be read: the master is remuxed as always)
+      const audioHashOf = async (file) => {
+        const [hcmd, hargs] = commands.audioHash({file});
+        const r = await runChild(hcmd, hargs, {cwd: root, signal, onPid: ctx.setPid});
+        return r.code === 0 ? r.out.match(/SHA256=([0-9a-f]{64})/)?.[1] ?? null : null;
+      };
       // a Remotion pass whose frame 0 is a flat, neutral field while frame 1 is footage
       // (scripts/first-frame.mjs): frame 1 takes its place before anything uses the file
       // (a master before it enters the cache). An unreadable file is left to the pass's
@@ -463,8 +490,22 @@ export function createRenderRunner({
           await timed('render', () => pass('render', ranges.render, outFile, props), {videoSec: expectSec});
           await guardFirstFrame(outFile, 'render');
         } else {
+          // ---- a captions-only job: the client's own file, when it lays frame for frame under the caption layer ----
+          let original = null;
+          if (orig?.src) {
+            const abs = path.join(publicDir, orig.src), want = totalDurationFrames(props.clips, fps);
+            const m = fs.existsSync(abs) ? await probeOf(abs) : null;
+            // the composition's size (src/Root.tsx), square pixels: compositeArgs lays the layer over at the file's own size
+            const size = m && (m.w !== 1080 || m.h !== 1920 || !['1:1', '0:1', null].includes(m.sar)) ? `${orig.src} is ${m.w}x${m.h}${m.sar && m.sar !== '1:1' ? ` (SAR ${m.sar})` : ''}, the composition 1080x1920` : null;
+            if (m && !size && Math.abs(rateOf(m.fps) - fps) < 1e-6 && m.frames === want) original = {src: orig.src, abs};
+            else {
+              result.original = `not the master: ${!m ? `${orig.src} is missing` : size ?? `${orig.src} is ${m.frames} frames at ${m.fps}, the caption layer ${want} at ${fps}`}`;
+              log(`render ${id}: ${result.original} — the master is rendered`);
+              if (!masterCache) throw new RenderError(`deliverables need the layered render: ${result.original}; no master cache on this backend`);
+            }
+          }
           // ---- the master: cached, being rendered by another job here (wait for it), or rendered now ----
-          const key = keyOf(mProps, {draft});
+          const key = original ? null : keyOf(mProps, {draft});
           const renderMaster = async () => {
             const part = path.join(masterCache.dir, `${key}.part-${id}.mp4`);
             tmp.push(part);
@@ -473,7 +514,8 @@ export function createRenderRunner({
             await guardFirstFrame(part, 'master'); // a cached master is always a repaired one
             return masterCache.put(key, part);
           };
-          let master = null;
+          let master = original?.abs ?? null;
+          if (original) { result.master = 'original'; set('master', 1, {progress: ranges.master[1], label: 'The client\'s own file is the master (captions only)'}); }
           for (let waited = 0; !master;) {
             const cached = masterCache.get(key);
             if (cached) {
@@ -496,10 +538,13 @@ export function createRenderRunner({
           }
           if (result.master === 'cached') set('master', 1, {progress: ranges.master[1], label: 'Master reused from the cache'});
           // the pair's master, held until the remux after QC (a copy where hard links are not possible)
-          if (pair) {
+          if (pair && !original) {
             hold = path.join(masterCache.dir, `${key}.part-pair-${id}.mp4`); pairKey = key;
             fs.rmSync(hold, {force: true}); // an earlier attempt's (re-queued after a crash)
             try { fs.linkSync(master, hold); } catch { await abortable(fs.promises.copyFile(master, hold)); }
+          }
+          if (original) pairOriginal = {src: original.src, abs: original.abs};
+          if (supersDrawn) {
             // its supers: the text graphics on a transparent layer of their own (ProRes 4444), laid under the captions
             const frames = path.join(os.tmpdir(), `reel-supers-${id}`);
             tmp.push(frames);
@@ -574,15 +619,30 @@ export function createRenderRunner({
         try {
           if (pair) await timed('pair', async () => {
             pairMaster = path.join(pairTmp, 'master.mp4');
-            await ffmpeg(commands.remux({video: hold, audio: outFile, outFile: pairMaster}), 'master remux');
-            // master_supers: the supers burnt into that master (its final audio copied) — the master itself when there is no text graphic
-            pairMasterSupers = path.join(pairTmp, 'master_supers.mp4');
-            if (supersDrawn) await ffmpeg(commands.composite({master: pairMaster, layers: [{file: pairSupers, alpha: 'prores'}], outFile: pairMasterSupers, draft: false, fps}), 'master + supers composite');
-            else try { fs.linkSync(pairMaster, pairMasterSupers); } catch { await abortable(fs.promises.copyFile(pairMaster, pairMasterSupers)); }
+            if (pairOriginal) {
+              // captions only: the client's file itself — a hard link (a copy across filesystems), checked byte for byte
+              try { fs.linkSync(pairOriginal.abs, pairMaster); } catch { await abortable(fs.promises.copyFile(pairOriginal.abs, pairMaster)); }
+              const [a, b] = await abortable(Promise.all([sha256Of(pairOriginal.abs), sha256Of(pairMaster)]));
+              if (a !== b) throw new RenderError(`the master is not ${pairOriginal.src} byte for byte`);
+              pairOriginal = {src: pairOriginal.src, sha256: a, bytes: fs.statSync(pairMaster).size};
+            } else {
+              // an unchanged master (the same cached master, the same final audio as an earlier version's): that file,
+              // linked — no remux of a new one (scripts/reviews.mjs priorMaster)
+              pairAudio = await audioHashOf(outFile);
+              const prior = priorMaster(reviewsDir, job.projectId, publicDir, {masterKey: pairKey, audioHash: pairAudio});
+              let linked = false;
+              if (prior) try { fs.linkSync(prior, pairMaster); linked = true; result.masterLinked = path.relative(publicDir, prior).split(path.sep).join('/'); } catch {}
+              if (!linked) await ffmpeg(commands.remux({video: hold, audio: outFile, outFile: pairMaster}), 'master remux');
+            }
+            // master_supers: the supers burnt into that master (its final audio copied) — none without a text graphic
+            if (supersDrawn) {
+              pairMasterSupers = path.join(pairTmp, 'master_supers.mp4');
+              await ffmpeg(commands.composite({master: pairMaster, layers: [{file: pairSupers, alpha: 'prores'}], outFile: pairMasterSupers, draft: false, fps}), 'master + supers composite');
+            }
             // every file against the master, at the client's rate whatever the props said
             const m = await probeOf(pairMaster), bad = new Set();
             pairParity = {frames: m.frames, fps: m.fps};
-            for (const [name, file] of [['captions', pairLayer], ['captions.png.zip', pairPng], ['supers', pairSupers], ['master_supers', pairMasterSupers]]) {
+            for (const [name, file] of [['captions', pairLayer], ['captions.png.zip', pairPng], ['supers', pairSupers], ['master_supers', pairMasterSupers]].filter(([, f]) => f)) {
               for (const x of parityIssues(m, file === pairPng ? await zipParity(file) : await probeOf(file), {name, fps: deliveryFps({identity: pair})})) bad.add(x);
             }
             if (bad.size) throw new RenderError(`deliverables parity failed: ${[...bad].join('; ')}`);
@@ -595,7 +655,9 @@ export function createRenderRunner({
           };
           let datos;
           try { datos = toConfirm(job.projectId, props); } catch (e) { log(`render ${id}: datos por confirmar not checked: ${e.message}`); }
-          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(datos?.length ? {datosPorConfirmar: datos} : {}), ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, qc: {lufs: qc.lufs ?? null, truePeak: qc.truePeak ?? null, parity: pairParity}, verify} : {})});
+          const deliverables = Object.fromEntries(Object.entries({master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}).filter(([, f]) => f));
+          const omitted = supersDrawn ? null : {supers: 'el reel no tiene gráficos de texto', masterSupers: 'sin supers sería el mismo master'};
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(datos?.length ? {datosPorConfirmar: datos} : {}), ...(pair ? {deliverables, omitted, original: pairOriginal, audioHash: pairAudio, identity: pair, snapshot: props, masterKey: pairKey, qc: {lufs: qc.lufs ?? null, truePeak: qc.truePeak ?? null, parity: pairParity}, verify} : {})});
           if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; if (v.deliverables) result.deliverables = v.deliverables; }
         } catch (e) {
           stop(); // cancelled while the proxy was made: not a version error, a cancel

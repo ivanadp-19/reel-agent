@@ -257,6 +257,9 @@ export function seesClient(g, clients) {
 // own user). Never a reviewer, basic auth, a user token or a login without the owner role — a re-judge can turn
 // 'hallazgos' into 'superado', the label approval waits for.
 export const mayRejudge = (g) => g?.via === 'backend-token' || g?.via === 'loopback' || (g?.via === 'session' && g.role === 'owner');
+// Who may run the retention pass (POST /api/review-retention: it deletes every client's older pairs): as mayRejudge,
+// but of the backend tokens only the primary — another one (a collaborator's, R-1) sees no client's project
+export const mayPrune = (g) => mayRejudge(g) && (g.via !== 'backend-token' || !!g.primary);
 
 // A human-only action (CEO-2, E-2: approve, revoke, confirm a note, waive a blocker, confirm a colorRef,
 // stagesMode): only a login session, which exists in public mode only — never loopback, basic auth, the

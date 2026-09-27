@@ -24,6 +24,13 @@
 //   POST /bandeja/revocar            {project, v, reason}
 //   POST /bandeja/nota               {project, v, atSec, text} anchored on the version's snapshot (anchorAt)
 //   POST /bandeja/nota/estado        {project, v, note, step: confirmar | descartar (owner) | verificar (reviewer), reason?}
+//                                    (clasificar / resolver are the agent's: POST /api/reviews/<id>/versions/<v>/notes/<note>)
+//   POST /bandeja/referencia         {project, v, step: confirmar | descartar} the owner answers the proposal of an approved
+//                                    master as a color reference (confirmar: scripts/reviews.mjs addColorRef)
+//   GET  /bandeja/par?project&v&opcion=A|B   the pair as ONE download (a stored zip + LEEME.txt): A = master + supers +
+//                                    captions, B = master_supers + captions — never supers over master_supers; a reel with no
+//                                    text graphic has one option, master + captions (scripts/review-states.mjs pairOptions).
+//                                    Only a session that sees the project's client (humanOnly: its reviewer or the owner)
 //   POST /bandeja/salir              sign out (the session cookie cleared, like POST /logout)
 // Every POST (E-8: one function each): a login session (humanOnly, E-2 — tokens, basic auth and loopback get 403), an
 // Origin of this site, the session's CSRF token, ≤ 30 per user per minute, then the step of scripts/review-states.mjs
@@ -32,8 +39,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {loadReviews, playableVersions, resolveToken, withVersion} from '../scripts/reviews.mjs';
-import {actorOf, addNote, anchorAt, approve, byVariant, moveNote, noteClock, noteMaxSec, openNotes, ownerInbox, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
+import {pipeline} from 'node:stream/promises';
+import zlib from 'node:zlib';
+import {addColorRef, loadReviews, playableVersions, resolveToken, withVersion} from '../scripts/reviews.mjs';
+import {zipCentral, zipLocal} from '../scripts/layers.mjs';
+import {STACK_WARNING, actorOf, addNote, anchorAt, approve, byVariant, colorRefProposal, decideColorRef, moveNote, noteClock, noteMaxSec, openNotes, ownerInbox, pairOptions, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
 import {validateIdentity} from '../src/validate.ts';
 import {humanOnly, projectClients, seesClient, serveFile} from './http.mjs';
 import {SESSION_COOKIE, clientIp, cookieHeader, parseCookies, readBody, sameSite} from './session.mjs';
@@ -252,10 +262,30 @@ export const BANDEJA_CSP = `default-src 'none'; img-src 'self'; media-src 'self'
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const cls = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]+/gi, '-').toLowerCase();
 const hidden = (o) => Object.entries(o).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
-const FLASH = {aprobada: 'Aprobada.', revocada: 'Aprobación revocada: la versión vuelve a por revisar.', nota: 'Nota guardada.', confirmada: 'Nota confirmada.', descartada: 'Nota descartada.', verificada: 'Nota verificada.'};
-const KIND = {nota: 'Nota por confirmar', guion: 'Guion vs audio', juez: 'Juez caído', rojos: '3 rojos seguidos', disco: 'Disco bajo'};
+const FLASH = {aprobada: 'Aprobada.', revocada: 'Aprobación revocada: la versión vuelve a por revisar.', nota: 'Nota guardada.', confirmada: 'Nota confirmada.', descartada: 'Nota descartada.', verificada: 'Nota verificada.',
+  referencia: 'Referencia de color guardada: el juez compara con ella los reels de ese desarrollo.', 'sin-referencia': 'Propuesta de referencia descartada.'};
+const KIND = {nota: 'Nota por confirmar', colorref: 'Referencia de color', guion: 'Guion vs audio', juez: 'Juez caído', rojos: '3 rojos seguidos', disco: 'Disco bajo'};
+// the pair's download links on a version card (pairOptions), with the size of each and what the version says about its
+// master (the client's own file) and what it left out (no supers)
+function pairBlock(r, x, sizeOf) {
+  const opts = pairOptions(x);
+  if (!opts.length) return '';
+  const size = (o) => { const b = o.keys.reduce((s, k) => s + (sizeOf(x.deliverables[k]) ?? NaN), 0); return Number.isFinite(b) ? ` · ${mb(b)}` : ''; };
+  const notes = [x.original && 'el master es tu archivo original, sin re-encode', x.omitted?.supers && 'sin supers: el reel no tiene textos'].filter(Boolean);
+  const href = (o) => `/bandeja/par?${new URLSearchParams({project: r.projectId, v: String(x.v), opcion: o.id})}`;
+  return `<div class="pair"><p class="meta">Descargar v${x.v}${notes.length ? ` — ${esc(notes.join('; '))}` : ''}</p>${opts.map((o) => `<a href="${esc(href(o))}" download>${esc(o.label)}${size(o)} (zip)</a>`).join('')}${opts.length > 1 ? `<p class="warn">${esc(STACK_WARNING)}</p>` : ''}</div>`;
+}
+// the owner's answer to an approved master proposed as a color reference (colorRefProposal), or what was answered —
+// the owner's business: the client's reviewer sees neither
+function refBlock(r, x, {owner, csrf, delivered}) {
+  if (x.colorRef) return !owner ? '' : `<p class="meta">Referencia de color: ${esc(x.colorRef.state)} por ${esc(x.colorRef.by)}${x.colorRef.development ? ` (${esc(x.colorRef.development)})` : ''}</p>`;
+  if (!owner || !colorRefProposal(x, delivered)) return '';
+  const dev = x.identity?.development;
+  const step = (name, label, cls = '') => `<form method="post" action="/bandeja/referencia">${hidden({csrf, project: r.projectId, v: x.v, step: name})}<button${cls ? ` class="${cls}"` : ''}>${label}</button></form>`;
+  return `<div class="ref"><p class="meta">¿El master de v${x.v} como referencia de color${dev ? ` de «${esc(dev)}»` : ''}? ${dev ? 'El juez compara con él los reels de ese desarrollo.' : 'La identidad no tiene desarrollo: el juez no la compara hasta que lo tenga.'}</p><div class="row">${step('confirmar', 'Usar como referencia', 'primary')}${step('descartar', 'No usar')}</div></div>`;
+}
 
-function versionCard(r, x, {delivered, newest, reviewer, csrf, draft}) {
+function versionCard(r, x, {delivered, newest, owner, reviewer, csrf, draft, sizeOf = () => null}) {
   const qc = versionQc(x), label = versionLabel(x, delivered), open = openNotes(x).length;
   const vid = `vid-${r.projectId}-${x.v}`, base = {csrf, project: r.projectId, v: x.v};
   const tag = x.v === delivered ? 'entregada' : x === newest ? 'la más nueva' : '';
@@ -278,7 +308,7 @@ function versionCard(r, x, {delivered, newest, reviewer, csrf, draft}) {
 <figcaption><b>v${x.v}</b> · ${esc(day(x.createdAt))} · ${esc(clock(x.durationSec ?? 0))}${tag ? ` <span class="tag">${tag}</span>` : ''}</figcaption>
 ${video}
 <p class="badges"><span class="badge qc-${cls(qc.state)}">${esc(qc.label)}</span> <span class="badge st-${cls(label)}">${esc(label)}</span></p>
-${x.approval ? `<p class="meta">Aprobada por ${esc(x.approval.by)} · ${esc(day(x.approval.at))}</p>` : ''}${findings}${actions}
+${x.approval ? `<p class="meta">Aprobada por ${esc(x.approval.by)} · ${esc(day(x.approval.at))}</p>` : ''}${findings}${pairBlock(r, x, sizeOf)}${refBlock(r, x, {owner, csrf, delivered})}${actions}
 </figure>`;
 }
 
@@ -298,11 +328,11 @@ function noteItem(r, x, n, {owner, reviewer, csrf}) {
   let actions = '';
   if (reviewer && n.state === 'resuelta') actions += step('verificar', 'Verificar: está arreglada');
   if (owner && n.state === 'clasificada') actions += step('confirmar', 'Confirmar');
-  // ponytail: the agent's clasificar has no route until phase 8 (review_notes) — say why there is no Confirmar yet
-  if (owner && n.state === 'abierta') actions += '<p class="meta">Se confirma cuando el agente la clasifique (fix, parámetro, regla o preferencia).</p>';
+  // the agent classifies it on its next run (review_notes → classify_note, in the restricted runner): no Confirmar before
+  if (owner && n.state === 'abierta') actions += '<p class="meta">Se confirma cuando el agente la clasifique (fix, parámetro, regla o preferencia) en su próxima corrida.</p>';
   if (owner && ['abierta', 'clasificada', 'confirmada'].includes(n.state)) actions += `<details><summary>Descartar</summary>${step('descartar', 'Descartar la nota', '<label>Razón (la ve el cliente)<textarea name="reason" maxlength="500" rows="2" required></textarea></label>')}</details>`;
   return `<li class="n-${cls(n.state)}"><p class="meta"><b>v${n.v} · ${esc(noteClock(n.atSec))}</b> · <span class="badge st-${cls(n.state)}">${esc(n.state)}${n.resolvedIn ? ` en v${n.resolvedIn}` : ''}</span>${n.afterApproval ? ' <span class="badge flag">nota después de aprobar</span>' : ''} · ${esc(n.by)}</p>
-<p class="text">${esc(n.text)}</p>${n.reason ? `<p class="meta">Descartada: ${esc(n.reason)}</p>` : ''}${owner && n.anchor ? `<p class="meta">clip ${esc(n.anchor.clipId)} · ${esc(n.anchor.src)} @ ${esc(n.anchor.srcSec)} s${n.anchor.wordId ? ` · palabra ${esc(n.anchor.wordId)}` : ''}</p>` : ''}${actions}</li>`;
+<p class="text">${esc(n.text)}</p>${n.kind ? `<p class="meta">Clasificada como ${esc(n.kind)}</p>` : ''}${n.reason ? `<p class="meta">Descartada: ${esc(n.reason)}</p>` : ''}${owner && n.anchor ? `<p class="meta">clip ${esc(n.anchor.clipId)} · ${esc(n.anchor.src)} @ ${esc(n.anchor.srcSec)} s${n.anchor.wordId ? ` · palabra ${esc(n.anchor.wordId)}` : ''}</p>` : ''}${actions}</li>`;
 }
 
 function variantBlock(r, o) {
@@ -323,9 +353,9 @@ ${notes.length ? `<section class="notes"><h4>Notas · ${plural(open, 'abierta', 
 
 // the page: g = the session (user, role), rows (bandejaRows), inbox (the owner's, else null), csrf (csrfToken),
 // flash / error (a line at the top), draft (a note sent back after an error: {projectId, v, atSec, text})
-export function bandejaPage({g, rows, inbox = null, csrf, flash = null, error = null, draft = null}) {
+export function bandejaPage({g, rows, inbox = null, csrf, flash = null, error = null, draft = null, sizeOf = () => null}) {
   const owner = g.role === 'owner', reviewer = g.role === 'reviewer';
-  const o = {owner, reviewer, csrf, draft};
+  const o = {owner, reviewer, csrf, draft, sizeOf};
   const groups = new Map(); // client + G → rows
   for (const r of rows) { const k = `${r.identity.client.toUpperCase()} · G${r.identity.script}`; groups.set(k, [...(groups.get(k) ?? []), r]); }
   const pending = (inbox ?? []).filter((i) => i.kind !== 'metrica'), metric = (inbox ?? []).filter((i) => i.kind === 'metrica');
@@ -391,6 +421,9 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .off{color:var(--mut);font-size:13px}
 .sev{font-size:12px;color:var(--warn);text-transform:uppercase;letter-spacing:.03em}
 .top form{margin:0}
+.pair,.ref{margin-top:8px}
+.pair a{display:flex;align-items:center;min-height:44px;padding:8px 12px;margin:6px 0;border:1px solid #3a3a42;border-radius:8px;text-decoration:none;color:var(--fg);overflow-wrap:anywhere}
+.ref .row{flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -427,7 +460,55 @@ function postNoteStep(x, actor, {form, at}) {
   if (!['confirmar', 'descartar', 'verificar'].includes(form.step)) throw Object.assign(new Error('Paso desconocido'), {status: 400});
   return moveNote(x, String(form.note ?? ''), form.step, actor, {at, reason: form.reason}).state;
 }
-const POSTS = {'/bandeja/aprobar': postApprove, '/bandeja/revocar': postRevoke, '/bandeja/nota': postNote, '/bandeja/nota/estado': postNoteStep};
+// the owner's answer to an approved master proposed as a color reference: confirmar writes it to the client's refs/ and
+// profile (in the row: a write that fails saves nothing)
+function postColorRef(x, actor, {form, at, publicDir}) {
+  if (decideColorRef(x, actor, {step: form.step, at}) && x.colorRef.state === 'confirmada') Object.assign(x.colorRef, addColorRef(publicDir, form.project, x));
+  return x.colorRef.state === 'confirmada' ? 'referencia' : 'sin-referencia';
+}
+const POSTS = {'/bandeja/aprobar': postApprove, '/bandeja/revocar': postRevoke, '/bandeja/nota': postNote, '/bandeja/nota/estado': postNoteStep, '/bandeja/referencia': postColorRef};
+
+// ---- the pair download (§5, CEO-22): one stored zip of the option's files + LEEME.txt ----
+// The files are read once for their CRCs before the first byte leaves (Content-Length is exact, any unzip opens it);
+// ponytail: ~1 s per GB per download — keep the CRCs with the version if downloads get frequent.
+const ROLE = {master: 'corte, color y audio final, sin textos', masterSupers: 'el master con supers, labels y end-card ya quemados',
+  supers: 'supers, labels y end-card, con alfa (ProRes 4444)', captions: 'captions con alfa (ProRes 4444)', captionsPng: 'los mismos captions como secuencia PNG (fps.json dice a qué fps importarla)'};
+export function pairReadme(x, opt) {
+  const stem = `${variantName(x.identity)}_v${x.v}`;
+  const layer = (k, i) => `  ${i + 1}. ${path.basename(x.deliverables[k])} — ${k === 'master' && x.original ? `tu archivo original, sin re-encode (sha256 ${x.original.sha256})` : ROLE[k]}`;
+  const stack = opt.keys.filter((k) => k !== 'captionsPng'), png = opt.keys.includes('captionsPng') ? [`     o ${path.basename(x.deliverables.captionsPng)} — ${ROLE.captionsPng}`] : [];
+  return [`${stem} · opción ${opt.label}`, '', 'Capas, de abajo hacia arriba (los mismos cuadros, el mismo fps, la misma duración):', ...stack.map(layer), ...png, '',
+    x.omitted?.supers ? 'Este reel no tiene textos (supers): no hay supers ni master_supers.' : STACK_WARNING, ''].join('\r\n');
+}
+async function sendPair(req, res, url, {publicDir, g, say, log}) {
+  const projectId = url.searchParams.get('project') ?? '', v = Number(url.searchParams.get('v')), id = url.searchParams.get('opcion') ?? 'A';
+  const x = /^[\w-]+$/.test(projectId) && Number.isInteger(v) ? loadReviews(path.join(publicDir, 'reviews'), projectId).versions.find((y) => y.v === v) : null;
+  if (!x?.identity?.client || !seesClient(g, projectClients(publicDir, projectId))) return say(404, 'Esa versión no existe o no es de tus clientes.');
+  const who = humanOnly(g, {client: x.identity.client});
+  if (!who.ok) return say(403, who.error);
+  const opt = pairOptions(x).find((o) => o.id === id);
+  const files = opt?.keys.map((k) => inside(publicDir, x.deliverables[k], 'reviews'));
+  if (!opt || files.some((f) => !f)) return say(x.pruned?.length || opt ? 410 : 404, x.pruned?.length || opt ? `Los archivos de v${v} ya no están (retención): descarga la versión más nueva.` : `v${v} no tiene la opción ${id}.`);
+  const readme = Buffer.from(pairReadme(x, opt));
+  const entries = [{name: 'LEEME.txt', data: readme, size: readme.length}, ...files.map((f) => ({name: path.basename(f), file: f, size: fs.statSync(f).size}))];
+  let at = 0;
+  for (const e of entries) { e.at = at; at += 30 + Buffer.byteLength(e.name) + e.size; }
+  const headers = {...PRIVACY_HEADERS, 'Cache-Control': 'no-store', 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${variantName(x.identity)}_v${x.v}_${opt.id}.zip"`};
+  let tail = zipCentral(entries.map((e) => ({...e, crc: 0})), at); // its size: the CRCs do not change it
+  if (req.method === 'HEAD') { res.writeHead(200, {...headers, 'Content-Length': at + tail.length}); res.end(); return true; }
+  for (const e of entries) { e.crc = 0; for await (const b of e.data ? [e.data] : fs.createReadStream(e.file)) e.crc = zlib.crc32(b, e.crc); }
+  tail = zipCentral(entries, at);
+  res.writeHead(200, {...headers, 'Content-Length': at + tail.length});
+  log(`[bandeja] ${g.user} downloads ${variantName(x.identity)} v${x.v} option ${opt.id} (${Math.round(at / 1e6)} MB)`);
+  try {
+    for (const e of entries) {
+      res.write(zipLocal(e));
+      if (e.data) res.write(e.data); else await pipeline(fs.createReadStream(e.file), res, {end: false});
+    }
+    res.end(tail);
+  } catch { res.destroy(); } // the phone went away mid-download
+  return true;
+}
 
 // `g` = the gate's answer (kind 'bandeja': the session user, or none); login = public mode (/login exists); secret = the
 // session key (CSRF, the approval's ipHash); limiter = createLoginLimiter-shaped, per user; disk() → {freeDiskMb,
@@ -439,8 +520,9 @@ export async function handleBandeja(req, res, url, {publicDir, g, login = false,
   const say = (status, msg, headers = {}) => send(status, {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_CSP, ...headers}, `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bandeja</title><body style="margin:0;padding:24px 16px;background:#0b0b0c;color:#e8e8ea;font:16px/1.5 system-ui,sans-serif"><p>${esc(msg)}</p>${back}</body></html>`);
   const route = url.pathname.replace(/\/+$/, '');
   const read = req.method === 'GET' || req.method === 'HEAD';
-  if (route !== '/bandeja' && route !== '/bandeja/salir' && !Object.hasOwn(POSTS, route)) return say(404, 'Not found');
-  if (route === '/bandeja' ? !read : req.method !== 'POST') return send(405, {Allow: route === '/bandeja' ? 'GET, HEAD' : 'POST'});
+  const reads = route === '/bandeja' || route === '/bandeja/par';
+  if (!reads && route !== '/bandeja/salir' && !Object.hasOwn(POSTS, route)) return say(404, 'Not found');
+  if (reads ? !read : req.method !== 'POST') return send(405, {Allow: reads ? 'GET, HEAD' : 'POST'});
   if (g?.via !== 'session' || !g.user) {
     if (read && login) return send(303, {Location: '/login?next=%2Fbandeja'});
     return say(403, read ? 'La bandeja necesita login: solo en la VM (modo público, REEL_PUBLIC=1).' : 'Solo con login en la VM: entra otra vez con tu cuenta.');
@@ -452,8 +534,10 @@ export async function handleBandeja(req, res, url, {publicDir, g, login = false,
     const rows = bandejaRows(publicDir, sees);
     const inbox = g.role === 'owner' ? ownerInbox(rows, {disk: disk()}) : null;
     if (inbox) logInbox(inbox, log);
-    return send(status, {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': BANDEJA_CSP}, bandejaPage({g, rows, inbox, csrf, ...extra}));
+    const sizeOf = (rel) => { try { return fs.statSync(path.join(publicDir, rel)).size; } catch { return null; } };
+    return send(status, {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': BANDEJA_CSP}, bandejaPage({g, rows, inbox, csrf, sizeOf, ...extra}));
   };
+  if (route === '/bandeja/par') return sendPair(req, res, url, {publicDir, g, say, log});
   if (read) return page(200, {flash: FLASH[url.searchParams.get('ok')] ?? null});
 
   // Origin: another site's is refused. This page's Referrer-Policy no-referrer makes the browser send `Origin: null` on its own

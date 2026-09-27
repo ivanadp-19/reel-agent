@@ -2,7 +2,7 @@
 // invalid ones refused, the QC helper, the note anchor on a snapshot and the owner's inbox.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NOTE_STEPS, actorOf, addNote, anchorAt, approve, byVariant, moveNote, noteClock, openNotes, ownerInbox, reviewState, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
+import {AGENT_NOTE_STEPS, NOTE_STEPS, actorOf, addNote, anchorAt, approve, byVariant, colorRefProposal, decideColorRef, moveNote, noteClock, openNotes, ownerInbox, pairOptions, reviewState, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
 import {DELIVERY_FPS} from '../src/timeline.ts';
 import {pageWords} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
@@ -215,4 +215,29 @@ test('byVariant: a project whose identity changed keeps each variant\'s versions
   const m = byVariant([v1, v2, plain]);
   assert.deepEqual([...m.keys()], ['ACME_G2_H1_C1', 'ACME_G2_H2_C1'], 'a version without an identity is no variant\'s');
   assert.deepEqual([variantState(m.get('ACME_G2_H1_C1')), variantState(m.get('ACME_G2_H2_C1'))], [{state: 'aprobada', delivered: 1}, {state: 'por revisar', delivered: null}]);
+});
+
+test('the pair\'s download options: A (master + supers + captions) and B (master_supers + captions); one without supers; none without a pair or after the retention', () => {
+  const d = {master: 'm', captions: 'c', captionsPng: 'z', supers: 's', masterSupers: 'ms'};
+  assert.deepEqual(pairOptions({deliverables: d}).map((o) => [o.id, o.keys]), [['A', ['master', 'supers', 'captions', 'captionsPng']], ['B', ['masterSupers', 'captions', 'captionsPng']]]);
+  assert.deepEqual(pairOptions({deliverables: {master: 'm', captions: 'c', captionsPng: 'z'}, omitted: {supers: 'x'}}).map((o) => [o.id, o.label, o.keys]), [['A', 'master + captions', ['master', 'captions', 'captionsPng']]]);
+  assert.deepEqual(pairOptions({}), []);
+  assert.deepEqual(pairOptions({deliverables: d, pruned: ['m']}), []);
+});
+
+test('a color reference: proposed for the delivered (newest approved) version until the owner answers; only the owner decides, only an approved version, once', () => {
+  const x = version(1, 'superado', {approval: {by: 'cesar'}, deliverables: {master: 'm'}});
+  assert.equal(colorRefProposal(x, 1), true);
+  assert.equal(colorRefProposal(x, 2), false, 'superseded by a newer approval');
+  assert.equal(colorRefProposal(version(1), null), false, 'not approved');
+  for (const who of [rev, agent]) refused(() => decideColorRef(x, who, {step: 'confirmar', at: AT}), 403);
+  refused(() => decideColorRef(x, owner, {step: 'quizás', at: AT}), 400);
+  refused(() => decideColorRef(version(2), owner, {step: 'confirmar', at: AT}), 409, 'not_approved');
+  refused(() => decideColorRef({...x, colorRef: undefined, pruned: ['m']}, owner, {step: 'confirmar', at: AT}), 409, 'retention_pruned');
+  assert.equal(decideColorRef(x, owner, {step: 'descartar', at: AT}), true);
+  assert.deepEqual(x.colorRef, {state: 'descartada', by: 'felipe', at: AT});
+  assert.equal(decideColorRef(x, owner, {step: 'confirmar', at: AT}), false, 'answered once');
+  assert.equal(colorRefProposal(x, 1), false);
+  assert.deepEqual(x.log.map((l) => l.action), ['referencia-descartar']);
+  assert.deepEqual(AGENT_NOTE_STEPS, ['clasificar', 'resolver'], 'the only note steps a token may take');
 });

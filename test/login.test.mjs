@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
-import {gate, humanOnly, mayRejudge, tokenOk} from '../server/http.mjs';
+import {gate, humanOnly, mayPrune, mayRejudge, tokenOk} from '../server/http.mjs';
 import {SESSION_COOKIE, clientIp, createLoginLimiter, handleLogin, parseCookies, parseRoles, safeNext, sameSite, signSession, trustedHops, verifySession} from '../server/session.mjs';
 import {createTokenStore} from '../server/tokens.mjs';
 
@@ -359,5 +359,8 @@ test('humanOnly: only a login session passes; loopback, basic auth, the backend 
     const rejudge = Object.fromEntries([...Object.entries(agents), ['the owner\'s login', boss], ['a login without a role', nadie]].map(([who, g]) => [who, mayRejudge(g)]));
     assert.deepEqual(rejudge, {loopback: true, 'a session cookie in local mode': true, 'basic auth of the owner': false, 'the primary backend token': true, 'another backend token': true, 'the owner\'s own user token': false, 'the owner\'s login': true, 'a login without a role': false});
     assert.equal(mayRejudge(rev), false, 'never a reviewer');
+    // the retention pass deletes every client's older pairs: of the backend tokens only the primary (R-1)
+    const prune = Object.fromEntries([...Object.entries(agents), ['the owner\'s login', boss], ['a login without a role', nadie], ['a reviewer', rev]].map(([who, g]) => [who, mayPrune(g)]));
+    assert.deepEqual(prune, {...rejudge, 'another backend token': false, 'a reviewer': false});
   } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
