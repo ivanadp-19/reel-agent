@@ -47,3 +47,4 @@ editor/dist*/
 
 # export cleanup log (scripts/cleanup-exports.mjs from cron)
 .cleanup.log
+.DS_Store
