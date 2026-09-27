@@ -3,7 +3,7 @@ import {useEditor} from './store';
 import {DEFAULTS, LOOKS, autoSources, lutBakes, paramsFor, withLut, type Adjust, type GradeParams, type ProjectGrade} from '../src/grade';
 import {lutSpans, matchPair} from '../src/lut';
 import {continuesPrev} from '../src/timeline';
-import {runJob, readPublic} from './jobs';
+import {runJob} from './jobs';
 import {Btn, Label, Section, Select, Toggle} from './ui';
 
 // Color (set_grade / create_lut): the whole reel or one source / clip (an
@@ -49,12 +49,10 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
     try {
       const next = {...g};
       if (need.length) {
-        await runJob('/api/grade', {clips: need.map((src) => ({src}))}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-        next.bySrc = {...next.bySrc, ...((await readPublic<{bySrc?: ProjectGrade['bySrc']}>('grade.json')).bySrc ?? {})};
+        next.bySrc = {...next.bySrc, ...((await runJob<{bySrc?: ProjectGrade['bySrc']}>('/api/grade', {clips: need.map((src) => ({src}))}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`))).bySrc ?? {})};
       }
       if (bakes.length) {
-        await runJob('/api/lut', {bake: bakes}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-        next.baked = {...next.baked, ...((await readPublic<{baked?: Record<string, string>}>('lut.json')).baked ?? {})};
+        next.baked = {...next.baked, ...((await runJob<{baked?: Record<string, string>}>('/api/lut', {bake: bakes}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`))).baked ?? {})};
       }
       setGrade(next);
     } catch (e) { notify('Color: ' + (e as Error).message, 'error'); }
@@ -94,8 +92,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
         if (!r?.file) throw new Error(r?.error ?? 'upload failed');
         refs.push(r.file);
       }
-      await runJob('/api/lut', {make: {name, refs, clips: lutSpans(clips, target || undefined), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const {lut} = await readPublic<{lut?: string}>('lut.json');
+      const {lut} = await runJob<{lut?: string}>('/api/lut', {make: {name, refs, clips: lutSpans(clips, target || undefined), strength: Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0.7}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       await loadLuts();
       setBusy(null);
       if (lut) { await settle(withLut(grade, lut, target || undefined)); notify(`LUT ${name} made from ${refs.length} photo(s)`, 'ok'); }
@@ -108,8 +105,7 @@ export const ColorSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok')
       const name = window.prompt('Name of the new LUT (letters, digits, - _)', `${from.id.replace(/[^\w-]/g, '_').slice(0, 34)}-match`)?.trim();
       if (!name || !/^[\w-]{1,40}$/.test(name)) return;
       setBusy('Starting…');
-      await runJob('/api/lut', {match: {name, from, to}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
-      const r = await readPublic<{lut?: string; before?: number; after?: number; worst?: {luma: number[]; rgb: number[]}}>('lut.json');
+      const r = await runJob<{lut?: string; before?: number; after?: number; worst?: {luma: number[]; rgb: number[]}}>('/api/lut', {match: {name, from, to}}, (s) => setBusy(`${s.label ?? ''} ${s.progress ?? 0}%`));
       await loadLuts();
       setBusy(null);
       if (r.lut) { await settle(withLut(grade, r.lut, from.id, to.id)); notify(`${from.id} matched to ${to.id}: difference ${r.before} → ${r.after} of 255${r.worst ? `; luma ${r.worst.luma.join('–')} off by R/G/B ${r.worst.rgb.join(' / ')}` : ''}`, 'ok'); }

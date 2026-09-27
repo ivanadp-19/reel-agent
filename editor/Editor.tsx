@@ -256,9 +256,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       pollJob(
         '/api/captions', jobId,
         (s) => setGenLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
-        async () => {
-          const fresh = await fetch(`/captions.multi.json?_=${Date.now()}`).then((x) => x.json()).catch(() => []);
-          const freshPages = Array.isArray(fresh) ? fresh : [];
+        async (s) => {
+          const freshPages = Array.isArray(s.result) ? s.result : []; // this job's own pages (jobs.ts JobStatus.result)
           const {captions: merged, added, hidden} = repage(captions, freshPages, clips, {hidden: hiddenWids, replace, repropose});
           pushHistory();
           setCaptions(merged, hidden);
@@ -282,8 +281,8 @@ export const Editor: React.FC<{onBackToStart: () => void}> = ({onBackToStart}) =
       pollJob(
         '/api/trim-silence', jobId,
         (s) => setTrimLabel(`${s.label ?? ''} ${s.progress ?? 0}%`),
-        async () => {
-          const {plan} = await fetch(`/trim-silence.json?_=${Date.now()}`).then((x) => x.json()).catch(() => ({plan: null}));
+        async (s) => {
+          const plan = (s.result as {plan?: Parameters<typeof applyAutocut>[0]} | undefined)?.plan; // this job's own plan
           if (Array.isArray(plan) && plan.length) applyAutocut(plan);
           setTrimming(false);
           const cuts = Array.isArray(plan) ? plan.reduce((n, p) => n + (p.segments?.length ?? 0), 0) : 0;
