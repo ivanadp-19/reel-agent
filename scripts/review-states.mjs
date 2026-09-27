@@ -7,6 +7,7 @@
 //  version review  por revisar → aprobada   only from QC superado, by the client's reviewer, who retypes the variant name
 //                  por revisar ⇄ cambios    derived: an open note on it
 //                  aprobada → revocar (the reviewer, with a reason) → por revisar
+//                  a version the retention stripped (pruned) is neither approved nor annotated (409 retention_pruned)
 //                  a note on an approved version leaves it approved; the note is flagged afterApproval
 //                  ('nota después de aprobar': the owner asks the reviewer to revoke, or carries it to vN+1).
 //                  The owner never writes an approval, and no token does (only a login session is a human).
@@ -30,11 +31,17 @@ export const noteClock = (sec) => { const t = Math.round(sec * 10) / 10; return 
 // the label as people read it (the editor, list_versions, the bandeja): "QC técnico en curso", "QC técnico: 2 hallazgos"
 export const judgeText = (j) => (j?.label ? `QC técnico${/hallazgo/.test(j.label) ? ':' : ''} ${j.label}` : null);
 // → {state: 'en curso' | 'superado' | 'hallazgos' | 'no disponible' | 'sin QC', label, approvable, findings}
-// 'superado (evidencia reducida)' approves like 'superado' and keeps its suffix in the label
+// 'superado (evidencia reducida)' approves like 'superado' and keeps its suffix in the label. findings: the judge's, each
+// with its severity as people read it (`sev`) and whether the label counts it (`blocks`: a blocker, a major, or a minor
+// of a check that repeats 3+ times — judge.mjs verdictOf), the counted ones first
+const SEV = {blocker: 'bloqueante', major: 'mayor', minor: 'menor', nit: 'detalle'};
 export function versionQc(x) {
   const j = x?.judge;
   const state = !j?.label ? 'sin QC' : /^superado/.test(j.label) ? 'superado' : /hallazgo/.test(j.label) ? 'hallazgos' : j.label === 'en curso' ? 'en curso' : 'no disponible';
-  return {state, label: judgeText(j) ?? 'Sin QC técnico', approvable: state === 'superado', findings: j?.findings ?? []};
+  const all = j?.findings ?? [], minors = {};
+  for (const f of all) if (f.severity === 'minor') minors[f.check] = (minors[f.check] ?? 0) + 1;
+  const findings = all.map((f) => ({...f, sev: SEV[f.severity] ?? f.severity ?? '', blocks: f.severity === 'blocker' || f.severity === 'major' || (f.severity === 'minor' && minors[f.check] >= 3)}));
+  return {state, label: judgeText(j) ?? 'Sin QC técnico', approvable: state === 'superado', findings: [...findings.filter((f) => f.blocks), ...findings.filter((f) => !f.blocks)]};
 }
 
 // ---- who acts ----
@@ -59,7 +66,14 @@ export function cleanText(s, max) {
 export const isOpen = (n) => n.state !== 'verificada' && n.state !== 'descartada';
 export const openNotes = (x) => (x?.notes ?? []).filter(isOpen);
 export const reviewState = (x) => (x.approval ? 'aprobada' : openNotes(x).length ? 'cambios' : 'por revisar');
-// versions of one variant (one project) → {state, delivered: the newest approved v | null}
+// a project's versions by the variant each was rendered under (its identity): the identity can change after versions
+// exist (set_identity), and a variant's state is read from its own versions only → Map stem → versions
+export function byVariant(versions) {
+  const out = new Map();
+  for (const x of versions ?? []) { const stem = variantName(x.identity); if (stem) out.set(stem, [...(out.get(stem) ?? []), x]); }
+  return out;
+}
+// versions of one variant (byVariant) → {state, delivered: the newest approved v | null}
 export function variantState(versions) {
   if (!versions.length) return {state: 'sin versiones', delivered: null};
   const ok = versions.filter((x) => x.approval).sort((a, b) => b.v - a.v);
@@ -71,10 +85,19 @@ export const versionLabel = (x, delivered) => (x.approval && delivered != null &
 // the name a reviewer retypes to approve (and the stem of the delivered files): VIBEM_G2_H1_C1
 export const variantName = (identity) => { const i = validateIdentity(identity).identity; return i ? identityStem(i) : null; };
 
+// the retention (scripts/reviews.mjs pruneVersions) stripped its files — the deliverables, maybe the snapshot: nothing
+// to deliver or to anchor on. Checked inside the row, so a prune that ran while the page was open is seen.
+function mustBeWhole(x, what) {
+  if (x.pruned?.length) fail(409, 'retention_pruned', `No se puede ${what} v${x.v}: sus archivos ya no están (retención) — usa la versión más nueva`);
+}
+// the last second a note may name: the version's length and half a second (a player's last frame)
+export const noteMaxSec = (x) => (x.durationSec ?? Infinity) + 0.5;
+
 // approve vN (the version object, mutated) → true, or false when it already was (a double click, the form sent twice)
 export function approve(x, actor, {name, at, ipHash, userAgent} = {}) {
   mustReview(actor, x, 'aprobar');
   if (x.approval) return false;
+  mustBeWhole(x, 'aprobar');
   const qc = versionQc(x);
   if (!qc.approvable) fail(409, 'qc_not_passed', `No se puede aprobar v${x.v}: ${qc.label}`);
   const want = variantName(x.identity);
@@ -97,9 +120,10 @@ export function revoke(x, actor, {reason, at} = {}) {
 // a note {v, atSec, text} on the version (anchor: anchorAt on its snapshot) → the note
 export function addNote(x, actor, {atSec, text, anchor = null, at} = {}) {
   mustReview(actor, x, 'dejar una nota');
+  mustBeWhole(x, 'anotar');
   const t = cleanText(text, 2000);
   if (!t) fail(400, 'text_required', 'La nota está vacía');
-  if (!Number.isFinite(atSec) || atSec < 0 || atSec > (x.durationSec ?? Infinity) + 0.5) fail(400, 'bad_time', `El segundo de la nota tiene que estar entre 0 y ${x.durationSec ?? '?'} s`);
+  if (!Number.isFinite(atSec) || atSec < 0 || atSec > noteMaxSec(x)) fail(400, 'bad_time', `El segundo de la nota tiene que estar entre 0 y ${x.durationSec ?? '?'} s`);
   const notes = (x.notes ??= []);
   const id = `n${notes.reduce((m, n) => Math.max(m, +String(n.id).slice(1) || 0), 0) + 1}`;
   const note = {id, v: x.v, atSec: Math.round(atSec * 100) / 100, text: t, anchor, by: actor.user, at, state: 'abierta', history: [{state: 'abierta', by: actor.user, at}], ...(x.approval ? {afterApproval: true} : {})};
@@ -152,7 +176,8 @@ export function anchorAt(snapshot, atSec) {
 }
 
 // ---- the owner's inbox (CEO-19, D28) ----
-// rows: every client project as the bandeja loads it ({projectId, stem, identity, versions, project: the live JSON});
+// rows: every variant as the bandeja loads it ({projectId, id, stem, identity, versions, project: the live JSON on the
+// row of the project's current identity, else null});
 // disk: {freeDiskMb, minDiskMb}. → items {key, kind, text, projectId?} — kind nota (to confirm: abierta / clasificada),
 // guion (guion-conflict from validate, on the live project), juez (the newest version's QC técnico no disponible),
 // rojos (the last 3 versions of a variant red), disco (free disk under the render floor), metrica (notes on v1 per
@@ -162,17 +187,18 @@ export function ownerInbox(rows, {disk} = {}) {
   const one = (s) => String(s).replace(/\s+/g, ' ').slice(0, 160);
   for (const r of rows) {
     const vs = [...r.versions].sort((a, b) => a.v - b.v);
+    const where = {projectId: r.projectId, row: r.id ?? r.projectId}; // row: the variant's anchor on the page
     for (const x of vs) for (const n of x.notes ?? []) {
       if (n.state !== 'abierta' && n.state !== 'clasificada') continue;
-      items.push({key: `nota:${r.projectId}:${x.v}:${n.id}:${n.at}:${n.state}`, kind: 'nota', projectId: r.projectId, text: `${r.stem} v${x.v} @${noteClock(n.atSec)}, de ${n.by} (${n.state}${n.afterApproval ? ', nota después de aprobar' : ''}): «${one(n.text)}»`});
+      items.push({key: `nota:${r.projectId}:${x.v}:${n.id}:${n.at}:${n.state}`, kind: 'nota', ...where, text: `${r.stem} v${x.v} @${noteClock(n.atSec)}, de ${n.by} (${n.state}${n.afterApproval ? ', nota después de aprobar' : ''}): «${one(n.text)}»`});
     }
     const newest = vs.at(-1);
-    if (newest && versionQc(newest).state === 'no disponible') items.push({key: `juez:${r.projectId}:${newest.v}:${newest.judge.at}`, kind: 'juez', projectId: r.projectId, text: `${r.stem} v${newest.v}: QC técnico no disponible${newest.judge.error ? ` — ${one(newest.judge.error)}` : ''} (re-juzgar, sin re-render)`});
+    if (newest && versionQc(newest).state === 'no disponible') items.push({key: `juez:${r.projectId}:${newest.v}:${newest.judge.at}`, kind: 'juez', ...where, text: `${r.stem} v${newest.v}: QC técnico no disponible${newest.judge.error ? ` — ${one(newest.judge.error)}` : ''} (re-juzgar, sin re-render)`});
     const last3 = vs.slice(-3);
-    if (last3.length === 3 && last3.every((x) => versionQc(x).state === 'hallazgos')) items.push({key: `rojos:${r.projectId}:${newest.v}`, kind: 'rojos', projectId: r.projectId, text: `${r.stem}: 3 versiones seguidas con hallazgos (v${last3[0].v}–v${newest.v}) — mirar antes de otra vuelta`});
+    if (last3.length === 3 && last3.every((x) => versionQc(x).state === 'hallazgos')) items.push({key: `rojos:${r.projectId}:${newest.v}`, kind: 'rojos', ...where, text: `${r.stem}: 3 versiones seguidas con hallazgos (v${last3[0].v}–v${newest.v}) — mirar antes de otra vuelta`});
     let conflicts = [];
     try { if (r.project?.guion?.trim()) conflicts = validateProject({...r.project, clips: r.project.clips ?? [], captions: r.project.captions ?? []}, deliveryFps(r.project)).filter((i) => i.code === 'guion-conflict'); } catch {}
-    for (const i of conflicts) items.push({key: `guion:${r.projectId}:${i.msg}`, kind: 'guion', projectId: r.projectId, text: `${r.stem}: ${one(i.msg)}`});
+    for (const i of conflicts) items.push({key: `guion:${r.projectId}:${i.msg}`, kind: 'guion', ...where, text: `${r.stem}: ${one(i.msg)}`});
   }
   if (disk?.freeDiskMb != null && disk.freeDiskMb < disk.minDiskMb) items.push({key: `disco:${Math.round(disk.freeDiskMb / 256)}`, kind: 'disco', text: `Disco bajo: ${(disk.freeDiskMb / 1024).toFixed(1)} GB libres (piso de render ${(disk.minDiskMb / 1024).toFixed(1)} GB) — cleanup-exports --apply y la retención`});
   // the metric: notes on v1 per variant, by G (a variant with no v1 yet is not counted)

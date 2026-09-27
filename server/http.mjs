@@ -52,6 +52,12 @@ export function serveFile(req, res, file, headers = {}) {
 // (/clients/<client>/…: judge profile, deliveries, research); a project without a client keeps the rule above (R-1).
 // Decided on the path as asked and on the file it opens (realpath: its case on a case-insensitive disk — /REVIEWS/…
 // on a Mac is the same file, the same answer —, symlinks resolved: a reviews/ that links to a volume stays scoped).
+// What callers upload lands in public/ and is served on this origin: inert there — never a document that runs (an .html or
+// .svg planted by a token holder would otherwise act with the session of whoever opens it, the bandeja's steps included).
+// A <video>, <img>, <audio>, font or fetch() of the editor ignores these headers. Video and audio get nosniff only: they are
+// never parsed as a page, and a sandboxed media document (the file opened in a tab) plays nothing.
+export const INERT = {'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff'};
+export const inertHeaders = (file) => (/^(video|audio)\//.test(MIME[path.extname(file).toLowerCase()] ?? '') ? {'X-Content-Type-Options': 'nosniff'} : INERT);
 export const cleanPath = (pathname) => path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, ''); // throws on bad %-encoding
 export function servePublic(req, res, pathname, {publicDir, distDir, g}) {
   if (pathname.startsWith('/api/')) return false;
@@ -73,8 +79,8 @@ export function servePublic(req, res, pathname, {publicDir, distDir, g}) {
   if (!seesClient(g, clients)) return answer(403, {'Cache-Control': 'no-store'}, {error: 'a client\'s project: sign in with an account of that client', code: 'forbidden'});
   for (const base of [publicDir, distDir]) {
     const file = path.join(base, clean);
-    // a client's footage and renders: never kept by a shared cache between the browser and us
-    if (file.startsWith(base + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) { serveFile(req, res, file, base === publicDir ? {'Cache-Control': 'private'} : {}); return true; }
+    // a client's footage and renders: never kept by a shared cache between the browser and us; inert (inertHeaders)
+    if (file.startsWith(base + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) { serveFile(req, res, file, base === publicDir ? {'Cache-Control': 'private', ...inertHeaders(file)} : {}); return true; }
   }
   if (media) return answer(404, {}, {error: 'not found', code: 'not_found'});
   const index = path.join(distDir, 'index.html');

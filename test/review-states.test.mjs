@@ -2,7 +2,7 @@
 // invalid ones refused, the QC helper, the note anchor on a snapshot and the owner's inbox.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NOTE_STEPS, actorOf, addNote, anchorAt, approve, moveNote, noteClock, openNotes, ownerInbox, reviewState, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
+import {NOTE_STEPS, actorOf, addNote, anchorAt, approve, byVariant, moveNote, noteClock, openNotes, ownerInbox, reviewState, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
 import {DELIVERY_FPS} from '../src/timeline.ts';
 import {pageWords} from '../src/paging.ts';
 import {presetOf} from '../src/captionPresets.ts';
@@ -188,4 +188,31 @@ test('the owner\'s inbox: notes to confirm, guion-conflict, a judge down, 3 reds
   // a judge down on an older version is history; two reds are not three; disk above the floor says nothing
   const calm = ownerInbox([{...rows[1], versions: [rows[1].versions[1], version(3)]}, {...rows[0], versions: [v2, v3], project: null}], {disk: {freeDiskMb: 9000, minDiskMb: 3072}});
   assert.deepEqual(calm.filter((i) => i.kind !== 'metrica' && i.kind !== 'nota'), []);
+});
+
+test('versionQc lists what the label counts first, each with its severity; a minor counts only as a pattern (3+ of one check)', () => {
+  // César's G2 v1: '1 hallazgo' = the major; the reading-speed minor is listed, not counted
+  const g2 = versionQc(version(1, '1 hallazgo', {judge: {label: '1 hallazgo', findings: [{check: 'reading-speed', severity: 'minor', at: 32.73, msg: 'rápido'}, {check: 'insert-missing', severity: 'major', at: null, msg: 'sin INSERTS'}]}}));
+  assert.deepEqual(g2.findings.map((f) => [f.check, f.sev, f.blocks]), [['insert-missing', 'mayor', true], ['reading-speed', 'menor', false]]);
+  const pattern = versionQc({v: 1, judge: {label: '1 hallazgo', findings: [1, 2, 3].map((i) => ({check: 'fast-words', severity: 'minor', at: i, msg: 'x'})).concat({check: 'pause', severity: 'nit', at: 9, msg: 'y'})}});
+  assert.deepEqual(pattern.findings.map((f) => [f.sev, f.blocks]), [['menor', true], ['menor', true], ['menor', true], ['detalle', false]]);
+});
+
+test('a version the retention stripped (pruned) is neither approved nor annotated; a revoked one that got pruned is not approved again', () => {
+  const x = version(2, 'superado', {pruned: ['reviews/p-1/v2/ACME_G2_H1_C1_v2_master.mp4']});
+  refused(() => approve(x, rev, {name: 'ACME_G2_H1_C1', at: AT}), 409, 'retention_pruned');
+  refused(() => addNote(x, rev, {atSec: 1, text: 'x', at: AT}), 409, 'retention_pruned');
+  assert.deepEqual([x.approval, x.notes, x.log], [undefined, undefined, undefined], 'nothing written');
+  const y = version(3);
+  approve(y, rev, {name: 'ACME_G2_H1_C1', at: AT});
+  assert.equal(approve(y, rev, {name: 'ACME_G2_H1_C1', at: AT}), false, 'approved and whole: still a no-op twice');
+});
+
+test('byVariant: a project whose identity changed keeps each variant\'s versions apart, so each reads its own state', () => {
+  const h2 = {...IDENTITY, variant: {hook: 2, cta: 1}};
+  const v1 = version(1), v2 = version(2, 'en curso', {identity: h2}), plain = {v: 3};
+  approve(v1, rev, {name: 'ACME_G2_H1_C1', at: AT});
+  const m = byVariant([v1, v2, plain]);
+  assert.deepEqual([...m.keys()], ['ACME_G2_H1_C1', 'ACME_G2_H2_C1'], 'a version without an identity is no variant\'s');
+  assert.deepEqual([variantState(m.get('ACME_G2_H1_C1')), variantState(m.get('ACME_G2_H2_C1'))], [{state: 'aprobada', delivered: 1}, {state: 'por revisar', delivered: null}]);
 });

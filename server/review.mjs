@@ -33,7 +33,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {loadReviews, playableVersions, resolveToken, withVersion} from '../scripts/reviews.mjs';
-import {actorOf, addNote, anchorAt, approve, moveNote, noteClock, openNotes, ownerInbox, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
+import {actorOf, addNote, anchorAt, approve, byVariant, moveNote, noteClock, noteMaxSec, openNotes, ownerInbox, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
 import {validateIdentity} from '../src/validate.ts';
 import {humanOnly, projectClients, seesClient, serveFile} from './http.mjs';
 import {SESSION_COOKIE, clientIp, cookieHeader, parseCookies, readBody, sameSite} from './session.mjs';
@@ -174,10 +174,13 @@ export function handleReview(req, res, url, {publicDir, now = Date.now(), g = nu
 }
 
 // ---- the bandeja ----
-// Every client project the caller may see (`sees(clients)`, seesClient), as the bandeja groups them: one variant per
-// project with an identity (the live one, else its newest version's); its versions = the review versions rendered
-// under an identity. → rows {projectId, name, identity, stem, versions, playable (v set), project (the live JSON)}
+// Every client variant the caller may see (`sees(clients)`, seesClient), as the bandeja groups them: one row per project
+// × variant — the versions rendered under that identity (byVariant: a project whose identity changed keeps the earlier
+// variant's versions, its approval included, under that variant), and the project's current identity even with none
+// yet. → rows {projectId, id (the variant's anchor on the page, rowId), name, identity, stem, versions, playable (v set),
+// project (the live JSON, on the row of the project's current identity; else null)}
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+export const rowId = (projectId, stem) => `${projectId}-${stem}`;
 export function bandejaRows(publicDir, sees) {
   const dir = path.join(publicDir, 'reviews'), pdir = path.join(publicDir, 'projects');
   const ids = (d) => { try { return fs.readdirSync(d).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)); } catch { return []; } };
@@ -186,10 +189,15 @@ export function bandejaRows(publicDir, sees) {
     if (!/^[\w-]+$/.test(projectId)) continue;
     const project = readJson(path.join(pdir, `${projectId}.json`));
     const r = loadReviews(dir, projectId);
-    const versions = r.versions.filter((x) => x.identity);
-    const identity = validateIdentity(project?.identity).identity ?? validateIdentity(versions.at(-1)?.identity).identity;
-    if (!identity || !sees(projectClients(publicDir, projectId))) continue;
-    rows.push({projectId, name: project?.name ?? projectId, identity, stem: variantName(identity), versions, playable: new Set(playableVersions(r, publicDir).map((x) => x.v)), project});
+    const variants = byVariant(r.versions);
+    const live = validateIdentity(project?.identity).identity, liveStem = live && variantName(live);
+    if (liveStem && !variants.has(liveStem)) variants.set(liveStem, []);
+    if (!variants.size || !sees(projectClients(publicDir, projectId))) continue;
+    const playable = new Set(playableVersions(r, publicDir).map((x) => x.v));
+    for (const [stem, versions] of variants) {
+      const identity = stem === liveStem ? live : validateIdentity(versions.at(-1).identity).identity;
+      rows.push({projectId, id: rowId(projectId, stem), name: project?.name ?? projectId, identity, stem, versions, playable, project: stem === liveStem ? project : null});
+    }
   }
   return rows.sort((a, b) => a.identity.client.localeCompare(b.identity.client) || a.identity.script - b.identity.script || a.stem.localeCompare(b.stem));
 }
@@ -209,8 +217,10 @@ export function refreshInbox({publicDir, disk = null, log = console.error}) {
 }
 
 // UX-1: a note's draft survives a reload — localStorage keyed by (projectId, v, atSec), every access in try/catch (a
-// private window, blocked storage), cleared on send: once the send is answered with the page's ?ok=nota (a send that
-// failed keeps it). "Segundo actual" / opening the form takes the video's second.
+// private window, blocked storage), cleared on send: once the send is answered with the page's ?ok=nota&k=<its key> (a
+// send that failed keeps it; so does Back to an earlier send's page). A draft of a version the page no longer shows (vN+1
+// landed) comes back in that version's hidden form. "Segundo actual" / opening the form takes the video's second, floored
+// and never past the form's max (the server's bound).
 const BANDEJA_JS = `(() => {
   let s = null;
   try { s = window.localStorage; } catch (e) {}
@@ -218,16 +228,17 @@ const BANDEJA_JS = `(() => {
   const put = (k, v) => { try { if (s) s.setItem(k, v); } catch (e) {} };
   const del = (k) => { try { if (s) s.removeItem(k); } catch (e) {} };
   const keys = (p) => { const out = []; try { for (let i = 0; s && i < s.length; i++) { const k = s.key(i); if (k && k.startsWith(p)) out.push(k); } } catch (e) {} return out; };
+  const q = new URLSearchParams(location.search), nav = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
   const sent = get('nota-enviada');
-  if (sent) { del('nota-enviada'); if (/[?&]ok=nota(&|$)/.test(location.search)) del(sent); }
+  if (sent) { del('nota-enviada'); if (q.get('ok') === 'nota' && 'nota:' + q.get('k') === sent && (!nav || nav.type !== 'back_forward')) del(sent); }
   for (const box of document.querySelectorAll('details[data-draft]')) {
     const form = box.querySelector('form'), at = form.elements.atSec, text = form.elements.text;
     const video = document.getElementById(box.dataset.video), prefix = box.dataset.draft;
     let key = null;
     const save = () => { const k = prefix + at.value; if (key && key !== k) del(key); key = k; if (text.value.trim()) put(k, text.value); else del(k); };
-    const now = () => { if (video) { video.pause(); at.value = (Math.round(video.currentTime * 10) / 10).toFixed(1); } save(); };
+    const now = () => { if (video) { video.pause(); at.value = (Math.floor(Math.min(video.currentTime, +at.max || Infinity) * 10) / 10).toFixed(1); } save(); };
     if (text.value) save();
-    else { const k = keys(prefix).pop(), t = k ? get(k) : null; if (t) { key = k; at.value = k.slice(prefix.length); text.value = t; box.open = true; } }
+    else { const k = keys(prefix).pop(), t = k ? get(k) : null; if (t) { key = k; at.value = k.slice(prefix.length); text.value = t; box.hidden = false; box.open = true; } }
     const b = box.querySelector('[data-now]');
     if (b) b.addEventListener('click', now);
     box.addEventListener('toggle', () => { if (box.open && !text.value.trim()) now(); });
@@ -251,15 +262,17 @@ function versionCard(r, x, {delivered, newest, reviewer, csrf, draft}) {
   const video = r.playable.has(x.v)
     ? `<video id="${esc(vid)}" src="/${esc(x.proxy)}"${x.poster ? ` poster="/${esc(x.poster)}"` : ''} controls playsinline preload="metadata"></video>`
     : '<p class="gone">El video de esta versión ya no está (retención).</p>';
+  // what the label counts first, each with its severity; the rest under "también"
+  const item = (f) => `<li>${f.sev ? `<span class="sev">${esc(f.sev)}</span> ` : ''}${f.at != null ? `<b>${esc(noteClock(f.at))}</b> ` : ''}${esc(f.msg)}</li>`;
+  const counted = qc.findings.filter((f) => f.blocks), also = qc.findings.filter((f) => !f.blocks);
   const findings = qc.state === 'hallazgos' && qc.findings.length
-    ? `<details class="findings"><summary>Ver hallazgos</summary><ul>${qc.findings.slice(0, 8).map((f) => `<li>${f.at != null ? `<b>${esc(noteClock(f.at))}</b> ` : ''}${esc(f.msg)}</li>`).join('')}</ul></details>` : '';
+    ? `<details class="findings"><summary>Ver hallazgos</summary>${counted.length ? `<ul>${counted.slice(0, 8).map(item).join('')}</ul>` : ''}${also.length ? `<p class="meta">También, sin bloquear la aprobación:</p><ul>${also.slice(0, 8).map(item).join('')}</ul>` : ''}</details>` : '';
   let actions = '';
   if (reviewer) {
     if (x.approval) actions += `<details><summary>Revocar la aprobación</summary><form method="post" action="/bandeja/revocar">${hidden(base)}<label>Razón (la ve el equipo)<textarea name="reason" maxlength="500" rows="2" required></textarea></label><button>Revocar v${x.v}</button></form></details>`;
-    else if (!qc.approvable) actions += `<p class="off"><button type="button" disabled>Aprobar v${x.v}</button> <span>${esc(qc.label)}: aprobar se habilita con QC técnico superado.</span></p>`;
+    else if (!qc.approvable || x.pruned?.length) actions += `<p class="off"><button type="button" disabled>Aprobar v${x.v}</button> <span>${x.pruned?.length ? 'Sus archivos ya no están (retención): se aprueba la versión más nueva.' : `${esc(qc.label)}: aprobar se habilita con QC técnico superado.`}</span></p>`;
     else actions += `<details class="approve"><summary>Aprobar v${x.v}</summary><form method="post" action="/bandeja/aprobar">${hidden(base)}<p class="${open ? 'warn' : 'meta'}">Tienes ${plural(open, 'nota abierta', 'notas abiertas')} en esta versión${open ? ': siguen abiertas y le llegan al equipo' : ''}.</p><label>Para aprobar, escribe <b>${esc(variantName(x.identity))}</b><input name="confirm" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><button class="primary">Aprobar v${x.v}</button></form></details>`;
-    const d = draft && draft.projectId === r.projectId && +draft.v === x.v ? draft : null;
-    actions += `<details class="note" data-draft="nota:${esc(r.projectId)}:${x.v}:" data-video="${esc(vid)}"${d ? ' open' : ''}><summary>Dejar una nota en v${x.v}</summary><form method="post" action="/bandeja/nota">${hidden(base)}<div class="row"><label>Segundo<input name="atSec" type="number" inputmode="decimal" step="any" min="0" max="${esc(x.durationSec ?? '')}" value="${esc(d?.atSec ?? '0')}" required></label><button type="button" data-now>Segundo actual</button></div><label>Nota<textarea name="text" maxlength="2000" rows="3" required>${esc(d?.text ?? '')}</textarea></label><button class="primary">Enviar nota</button></form></details>`;
+    actions += noteForm(r, x, {csrf, draft, vid});
   }
   return `<figure class="card">
 <figcaption><b>v${x.v}</b> · ${esc(day(x.createdAt))} · ${esc(clock(x.durationSec ?? 0))}${tag ? ` <span class="tag">${tag}</span>` : ''}</figcaption>
@@ -267,6 +280,16 @@ ${video}
 <p class="badges"><span class="badge qc-${cls(qc.state)}">${esc(qc.label)}</span> <span class="badge st-${cls(label)}">${esc(label)}</span></p>
 ${x.approval ? `<p class="meta">Aprobada por ${esc(x.approval.by)} · ${esc(day(x.approval.at))}</p>` : ''}${findings}${actions}
 </figure>`;
+}
+
+// the reviewer's note form on version x (data-draft: where the script keeps its draft, UX-1). orphan = a version the page
+// does not show (vN+1 landed): hidden until the script restores a draft of it. A version the retention stripped takes no
+// note (addNote): its form only holds the draft to copy into the newest one.
+function noteForm(r, x, {csrf, draft, vid = '', orphan = false}) {
+  const d = draft && draft.projectId === r.projectId && +draft.v === x.v ? draft : null;
+  const max = noteMaxSec(x), gone = x.pruned?.length;
+  const lead = orphan ? `Nota sin enviar en v${x.v} (ya no es la versión más nueva)` : `Dejar una nota en v${x.v}`;
+  return `<details class="note" data-draft="nota:${esc(r.projectId)}:${x.v}:" data-video="${esc(vid)}"${d ? ' open' : ''}${orphan ? ' hidden' : ''}><summary>${lead}</summary><form method="post" action="/bandeja/nota">${hidden({csrf, project: r.projectId, v: x.v})}<div class="row"><label>Segundo<input name="atSec" type="number" inputmode="decimal" step="any" min="0" max="${Number.isFinite(max) ? Math.floor(max * 100) / 100 : ''}" value="${esc(d?.atSec ?? '0')}" required></label>${vid ? '<button type="button" data-now>Segundo actual</button>' : ''}</div><label>Nota<textarea name="text" maxlength="2000" rows="3" required>${esc(d?.text ?? '')}</textarea></label>${gone ? `<p class="warn">v${x.v} ya no admite notas: sus archivos ya no están (retención). Copia el texto en la versión más nueva y bórralo de aquí.</p>` : '<button class="primary">Enviar nota</button>'}</form></details>`;
 }
 
 function noteItem(r, x, n, {owner, reviewer, csrf}) {
@@ -285,11 +308,13 @@ function variantBlock(r, o) {
   const newest = r.versions.reduce((m, x) => (!m || x.v > m.v ? x : m), null);
   // the delivered version next to the newest — and the one a note sent back after an error was for
   const shown = [r.versions.find((x) => x.v === delivered), newest, o.draft?.projectId === r.projectId && r.versions.find((x) => x.v === +o.draft.v)].filter((x, i, a) => x && a.indexOf(x) === i);
+  // every other version: a hidden note form, where a draft left on it comes back (UX-1)
+  const orphans = o.reviewer ? r.versions.filter((x) => !shown.includes(x)).map((x) => noteForm(r, x, {csrf: o.csrf, orphan: true})).join('') : '';
   const notes = r.versions.flatMap((x) => (x.notes ?? []).map((n) => [x, n])).sort((a, b) => b[0].v - a[0].v || a[1].atSec - b[1].atSec);
   const open = notes.filter(([, n]) => n.state !== 'verificada' && n.state !== 'descartada').length;
-  return `<article class="variant" id="${esc(r.projectId)}">
+  return `<article class="variant" id="${esc(r.id ?? r.projectId)}">
 <header><h3>${esc(r.stem)}</h3><span class="badge st-${cls(state)}">${esc(state === 'aprobada' ? `aprobada = v${delivered}` : state)}</span></header>
-${shown.length ? `<div class="cards">${shown.map((x) => versionCard(r, x, {...o, delivered, newest})).join('\n')}</div>` : `<p class="empty">Todavía no hay versión de ${esc(r.stem)}.</p>`}
+${shown.length ? `<div class="cards">${shown.map((x) => versionCard(r, x, {...o, delivered, newest})).join('\n')}</div>` : `<p class="empty">Todavía no hay versión de ${esc(r.stem)}.</p>`}${orphans}
 ${notes.length ? `<section class="notes"><h4>Notas · ${plural(open, 'abierta', 'abiertas')}</h4><ul>${notes.map(([x, n]) => noteItem(r, x, n, o)).join('\n')}</ul></section>` : ''}
 </article>`;
 }
@@ -303,7 +328,7 @@ export function bandejaPage({g, rows, inbox = null, csrf, flash = null, error = 
   for (const r of rows) { const k = `${r.identity.client.toUpperCase()} · G${r.identity.script}`; groups.set(k, [...(groups.get(k) ?? []), r]); }
   const pending = (inbox ?? []).filter((i) => i.kind !== 'metrica'), metric = (inbox ?? []).filter((i) => i.kind === 'metrica');
   const inboxHtml = !inbox ? '' : `<section class="inbox" aria-labelledby="inbox-h"><h2 id="inbox-h">Pendientes <span class="count">${pending.length}</span></h2>
-${pending.length ? `<ul>${pending.map((i) => `<li><span class="kind">${esc(KIND[i.kind] ?? i.kind)}</span> ${i.projectId ? `<a href="#${esc(i.projectId)}">${esc(i.text)}</a>` : esc(i.text)}</li>`).join('\n')}</ul>` : '<p class="empty">Nada pendiente.</p>'}
+${pending.length ? `<ul>${pending.map((i) => `<li><span class="kind">${esc(KIND[i.kind] ?? i.kind)}</span> ${i.projectId ? `<a href="#${esc(i.row ?? i.projectId)}">${esc(i.text)}</a>` : esc(i.text)}</li>`).join('\n')}</ul>` : '<p class="empty">Nada pendiente.</p>'}
 ${metric.map((i) => `<p class="meta">${esc(i.text)}</p>`).join('')}</section>`;
   return `<!doctype html>
 <html lang="es">
@@ -362,6 +387,7 @@ button{font:inherit;min-height:44px;padding:9px 14px;border-radius:8px;border:1p
 button.primary{background:#2f6fef;border-color:#2f6fef;color:#fff}
 button:disabled{opacity:.5;cursor:not-allowed}
 .off{color:var(--mut);font-size:13px}
+.sev{font-size:12px;color:var(--warn);text-transform:uppercase;letter-spacing:.03em}
 .top form{margin:0}
 </style>
 </head>
@@ -406,14 +432,16 @@ const POSTS = {'/bandeja/aprobar': postApprove, '/bandeja/revocar': postRevoke, 
 // minDiskMb}. → true (every /bandeja request is answered here)
 export async function handleBandeja(req, res, url, {publicDir, g, login = false, secret, hops = 0, publicUrl = process.env.REEL_PUBLIC_URL, limiter = null, disk = () => null, now = Date.now, log = console.error}) {
   const send = (status, headers, body) => { res.writeHead(status, {...PRIVACY_HEADERS, 'Cache-Control': 'no-store', ...headers}); res.end(req.method === 'HEAD' ? undefined : body); return true; };
-  const say = (status, msg, headers = {}) => send(status, {'Content-Type': 'text/plain; charset=utf-8', ...headers}, msg);
+  // a refusal a phone can leave: one line and the way back (a GET — reloading a POST's answer would send it again)
+  const back = g?.via === 'session' && g.user ? '<p><a style="color:#8ab4ff" href="/bandeja">Volver a la bandeja</a></p>' : login ? '<p><a style="color:#8ab4ff" href="/login?next=%2Fbandeja">Entrar</a></p>' : '';
+  const say = (status, msg, headers = {}) => send(status, {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_CSP, ...headers}, `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bandeja</title><body style="margin:0;padding:24px 16px;background:#0b0b0c;color:#e8e8ea;font:16px/1.5 system-ui,sans-serif"><p>${esc(msg)}</p>${back}</body></html>`);
   const route = url.pathname.replace(/\/+$/, '');
   const read = req.method === 'GET' || req.method === 'HEAD';
   if (route !== '/bandeja' && route !== '/bandeja/salir' && !Object.hasOwn(POSTS, route)) return say(404, 'Not found');
   if (route === '/bandeja' ? !read : req.method !== 'POST') return send(405, {Allow: route === '/bandeja' ? 'GET, HEAD' : 'POST'});
   if (g?.via !== 'session' || !g.user) {
     if (read && login) return send(303, {Location: '/login?next=%2Fbandeja'});
-    return say(403, read ? 'La bandeja necesita login: solo en la VM (modo público, REEL_PUBLIC=1).' : 'solo con login en la VM');
+    return say(403, read ? 'La bandeja necesita login: solo en la VM (modo público, REEL_PUBLIC=1).' : 'Solo con login en la VM: entra otra vez con tu cuenta.');
   }
   const dir = path.join(publicDir, 'reviews');
   const sees = (clients) => seesClient(g, clients);
@@ -434,25 +462,28 @@ export async function handleBandeja(req, res, url, {publicDir, g, login = false,
   if (wait) return say(429, 'Demasiadas acciones seguidas: espera un momento.', {'Retry-After': String(wait)});
   let form;
   try { form = Object.fromEntries(new URLSearchParams(await readBody(req, 16384))); } catch (e) { return say(e.status || 400, 'Petición inválida.'); }
-  if (!csrfOk(csrf, form.csrf)) return say(403, 'La página caducó: recárgala e inténtalo otra vez.');
-  // sign out from this page: POST /logout wants an Origin of this site, which this page's no-referrer never sends
-  if (route === '/bandeja/salir') return send(303, {Location: '/login', 'Set-Cookie': cookieHeader(req, '', 0, login)});
   const projectId = String(form.project ?? ''), v = Number(form.v);
   const draft = route === '/bandeja/nota' ? {projectId, v, atSec: form.atSec, text: form.text} : null;
+  // a page of an earlier login (signed in again elsewhere): this page again, with this session's token and the note kept
+  if (!csrfOk(csrf, form.csrf)) return page(403, {error: 'La página había caducado (entraste otra vez en otra pestaña). Ya está al día: vuelve a enviarlo.', draft});
+  // sign out from this page: POST /logout wants an Origin of this site, which this page's no-referrer never sends
+  if (route === '/bandeja/salir') return send(303, {Location: '/login?next=%2Fbandeja', 'Set-Cookie': cookieHeader(req, '', 0, login)});
   // the version's client, read before the row: humanOnly (E-2) decides who may act on it; the step re-checks in the row
   const client = /^[\w-]+$/.test(projectId) && Number.isInteger(v) ? loadReviews(dir, projectId).versions.find((x) => x.v === v)?.identity?.client : null;
   if (!client || !sees(projectClients(publicDir, projectId))) return page(404, {error: 'Esa versión no existe o no es de tus clientes.'});
   const who = humanOnly(g, {client});
   if (!who.ok) return page(403, {error: who.error, draft});
   const ipHash = crypto.createHash('sha256').update(`${secret}|${clientIp(req, hops)}`).digest('hex').slice(0, 16);
-  let done;
+  let done, x;
   try {
-    const x = await withVersion(dir, projectId, v, (y) => { done = POSTS[route](y, actorOf(g), {form, at: new Date(now()).toISOString(), ipHash, userAgent: req.headers['user-agent'], publicDir}); });
+    x = await withVersion(dir, projectId, v, (y) => { done = POSTS[route](y, actorOf(g), {form, at: new Date(now()).toISOString(), ipHash, userAgent: req.headers['user-agent'], publicDir}); });
     if (!x) return page(404, {error: 'Esa versión ya no existe.'});
   } catch (e) {
     if (!e.status) throw e;
     return page(e.status, {error: e.message, draft});
   }
   try { refreshInbox({publicDir, disk: disk(), log}); } catch (e) { log(`[owner-inbox] not refreshed: ${e.message}`); }
-  return send(303, {Location: `/bandeja?ok=${done}#${projectId}`});
+  // a note names the draft it confirms (k = its key, UX-1): the page clears that one draft and no other
+  const k = done === 'nota' ? `&k=${encodeURIComponent(`${form.project}:${form.v}:${form.atSec}`)}` : '';
+  return send(303, {Location: `/bandeja?ok=${done}${k}#${variantName(x.identity) ? rowId(projectId, variantName(x.identity)) : projectId}`});
 }

@@ -42,7 +42,7 @@ import {loadEntries, searchCatalog} from '../scripts/catalog.mjs';
 import {gate, mayRejudge, servePublic, serveFile, tokenOk} from './http.mjs';
 import {createLoginLimiter, handleLogin, parseRoles, trustedHops} from './session.mjs';
 import {handleBandeja, handleReview, linkAccess, refreshInbox} from './review.mjs';
-import {openNotes, variantState, versionLabel} from '../scripts/review-states.mjs';
+import {byVariant, openNotes, variantName, variantState, versionLabel} from '../scripts/review-states.mjs';
 import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
@@ -636,9 +636,10 @@ async function handle(req, res) {
     return;
   }
 
-  // ---- upload a music track → public/music/ ----
+  // ---- upload a music track → public/music/ (audio only: public/ is served on this origin) ----
   if (req.method === 'POST' && url.pathname === '/api/music') {
     const safe = (url.searchParams.get('name') || 'track.mp3').replace(/[^\w.\-]/g, '_');
+    if (!/\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i.test(safe)) return json(res, 400, {error: 'an audio file: mp3, m4a, aac, wav, ogg, opus or flac'});
     const dir = path.join(PUBLIC, 'music');
     fs.mkdirSync(dir, {recursive: true});
     const ws = fs.createWriteStream(path.join(dir, safe));
@@ -844,8 +845,9 @@ async function handle(req, res) {
     if (req.method === 'GET' && !withLinks) {
       const r = loadReviews(REVIEWS, projectId);
       const playable = new Set(playableVersions(r, PUBLIC).map((x) => x.v));
-      const {delivered} = variantState(r.versions.filter((x) => x.identity)); // a client's version: its review state in the bandeja (read-only here)
-      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v), qcLabel: judgeText(x.judge), ...(x.identity ? {review: versionLabel(x, delivered), openNotes: openNotes(x).length} : {})})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
+      // a client's version: its review state in the bandeja (read-only here), against the versions of its own variant
+      const delivered = new Map([...byVariant(r.versions)].map(([stem, vs]) => [stem, variantState(vs).delivered]));
+      return json(res, 200, {projectId, versions: r.versions.map((x) => ({...x, playable: playable.has(x.v), qcLabel: judgeText(x.judge), ...(x.identity ? {review: versionLabel(x, delivered.get(variantName(x.identity))), openNotes: openNotes(x).length} : {})})).reverse(), links: r.links.map((l) => publicLink(l)).reverse()});
     }
     if (req.method === 'POST' && withLinks && !linkId) {
       let b = {}; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json'}); }

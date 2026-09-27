@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import bcrypt from 'bcryptjs';
 import {createLink, hashToken, inReviewsRow, keepUnapproved, loadReviews, proxyArgs, pruneVersions, recordFinal, recordVersion, removeVersion, resolveToken, retainedFiles, revokeLink} from '../scripts/reviews.mjs';
 import {gate, serveFile} from '../server/http.mjs';
-import {handleBandeja, handleReview, linkAccess} from '../server/review.mjs';
+import {bandejaRows, handleBandeja, handleReview, linkAccess} from '../server/review.mjs';
 import {SESSION_COOKIE, createLoginLimiter, parseRoles, signSession} from '../server/session.mjs';
 
 const DAY = 86400e3;
@@ -727,7 +727,7 @@ test('the bandeja: a login session only; a reviewer sees their clients\' variant
     assert.equal((await get(srv, '/bandeja/aprobar', ck('rev'))).status, 405, 'no GET on a step');
     assert.equal((await get(srv, '/bandeja/otra', ck('rev'))).status, 404);
     const out = await post(srv, '/bandeja/salir', ck('rev'), {csrf: rev.csrf});
-    assert.deepEqual([out.status, out.headers.location], [303, '/login']);
+    assert.deepEqual([out.status, out.headers.location], [303, '/login?next=%2Fbandeja'], 'signing in again lands on the bandeja');
     assert.match(out.headers['set-cookie'][0], new RegExp(`^${SESSION_COOKIE}=; .*Max-Age=0.*; Secure`));
     assert.equal((await post(srv, '/bandeja/salir', ck('rev'), {csrf: 'x'})).status, 403, 'not without its CSRF token');
   } finally { srv.close(); local.close(); }
@@ -767,7 +767,7 @@ test('approve / revoke in the bandeja: only the client\'s reviewer, same-site, w
     // a double click: two POSTs at once → one approval, both answered like the first. The second comes as a browser sends it
     // from this page (its Referrer-Policy no-referrer: Origin null) — the CSRF token decides
     const both = await Promise.all([post(srv, '/bandeja/aprobar', ck('rev'), ok), post(srv, '/bandeja/aprobar', {...ck('rev'), origin: 'null'}, ok)]);
-    assert.deepEqual(both.map((x) => [x.status, x.headers.location]), [[303, '/bandeja?ok=aprobada#p-1'], [303, '/bandeja?ok=aprobada#p-1']]);
+    assert.deepEqual(both.map((x) => [x.status, x.headers.location]), [[303, '/bandeja?ok=aprobada#p-1-ACME_G2_H1_C1'], [303, '/bandeja?ok=aprobada#p-1-ACME_G2_H1_C1']]);
     assert.equal(approval().by, 'rev');
     assert.match(approval().ipHash, /^[0-9a-f]{16}$/);
     assert.equal(approval().userAgent, 'TestPhone/1');
@@ -874,5 +874,52 @@ test('note steps in the bandeja: the owner confirms a classified note or discard
     assert.match(html, /Descartada: el logo es del cliente/);
     assert.match(html, /verificada/);
     assert.deepEqual(loadReviews(dir, 'p-1').versions[0].log.map((l) => `${l.action}:${l.by}`), ['nota:rev', 'nota:rev', 'clasificar:backend-token', 'confirmar:boss', 'resolver:backend-token', 'verificar:rev', 'descartar:boss']);
+  } finally { srv.close(); }
+});
+
+test('the bandeja after the reviews: a variant reads only its own versions; retention-stripped versions take no approval or note; drafts of a version no longer shown come back; a note\'s answer names its draft; a stale page is answered with a working one', async () => {
+  const {pub, dir} = bandejaFixture(3);
+  for (const v of [1, 2, 3]) await setJudge(dir, v, 'superado');
+  const srv = await serve(pub, {limiter: createLoginLimiter({max: 100})});
+  try {
+    const {csrf, html} = await page(srv, 'rev');
+    // v3 is the newest: v1 and v2 keep a hidden note form each, where a draft left on them comes back (UX-1)
+    assert.match(html, /<details class="note" data-draft="nota:p-1:3:" data-video="vid-p-1-3">/);
+    for (const v of [1, 2]) assert.match(html, new RegExp(`<details class="note" data-draft="nota:p-1:${v}:" data-video="" hidden><summary>Nota sin enviar en v${v}`));
+    assert.match(html, /name="atSec" type="number" inputmode="decimal" step="any" min="0" max="2.5"/, 'the form takes what the server takes: the length + 0.5 s');
+    // a note's answer names the draft it confirms; the anchor is the variant's row
+    const sent = await post(srv, '/bandeja/nota', {...ck('rev'), origin: 'null'}, {csrf, project: 'p-1', v: '2', atSec: '2.4', text: 'al final'});
+    assert.deepEqual([sent.status, sent.headers.location], [303, '/bandeja?ok=nota&k=p-1%3A2%3A2.4#p-1-ACME_G2_H1_C1']);
+    assert.match(html, /<article class="variant" id="p-1-ACME_G2_H1_C1">/);
+    // a page of an earlier login: 403 with the bandeja itself — this session's token, the note still in its form
+    const stale = await post(srv, '/bandeja/nota', ck('rev'), {csrf: 'from-an-earlier-login', project: 'p-1', v: '1', atSec: '1', text: 'mi nota'});
+    const body = stale.body.toString();
+    assert.equal(stale.status, 403);
+    assert.match(body, /role="alert">La página había caducado/);
+    assert.match(body, new RegExp(`name="csrf" value="${csrf}"`));
+    assert.match(body, /data-draft="nota:p-1:1:" data-video="vid-p-1-1" open>.*>mi nota<\/textarea>/s);
+    // a refusal outside the page: plain HTML with the way back, never a dead end
+    const late = await post(srv, '/bandeja/nota', {'x-reel-token': 'backend-tok'}, {csrf, project: 'p-1', v: '1', atSec: '1', text: 'x'});
+    assert.equal(late.status, 403);
+    assert.match(late.body.toString(), /<a style="color:#8ab4ff" href="\/login\?next=%2Fbandeja">Entrar<\/a>/);
+    // the retention stripped v1 (REEL_REVIEW_KEEP_UNAPPROVED): neither approved nor annotated, and the page says so
+    await withVersion(dir, 'p-1', 1, (x) => { x.pruned = Object.values(x.deliverables); });
+    for (const [route, fields] of [['/bandeja/aprobar', {confirm: 'ACME_G2_H1_C1'}], ['/bandeja/nota', {atSec: '1', text: 'tarde'}]]) {
+      const r = await post(srv, route, ck('rev'), {csrf, project: 'p-1', v: '1', ...fields});
+      assert.equal(r.status, 409, route);
+      assert.match(r.body.toString(), /role="alert">No se puede (aprobar|anotar) v1: sus archivos ya no están/, route);
+    }
+    assert.equal(loadReviews(dir, 'p-1').versions[0].approval, undefined);
+    // the project's identity moves to H2 after v1 (H1) was approved: H2 is not 'aprobada = v1'; H1 keeps its approval
+    await withVersion(dir, 'p-1', 1, (x) => { delete x.pruned; });
+    assert.equal((await post(srv, '/bandeja/aprobar', ck('rev'), {csrf, project: 'p-1', v: '1', confirm: 'ACME_G2_H1_C1'})).status, 303);
+    const h2 = {...IDENTITY, variant: {hook: 2, cta: 1}};
+    await withVersion(dir, 'p-1', 3, (x) => { x.identity = h2; });
+    fs.writeFileSync(path.join(pub, 'projects', 'p-1.json'), JSON.stringify({name: 'G2', identity: h2}));
+    const moved = (await page(srv, 'rev')).html;
+    assert.match(moved, /<article class="variant" id="p-1-ACME_G2_H1_C1">\n<header><h3>ACME_G2_H1_C1<\/h3><span class="badge st-aprobada">aprobada = v1</);
+    assert.match(moved, /<article class="variant" id="p-1-ACME_G2_H2_C1">\n<header><h3>ACME_G2_H2_C1<\/h3><span class="badge st-por-revisar">por revisar</);
+    const rows = bandejaRows(pub, () => true).filter((r) => r.projectId === 'p-1');
+    assert.deepEqual(rows.map((r) => [r.stem, r.versions.map((x) => x.v), !!r.project]), [['ACME_G2_H1_C1', [1, 2], false], ['ACME_G2_H2_C1', [3], true]]);
   } finally { srv.close(); }
 });
