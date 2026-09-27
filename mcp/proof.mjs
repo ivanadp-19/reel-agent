@@ -102,10 +102,15 @@ async function tile(files, cols, out, labels, font) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const spec = process.argv[2];
-  const {what, times, atSec, props} = JSON.parse(fs.readFileSync(spec, 'utf8'));
   const out = path.dirname(spec);
   const onStill = (i, n) => console.log(`still ${i}/${n}`);
-  const r = what === 'motion' ? await renderStrip(props, atSec, out, {onStill}) : await renderProof(props, times, out, 0.35, onStill);
-  fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(r));
+  try {
+    const {what, times, atSec, props} = JSON.parse(fs.readFileSync(spec, 'utf8'));
+    const r = what === 'motion' ? await renderStrip(props, atSec, out, {onStill}) : await renderProof(props, times, out, 0.35, onStill);
+    fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(r));
+  } catch (e) {
+    console.error(`proof: ${String(e?.message ?? e).split('\n')[0]}`); // the last line the job keeps is the reason, not a stack frame
+    process.exit(1);
+  }
   process.exit(0); // the bundle's work dir goes with the exit hook
 }

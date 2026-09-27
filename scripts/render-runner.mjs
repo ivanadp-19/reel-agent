@@ -85,7 +85,7 @@
 //
 // A PROOF (job.kind 'proof', the queue's proof lane — POST /api/proof, the MCP's caption_proof / motion_proof):
 // no export, no QC, no version. mcp/proof.mjs renders the stills (or the 24-frame strip) of the job's props in a
-// child — niced (REEL_PROOF_NICE, 15) when a render holds a slot as it starts — into .captions-tmp/proof-<id>/,
+// child — niced (REEL_PROOF_NICE, 10) when a render holds a slot as it starts — into .captions-tmp/proof-<id>/,
 // and the result names the contact sheet there ({sheet, dir, rev, …}); a failed or cancelled proof leaves nothing.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -248,7 +248,9 @@ export const defaultCommands = {
   // a proof: the stills / strip of spec.json ({what, times | atSec, props}) → result.json next to it
   proof: ({spec}) => ['node', ['mcp/proof.mjs', spec]],
 };
-const PROOF_NICE = Math.min(19, Math.max(0, +(process.env.REEL_PROOF_NICE ?? 15) || 0));
+// 10, not the judge's 15: an agent waits on a proof — at 15 one next to a CPU-bound final gets ~3 % of a core (weight 36
+// vs 1024) and would run into REEL_PROOF_TIMEOUT_SEC; at 10 ~10 % (110)
+const PROOF_NICE = Math.min(19, Math.max(0, +(process.env.REEL_PROOF_NICE ?? 10) || 0));
 const sha256Of = async (file) => { const h = crypto.createHash('sha256'); for await (const b of fs.createReadStream(file)) h.update(b); return h.digest('hex'); };
 
 // What a render will do, said before it is queued (POST /api/render answers with it,

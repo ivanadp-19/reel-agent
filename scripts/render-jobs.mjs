@@ -82,7 +82,7 @@ const ID_RE = /^[\w-]{6,64}$/;
 const DAY = 86400e3;
 
 export const jobsDir = (publicDir) => path.join(publicDir, 'render-jobs');
-export const kindOf = (j) => (j?.kind === 'proof' ? 'proof' : 'render');
+const kindOf = (j) => (j?.kind === 'proof' ? 'proof' : 'render');
 const kindName = (j) => (kindOf(j) === 'proof' ? 'proof' : j.draft ? 'draft' : 'final');
 export const newJobId = (now = Date.now()) => `${now}${crypto.randomBytes(3).toString('hex')}`; // parallel agents may submit in the same ms
 
@@ -162,7 +162,8 @@ export function fairOrder(jobs) {
   const served = new Map(), queues = new Map();
   for (const j of jobs) {
     const b = j.projectId ?? '';
-    if (j.startedAt) served.set(b, Math.max(served.get(b) ?? -Infinity, Date.parse(j.startedAt) || -Infinity));
+    // a queued job's startedAt is the attempt a restart cut (re-queued): no serve, it keeps its place
+    if (j.startedAt && j.status !== 'queued') served.set(b, Math.max(served.get(b) ?? -Infinity, Date.parse(j.startedAt) || -Infinity));
     if (j.status === 'queued') { if (!queues.has(b)) queues.set(b, []); queues.get(b).push(j); }
   }
   const buckets = [...queues].map(([b, q]) => ({at: served.get(b) ?? -Infinity, q: q.sort((x, y) => x.seq - y.seq)})).sort((x, y) => x.at - y.at || x.q[0].seq - y.q[0].seq);
@@ -414,7 +415,7 @@ export function createRenderJobs({
       // a render holds a slot now (a proof then runs niced: scripts/render-runner.mjs)
       renderBusy: () => slotsHeld('render') > 0,
     };
-    log(`${kindOf(job)} ${job.id} started (${kindName(job)}${job.projectId ? ` of ${job.projectId}` : ''}, attempt ${(job.attempts ?? 0) + 1})`);
+    log(`${kindOf(job)} ${job.id} started (${kindOf(job) === 'proof' ? job.proof?.what ?? 'proof' : kindName(job)}${job.projectId ? ` of ${job.projectId}` : ''}, attempt ${(job.attempts ?? 0) + 1})`);
     Promise.resolve()
       .then(() => run(readJob(dir, job.id), ctx))
       .then(
@@ -468,11 +469,12 @@ export function createRenderJobs({
       fs.rmSync(fileOf(dir, j.id, '.claim'), {force: true});
       const hasProps = fs.existsSync(fileOf(dir, j.id, '.props.json'));
       if (cancelRequested(j.id)) { end(j.id, {status: 'cancelled', stage: 'cancelled', label: 'Cancelled'}); continue; }
-      if ((j.attempts ?? 1) < MAX_ATTEMPTS && hasProps) {
+      // a proof is not run again: the MCP session waiting for it died with the backend (HTTP) or gave up polling
+      if ((j.attempts ?? 1) < MAX_ATTEMPTS && hasProps && kindOf(j) !== 'proof') {
         save({...j, status: 'queued', stage: 'queued', label: 'Queued (restarted after the backend stopped)', progress: 0, frames: undefined, etaSec: undefined, pid: null, owner: undefined, requeuedAt: iso()});
         log(`render ${j.id} re-queued: its backend (pid ${holder}) stopped mid-render`);
       } else {
-        end(j.id, {status: 'failed', stage: 'failed', label: 'Failed', errorCode: 'INTERRUPTED', error: `interrupted: the backend (pid ${holder}) stopped during the render${hasProps ? ` — ${j.attempts} attempts` : ''}`});
+        end(j.id, {status: 'failed', stage: 'failed', label: 'Failed', errorCode: 'INTERRUPTED', error: `interrupted: the backend (pid ${holder}) stopped during the ${kindOf(j)}${hasProps ? ` — ${j.attempts} attempts` : ''}`});
         log(`render ${j.id} failed: interrupted`);
       }
     }
@@ -488,7 +490,9 @@ export function createRenderJobs({
   // start gets it before a proof does, and no proof starts while one waits for it.
   function pump() {
     if (stopping) return;
-    pumpLane('proof', pumpLane('render'));
+    // …or one another backend found so in the last two ticks (its claim hid it from this pump)
+    const fresh = (j) => j.memoryWait?.lastAt && now() - Date.parse(j.memoryWait.lastAt) < 2 * tickMs;
+    pumpLane('proof', pumpLane('render') ?? listJobs(dir, {kind: 'render', status: 'queued'}).find(fresh)?.id ?? null);
   }
   // → the id of the lane's next job when it waits for memory alone (a slot is free for it), else null
   function pumpLane(kind, behind = null) {
@@ -575,7 +579,7 @@ export function createRenderJobs({
     list: (opts) => listJobs(dir, opts),
     ahead: (id) => aheadOf(listJobs(dir), id),
     prune: (opts) => prune(dir, opts),
-    view: (id) => { const jobs = listJobs(dir); return legacyView(jobs.find((j) => j.id === id) ?? null, aheadOf(jobs, id)); },
+    view: (id) => { const j = readJob(dir, id); return legacyView(j, j?.status === 'queued' ? aheadOf(listJobs(dir), id) : 0); },
     tick,
     pump,
     recover,

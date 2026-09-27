@@ -1233,17 +1233,19 @@ async function proofJob(body, extra) {
   extra?.signal?.addEventListener('abort', cancel, {once: true});
   const t0 = Date.now();
   let waitedMs = 0;
+  const maxQueuedMs = +(process.env.REEL_PROOF_QUEUE_MAX_SEC || 1800) * 1000; // then cancelled, with why it waited
   try {
     for (let misses = 0; ;) {
       let s;
       try { s = await fetch(`${API}/api/render/${r.jobId}`).then((x) => x.json()); misses = 0; }
       catch (e) { if (++misses >= 8) throw new Error(`lost the backend while waiting for proof ${r.jobId}: ${e.message}`); await new Promise((ok) => setTimeout(ok, 2000)); continue; }
       if (s.queued) waitedMs = Date.now() - t0;
+      if (s.queued && waitedMs > maxQueuedMs) { await cancel(); throw new Error(`proof ${r.jobId} gave up after ${Math.round(waitedMs / 60e3)} min in the queue (REEL_PROOF_QUEUE_MAX_SEC) — ${s.label}`); }
       if (s.status === 'done') return {...s, turn: r.ahead || waitedMs > 5000 ? `\n(proof en fila, ${r.ahead} antes: ${Math.round(waitedMs / 1000)} s de espera)` : ''};
       if (s.status === 'error') throw new Error(`proof ${r.jobId}: ${s.error}`);
       if (s.status === 'unknown') throw new Error(`proof ${r.jobId} vanished (backend restarted?)`);
       tell(s.label);
-      await new Promise((ok) => setTimeout(ok, 1000));
+      await new Promise((ok) => setTimeout(ok, s.queued ? 3000 : 1500)); // as runJob polls
     }
   } finally { extra?.signal?.removeEventListener('abort', cancel); }
 }

@@ -1355,6 +1355,17 @@ test('a proof past REEL_PROOF_TIMEOUT_SEC is killed and failed with the message;
   await until(() => readJob(s.dir, next.id).status === 'done');
 });
 
+test('a proof a backend restart cut is failed as interrupted, not run again (nobody waits for it any more)', () => {
+  const {dir} = setup();
+  const id = '1700000000000abc123';
+  fs.writeFileSync(path.join(dir, `${id}.props.json`), props());
+  writeJob(dir, {id, seq: 5, kind: 'proof', proof: {what: 'caption', times: [1]}, status: 'running', owner: deadPid(), attempts: 1, draft: true, projectId: 'p1', createdAt: new Date().toISOString()});
+  createRenderJobs({dir, workers: 1, log: quiet, run: () => new Promise(() => {})}).recover();
+  const j = readJob(dir, id);
+  assert.equal(j.status, 'failed'); assert.equal(j.errorCode, 'INTERRUPTED');
+  assert.match(j.error, /stopped during the proof/);
+});
+
 test('a proof that crashes fails with the reason and leaves nothing; a cancelled one is killed; the lane goes on', async () => {
   const s = setup();
   const crash = proofOf(s, {mode: 'crash'});
@@ -1412,6 +1423,24 @@ test('memory: a proof waits under REEL_PROOF_START_MIN_MEM_MB (1024), and never 
   await until(() => readJob(s.dir, behind.id).status === 'done', 8000);
 });
 
+test('two backends: a render another backend just found short of memory (its claim hides it here) holds the proofs too', async () => {
+  const s = setup({memory: () => 1500});
+  const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], {stdio: 'ignore'});
+  kids.push(other.pid);
+  const r = {id: '1800000000000aa0001', seq: 1, status: 'queued', attempts: 0, draft: true, projectId: 'p2', createdAt: new Date().toISOString(), memoryWait: {since: new Date().toISOString(), lastAt: new Date().toISOString(), availMb: 1500, needMb: 2560, checks: 1}};
+  writeJob(s.dir, r);
+  fs.writeFileSync(path.join(s.dir, `${r.id}.props.json`), props());
+  fs.writeFileSync(path.join(s.dir, `${r.id}.claim`), String(other.pid)); // the other backend is checking it right now
+  const pr = proofOf(s);
+  await sleep(40);
+  assert.equal(readJob(s.dir, pr.id).status, 'queued');
+  assert.equal(readJob(s.dir, pr.id).memoryWait.render, r.id);
+  // that wait goes stale (the other backend stopped refreshing it): the proof runs
+  writeJob(s.dir, {...readJob(s.dir, r.id), memoryWait: {...r.memoryWait, lastAt: new Date(Date.now() - 60e3).toISOString()}});
+  s.jobs.tick();
+  await until(() => readJob(s.dir, pr.id).status === 'done');
+});
+
 test('fair queue (CEO-18): A1 A2 B1 C1 submitted in that order start A1, B1, C1, A2; aheadOf counts in that order', async () => {
   const q = (id, projectId, seq, extra = {}) => ({id, projectId, seq, status: 'queued', ...extra});
   assert.deepEqual(fairOrder([q('A1', 'A', 1), q('A2', 'A', 2), q('B1', 'B', 3), q('C1', 'C', 4)]).map((j) => j.id), ['A1', 'B1', 'C1', 'A2']);
@@ -1419,6 +1448,8 @@ test('fair queue (CEO-18): A1 A2 B1 C1 submitted in that order start A1, B1, C1,
   const t = (m) => new Date(Date.UTC(2026, 8, 27, 0, m)).toISOString();
   const jobs = [q('A0', 'A', 0, {status: 'done', startedAt: t(5)}), q('B0', 'B', 0, {status: 'running', startedAt: t(9)}), q('A2', 'A', 2), q('B1', 'B', 3), q('n1', null, 4), q('n2', null, 5), q('A3', 'A', 6)];
   assert.deepEqual(fairOrder(jobs).map((j) => j.id), ['n1', 'A2', 'B1', 'n2', 'A3']);
+  // re-queued after a restart: the startedAt of the attempt it lost is no serve — it keeps its place
+  assert.deepEqual(fairOrder([q('C1', 'C', 1, {startedAt: t(30)}), q('D1', 'D', 2)]).map((j) => j.id), ['C1', 'D1']);
   assert.equal(aheadOf(jobs, 'B1'), 1 + 2, 'the running one + n1, A2');
   // proofs count only proofs
   assert.equal(aheadOf([...jobs, q('P1', 'A', 7, {kind: 'proof'})], 'P1'), 0);
