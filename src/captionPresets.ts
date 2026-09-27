@@ -68,8 +68,15 @@ export type Preset = {
   // keepCommas: a comma stays on screen mid-page (in its word's color) and never ends a page; a
   // page-final comma and every period go. figurePages: a highlighted figure may stand alone ('326').
   // keepDigits: a figure the ASR wrote in digits stays digits where the guion spells it out.
-  // glueExcept: function words a page may end on here
-  layout: {maxWords: number; maxCharsLine: number; unbreakable?: boolean; topPct?: number; padPx?: number; overflowPad?: boolean; keepCommas?: boolean; figurePages?: boolean; keepDigits?: boolean; glueExcept?: string[]};
+  // glueExcept: function words a page may end on here.
+  // Opt-ins (absent = the pager and the wrap as before; never vibem, whose look is the golden):
+  // balance: a page's lines are balanced to even widths (src/captionLayout.ts breakLines) instead of
+  // flex-wrap's greedy fill. Fats403's pager (src/paging.ts): silenceMs, the pause that ends a page
+  // (450); maxChars / maxMs, hard caps checked before a word joins (characters shown, speech) — with
+  // either, a clause end no longer ends a page by itself; minMs, a page on screen for less merges into
+  // a neighbor; minWords, a page with fewer merges or takes a word from a neighbor
+  layout: {maxWords: number; maxCharsLine: number; unbreakable?: boolean; topPct?: number; padPx?: number; overflowPad?: boolean; keepCommas?: boolean; figurePages?: boolean; keepDigits?: boolean; glueExcept?: string[];
+    balance?: boolean; silenceMs?: number; maxChars?: number; maxMs?: number; minMs?: number; minWords?: number};
   highlight?: import('./highlights.ts').HighlightRules; // how the captions step proposes key words for a new reel (1–2 a sentence otherwise)
 };
 
@@ -98,6 +105,14 @@ const base = {
   tiers: {1: {weight: 800}, 2: {weight: 800, scale: 1.15}},
   layout: {maxWords: 6, maxCharsLine: 26},
 } satisfies Omit<Preset, 'id' | 'label' | 'desc' | 'font'>;
+
+// The packs whose Captions.ai previews show a page's words balanced on two lines or more — Prism, Lift,
+// Stack, Sketch, Y2K (research/captions-ai-motion.md) — take the opt-ins: balanced lines, no 1-word page
+// (none in those previews) and no page on screen under 0.8 s (the shortest measured there: Sketch's first
+// page, 0.17–1.00 s; Prism 1.0, Stack 1.1, Y2K 1.1, Lift 1.3 s). The one-line or 1–3-word packs (Vista,
+// Lens, Focus, Evo, Prime, Impact, Orbit, Align, Linen) and those the previews do not show on two lines
+// keep the pager and the wrap as they were.
+const TWO_LINE_MIN_MS = 800;
 
 // floating positions cycle per page (Prism-style): top-left, top-right, low-center.
 // Tops stay under the Reels top UI band (validate.ts SAFE.topPct = 13).
@@ -227,7 +242,7 @@ export const PRESETS: Record<string, Preset> = {
     opening: 'zoomBlur',
     titles: {reveal: 'blur', out: 'fade'},
     tiers: {1: {weight: 800, italic: true, scale: 1.45, fill: 'gradient'}, 2: {weight: 800, italic: true, scale: 1.9, fill: 'gradient'}},
-    layout: {maxWords: 6, maxCharsLine: 24},
+    layout: {maxWords: 6, maxCharsLine: 24, balance: true, minWords: 2, minMs: TWO_LINE_MIN_MS}, // 'What You Should / Really Be Paying / Attention To', 'First-Time / Homebuyers'
   },
   focus: {
     ...base,
@@ -264,7 +279,7 @@ export const PRESETS: Record<string, Preset> = {
     wordIn: 'fade',
     keyIn: 'pop',
     tiers: {1: {weight: 800, scale: 1.5, color: 'text'}, 2: {weight: 800, scale: 1.6, color: 'text'}},
-    layout: {maxWords: 6, maxCharsLine: 22},
+    layout: {maxWords: 6, maxCharsLine: 22, balance: true, minWords: 2, minMs: TWO_LINE_MIN_MS}, // the words build up on two lines
   },
   lift: {
     ...base,
@@ -282,7 +297,7 @@ export const PRESETS: Record<string, Preset> = {
     wordIn: 'cut',
     keyIn: 'cut',
     tiers: {1: {weight: 500}, 2: {weight: 600, scale: 1.12}},
-    layout: {maxWords: 5, maxCharsLine: 18},
+    layout: {maxWords: 5, maxCharsLine: 18, balance: true, minWords: 2, minMs: TWO_LINE_MIN_MS}, // 'What's slowing / your team down?', 'It's not effort, / it's visibility.'
   },
   evo: {
     ...base,
@@ -384,7 +399,7 @@ Object.assign(PRESETS, {
     colors: {text: '#ffffff', dim: 'rgba(255,255,255,0.5)', accent: '#E9DCC5'},
     reveal: 'build', wordIn: 'cut', keyIn: 'cut', pageIn: {type: 'none', ms: 0}, pageOut: 'cut',
     titles: {reveal: 'blur', out: 'fade'},
-    tiers: {1: {weight: 700, color: 'text'}, 2: {weight: 700, scale: 1.2, color: 'text'}}, layout: {maxWords: 4, maxCharsLine: 22},
+    tiers: {1: {weight: 700, color: 'text'}, 2: {weight: 700, scale: 1.2, color: 'text'}}, layout: {maxWords: 4, maxCharsLine: 22, balance: true, minWords: 2, minMs: TWO_LINE_MIN_MS}, // two lines at most
   },
   lens: {
     ...base, id: 'lens', label: 'Lens',
@@ -420,7 +435,7 @@ Object.assign(PRESETS, {
     colors: {text: '#F0FF00', dim: 'rgba(240,255,0,0.5)', accent: '#EEFF3A'},
     shadow: '0 2px 8px rgba(0,0,0,0.45)', reveal: 'build', wordIn: 'fade', keyIn: 'fade', pageIn: {type: 'none', ms: 0}, pageOut: 'cut',
     titles: {reveal: 'fade', out: 'fade'},
-    tiers: {1: {weight: 700, color: 'text'}, 2: {weight: 700, color: 'text'}}, layout: {maxWords: 5, maxCharsLine: 24},
+    tiers: {1: {weight: 700, color: 'text'}, 2: {weight: 700, color: 'text'}}, layout: {maxWords: 5, maxCharsLine: 24, balance: true, minWords: 2, minMs: TWO_LINE_MIN_MS}, // the phrase builds on 1–2 lines
   },
   form: {
     ...base, id: 'form', label: 'Form',

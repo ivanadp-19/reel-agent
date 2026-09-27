@@ -51,7 +51,7 @@ const {normalizeCaption, projectCaptions, shownUntilMs} = await import(src('capt
 const {validateProject, validateIdentity, transcriptIssues, unbackedData, dataIssue, SAFE} = await import(src('validate.ts'));
 const {DUR_MS} = await import(src('transitions.ts'));
 const {presetOf} = await import(src('captionPresets.ts'));
-const {captionPreset, fitPage, wrapUnits, realAdvances, MIN_FONT_PX} = await import(src('captionLayout.ts'));
+const {captionPreset, fitPage, nameRuns, realAdvances, MIN_FONT_PX} = await import(src('captionLayout.ts'));
 const {readFont} = await import(src('sfnt.ts'));
 const {projectBrolls} = await import(src('brollModel.ts'));
 const {projectGraphics} = await import(src('graphicTemplates.ts'));
@@ -302,12 +302,12 @@ export function splitNameFindings(pages, glossary = [], style, rawOf = rawText, 
 
 // caption text that runs off the frame / pages too tall (a failure César reported). The page
 // layout is src/captionLayout.ts — the SAME function CaptionTrack renders with (bonded pairs,
-// widths as rendered, the shrink to fit, the wrap) — so this only adds the verdict. Widths
-// are a table estimate (heuristic) unless the pack's own font file was read (realAdvances): confirm
-// flagged pages with frame_at on the render.
-export function overflowFindings(pages, style, brandFont) {
+// widths as rendered with their emoji, the shrink to fit, the page's lines: flex-wrap's, or balanced in a
+// layout.balance pack) — so this only adds the verdict. Widths are a table estimate (heuristic) unless
+// the pack's own font file was read (realAdvances): confirm flagged pages with frame_at on the render.
+export function overflowFindings(pages, style, brandFont, glossary = []) {
   const preset = captionPreset(style, brandFont);
-  const gapEm = preset.font.wordGapEm ?? 0.26;
+  const terms = glossary.flatMap((g) => [g.term, ...(g.variants ?? [])]).map((t) => String(t).split(/\s+/).map(fold).filter(Boolean)).filter((t) => t.length > 1);
   const out = [];
   pages.forEach((c, i) => {
     if (!c.words.length) return;
@@ -321,16 +321,28 @@ export function overflowFindings(pages, style, brandFont) {
       out.push(F('overflow', blocker ? 'blocker' : 'major', 'heuristic', c.startMs / 1000, c.endMs / 1000, blocker ? `"${text}" (${c.id}) se sale del cuadro: la palabra/unidad más ancha no cabe ni a ${MIN_FONT_PX}px` : `"${text}" (${c.id}) — una palabra/unidad es más ancha que la caja flotante`, {page: c.id, lookAt: r2(at)}, blocker ? [{tool: 'edit_caption', args: {caption_id: c.id, text: '<shorter wording>'}}] : [{tool: 'edit_caption', args: {caption_id: c.id, scale: fitScale}}]));
       return;
     }
-    const starts = wrapUnits(fit.units, fit.fontSize, fit.wrapPx, gapEm);
+    const starts = fit.lines;
     if (starts.length > T.maxLines) out.push(F('overflow', 'major', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) ocupa ~${starts.length} líneas — bloque demasiado alto`, {page: c.id, lines: starts.length, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, scale: r2(Math.max(0.5, (c.scale ?? 1) * 0.85))}}]));
     else if (fit.fontSize < fit.baseSize * 0.75) out.push(F('overflow', 'minor', 'heuristic', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) se encoge a ${Math.round((fit.fontSize / fit.baseSize) * 100)}% para caber`, {page: c.id, lookAt: r2(at)}, []));
-    // a capitalized pair the wrap breaks across lines (packs without bonding)
+    // a name the page's lines break: a glossary term (of any length) is a rule; a capitalized pair or a
+    // name with a connector (captionLayout nameRuns: "Temozón / Norte", "PLAYA DEL / CARMEN") a candidate
+    const names = fit.paired.size ? [] : nameRuns(c.words);
     for (const k of starts.slice(1)) {
-      const prev = c.words[fit.units[k - 1].to].text, cur = c.words[fit.units[k].from].text;
-      if (!fit.paired.size && CAP.test(prev) && (CAP.test(cur) || /^\d/.test(cur)) && !SENT_END.test(prev)) {
-        out.push(F('split-name', 'minor', 'candidate', c.startMs / 1000, c.endMs / 1000, `nombre que puede partirse en dos líneas: "${prev} / ${cur}" (${c.id})`, {page: c.id, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, text: '<break the page before the name>'}}]));
-        break;
-      }
+      const cut = fit.units[k].from, left = c.words.slice(0, cut), right = c.words.slice(cut);
+      if (SENT_END.test(left.at(-1).text)) continue;
+      // a term whose first j + 1 words end the line and the rest open the next (span: its words)
+      let span = [];
+      const term = terms.find((t) => t.some((_, j) => j < t.length - 1 && j < left.length && t.length - j - 1 <= right.length && (span = [...left.slice(left.length - j - 1), ...right.slice(0, t.length - j - 1)]).every((w, i) => fold(w.text) === t[i])));
+      const run = names.find(([a, b]) => a < cut && cut <= b);
+      if (!term && !run) continue;
+      const shown = (ws) => ws.map((w) => clean(w.text)).join(' ');
+      out.push(term
+        ? F('split-name', 'major', 'rule', c.startMs / 1000, c.endMs / 1000, `término del glosario "${shown(span)}" partido en dos líneas (${c.id})`, {page: c.id, words: span.map((w) => w.wid), lookAt: r2(at)}, preset.layout.balance && span.every((w) => w.wid)
+          // the balanced lines never break inside a highlighted span unless nothing else fits (captionLayout breakLines)
+          ? [{tool: 'annotate_captions', note: 'the whole term as one highlighted span: the page\'s balanced lines keep it together', args: {items: span.map((w) => ({wid: w.wid, tier: Math.max(1, w.tier ?? 0)}))}}]
+          : [{tool: 'edit_caption', note: 'smaller, so the term fits one line (flex-wrap: no tool moves a line break)', args: {caption_id: c.id, scale: r2(Math.max(0.5, (c.scale ?? 1) * 0.85))}}])
+        : F('split-name', 'minor', 'candidate', c.startMs / 1000, c.endMs / 1000, `nombre que puede partirse en dos líneas: "${shown(c.words.slice(run[0], cut))} / ${shown(c.words.slice(cut, run[1] + 1))}" (${c.id})`, {page: c.id, lookAt: r2(at)}, [{tool: 'edit_caption', args: {caption_id: c.id, text: '<break the page before the name>'}}]));
+      break;
     }
     const dur = (shownUntilMs(pages, i, preset.holdMs) - c.startMs) / 1000; // on screen, the hold included
     if (dur > 0 && text.length / dur > T.cps) out.push(F('reading-speed', 'minor', 'rule', c.startMs / 1000, c.endMs / 1000, `"${text}" (${c.id}) — ${Math.round(text.length / dur)} caracteres/s, ilegible (≤ ${T.cps})`, {page: c.id}, []));
@@ -1395,7 +1407,7 @@ export async function judge({projectId, render, publicDir = path.join(ROOT, 'pub
     const rawWord = new Map(words.map((w) => [w.wid, w.word]));
     const rawOf = (w) => (w.wid && rawWord.get(w.wid)) || w.text; // the transcript keeps the periods captions drop
     const namesMaySplit = !!profile?.captions?.namesMaySplit; // the client's look splits names across lines and pages (César v11)
-    findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf, namesMaySplit), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body).filter((f) => !(namesMaySplit && f.check === 'split-name')));
+    findings.push(...splitNameFindings(pages, glossary, p.captionStyle, rawOf, namesMaySplit), ...overflowFindings(pages, p.captionStyle, p.brand?.fonts?.body, glossary).filter((f) => !(namesMaySplit && f.check === 'split-name' && f.kind === 'candidate')));
     if (haveTr) findings.push(...captionTextFindings(pages, words, new Set(p.hiddenWids ?? []), spellings));
     if (profile?.captions?.pagination === 'sentence') findings.push(...paginationFindings(pages, p.captionStyle, rawOf));
     const offPack = packFindings(p.captionStyle, profile, p.brand?.style?.pack);

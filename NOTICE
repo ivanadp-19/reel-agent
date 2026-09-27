@@ -7,3 +7,17 @@ This project started as a fork of AutoBroll
 (https://github.com/andriidrok1/autobroll, commit 9122e89, 2026-09-16),
 Copyright (c) 2026 Andrii Drok, licensed under the MIT License.
 The original license text is kept in LICENSE.autobroll.
+
+The sentence-boundary rules of src/paging.ts (endsSentence) and its opt-in page
+caps (the clause split, the short-page and orphan merges, the word-time clamp),
+and the seeded property tests of test/paging-invariants.test.mjs, are ported from
+remotion-captions-kit (https://github.com/Fats403/remotion-captions-kit,
+commit 9723227), Copyright (c) 2026 Brayden Blackwell, licensed under the MIT
+License. The original license text is kept in LICENSE.remotion-captions-kit.
+
+The balanced line breaker of src/captionLayout.ts (breakLines: a greedy count of
+the fewest lines, then a recursive split that evens their widths) is ported from
+tscaps packages/engine/src/modules/splitting/BalancedPixelWidthLineSplitter.ts
+(https://github.com/francozanardi/tscaps, commit 1d7da53), Copyright (c) 2026
+Franco Zanardi, licensed under the MIT License (packages/engine). The original
+license text is kept in LICENSE.tscaps.

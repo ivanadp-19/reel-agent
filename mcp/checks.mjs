@@ -8,6 +8,8 @@ import {normalizeCaption} from '../src/captions.ts';
 import {deliveryFps} from '../src/timeline.ts';
 import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, unbackedData, validateIdentity, validateProject} from '../src/validate.ts';
 import {readFont} from '../src/sfnt.ts';
+import {presetOf} from '../src/captionPresets.ts';
+import {realAdvances} from '../src/captionLayout.ts';
 import {cacheName, projectTranscript, sourceKey} from '../scripts/transcript-cache.mjs';
 import {readScan} from '../scripts/grade-scan.mjs';
 import {scopeFindings, stageFindings} from '../src/stages.ts';
@@ -40,8 +42,10 @@ export const datosPorConfirmar = (p, publicDir, env) => unbackedData(p, projectW
 // createGradeScans, which runs the wind scan too) — validate itself never decodes
 export async function projectIssues(p, publicDir, env, {kick} = {}) {
   const fps = deliveryFps(p);
-  // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name)
-  const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { return [f, readFont(fs.readFileSync(file)).fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
+  // each font file the render loads: missing, or the face it is (validate compares a pack's with its expected name);
+  // the pack's own file also gives validate's caption band its real widths (realAdvances, as the render judge)
+  const custom = presetOf(p.captionStyle).font.custom;
+  const fonts = Object.fromEntries(fontFiles(p).map((f) => { const file = path.join(publicDir, f); if (!fs.existsSync(file)) return [f, false]; try { const font = readFont(fs.readFileSync(file)); if (f === custom?.file) realAdvances(custom.family, font.advance); return [f, font.fullName ?? true]; } catch { return [f, '(not a font file)']; } }));
   const srcs = [...new Set(p.clips.map((c) => c.src))];
   const scans = Object.fromEntries(srcs.map((src) => [src, readScan(publicDir, src)]));
   const winds = Object.fromEntries(srcs.map((src) => [src, readWind(publicDir, src)]));

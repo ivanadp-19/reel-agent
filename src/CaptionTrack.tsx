@@ -138,7 +138,10 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
   const {width: compWidth} = useVideoConfig();
   const custom = useProjectFont(preset.font.custom); // the pack's file: fitPage then sizes by its real widths
   const float0 = preset.position === 'float' && !caption.pin;
-  const {paired, fontSize} = fitPage(caption, preset, {compWidth, float: float0});
+  const {paired, units, lines, fontSize} = fitPage(caption, preset, {compWidth, float: float0});
+  // a layout.balance pack breaks its lines where the balanced layout says (fixed for the whole page, so a
+  // word never jumps line while the phrase builds); every other pack leaves them to flex-wrap
+  const lineStarts = new Set(preset.layout.balance ? lines.slice(1).map((k) => units[k].from) : []);
 
   // entrance + exit. Guarded for very short pages (1–2 frames after autocut /
   // clip clamping): interpolate() needs strictly increasing ranges.
@@ -263,10 +266,17 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
             />
           );
         };
+        // a layout.balance pack: each of fitPage's lines is one nowrap row, so the browser's real widths (a
+        // bold key word runs wider than the estimate) never add a line validate's band and the judge did not count
+        const rows: React.ReactNode[][] = [];
         for (let i = 0; i < caption.words.length; i++) {
           const w = caption.words[i];
-          if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
-          if (paired.has(i)) {
+          if (lineStarts.has(i)) rows.push(els.splice(0)); // only a balance pack has lineStarts
+          else if (w.br) els.push(<div key={`br${i}`} style={{flexBasis: '100%', height: 0}} />);
+          if (w.emoji && !paired.has(i)) {
+            // a word and its emoji are one unit (captionLayout counts it so): the emoji never wraps alone
+            els.push(<span key={`e${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>{wordEl(i)}</span>);
+          } else if (paired.has(i)) {
             els.push(
               <span key={`g${i}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>
                 {wordEl(i)}{wordEl(i + 1)}
@@ -277,7 +287,12 @@ const CaptionPage: React.FC<{caption: Caption; index: number; preset: Preset; ac
             els.push(wordEl(i));
           }
         }
-        return els;
+        if (!preset.layout.balance) return els;
+        rows.push(els);
+        return rows.flatMap((row, k) => [
+          ...(k ? [<div key={`br-l${k}`} style={{flexBasis: '100%', height: 0}} />] : []),
+          <span key={`l${k}`} style={{display: 'inline-flex', whiteSpace: 'nowrap', gap: `0 ${gapPx}px`, alignItems: 'baseline'}}>{row}</span>,
+        ]);
       })()}
       </div>
     </div>
