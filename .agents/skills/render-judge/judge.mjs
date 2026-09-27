@@ -631,8 +631,13 @@ export function parseInserts(plan = '') {
   for (const l of lines.slice(at + 1)) {
     if (!l.trim()) continue;
     if (!/^\s*-/.test(l)) break;
-    const m = l.trim().match(/^-\s*(.+?)\s*(?:@\s*([\w.-]+:\d+))?\s*(?:→|->)\s*(b-?roll|super|graphic)\s*:\s*(.+)$/i);
-    if (m) out.push({what: m[1], anchor: m[2] ?? null, need: /super|graphic/i.test(m[3]) ? 'super' : 'broll', keywords: m[4].split(',').map((x) => x.trim()).filter(Boolean)});
+    // a note may follow the anchor (@ g02-hook:13 ("cava?") →) and a keyword may name its asset in parentheses
+    // ("copas en cava (px-A4MF…)"): the asset id matches the cue's file, the words around it match its tags
+    const m = l.trim().match(/^-\s*(.+?)\s*(?:@\s*([\w.-]+:\d+)[^→]*?)?\s*(?:→|->)\s*(b-?roll|super|graphic)\s*:\s*(.+)$/i);
+    if (!m) continue;
+    const kws = m[4].split(',').map((x) => x.trim()).filter(Boolean);
+    const ids = kws.flatMap((k) => [...k.matchAll(/\(([^()]+)\)/g)].map((x) => x[1].trim())).filter((x) => /^[\w.-]+$/.test(x));
+    out.push({what: m[1], anchor: m[2] ?? null, need: /super|graphic/i.test(m[3]) ? 'super' : 'broll', keywords: kws.map((k) => k.replace(/\([^()]*\)/g, ' ').replace(/[.\s]+$/, '').trim()).filter(Boolean), ids});
   }
   return out;
 }
@@ -661,7 +666,7 @@ export function insertFindings(inserts, words, brolls, gfx, lib = []) {
     const anchorWord = ins.anchor ? words.find((w) => w.wid === ins.anchor) : words.find(stem);
     const t = anchorWord?.t0;
     const near = (x) => t == null || (x.startMs / 1000 <= t + 4 && x.endMs / 1000 >= t - 2);
-    const ok = ins.need === 'super' ? gfx.some((g) => has(gText(g), ins.keywords) && near(g)) : brolls.some((b) => has(cueText(b), ins.keywords) && near(b));
+    const ok = ins.need === 'super' ? gfx.some((g) => has(gText(g), ins.keywords) && near(g)) : brolls.some((b) => ((ins.ids ?? []).includes(sourceOf(b.src ?? '')) || has(cueText(b), ins.keywords)) && near(b));
     if (ok) continue;
     out.push(F('insert-missing', 'blocker', 'rule', t ?? null, null, `falta el inserto del guion "${ins.what}" (${ins.need === 'super' ? 'super' : 'B-roll'}: ${ins.keywords.join(', ')})${t != null ? ` donde se dice "${anchorWord.word}"` : ''}`, {wid: anchorWord?.wid, insert: ins.what},
       ins.need === 'super'

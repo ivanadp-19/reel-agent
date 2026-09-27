@@ -244,6 +244,18 @@ test('script inserts: parsed from the plan, covered by a matching cue or super n
   assert.equal(f[0].fix.at(-1).args.at_wid, 'a:2');
 });
 
+test('script inserts: a note after the anchor and an asset named in parentheses (the way agents write them)', () => {
+  const plan = 'INSERTS:\n- cava propia @ a:1 ("cava?") → B-roll: copas en cava de vinos (px-TEST1), hasta el corte al cuerpo.\n- cava privada @ a:2 ("cava") → B-roll: persona frente a estantes (lib-cava).\n- salón @ a:3 → B-roll: salón de eventos (px-TEST9)';
+  const ins = parseInserts(plan);
+  assert.deepEqual(ins.map((x) => [x.what, x.anchor, x.ids]), [['cava propia', 'a:1', ['px-TEST1']], ['cava privada', 'a:2', ['lib-cava']], ['salón', 'a:3', ['px-TEST9']]]);
+  assert.deepEqual(ins[0].keywords, ['copas en cava de vinos', 'hasta el corte al cuerpo']);
+  const clips = [clip('a', 'a', 0, 30)];
+  const w = words(clips, [{clipId: 'a', source: 'a', words: [TW(1, 'cava?', 5000, 5400), TW(2, 'cava', 12000, 12400), TW(3, 'salón', 20000, 20500)]}]);
+  // cues by asset id, a little after the word (as an editor places them), and one far away (salón: 40 s)
+  const brolls = [{id: 'b0', src: 'broll-assets/px-TEST1.mp4', startMs: 6100, endMs: 11000}, {id: 'b1', src: 'broll-assets/lib-cava.mp4', startMs: 12500, endMs: 17000}, {id: 'b2', src: 'broll-assets/px-TEST9.mp4', startMs: 40000, endMs: 44000}];
+  assert.deepEqual(insertFindings(ins, w, brolls, []).map((x) => x.evidence.insert), ['salón']);
+});
+
 test('phone filter only on the interviewer\'s questions', () => {
   const clips = [clip('a', 'a', 0, 30)];
   const S = (i, word, s, speaker) => ({i, word, startMs: s, endMs: s + 400, speaker});
