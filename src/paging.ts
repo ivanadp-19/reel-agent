@@ -223,25 +223,30 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
   // maxWords words — unless the word starts a guion sentence (the 'MINUTOS SALÓN' defect), or a sentence
   // ends between them ("¿Vienes? | Sí." stays two pages), or in v11 (figurePages) it is a highlighted figure
   // ('MONTEALBÁN' | '326'). A pack that sets minWords (Fats403 fixOrphans): a page under it merges into a
-  // neighbor that it fits with or takes a word across the break, and only then falls back to the pager's
-  // own rule (one page a word over the budget beats an orphan). Walked from the end.
+  // neighbor that it fits with, or takes a word across the break when both pages then last minMs; else the
+  // pager's own rule (one page a word over the budget beats an orphan), and only then a word that leaves it
+  // short. A highlighted span is never split by it (two tier words in a row). Walked from the end.
   const own = (a: Page, b: Page) => b.length === 1 && joinable(a, b, ORPHAN_GAP_MS) && a.length <= maxWords && withinLimits([...a, ...b]);
   const min = minWords ?? 2;
   if (maxWords > 1 && min > 1) {
     const both = minWords != null;
     const gap = silenceMs;
     const figure = (p: Page) => figurePages && (p[0].w.tier ?? 0) > 0 && /^\d/.test(p[0].text);
-    // one word from the donor page d to the orphan o, when both pages stay legal
-    const shift = (d: number, o: number) => {
+    // two highlighted words in a row: one span (captionLayout's unit.name, the judge's 'frase resaltada partida')
+    const span = (a: Item, b: Item) => (a.w.tier ?? 0) > 0 && (b.w.tier ?? 0) > 0;
+    // one word from the donor page d to the orphan o, when both pages stay legal and no highlighted span
+    // splits; strict: the grown orphan is on screen minMs too (else the pager's own merge is tried first)
+    const shift = (d: number, o: number, strict: boolean) => {
       const donor = pages[d], orphan = pages[o], leads = d < o;
       if (donor.length <= min || !joinable(leads ? donor : orphan, leads ? orphan : donor, gap)) return false;
       const moved = leads ? donor[donor.length - 1] : donor[0];
       const kept = leads ? donor.slice(0, -1) : donor.slice(1);
       const grown = leads ? [moved, ...orphan] : [...orphan, moved];
       const left = leads ? kept : grown;
-      if (moved.w.sentenceStart || (leads ? bonded(kept[kept.length - 1], moved) : bonded(moved, kept[0])) || glue(left[left.length - 1].text) || !fits(grown)) return false;
+      const [a, b] = leads ? [kept[kept.length - 1], moved] : [moved, kept[0]];
+      if (moved.w.sentenceStart || bonded(a, b) || span(a, b) || glue(left[left.length - 1].text) || !fits(grown)) return false;
       const after = pages.map((p, k) => (k === d ? kept : k === o ? grown : p));
-      if (minMs > 0 && shown(after, d) < minMs) return false; // a solved orphan must not leave a flash page
+      if (minMs > 0 && (shown(after, d) < minMs || (strict && shown(after, o) < minMs))) return false; // no flash page left
       pages[d] = kept;
       pages[o] = grown;
       return true;
@@ -254,11 +259,13 @@ export function pageWords(words: TimelineWord[], preset: Preset, topBySrc: Recor
       for (let k = pages.length - 1; k >= 0; k--) {
         const p = pages[k], prev = pages[k - 1], next = pages[k + 1];
         if (p.length >= min || figure(p)) continue;
-        if (prev && (both ? joinable(prev, p, gap) && fits([...prev, ...p]) : own(prev, p))) { pages.splice(k - 1, 2, [...prev, ...p]); moved = both; }
+        // a highlighted span split before the orphan ('Plaza* | Altabrisa*') heals by the own rule first
+        if (prev && (both ? (span(prev[prev.length - 1], p[0]) && own(prev, p)) || (joinable(prev, p, gap) && fits([...prev, ...p])) : own(prev, p))) { pages.splice(k - 1, 2, [...prev, ...p]); moved = both; }
         else if (!both) continue;
         else if (next && joinable(p, next, gap) && fits([...p, ...next])) { pages.splice(k, 2, [...p, ...next]); k++; moved = true; }
-        else if ((prev && shift(k - 1, k)) || (next && shift(k + 1, k))) { k++; moved = true; } // look at it again
+        else if ((prev && shift(k - 1, k, true)) || (next && shift(k + 1, k, true))) { k++; moved = true; } // look at it again
         else if (prev && own(prev, p)) { pages.splice(k - 1, 2, [...prev, ...p]); moved = true; }
+        else if ((prev && shift(k - 1, k, false)) || (next && shift(k + 1, k, false))) { k++; moved = true; } // 'Yes,' → 'Yes, that's'
       }
     }
   }

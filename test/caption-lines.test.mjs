@@ -100,3 +100,32 @@ test('judge: a glossary term split across two lines of a page is a rule; a plain
   assert.deepEqual([f[0].severity, f[0].kind], ['major', 'rule']);
   assert.deepEqual(overflowFindings([c], 'caja').filter((x) => x.check === 'split-name'), []); // lowercase, no glossary: nothing
 });
+
+test('minWords: an orphan fix never splits a highlighted span, and never leaves a flash page the own merge avoids', () => {
+  const at = (arr, tiers = []) => arr.map(([word, s, e], i) => ({wid: `a:${i}`, word, startMs: s, endMs: e, srcStartMs: s, srcEndMs: e, clipId: 'a', src: 'clips/a.mp4', tier: tiers.includes(i) ? 1 : 0}));
+  const even = (ws) => ws.split(' ').map((w, i) => [w, i * 400, i * 400 + 350]);
+  // Morantes3.3: 'tres* pisos* | abajo' — moving 'pisos' to the orphan split the span; the own rule keeps it whole
+  assert.deepEqual(texts(pageWords(at(even('porque está tres pisos abajo, ni das vueltas buscando.'), [2, 3]), PRESETS.lift)), ['porque está tres pisos abajo', 'ni das vueltas buscando']);
+  // Guion1: 'Plaza* | Altabrisa*' split before the orphan heals by the own rule before a word of the next page moves
+  assert.deepEqual(texts(pageWords(at(even('vive muy cerca de Plaza Altabrisa, Uptown y City Center.'), [4, 5]), PRESETS.lift)), ['vive muy cerca de Plaza Altabrisa', 'Uptown y City Center']);
+  // Guion1: 'Todos por esta misma | zona.' — 'misma zona.' would be 600 ms on screen (lift's minMs 800): one page instead
+  const zona = at([['Todos', 0, 250], ['por', 300, 550], ['esta', 600, 850], ['misma', 900, 1150], ['zona.', 1150, 1400], ['Aquí', 1500, 1700], ['abajo', 1700, 1900], ['tienes.', 1900, 2300]]);
+  assert.deepEqual(texts(pageWords(zona, PRESETS.lift)), ['Todos por esta misma zona', 'Aquí abajo tienes']);
+  // with no own merge to fall back on (a sentence ends before it), a word still moves: 'Yes,' → "Yes, that's"
+  const yes = at([['Is', 0, 200], ['it', 200, 400], ['bad?', 400, 700], ['Yes,', 800, 1040], ["that's", 1040, 1300], ['bad', 1300, 1600], ['debt.', 1600, 2000], ['Pay', 2600, 2900], ['it.', 2900, 3200]]);
+  assert.deepEqual(texts(pageWords(yes, PRESETS.lift)), ['Is it bad?', "Yes that's", 'bad debt', 'Pay it']);
+});
+
+test('avoidGraphics places a vibem page by the same band with or without the real font widths (the export reads none)', async () => {
+  // César's v11 P21 'ES EXACTAMENTE / LA VISTA' at 53 % under his G2 stat at 64 %: two lines, no overlap. fitPage's
+  // estimate (Inter's table, before the font file is read) made it 3 lines and pinned it at 45.6 % in the export
+  const {avoidGraphics} = await import('../src/validate.ts');
+  const {realAdvances} = await import('../src/captionLayout.ts');
+  const words = ['es', 'exactamente', 'la', 'vista'].map((text, i) => ({wid: `g:${i}`, text, startMs: 25500 + i * 300, endMs: 25700 + i * 300, tier: 0}));
+  const cap = {id: 'c21', src: 'clips/a.mp4', clipId: 'a', words, startMs: 25500, endMs: 26600, topPct: 53};
+  const stat = {id: 'g1', template: 'stat', startMs: 25000, endMs: 28000, yPct: 64, props: {value: '54', label: 'departamentos en preventa'}};
+  assert.equal(avoidGraphics([cap], [stat], 'vibem')[0].topPct, 53);
+  realAdvances(PRESETS.vibem.font.custom.family, (t) => [...t].length * 0.6); // any registered widths
+  assert.equal(avoidGraphics([cap], [stat], 'vibem')[0].topPct, 53);
+  realAdvances(PRESETS.vibem.font.custom.family, undefined); // this file's other tests read the estimate
+});

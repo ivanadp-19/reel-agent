@@ -3,7 +3,7 @@
 // caption_proof stills); the point is to catch the obvious before a render.
 
 import {projectCaptions, type Caption} from './captions.ts';
-import {FLOAT_SLOTS, presetOf} from './captionPresets.ts';
+import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {fitPage} from './captionLayout.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
@@ -22,8 +22,9 @@ const W = 1080, H = 1920;
 
 type Band = {top: number; bottom: number}; // % of frame height
 
-// on-screen band of a caption page for its preset: its lines at its size as the renderer lays them out
-// (src/captionLayout.ts fitPage); index = its place in the projected list (floating presets cycle their
+// on-screen band of a caption page for its preset, for validate's warnings: its lines at its size as the
+// renderer lays them out (src/captionLayout.ts fitPage — a pack's own font measured once its file is read:
+// mcp/checks.mjs, the render judge); index = its place in the projected list (floating presets cycle their
 // slots by it, like the renderer)
 function captionBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
@@ -31,6 +32,19 @@ function captionBand(c: Caption, style: string | undefined, index: number): Band
   const {lines, fontSize} = fitPage(c, p, {float});
   const hPx = Math.max(1, lines.length) * fontSize * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
   const top = float ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
+  return {top, bottom: top + (hPx / H) * 100};
+}
+// the band avoidGraphics PLACES a page by, inside every render: characters over maxCharsLine, never a font's
+// widths — MultiClipVideo places the pages before any font file is read, so fitPage's band would move a page
+// by the estimate in the export and by the real face in the judge (a vibem page pinned 7 % up for nothing).
+// ponytail: an estimate; place by fitPage once MultiClipVideo holds its frame for the pack font (useProjectFont)
+function placeBand(c: Caption, style: string | undefined, index: number): Band {
+  const p = presetOf(style);
+  const chars = c.words.reduce((n, w) => n + w.text.length + 1, -1);
+  const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
+  const scale = (c.scale ?? 1) * pageScale(p, c.words.length);
+  const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
+  const top = p.position === 'float' && !c.pin ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};
 }
 
@@ -79,7 +93,7 @@ export function avoidGraphics(caps: Caption[], gfx: Graphic[], style?: string): 
   const blockers = gfx.filter((g) => !g.behind && !CENTERED.has(g.template)).map((g) => ({g, band: graphicBand(g)})).filter((x): x is {g: Graphic; band: Band} => !!x.band);
   if (!blockers.length) return caps;
   return caps.map((c, i) => {
-    const band = captionBand(c, style, i);
+    const band = placeBand(c, style, i);
     const during = blockers.filter(({g}) => c.startMs < g.endMs && g.startMs < c.endMs);
     const hits = during.filter((x) => overlap(band, x.band));
     if (!hits.length) return c;
