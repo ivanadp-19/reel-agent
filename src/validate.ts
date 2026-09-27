@@ -3,7 +3,8 @@
 // caption_proof stills); the point is to catch the obvious before a render.
 
 import {projectCaptions, type Caption} from './captions.ts';
-import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
+import {FLOAT_SLOTS, presetOf} from './captionPresets.ts';
+import {fitPage} from './captionLayout.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {applyGlossary, coreOf, guionIssues, joinFigures, normKey, numberOf, type GlossaryEntry} from './guion.ts';
@@ -21,15 +22,15 @@ const W = 1080, H = 1920;
 
 type Band = {top: number; bottom: number}; // % of frame height
 
-// rough on-screen band of a caption page for its preset; index = its place in
-// the projected list (floating presets cycle their slots by it, like the renderer)
+// on-screen band of a caption page for its preset: its lines at its size as the renderer lays them out
+// (src/captionLayout.ts fitPage); index = its place in the projected list (floating presets cycle their
+// slots by it, like the renderer)
 function captionBand(c: Caption, style: string | undefined, index: number): Band {
   const p = presetOf(style);
-  const chars = c.words.reduce((n, w) => n + w.text.length + 1, -1);
-  const lines = Math.max(1, Math.ceil(chars / p.layout.maxCharsLine));
-  const scale = (c.scale ?? 1) * pageScale(p, c.words.length);
-  const hPx = lines * p.font.sizePx * scale * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
-  const top = p.position === 'float' && !c.pin ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
+  const float = p.position === 'float' && !c.pin;
+  const {lines, fontSize} = fitPage(c, p, {float});
+  const hPx = Math.max(1, lines.length) * fontSize * p.font.lineHeight + (p.container !== 'none' ? p.font.sizePx * 0.5 : 0);
+  const top = float ? FLOAT_SLOTS[index % FLOAT_SLOTS.length].top : c.topPct;
   return {top, bottom: top + (hPx / H) * 100};
 }
 
