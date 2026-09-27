@@ -29,7 +29,6 @@ import {PACKS} from '../src/stylePacks.ts';
 import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, projectGraphics, spansWithoutMatte, REVEAL_KINDS, OUT_KINDS, LIFE_KINDS} from '../src/graphicTemplates.ts';
 import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
 import {searchStock} from './stock.mjs';
-import {renderProof, renderStrip} from './proof.mjs';
 import {DELIVERABLES, deliverableName, eachTarget, familyTargets, identityOf, projectTargets, unbackedData, validateIdentity, validateProject} from '../src/validate.ts';
 import {claimIdentity, facesOf, newProject, projectIssues, projectRows, projectWords, withDefaults} from './checks.mjs';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
@@ -1220,7 +1219,43 @@ server.registerTool('validate', {description: 'Deterministic checks before rende
   return text(issuesText(await allIssues(p)));
 });
 
-server.registerTool('caption_proof', {description: 'LOOK at the result without a full render: renders up to 8 stills of the current project (default: spread over the pages with emphasis and every graphic) and returns them as one contact sheet plus the validate report. Use it after annotating captions or adding graphics; fix what looks wrong and call again.', inputSchema: {project_id: pid, at_secs: z.array(sec('timeline time')).max(8).optional().describe('times to look at; omit to pick automatically')}}, async ({project_id, at_secs}) => {
+// Proofs run in the render queue's proof lane (POST /api/proof, scripts/render-jobs.mjs kind 'proof': one at a time on the
+// machine, niced while a final renders, a timeout) — never a Chrome in this process. The agent waits its turn, told as
+// progress ('proof en fila, N antes'); a cancelled tool call cancels its proof. → the done job ({sheet, dir, rev, …}, turn)
+async function proofJob(body, extra) {
+  await needBackend();
+  const r = await fetch(`${API}/api/proof`, {method: 'POST', body: JSON.stringify(body)}).then((x) => x.json());
+  if (!r.jobId) throw new Error(r.error || 'proof did not start');
+  const token = extra?._meta?.progressToken;
+  let n = 0, said = null;
+  const tell = (message) => { if (token == null || message === said) return; said = message; extra.sendNotification({method: 'notifications/progress', params: {progressToken: token, progress: ++n, message}}).catch(() => {}); };
+  const cancel = () => fetch(`${API}/api/render-jobs/${r.jobId}/cancel`, {method: 'POST', body: '{}'}).catch(() => {});
+  extra?.signal?.addEventListener('abort', cancel, {once: true});
+  const t0 = Date.now();
+  let waitedMs = 0;
+  const maxQueuedMs = +(process.env.REEL_PROOF_QUEUE_MAX_SEC || 1800) * 1000; // then cancelled, with why it waited
+  try {
+    for (let misses = 0; ;) {
+      let s;
+      try { s = await fetch(`${API}/api/render/${r.jobId}`).then((x) => x.json()); misses = 0; }
+      catch (e) { if (++misses >= 8) throw new Error(`lost the backend while waiting for proof ${r.jobId}: ${e.message}`); await new Promise((ok) => setTimeout(ok, 2000)); continue; }
+      if (s.queued) waitedMs = Date.now() - t0;
+      if (s.queued && waitedMs > maxQueuedMs) { await cancel(); throw new Error(`proof ${r.jobId} gave up after ${Math.round(waitedMs / 60e3)} min in the queue (REEL_PROOF_QUEUE_MAX_SEC) — ${s.label}`); }
+      if (s.status === 'done') return {...s, turn: r.ahead || waitedMs > 5000 ? `\n(proof en fila, ${r.ahead} antes: ${Math.round(waitedMs / 1000)} s de espera)` : ''};
+      if (s.status === 'error') throw new Error(`proof ${r.jobId}: ${s.error}`);
+      if (s.status === 'unknown') throw new Error(`proof ${r.jobId} vanished (backend restarted?)`);
+      tell(s.label);
+      await new Promise((ok) => setTimeout(ok, s.queued ? 3000 : 1500)); // as runJob polls
+    }
+  } finally { extra?.signal?.removeEventListener('abort', cancel); }
+}
+// the contact sheet of a done proof, read on this box (the backend's .captions-tmp/proof-<job>/) and removed once read
+function proofSheet(r) {
+  try { return fs.readFileSync(r.sheet).toString('base64'); }
+  finally { if (/[\\/]proof-[\w-]+$/.test(r.dir ?? '')) fs.rmSync(r.dir, {recursive: true, force: true}); }
+}
+
+server.registerTool('caption_proof', {description: 'LOOK at the result without a full render: renders up to 8 stills of the current project (default: spread over the pages with emphasis and every graphic) and returns them as one contact sheet plus the validate report. Use it after annotating captions or adding graphics; fix what looks wrong and call again. It waits its turn in the proof queue (one proof at a time on the machine).', inputSchema: {project_id: pid, at_secs: z.array(sec('timeline time')).max(8).optional().describe('times to look at; omit to pick automatically')}}, async ({project_id, at_secs}, extra) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
   let times = at_secs;
   if (!times?.length) {
@@ -1231,24 +1266,21 @@ server.registerTool('caption_proof', {description: 'LOOK at the result without a
     if (!picks.length) picks.push(...[0.15, 0.4, 0.65, 0.9].map((f) => f * total));
     times = [...new Set(picks.map((t) => Math.round(t * 10) / 10))].sort((a, b) => a - b).slice(0, 8);
   }
-  const outDir = path.join(ROOT, '.captions-tmp', `proof-${Date.now()}`);
-  const {sheet, cols} = await renderProof(projectProps(p), times, outDir);
-  const data = fs.readFileSync(sheet).toString('base64');
-  fs.rmSync(outDir, {recursive: true, force: true});
-  const proof = await stageProof(project_id, 'caption_proof', p.updatedAt);
+  const r = await proofJob({project_id, what: 'caption', times}, extra);
+  const data = proofSheet(r);
+  const proof = await stageProof(project_id, 'caption_proof', r.rev);
   return {content: [
-    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.${proof}\n\nvalidate:\n${issuesText(await allIssues(p))}`},
+    {type: 'text', text: `Contact sheet of STILLS (not the render: each still is labeled on a yellow strip below the frame; gray tiles are empty slots — the video itself is full-frame 1080x1920, no bars), ${r.cols} per row, left→right top→bottom at ${times.map((t) => f1(t) + 's').join(', ')}. When you show this to the user, say it is a still proof.${proof}${r.turn}\n\nvalidate:\n${issuesText(await allIssues(p))}`},
     {type: 'image', data, mimeType: 'image/jpeg'},
   ]};
 });
 
-server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutive frames (0.8 s at 30 fps) from a timeline time, tiled 8 per row left→right, top→bottom. Use it on a word arrival, a transition, a title or a B-roll cue to check timing and easing; caption_proof shows single stills.', inputSchema: {project_id: pid, at_sec: sec('timeline time to start from')}}, async ({project_id, at_sec}) => {
+server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutive frames (0.8 s at 30 fps) from a timeline time, tiled 8 per row left→right, top→bottom. Use it on a word arrival, a transition, a title or a B-roll cue to check timing and easing; caption_proof shows single stills. It waits its turn in the proof queue (one proof at a time on the machine).', inputSchema: {project_id: pid, at_sec: sec('timeline time to start from')}}, async ({project_id, at_sec}, extra) => {
   const p = load(project_id); if (!p.clips.length) throw new Error('project has no clips');
-  const outDir = path.join(ROOT, '.captions-tmp', `strip-${Date.now()}`);
-  const {sheet, first, fps} = await renderStrip(projectProps(p), at_sec, outDir);
-  const data = fs.readFileSync(sheet).toString('base64');
-  fs.rmSync(outDir, {recursive: true, force: true});
-  return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down${await stageProof(project_id, 'motion_proof', p.updatedAt)}`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
+  const r = await proofJob({project_id, what: 'motion', at_sec}, extra);
+  const {first, fps} = r;
+  const data = proofSheet(r);
+  return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down${await stageProof(project_id, 'motion_proof', r.rev)}${r.turn}`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
 // ---------- the stages of the reel (src/stages.ts, scripts/stages.mjs), through the backend ----------
@@ -1356,7 +1388,7 @@ server.registerTool('list_render_jobs', {description: 'The render jobs, newest f
   const live = await backendUp();
   const q = new URLSearchParams({limit: String(limit), ...(project_id ? {project: project_id} : {}), ...(active_only ? {status: 'queued,running'} : {})});
   const all = live ? null : listJobs(RENDER_JOBS);
-  const jobs = live ? (await renderJobsApi(`?${q}`)).jobs : listJobs(RENDER_JOBS, {projectId: project_id, status: active_only ? ['queued', 'running'] : undefined, limit}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
+  const jobs = live ? (await renderJobsApi(`?${q}`)).jobs : listJobs(RENDER_JOBS, {projectId: project_id, status: active_only ? ['queued', 'running'] : undefined, limit, kind: 'render'}).map((j) => ({...j, ahead: aheadOf(all, j.id)}));
   if (!jobs.length) return text(`No ${active_only ? 'active ' : ''}render jobs${project_id ? ` for ${project_id}` : ''}.`);
   return text(`${jobs.map((j) => describeJob(j, {ahead: j.ahead ?? 0})).join('\n')}${live ? '' : '\n(backend not running — read from disk)'}`);
 });

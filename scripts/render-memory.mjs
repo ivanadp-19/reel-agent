@@ -28,6 +28,8 @@ import path from 'node:path';
 const num = (v, dflt) => (v == null || v === '' || !Number.isFinite(+v) ? dflt : +v);
 export const heapMb = (env = process.env) => Math.max(0, num(env.REEL_RENDER_HEAP_MB, 1536)); // 0 = no cap
 export const startMinMemMb = (env = process.env) => Math.max(0, num(env.REEL_RENDER_START_MIN_MEM_MB, 2560)); // 0 = no floor
+// a proof (the queue's proof lane: a still or strip of the composition — one Chrome, no encoder) needs less; 1024 until the VM is measured (plan phase 25)
+export const proofStartMinMemMb = (env = process.env) => Math.max(0, num(env.REEL_PROOF_START_MIN_MEM_MB, 1024));
 
 // the env of a render child: NODE_OPTIONS with the heap cap appended (an operator's own options kept;
 // a --max-old-space-size already there wins — the last one counts in node, so it is not appended twice)

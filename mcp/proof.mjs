@@ -1,5 +1,9 @@
 // Contact-sheet proof for the agent: render a few stills of the composition
 // (bundle once per process, then one renderStill per time) and tile them.
+// It runs as a child of the render queue's proof lane (scripts/render-runner.mjs runProof: one proof at a
+// time on the machine, niced while a final renders), never in the MCP process: `node mcp/proof.mjs <spec.json>`
+// (spec {what: 'caption' | 'motion', times | atSec, props}) → the sheet and result.json next to the spec,
+// "still i/n" on stdout as it goes.
 import fs from 'node:fs';
 import path from 'node:path';
 import {bundle} from '@remotion/bundler';
@@ -30,7 +34,7 @@ const getBundle = sharedOnce(async () => {
 });
 
 // times in seconds → one JPEG contact sheet (path) + the stills
-export async function renderProof(props, times, outDir, scale = 0.35) {
+export async function renderProof(props, times, outDir, scale = 0.35, onStill = () => {}) {
   fs.mkdirSync(outDir, {recursive: true});
   const serveUrl = await getBundle();
   const composition = await selectComposition({serveUrl, id: 'MultiClip', inputProps: props});
@@ -40,6 +44,7 @@ export async function renderProof(props, times, outDir, scale = 0.35) {
     const out = path.join(outDir, `proof-${t.toFixed(2)}.jpg`);
     await renderStill({composition, serveUrl, output: out, inputProps: props, frame, scale, imageFormat: 'jpeg', jpegQuality: 82});
     stills.push({t, file: out});
+    onStill(stills.length, times.length);
   }
   // tile: up to 4 per row. Each still carries a yellow strip UNDER the frame
   // ("STILL 12.3 s · proof, not the render") so nobody mistakes the sheet for the
@@ -53,7 +58,7 @@ export async function renderProof(props, times, outDir, scale = 0.35) {
 
 // 24 consecutive frames from atSec → one strip (cols per row), so the agent can
 // SEE an arrival, a transition or a title, not just a still. Same bundle.
-export async function renderStrip(props, atSec, outDir, {frames = 24, cols = 8, scale = 0.17} = {}) {
+export async function renderStrip(props, atSec, outDir, {frames = 24, cols = 8, scale = 0.17, onStill = () => {}} = {}) {
   fs.mkdirSync(outDir, {recursive: true});
   const serveUrl = await getBundle();
   const composition = await selectComposition({serveUrl, id: 'MultiClip', inputProps: props});
@@ -63,6 +68,7 @@ export async function renderStrip(props, atSec, outDir, {frames = 24, cols = 8, 
     const out = path.join(outDir, `strip-${String(i).padStart(2, '0')}.jpg`);
     await renderStill({composition, serveUrl, output: out, inputProps: props, frame: first + i, scale, imageFormat: 'jpeg', jpegQuality: 80});
     stills.push(out);
+    onStill(i + 1, frames);
   }
   const sheet = path.join(outDir, 'strip.jpg');
   await tile(stills, cols, sheet, stills.map((_, i) => `STILL f${first + i}`), Math.max(11, Math.round(64 * scale)));
@@ -92,4 +98,19 @@ async function tile(files, cols, out, labels, font) {
     if (r.code === 0) return;
     if (!l) throw new Error(`ffmpeg tiling failed: ${String(r.stderr).slice(-200)}`);
   }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const spec = process.argv[2];
+  const out = path.dirname(spec);
+  const onStill = (i, n) => console.log(`still ${i}/${n}`);
+  try {
+    const {what, times, atSec, props} = JSON.parse(fs.readFileSync(spec, 'utf8'));
+    const r = what === 'motion' ? await renderStrip(props, atSec, out, {onStill}) : await renderProof(props, times, out, 0.35, onStill);
+    fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(r));
+  } catch (e) {
+    console.error(`proof: ${String(e?.message ?? e).split('\n')[0]}`); // the last line the job keeps is the reason, not a stack frame
+    process.exit(1);
+  }
+  process.exit(0); // the bundle's work dir goes with the exit hook
 }
