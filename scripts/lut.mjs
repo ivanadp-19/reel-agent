@@ -8,8 +8,9 @@
 //     ranges, src/lut.ts lutSpans) matched to the references' → public/luts/<name>.cube;
 //     → public/lut.json {lut: 'luts/<name>.cube'}
 //   {match: {name, from: {id, src, inSec, outSec}, to: {id, src, inSec, outSec, lut?, mix?}, frames}}  fit a
-//     .cube on pixel pairs (src/lut.ts fitCube): the last frames of `from` against the first frames of `to`
-//     through its own LUT — the same shot a frame apart (src/lut.ts matchPair) → public/luts/<name>.cube;
+//     .cube on pixel pairs (src/lut.ts fitCube): the frames of `from` at the join against `to`'s there (from's last vs
+//     to's first; a tail after its shot: from's first vs to's last) through to's own LUT — the same shot a frame
+//     apart (src/lut.ts matchPair) → public/luts/<name>.cube;
 //     → public/lut.json {lut, pairs, before, after, worst} (mean |difference| of the pairs, of 255; worst = the
 //     luma band the fit leaves most off, its mean R/G/B error); refused when the pairs stay far apart (another shot)
 //
@@ -76,16 +77,19 @@ export function makeLut({name, refs, clips = [], strength = 0.7}) {
   return writeLut(rel, cubeFromReferences(foot, ref, name, {strength}));
 }
 
-// the frames either side of the join: `from`'s last ones (nearest the join first) against `to`'s first ones, through
-// the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under: a frame of motion leaves
-// ~5, another shot ~40 (least squares on unrelated pixels regresses to gray, and the mean still falls)
+// the frames either side of the join, nearest it first: `from`'s last ones against `to`'s first ones (a head before
+// its continuation) — or, when `to` ends where `from` starts (a tail after its shot), from's first against to's last —
+// through the LUT `to` plays with. SAME_SHOT = the mean difference (of 255) the fit must get under: a frame of motion
+// leaves ~5, another shot ~40 (least squares on unrelated pixels regresses to gray, and the mean still falls)
 const SAME_SHOT = 10;
 const cubeAt = (lut, mix) => { const text = fs.readFileSync(inPublic(lut), 'utf8'); return parseCube(mix >= 1 ? text : mixCube(parseCube(text), mix)); };
+const firstOf = (s) => decode(inPublic(s.src), {span: {...s, outSec: Math.min(s.outSec, s.inSec + 1)}, count: 0});
+const lastOf = (s) => decode(inPublic(s.src), {span: {...s, inSec: Math.max(s.inSec, s.outSec - 1)}, count: 0}).reverse();
 export function matchLut({name, from, to, frames = 3}) {
   const rel = lutRel(name);
   progress(10, 'Reading the frames at the join');
-  const a = decode(inPublic(from.src), {span: {...from, inSec: Math.max(from.inSec, from.outSec - 1)}, count: 0}).reverse();
-  const b = decode(inPublic(to.src), {span: {...to, outSec: Math.min(to.outSec, to.inSec + 1)}, count: 0});
+  const tail = Math.abs(to.outSec - from.inSec) < 0.001;
+  const [a, b] = tail ? [firstOf(from), lastOf(to)] : [lastOf(from), firstOf(to)];
   const k = Math.min(frames, a.length, b.length);
   const x = concat(a.slice(0, k)), y = concat(b.slice(0, k));
   if (to.lut) { const l = cubeAt(to.lut, to.mix ?? 1); for (let i = 0; i < y.length; i += 3) y.set(sampleCube(l, [y[i], y[i + 1], y[i + 2]]), i); }

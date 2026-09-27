@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {cube} from '../src/hdr.ts';
-import {fitCube, labStats, lutSpans, matchPair, mixCube, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
+import {fitCube, labStats, lutSpans, matchCandidates, matchPair, mixCube, oklabToRgb, parseCube, rgbToOklab, sampleCube, transferFn} from '../src/lut.ts';
 import {withLut} from '../src/grade.ts';
 import {decode} from '../scripts/lut.mjs';
 
@@ -104,8 +104,12 @@ test('lutSpans / matchPair / withLut: a clip\'s range, the clip continuing it, i
   assert.throws(() => lutSpans(clips, 'nope'), /no clip/);
   assert.equal(matchPair(clips, 'head').to.id, 'rest');
   assert.equal(matchPair([...clips].reverse(), 'head').to.id, 'rest', 'wherever it sits on the timeline');
-  assert.throws(() => matchPair(clips, 'head', 'a'), /does not continue/); // another shot: never
-  assert.throws(() => matchPair(clips, 'rest'), /no clip continues/); // the next clip is another source
+  assert.throws(() => matchPair(clips, 'head', 'other'), /neither continues/); // another source: never (the shot before a cut, contiguous, the job refuses by its pixels)
+  assert.throws(() => matchPair(clips, 'rest'), /no clip continues/); // the next clip is another source — and never, by default, the head it continues
+  // a tail whose grade stops early: matched to the shot it ends when named (validate's fix names it), never the next shot by default
+  const t = [{id: 'shot', src: 'clips/m.mp4', inSec: 0, outSec: 12.212}, {id: 'tail', src: 'clips/m.mp4', inSec: 12.212, outSec: 12.446}, {id: 'next', src: 'clips/m.mp4', inSec: 12.446, outSec: 20}];
+  assert.deepEqual(matchPair(t, 'tail', 'shot'), {from: {id: 'tail', src: 'clips/m.mp4', inSec: 12.212, outSec: 12.446}, to: {id: 'shot', src: 'clips/m.mp4', inSec: 0, outSec: 12.212}});
+  assert.deepEqual(matchCandidates(t, t[1]).map((c) => c.id), ['next', 'shot']);
   // the continuation plays with a whole-reel LUT: the match carries it (the head's LUT replaces it)
   assert.deepEqual(matchPair(clips, 'head', undefined, {look: 'none', intensity: 0.8, auto: false, bySrc: {}, lut: 'luts/brand.cube', lutMix: 0.7}).to, {id: 'rest', src: 'clips/x.mp4', inSec: 9.204, outSec: 12.47, lut: 'luts/brand.cube', mix: 0.7});
   const g = {look: 'none', intensity: 0.8, auto: false, bySrc: {}, lutMix: 0.5, overrides: {head: {adjust: {saturation: 2}, lut: 'luts/old.cube', lutMix: 0.5}, rest: {adjust: {contrast: 1.4}, highlights: 0.4}}};
@@ -181,5 +185,34 @@ test('match: fitted to the continuation as it plays (its LUT in), refused across
   assert.notEqual(other.r.status, 0);
   assert.match(other.r.stderr, /do not show the same picture/);
   assert.ok(!fs.existsSync(path.join(pub, 'luts', 'other.cube')), 'nothing written');
+  fs.rmSync(dir, {recursive: true, force: true});
+});
+
+test('match, a tail: its first frames fitted to the shot\'s last ones before it (the grade stops early), refused across two shots', () => {
+  const dir = tmp(), pub = path.join(dir, 'public');
+  fs.mkdirSync(path.join(pub, 'clips'), {recursive: true});
+  // bars (0–9), then one still shot (10–29) whose last 7 frames (23–29) pop: brighter and twice as saturated — the pairs
+  // must be the tail's first frames against the shot's LAST ones (its first are the bars: the old head-only pairing
+  // is refused here); and another picture
+  ff(['-f', 'lavfi', '-i', 'smptebars=s=160x284:r=30:d=0.3333', '-f', 'lavfi', '-i', 'testsrc2=s=160x284:r=1:d=1,fps=30,trim=end_frame=20,hue=s=0.2', '-filter_complex', "[0:v][1:v]concat=n=2:v=1,eq=brightness=0.03:saturation=2:enable='gte(n\\,23)'[v]", '-map', '[v]', ...x264, path.join(pub, 'clips', 's.mp4')]);
+  ff(['-f', 'lavfi', '-i', 'smptebars=s=160x284:r=30:d=1', ...x264, path.join(pub, 'clips', 'o.mp4')]);
+  const shot = {id: 'shot', src: 'clips/s.mp4', inSec: 0, outSec: 23 / 30}, tail = {id: 'tail', src: 'clips/s.mp4', inSec: 23 / 30, outSec: 1};
+  const job = (name, to) => {
+    fs.writeFileSync(path.join(dir, 'job.json'), JSON.stringify({match: {name, from: tail, to}}));
+    const r = spawnSync('node', [path.resolve(import.meta.dirname, '../scripts/lut.mjs'), 'job.json', 'out.json'], {cwd: dir, encoding: 'utf8'});
+    return {r, out: r.status === 0 ? JSON.parse(fs.readFileSync(path.join(dir, 'out.json'), 'utf8')) : null};
+  };
+  const ok = job('tail', shot);
+  assert.equal(ok.r.status, 0, ok.r.stderr);
+  assert.ok(ok.out.before > 10 && ok.out.after < 1, JSON.stringify(ok.out));
+  // the tail through it looks like the shot: its first frame lands on the shot's last
+  const l = parseCube(fs.readFileSync(path.join(pub, 'luts', 'tail.cube'), 'utf8'));
+  const [a] = decode(path.join(pub, 'clips', 's.mp4'), {span: tail, count: 1}), [b] = decode(path.join(pub, 'clips', 's.mp4'), {span: {...shot, inSec: 22 / 30}, count: 1});
+  let off = 0;
+  for (let i = 0; i < a.length; i += 3) { const o = sampleCube(l, [a[i], a[i + 1], a[i + 2]]); for (let c = 0; c < 3; c++) off += Math.abs(o[c] - b[i + c]); }
+  assert.ok((off / a.length) * 255 < 1, `the matched tail is ${((off / a.length) * 255).toFixed(1)} of 255 from the shot`);
+  const bad = job('bad', {id: 'bars', src: 'clips/o.mp4', inSec: 0, outSec: 23 / 30});
+  assert.notEqual(bad.r.status, 0);
+  assert.match(bad.r.stderr, /do not show the same picture/);
   fs.rmSync(dir, {recursive: true, force: true});
 });

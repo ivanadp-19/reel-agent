@@ -144,17 +144,19 @@ export function lutSpans(clips: Clip[], target?: string): Span[] {
   if (!out.length) throw new Error(target ? `no clip or source "${target}"` : 'the project has no clips to measure the footage from');
   return out;
 }
-// create_lut match: the clip to fix and the one it must look like — the clip that continues it in the same source (a
-// shot a pre-edit graded only from its second part on, split at the change: the head, then the rest), wherever it sits
-// on the timeline; toClipId only picks among several. Never another shot: fitted across two, least squares washes the
-// head out. `to` carries the LUT it plays with (whole reel, source or its own): the head's LUT replaces that one, so
-// it is fitted to the continuation as it shows.
+// create_lut match: the clip to fix and the one it must look like — a clip it runs into in the same source, split
+// where the look changes inside a shot: the clip that continues it (a head a pre-edit graded only from its second part
+// on, then the rest) or the one it continues (a tail whose grade stops early or pops: the shot, then the tail) —
+// wherever they sit on the timeline (matchCandidates). Without toClipId, the continuation; the clip it continues only
+// when named (a tail names its shot — never by default: that would fit a graded rest to its ungraded head). Never
+// another shot: fitted across two, least squares washes the clip out (the job refuses it). `to` carries the LUT it
+// plays with (whole reel, source or its own): the clip's LUT replaces that one, so it is fitted to `to` as it shows.
+export const matchCandidates = (clips: Clip[], from: Clip): Clip[] => [...clips.filter((c) => continuesPrev(from, c)), ...clips.filter((c) => continuesPrev(c, from))];
 export function matchPair(clips: Clip[], clipId: string, toClipId?: string, grade?: ProjectGrade | null): {from: Span; to: Span & {lut?: string; mix?: number}} {
   const from = clips.find((c) => c.id === clipId);
   if (!from) throw new Error(`no clip ${clipId}`);
-  const next = clips.filter((c) => continuesPrev(from, c));
-  const to = toClipId ? next.find((c) => c.id === toClipId) : next[0];
-  if (!to) throw new Error(toClipId ? `${toClipId} does not continue ${clipId} in the same source: a match fits the same shot either side of a split` : `no clip continues ${clipId} in the same source: split_clip where the look changes inside the shot, then match the part before the split`);
+  const to = toClipId ? matchCandidates(clips, from).find((c) => c.id === toClipId) : clips.find((c) => continuesPrev(from, c));
+  if (!to) throw new Error(toClipId ? `${toClipId} neither continues ${clipId} nor is continued by it in the same source: a match fits the same shot either side of a split` : `no clip continues ${clipId} in the same source: split_clip where the look changes inside the shot, then match the part before the split (a tail: to_clip_id its shot)`);
   const p: {lut?: string | null; lutMix?: number} = grade ? paramsFor(grade, to.src, to.id) : {};
   const mix = p.lutMix ?? DEFAULTS.lutMix;
   return {from: span(from), to: {...span(to), ...(p.lut && mix > 0 ? {lut: p.lut, mix} : {})}};

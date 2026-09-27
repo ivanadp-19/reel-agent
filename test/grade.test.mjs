@@ -99,12 +99,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {createGradeScans, frameLooks, hamming, lookSteps, readScan, scanSource, sourceSteps, LOOKS_VF, SOURCE_CHANNELS} from '../scripts/grade-scan.mjs';
+import {createGradeScans, frameLooks, hamming, lookSteps, looksVf, rangeOf, readScan, scanSource, sourceSteps, SOURCE_CHANNELS} from '../scripts/grade-scan.mjs';
 
 // synthetic footage (no client media): a flat testsrc2 shot whose eq grade switches on at frame 10, and a
 // hard cut from that flat shot into colour bars
 const ffmpeg = (args) => spawnSync('ffmpeg', ['-v', 'error', '-y', ...args, '-c:v', 'libx264', '-pix_fmt', 'yuv420p'], {encoding: 'utf8'});
-const FLAT = 'eq=saturation=0.35:contrast=0.75';
+const FLAT = 'eq=saturation=0.35:contrast=0.75', POP = 'lutyuv=y=val+8:u=(val-128)*2+128:v=(val-128)*2+128';
 function synthClips(dir) {
   fs.mkdirSync(path.join(dir, 'clips'), {recursive: true});
   const f = (n) => path.join(dir, 'clips', n);
@@ -113,6 +113,12 @@ function synthClips(dir) {
     ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=180x320:r=30:d=2', '-vf', `${FLAT},eq=contrast=1.35:saturation=2.8:brightness=0.06`, f('fixed.mp4')]),
     ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=180x320:r=30:d=2', '-vf', `${FLAT},eq=contrast=1.35:saturation=2.8:brightness=0.06:enable='lt(n,50)'`, f('tail.mp4')]),
     ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=180x320:r=30:d=1', '-f', 'lavfi', '-i', 'smptebars=s=180x320:r=30:d=1', '-filter_complex', `[0:v]${FLAT}[a];[a][1:v]concat=n=2:v=1[v]`, '-map', '[v]', f('cut.mp4')]),
+    // Morantes 10's pop: the last 7 frames of a shot +8 luma and twice as saturated
+    ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=180x320:r=30:d=2', '-vf', `${FLAT},${POP}:enable='gte(n,53)'`, f('tail7.mp4')]),
+    // what must stay quiet, in one shot: a camera's exposure ramp (tone and color over 10 frames, 20–29), a flash frame
+    // (60), a 2-frame blip of the tail's look (80–81), an exposure step (tone alone, 100–119) and a white-balance step
+    // (color alone, 130–149); then a cut into bars (150)
+    ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=180x320:r=30:d=5', '-f', 'lavfi', '-i', 'smptebars=s=180x320:r=30:d=1', '-filter_complex', `[0:v]${FLAT},eq=brightness='0.004*clip(n-20,0,10)':saturation='1+0.1*clip(n-20,0,10)':eval=frame,eq=brightness=0.3:enable='eq(n,60)',${POP}:enable='between(n,80,81)',lutyuv=y=val+8:enable='between(n,100,119)',eq=saturation=1.6:enable='between(n,130,149)'[a];[a][1:v]concat=n=2:v=1[v]`, '-map', '[v]', f('quiet.mp4')]),
   ].every((r) => r.status === 0);
   return ok;
 }
@@ -138,9 +144,40 @@ test('half-graded scan: the grade that switches on 10 frames into a shot is foun
     assert.deepEqual(Object.keys(readScan(pub, 'clips/bad.mp4')).filter((k) => k === 'error' || k === 'steps'), ['error', 'steps']);
     // the cut steps far past the rule, but the picture changes: not a head
     assert.deepEqual((await scanSource(pub, 'clips/cut.mp4')).steps, []);
-    const raw = spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(pub, 'clips/cut.mp4'), '-vf', LOOKS_VF, '-f', 'rawvideo', '-'], {maxBuffer: 1 << 26}).stdout;
+    const raw = spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(pub, 'clips/cut.mp4'), '-vf', looksVf('tv'), '-f', 'rawvideo', '-'], {maxBuffer: 1 << 26}).stdout;
     assert.equal(lookSteps(frameLooks(raw), SOURCE_CHANNELS, {maxHash: 64, cutHash: 64, global: 0}).length, 1, 'only the structure hash and the whole-picture check keep the cut out');
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('half-graded scan: a 7-frame tail +8 luma / saturation ×2 inside a shot is found; a ramp, a flash, a 2-frame blip, tone or color alone and a cut are not', async () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'hg7-'));
+  try {
+    assert.ok(synthClips(pub), 'ffmpeg with libx264');
+    const [t] = (await scanSource(pub, 'clips/tail7.mp4')).steps;
+    assert.deepEqual([t.frame, t.at, t.to, t.off, t.frames], [53, 1.767, 2, true, 7]);
+    assert.ok(t.dY === 8 && t.sat[1] / t.sat[0] >= 1.9 && t.sat[1] / t.sat[0] <= 2.1, JSON.stringify(t));
+    const quiet = await scanSource(pub, 'clips/quiet.mp4');
+    assert.equal(quiet.frames, 180);
+    assert.deepEqual(quiet.steps, []);
+    // what keeps them out: the exposure step (100, back at 120) and the white-balance step (130, back at 150 is the cut)
+    // switch in one frame and hold, but each moves tone or color alone — any single channel would call them steps
+    const looks = frameLooks(spawnSync('ffmpeg', ['-v', 'error', '-i', path.join(pub, 'clips/quiet.mp4'), '-vf', looksVf('tv'), '-f', 'rawvideo', '-'], {maxBuffer: 1 << 26}).stdout);
+    assert.deepEqual(lookSteps(looks, SOURCE_CHANNELS).map((x) => x.k), [100, 120, 130]);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('frame looks in the input\'s own range: a full-range clip reads its own levels (ffmpeg < 7.1 squeezed them to limited)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hgr-')), f = path.join(dir, 'pc.mp4');
+  try {
+    // gray 100 for a second, then 200 — full range (yuvj420p, tagged pc), as Remotion renders and phones write it
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x646464:s=64x64:r=30:d=1', '-f', 'lavfi', '-i', 'color=c=0xc8c8c8:s=64x64:r=30:d=1', '-filter_complex', '[0:v][1:v]concat=n=2:v=1,scale=out_range=pc,format=yuvj420p[v]', '-map', '[v]', '-c:v', 'libx264', '-crf', '1', '-color_range', 'pc', f], {encoding: 'utf8'});
+    assert.equal(r.status, 0, r.stderr);
+    const stream = JSON.parse(spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=color_range,pix_fmt', '-of', 'json', f], {encoding: 'utf8'}).stdout).streams[0];
+    assert.equal(rangeOf(stream), 'pc');
+    assert.deepEqual([rangeOf({pix_fmt: 'yuv420p'}), rangeOf({pix_fmt: 'yuv420p', color_range: 'tv'}), rangeOf({pix_fmt: 'yuvj420p'})], ['tv', 'tv', 'pc']);
+    const y = (vf) => { const l = frameLooks(spawnSync('ffmpeg', ['-v', 'error', '-i', f, '-vf', vf, '-f', 'rawvideo', '-'], {maxBuffer: 1 << 26}).stdout); return [l[0].y, l[59].y].map(Math.round); };
+    assert.deepEqual(y(looksVf(rangeOf(stream))), [100, 200], 'the step is 100, as the file has it (ffmpeg 6.1 untold: 102 → 188, a step of 86)');
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 // frames drawn here (27×24 yuv444p, what LOOKS_VF delivers): a picture (seed), panned dx px, in a look (lift:
@@ -238,5 +275,9 @@ test('grade-coverage (render judge): the synthetic head blocks on the render\'s 
     assert.deepEqual(judge('head.mp4', [split[0], {...split[1], enter: 'whip'}]).findings, []);
     // a hard cut between two shots inside one clip (a pre-edit's own cut) is no finding
     assert.deepEqual(judge('cut.mp4', [clip('c', 'clips/cut.mp4', 0, 2)]).findings, []);
+    // a tail in another grade (Morantes 10's pop): split it off, then match IT to the shot it ends
+    const [t] = judge('tail7.mp4', [clip('k0', 'clips/tail7.mp4', 0, 2)]).findings;
+    assert.deepEqual(t.evidence.frames, [0, 53, 60]);
+    assert.deepEqual(t.fix, [{tool: 'split_clip', args: {at_sec: 1.767}, changesIds: true}, {tool: 'create_lut', note: 'the tail takes the grade of the shot it ends', args: {clip_id: '<the piece from 1.767 s>', to_clip_id: 'k0', match: true, name: 'k0-tail-match'}}]);
   } finally { fs.rmSync(pub, {recursive: true, force: true}); }
 });

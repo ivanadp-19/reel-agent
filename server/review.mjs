@@ -45,6 +45,7 @@ import {addColorRef, loadReviews, playableVersions, resolveToken, withVersion} f
 import {zipCentral, zipLocal} from '../scripts/layers.mjs';
 import {STACK_WARNING, actorOf, addNote, anchorAt, approve, byVariant, colorRefProposal, decideColorRef, moveNote, noteClock, noteMaxSec, openNotes, ownerInbox, pairOptions, revoke, variantName, variantState, versionLabel, versionQc} from '../scripts/review-states.mjs';
 import {validateIdentity} from '../src/validate.ts';
+import {readScan} from '../scripts/grade-scan.mjs';
 import {humanOnly, projectClients, seesClient, serveFile} from './http.mjs';
 import {SESSION_COOKIE, clientIp, cookieHeader, parseCookies, readBody, sameSite} from './session.mjs';
 
@@ -188,7 +189,8 @@ export function handleReview(req, res, url, {publicDir, now = Date.now(), g = nu
 // × variant — the versions rendered under that identity (byVariant: a project whose identity changed keeps the earlier
 // variant's versions, its approval included, under that variant), and the project's current identity even with none
 // yet. → rows {projectId, id (the variant's anchor on the page, rowId), name, identity, stem, versions, playable (v set),
-// project (the live JSON, on the row of the project's current identity; else null)}
+// project (the live JSON, on the row of the project's current identity; else null), scans (its sources' half-graded
+// scans, scripts/grade-scan.mjs readScan, on that row)}
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 export const rowId = (projectId, stem) => `${projectId}-${stem}`;
 export function bandejaRows(publicDir, sees) {
@@ -206,7 +208,8 @@ export function bandejaRows(publicDir, sees) {
     const playable = new Set(playableVersions(r, publicDir).map((x) => x.v));
     for (const [stem, versions] of variants) {
       const identity = stem === liveStem ? live : validateIdentity(versions.at(-1).identity).identity;
-      rows.push({projectId, id: rowId(projectId, stem), name: project?.name ?? projectId, identity, stem, versions, playable, project: stem === liveStem ? project : null});
+      const current = stem === liveStem ? project : null;
+      rows.push({projectId, id: rowId(projectId, stem), name: project?.name ?? projectId, identity, stem, versions, playable, project: current, scans: current && Object.fromEntries([...new Set((current.clips ?? []).map((c) => c.src))].map((src) => [src, readScan(publicDir, src)]))});
     }
   }
   return rows.sort((a, b) => a.identity.client.localeCompare(b.identity.client) || a.identity.script - b.identity.script || a.stem.localeCompare(b.stem));
@@ -264,7 +267,7 @@ const cls = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[
 const hidden = (o) => Object.entries(o).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('');
 const FLASH = {aprobada: 'Aprobada.', revocada: 'Aprobación revocada: la versión vuelve a por revisar.', nota: 'Nota guardada.', confirmada: 'Nota confirmada.', descartada: 'Nota descartada.', verificada: 'Nota verificada.',
   referencia: 'Referencia de color guardada: el juez compara con ella los reels de ese desarrollo.', 'sin-referencia': 'Propuesta de referencia descartada.'};
-const KIND = {nota: 'Nota por confirmar', colorref: 'Referencia de color', guion: 'Guion vs audio', juez: 'Juez caído', rojos: '3 rojos seguidos', disco: 'Disco bajo'};
+const KIND = {nota: 'Nota por confirmar', colorref: 'Referencia de color', guion: 'Guion vs audio', color: 'Color del export', juez: 'Juez caído', rojos: '3 rojos seguidos', disco: 'Disco bajo'};
 // the pair's download links on a version card (pairOptions), with the size of each and what the version says about its
 // master (the client's own file) and what it left out (no supers)
 function pairBlock(r, x, sizeOf) {

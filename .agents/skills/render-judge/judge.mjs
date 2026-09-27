@@ -88,7 +88,7 @@ export const T = {
   voiceJumpLU: 4, // take-to-take voice level jump
   musicUnderVoiceLU: 12, musicUnderVoiceMajorLU: 8,
   expoJump: 18, wbJump: 5, burnt: 235, dark: 45, // 8-bit YUV
-  gradeY: 2, gradeUV: 1, gradeSat: 0.8, gradeNoise: 4, gradeWin: 6, // a look step inside a shot: the residual a match leaves visible (|ΔY| 2, U/V 1, sat 0.8), ≥ 4× the local noise, levels over 6 frames each side
+  gradeY: 2, gradeUV: 1, gradeSat: 0.8, gradeNoise: 4, gradeWin: 6, // a look step at a join: the residual a match leaves visible (|ΔY| 2, U/V 1, sat 0.8), ≥ 4× the local noise, levels over 6 frames each side (inside a clip: the source scan's rule, scripts/grade-scan.mjs)
   hashDist: 6, // dHash bits (of 64) for "same shot"
   repeatWords: 5, // same n words said twice = a retake left in
   refY: 20, refSat: 12, refContrast: 25, refWB: 6, // render vs the client's approved color references
@@ -819,8 +819,8 @@ export function cutFindings(placed) {
 // under them and around a cut with a transition are not measured. A step between two measured frames of
 // one stretch of footage — the same clip, or a clip that continues it in its source — whose structure
 // stays the same is part of a shot in another grade: a pre-edit's ungraded head, a grade that starts late.
-// Thresholds near what a fixed join leaves (T.grade*). → {findings, skipped}: a clip with no measured
-// frame is skipped with a note.
+// The source scan's rule everywhere; at a join, thresholds near what a fixed join leaves (T.grade*). →
+// {findings, skipped}: a clip with no measured frame is skipped with a note.
 export function gradeCoverageFindings(looks, placed, spans = [], fps = FPS) {
   const last = placed.at(-1);
   const n = Math.min(looks.length, last ? last.fromFrame + last.durFrames : 0);
@@ -832,19 +832,25 @@ export function gradeCoverageFindings(looks, placed, spans = [], fps = FPS) {
   const okA = Array.from({length: n}, (_, k) => clipOf[k] >= 0 && !cover.some(([a, b]) => k * frameMs >= a && k * frameMs < b));
   const joined = (k) => clipOf[k] === clipOf[k - 1] || continuesPrev(placed[clipOf[k - 1]]?.clip, placed[clipOf[k]]?.clip);
   const ch = [{key: 'luma', t: T.gradeY, of: (f) => f.y}, {key: 'U', t: T.gradeUV, of: (f) => f.u}, {key: 'V', t: T.gradeUV, of: (f) => f.v}, {key: 'sat', t: T.gradeSat, of: (f) => f.s}];
-  const findings = [];
-  for (const {k, from, to, by} of gradeScan.lookSteps(looks.slice(0, n), ch, {win: T.gradeWin, noiseK: T.gradeNoise, ok: (i) => okA[i], joined})) {
+  const findings = [], L = looks.slice(0, n), opts = {win: T.gradeWin, noiseK: T.gradeNoise, ok: (i) => okA[i], joined};
+  // one rule with the source scan (scripts/grade-scan.mjs: tone and color at once, up to the shot's link), so a render
+  // never passes a step validate reports in its sources — and at a join of two clips, a split's, the residual a match
+  // leaves (T.grade*, the same picture: 6 bits); inside a clip, where no fix joins anything, a residual-size step is the
+  // source's own (a jump cut between takes moves one channel ~2: Morantes 10.1 at 14.7 s)
+  const steps = new Map([...gradeScan.lookSteps(L, gradeScan.SOURCE_CHANNELS, {...opts, need: gradeScan.SOURCE_NEED, maxHash: gradeScan.CUT_HASH}), ...gradeScan.lookSteps(L, ch, opts).filter((x) => clipOf[x.k] !== clipOf[x.k - 1])].map((x) => [x.k, x]));
+  for (const {k, from, to, by} of [...steps.values()].sort((x, y) => x.k - y.k)) {
     const a = placed[clipOf[k - 1]].clip, b = placed[clipOf[k]].clip;
     const head = k - from <= to - k; // the shorter side of the shot is the one in another grade
     const [s0, e0] = head ? [from, k] : [k, to];
     // that part becomes its own clip: split_clip where it starts / ends inside its clip (0.2 s from an
-    // edge at least, as split_clip wants), then the head takes its continuation's grade (create_lut match)
+    // edge at least, as split_clip wants), then it takes the grade of the rest of the shot (create_lut match: a head
+    // its continuation's, a tail the shot's before it — a, which keeps its id through the split)
     const odd = placed[clipOf[head ? k - 1 : k]], at = (f) => Math.round((f / fps) * 1000) / 1000;
     const splits = [e0, s0].filter((f) => f - odd.fromFrame >= 0.2 * fps && odd.fromFrame + odd.durFrames - f >= 0.2 * fps); // the later first: a split moves what follows it by up to a frame (validate's halfGradedIssues)
     const piece = splits.includes(s0) ? `<the piece from ${at(s0)} s>` : odd.clip.id; // a split keeps the first piece's id
     const fix = [...splits.map((f) => ({tool: 'split_clip', args: {at_sec: at(f)}})), head
       ? {tool: 'create_lut', note: 'the head takes the grade of the clip continuing it', args: {clip_id: piece, ...(a === b ? {} : {to_clip_id: b.id}), match: true, name: `${a.id}-match`.slice(0, 40)}}
-      : {tool: 'set_grade', note: 'the tail like the rest of the shot — compare the join with caption_proof', args: {target: piece}}];
+      : {tool: 'create_lut', note: 'the tail takes the grade of the shot it ends', args: {clip_id: piece, to_clip_id: a.id, match: true, name: `${odd.clip.id}-tail-match`.slice(0, 40)}}];
     const moves = Object.entries(by).map(([c, m]) => `${c} ${m > 0 ? '+' : ''}${m}`).join(', ');
     findings.push(F('grade-coverage', 'blocker', 'heuristic', s0 / fps, e0 / fps, `el color cambia dentro del plano en ${tc(k / fps)} (${a === b ? a.id : `${a.id} → ${b.id}`}): ${moves} — ${e0 - s0} cuadro(s) de ${head ? 'cabeza' : 'cola'} en otro grade`, {clip: (head ? a : b).id, frames: [from, k, to], by, lookAt: [r2((k - 1) / fps), r2(k / fps)]}, fix));
   }
@@ -1071,7 +1077,7 @@ function F(check, severity, kind, at, end, msg, evidence = {}, fix = []) {
 
 // ---------- evidence from the mp4 ----------
 function probe(file) {
-  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,sample_rate,channels,duration:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
+  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,pix_fmt,color_range,sample_rate,channels,duration:format=duration,bit_rate', '-of', 'json', file], {encoding: 'utf8'});
   return r.status === 0 ? JSON.parse(r.stdout) : null;
 }
 // One decode per file, not one per measurement (the VM has 2 vCPU): every video number comes
@@ -1098,17 +1104,19 @@ function readMeta(file, re) {
 // video, one decode: per-frame luma/chroma at `rate` fps (signalstats), a 9×8 dHash of the same
 // frames, and — when asked — the scene cuts and the black runs at full frame rate (blackFps =
 // the file's fps: a run as short as ONE frame is caught, d = half a frame), and every frame's look
-// (looks: scripts/grade-scan.mjs frameLooks — grade-coverage)
+// (looks: scripts/grade-scan.mjs frameLooks — grade-coverage — from the full frames, in the file's own range: the
+// source scan's numbers on any ffmpeg)
 export function analyzeVideo(file, {rate = 2, hashes = true, scenes = false, blackFps = null, looks = false} = {}) {
   const dir = tmpDir();
   const stats = path.join(dir, 'stats.txt'), cuts = path.join(dir, 'scene.txt'), black = path.join(dir, 'black.txt'), lk = path.join(dir, 'looks.raw');
   try {
     // scene cuts, black frames and looks need every frame; the stats and hashes only `rate` per second — thin out first
-    const full = [scenes && `[sc]select='gt(scene,0.35)',metadata=print:file=${fesc(cuts)},nullsink`, blackFps && `[bk]blackdetect=d=${(0.5 / blackFps).toFixed(4)}:pix_th=${BLACK.pix}:pic_th=${BLACK.pic},metadata=print:file=${fesc(black)},nullsink`, looks && `[lk]${gradeScan.LOOKS_VF}[looks]`].filter(Boolean);
-    const labels = [scenes && '[sc]', blackFps && '[bk]', looks && '[lk]'].filter(Boolean).join('');
-    const g = (full.length
-      ? [`[0:v]scale=160:-2,split=${full.length + 1}${labels}[v0]`, ...full, `[v0]fps=${rate},split=2[st][h]`]
-      : [`[0:v]fps=${rate},scale=270:-2,split=2[st][h]`])
+    const full = [scenes && `[sc]select='gt(scene,0.35)',metadata=print:file=${fesc(cuts)},nullsink`, blackFps && `[bk]blackdetect=d=${(0.5 / blackFps).toFixed(4)}:pix_th=${BLACK.pix}:pic_th=${BLACK.pic},metadata=print:file=${fesc(black)},nullsink`].filter(Boolean);
+    const labels = [scenes && '[sc]', blackFps && '[bk]'].filter(Boolean).join('');
+    const src = looks ? '[in]' : '[0:v]';
+    const g = [...(looks ? [`[0:v]split=2[lk][in]`, `[lk]${gradeScan.looksVf(gradeScan.rangeOf(probe(file)?.streams?.find((s) => s.codec_type === 'video')))}[looks]`] : []), ...(full.length
+      ? [`${src}scale=160:-2,split=${full.length + 1}${labels}[v0]`, ...full, `[v0]fps=${rate},split=2[st][h]`]
+      : [`${src}fps=${rate},scale=270:-2,split=2[st][h]`])]
       .concat([`[st]signalstats,metadata=print:file=${fesc(stats)},nullsink`, '[h]scale=9:8:flags=area,format=gray[out]']).join(';');
     const r = spawnSync('ffmpeg', ['-hide_banner', '-v', 'error', ...LIMIT(), '-i', file, '-an', '-filter_complex', g, '-map', '[out]', '-f', 'rawvideo', '-', ...(looks ? ['-map', '[looks]', '-fps_mode', 'passthrough', '-f', 'rawvideo', lk] : [])], {maxBuffer: 1 << 28, timeout: TIMEOUT(), killSignal: 'SIGKILL'});
     const frames = readMeta(stats, /lavfi\.signalstats\.(YAVG|YHIGH|YLOW|UAVG|VAVG|SATAVG)=([\d.]+)/);

@@ -190,6 +190,19 @@ test('the owner\'s inbox: notes to confirm, guion-conflict, a judge down, 3 reds
   assert.deepEqual(calm.filter((i) => i.kind !== 'metrica' && i.kind !== 'nota'), []);
 });
 
+test('the owner\'s inbox: a captions-only job on the client\'s export names the grade change inside a shot of it (delivered untouched)', () => {
+  // Morantes 10's pop: the rooftop shot's last 7 frames in another grade — the job asked for captions only
+  const scans = {'clips/m.mp4': {steps: [{at: 12.212, from: 8.842, to: 12.446, off: true, frames: 7, dY: 7.7, sat: [8.3, 16.3]}]}};
+  const project = {identity: IDENTITY, scope: ['captions'], clips: [{id: 'k0', src: 'clips/m.mp4', inSec: 0, outSec: 44.778, sourceDurationSec: 44.778}], captions: [], graphics: []};
+  const row = {projectId: 'p-9', stem: 'ACME_G2_H1_C1', identity: IDENTITY, versions: [version(1)], project, scans};
+  const color = ownerInbox([row]).filter((i) => i.kind === 'color');
+  assert.equal(color.length, 1);
+  assert.match(color[0].text, /^ACME_G2_H1_C1: su export cambia de color dentro de un plano — se entrega intacto \(el color no es de este trabajo\): avisarle\. k0: clips\/m\.mp4 is half-graded — .*stops at 12\.212 s: the 7 frames to 12\.446 s are in another grade \(ΔY \+7\.7, saturation 8\.3 → 16\.3\)\.$/);
+  // a job with color fixes it (validate's half-graded): nothing for the owner; nor without a scan
+  assert.deepEqual(ownerInbox([{...row, project: {...project, scope: null}}]).filter((i) => i.kind === 'color'), []);
+  assert.deepEqual(ownerInbox([{...row, scans: {'clips/m.mp4': null}}]).filter((i) => i.kind === 'color'), []);
+});
+
 test('versionQc lists what the label counts first, each with its severity; a minor counts only as a pattern (3+ of one check)', () => {
   // César's G2 v1: '1 hallazgo' = the major; the reading-speed minor is listed, not counted
   const g2 = versionQc(version(1, '1 hallazgo', {judge: {label: '1 hallazgo', findings: [{check: 'reading-speed', severity: 'minor', at: 32.73, msg: 'rápido'}, {check: 'insert-missing', severity: 'major', at: null, msg: 'sin INSERTS'}]}}));
