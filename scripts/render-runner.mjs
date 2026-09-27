@@ -8,6 +8,9 @@
 //   finalizing  final only: two-pass loudness to −14 LUFS + the QC gate (scripts/qc.mjs)
 //   review      final that passed QC for a project: 720p proxy + poster, recorded as the
 //               next review version (scripts/reviews.mjs recordFinal)
+//   (after)     a client's version (the pair, below) is judged: the `judge` hook (the backend's: scripts/reviews.mjs
+//               judgeVersion — the render judge's rules in a niced child) starts on it and the job is done
+//               without waiting; the version reads 'en curso' until the judge answers (CEO-6)
 //
 // Every render that settles leaves a record next to its mp4 (<file>.mp4.json,
 // scripts/render-records.mjs): the project (job.projectId) and what it is — final,
@@ -60,7 +63,8 @@
 // file must match the master frame for frame at the delivery fps (ffprobe: frames, fps, length; the zip:
 // its PNG count and fps.json) and they are moved into
 // reviews/<projectId>/v<n>/ under their system names with a snapshot
-// of the rendered props (scripts/reviews.mjs recordVersion). v<n> exists only when all of
+// of the rendered props (scripts/reviews.mjs recordVersion) and its qc: the loudness the gate measured and the
+// frames / rate the files matched ({lufs, truePeak, parity: {frames, fps}}). v<n> exists only when all of
 // it passed and the project still has that identity; a failure, a QC failure or a cancel
 // leaves no file of the pair and no version (a backend that died mid-render: its leftovers
 // go when the queue ends the job, runRender.abandon). Drafts and projects without identity
@@ -273,6 +277,7 @@ export function createRenderRunner({
   record = recordFinal,
   unrecord = ({projectId, v}) => inReviewsRow(reviewsDir, projectId, () => removeVersion(reviewsDir, projectId, v, publicDir)), // a version recorded by a job cancelled meanwhile
   identityNow = (projectId) => pairIdentity(path.join(publicDir, 'projects'), projectId), // the saved project's identity when the pair is recorded
+  judge = null, // ({projectId, v}) → the judge on a client's new version, not awaited (the backend: scripts/reviews.mjs judgeVersion)
   writeRecord = writeRenderRecord, // (mp4, {projectId, kind, renderSec}) → <mp4>.json, what scripts/cleanup-exports.mjs reads
   log = (m) => console.log(m),
   now = Date.now,
@@ -319,7 +324,7 @@ export function createRenderRunner({
     // master held by a hard link next to the cache's (`.part-` keeps another job's trim off it)
     const pair = !draft && job.projectId && job.identity?.client ? job.identity : null;
     const pairTmp = pair ? path.join(reviewsDir, job.projectId, `.tmp-pair-${id}`) : null;
-    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null;
+    let hold = null, pairKey = null, pairLayer = null, pairPng = null, pairMaster = null, pairSupers = null, pairMasterSupers = null, pairParity = null;
     // cancelled: no file of this job stays in exports/, no version of it stays in reviews/
     const cleanUp = async () => {
       let names = [];
@@ -573,6 +578,7 @@ export function createRenderRunner({
             else try { fs.linkSync(pairMaster, pairMasterSupers); } catch { await abortable(fs.promises.copyFile(pairMaster, pairMasterSupers)); }
             // every file against the master, at the client's rate whatever the props said
             const m = await probeOf(pairMaster), bad = new Set();
+            pairParity = {frames: m.frames, fps: m.fps};
             for (const [name, file] of [['captions', pairLayer], ['captions.png.zip', pairPng], ['supers', pairSupers], ['master_supers', pairMasterSupers]]) {
               for (const x of parityIssues(m, file === pairPng ? await zipParity(file) : await probeOf(file), {name, fps: deliveryFps({identity: pair})})) bad.add(x);
             }
@@ -584,7 +590,7 @@ export function createRenderRunner({
             const cur = identityNow(job.projectId);
             if (JSON.stringify(cur) !== JSON.stringify(pair)) throw new RenderError(`the project's identity changed during the render (${cur ? JSON.stringify(cur) : 'none now'}): render again`);
           };
-          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, verify} : {})});
+          const v = await record({draft, qcOk: true, projectId: job.projectId, outFile, dir: reviewsDir, publicDir, jobId: id, signal, ...(pair ? {deliverables: {master: pairMaster, captions: pairLayer, captionsPng: pairPng, supers: pairSupers, masterSupers: pairMasterSupers}, identity: pair, snapshot: props, masterKey: pairKey, qc: {lufs: qc.lufs ?? null, truePeak: qc.truePeak ?? null, parity: pairParity}, verify} : {})});
           if (v) { recorded = {projectId: job.projectId, v: v.v}; result.version = v.v; result.projectId = job.projectId; if (v.deliverables) result.deliverables = v.deliverables; }
         } catch (e) {
           stop(); // cancelled while the proxy was made: not a version error, a cancel
@@ -597,6 +603,8 @@ export function createRenderRunner({
           result.versionError = why;
         }
         stop(); // the cancel came in while it was being recorded: cleanUp takes the version back
+        // past the last cancel point: the client's version is judged in the background (never awaited here)
+        if (pair && recorded && judge) Promise.resolve().then(() => judge(recorded)).catch((e) => log(`render ${id}: the judge of v${recorded.v} did not start: ${e?.message ?? e}`));
       }
       recordAs(outFile, 'final');
       log(`render ${id} [${result.mode}${result.master ? `, master ${result.master}` : ''}] took ${result.renderSec}s for ${expectSec.toFixed?.(1)}s of video ${JSON.stringify(stages)}`);

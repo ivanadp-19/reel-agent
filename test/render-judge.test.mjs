@@ -27,6 +27,21 @@ test('timelineSpeech: a word a continuing split runs through (a half-graded head
   assert.deepEqual(pauseFindings(w, clips), []);
 });
 
+test('a split that removed nothing (continuesPrev) is no cut: a word across it is heard once, and no "cut-tight" there', () => {
+  const said = [TW(0, '¿O', 2550, 2770), TW(1, 'eso,', 2790, 3100), TW(2, 'mismo', 3120, 3400), TW(3, 'digo.', 3420, 3800)];
+  const tr = ['a', 'b'].map((clipId) => ({clipId, source: 'a', words: said})); // each clip reads its source's words
+  const split = [clip('a', 'a', 0, 2.7), clip('b', 'a', 2.7, 6)];
+  const w = words(split, tr);
+  assert.deepEqual(w.map((x) => [x.wid, x.clipId, x.take, +x.t0.toFixed(2), +x.t1.toFixed(2)]).slice(0, 2), [['a:0', 'a', 'a', 2.55, 2.77], ['a:1', 'b', 'a', 2.79, 3.1]]);
+  assert.ok(!pauseFindings(w, split).some((f) => f.check === 'cut-tight'));
+  // a page of the take (projectCaptions names it by its first clip) covers the words heard in its later pieces
+  const hand = {id: 'c0', clipId: 'a', src: 'clips/a.mp4', words: said.map((x) => ({text: x.word, startMs: x.startMs, endMs: x.endMs})), startMs: 2550, endMs: 3800, covers: []};
+  assert.ok(!captionTextFindings([hand], w).some((f) => f.check === 'coverage'));
+  const cut = [clip('a', 'a', 0, 2.7), clip('b', 'a', 2.72, 6)]; // 20 ms taken out: a real cut, the word heard in both pieces
+  assert.deepEqual(words(cut, tr).map((x) => x.wid).slice(0, 3), ['a:0', 'a:0', 'a:1']);
+  assert.ok(pauseFindings(words(cut, tr), cut).some((f) => f.check === 'cut-tight'));
+});
+
 test('pauses: mid-sentence gap is major, after a full stop only past the longer threshold', () => {
   const clips = [clip('a', 'a', 0, 10)];
   const tr = [{clipId: 'a', source: 'a', words: [TW(0, 'tiene', 0, 300), TW(1, 'noventa', 1000, 1300), TW(2, 'metros.', 1320, 1600), TW(3, 'Y', 2300, 2400), TW(4, 'cuesta', 2420, 2800)]}];
@@ -338,6 +353,13 @@ test('inserts match whole tokens of text values only', () => {
   const keyOnly = [{id: 'g0', template: 'label-2tone', props: {top: 'la llave', bottom: 'de la casa'}, startMs: 0, endMs: 2000}];
   assert.equal(insertFindings(ins, w, [], keyOnly).length, 1); // "llave" is not "av"; the key "place" is not a value
   assert.equal(insertFindings(ins, w, [], [{id: 'g1', template: 'location-tag', props: {place: 'Av. Reforma'}, startMs: 0, endMs: 2000}]).length, 0);
+  // a super anchors on its keywords, never on its name: "súper" (the supermarket) is not where the street is
+  const said = words([clip('a', 'a', 0, 40)], [{clipId: 'a', source: 'a', words: [TW(0, 'el', 16800, 17000), TW(1, 'súper,', 17080, 17500), TW(2, 'veintiséis', 29790, 30300)]}]);
+  const street = [{id: 'g2', template: 'location-tag', props: {place: 'Av. Reforma 222'}, startMs: 29600, endMs: 32300}];
+  assert.deepEqual(insertFindings(ins, said, [], street), [], 'no keyword said: covered anywhere in the reel');
+  const atCalle = words([clip('a', 'a', 0, 40)], [{clipId: 'a', source: 'a', words: [TW(0, 'súper,', 17080, 17500), TW(1, 'calle', 29700, 30000)]}]);
+  assert.deepEqual(insertFindings(ins, atCalle, [], street), [], 'where "calle" is said');
+  assert.equal(insertFindings(ins, atCalle, [], [{...street[0], startMs: 16000, endMs: 18500}]).length, 1, 'far from "calle": missing there');
 });
 
 test('caption layout is one function: measured as rendered (case, tier scale), shared with the renderer', () => {
@@ -596,4 +618,69 @@ test('cuts: a 0.33 s head continuing into the next clip (grade-coverage\'s split
   assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
   assert.deepEqual(checks([clip('x', 'x', 0, 3), clip('h', 'a', 3, 3.333), clip('b', 'a', 3.333, 6)]), []);
   assert.deepEqual(checks([clip('a', 'a', 0, 3), clip('h', 'a', 3.5, 3.833), clip('x', 'x', 0, 3)]), [['flash-cut', 'h'], ['jump-cut', ['h']]]);
+  // a continuing piece in another framing changes the picture: its own shot, a flash (never a jump cut: nothing was taken out)
+  assert.deepEqual(checks([clip('a', 'a', 0, 3), {...clip('h', 'a', 3, 3.333), transform: [{t: 3, scale: 1.2, x: 0, y: 0}]}, clip('b', 'a', 3.333, 6)]), [['flash-cut', 'h']]);
+  // two tiny pieces of one continuing shot are one flash, and the fix deletes both
+  const two = cutFindings(place([clip('a', 'a', 0, 3), clip('x1', 'x', 0, 0.2), clip('x2', 'x', 0.2, 0.4), clip('b', 'b', 0, 3)], 30));
+  assert.deepEqual(two.map((f) => [f.check, f.fix[0].args.clip_ids]), [['flash-cut', ['x1', 'x2']]]);
+});
+
+// ---- the queued judge on a client's version: the project's own words and its own rate ----
+import {judge, versionSummary, counts} from '../.agents/skills/render-judge/judge.mjs';
+
+test('judge(): the project\'s own words (its sources\' caches, never the machine\'s last transcript.json) at its own rate — 29.97 for a client, or the snapshot\'s', async () => {
+  const pub = fs.mkdtempSync(path.join(os.tmpdir(), 'jt-'));
+  const render = path.join(pub, 'exports', 'r.mp4');
+  fs.mkdirSync(path.dirname(render), {recursive: true});
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=108x192:r=30:d=2', '-f', 'lavfi', '-i', 'sine=f=440:d=2:sample_rate=48000', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', render]);
+  if (r.status !== 0) return; // no ffmpeg with libx264 here
+  for (const d of ['projects', 'clips/transcripts']) fs.mkdirSync(path.join(pub, d), {recursive: true});
+  const clip = (src) => ({id: 'c0', src, inSec: 0, outSec: 2, sourceDurationSec: 2});
+  // A was transcribed (its source's cache); B never was — yet the machine's last run, transcript.json, is a clip c0 of B heard late
+  fs.writeFileSync(path.join(pub, 'clips', 'transcripts', 'A.auto.json'), JSON.stringify([{word: 'Hola', startMs: 100, endMs: 400}, {word: 'mundo.', startMs: 450, endMs: 900}]));
+  fs.writeFileSync(path.join(pub, 'transcript.json'), JSON.stringify([{clipId: 'c0', source: 'B', words: [{i: 0, word: 'tarde', startMs: 1500, endMs: 1800}]}]));
+  fs.writeFileSync(path.join(pub, 'projects', 'a.json'), JSON.stringify({name: 'A', clips: [clip('clips/A.mp4')], identity: {client: 'acme', family: 'acme-G2', script: 2, variant: null}}));
+  fs.writeFileSync(path.join(pub, 'projects', 'b.json'), JSON.stringify({name: 'B', clips: [clip('clips/B.mp4')]}));
+  const run = (projectId, o = {}) => judge({projectId, render, publicDir: pub, sheets: false, sourceScan: false, env: {}, ...o});
+  try {
+    const a = await run('a');
+    assert.ok(!a.findings.some((f) => f.check === 'evidence'), 'A has its words');
+    assert.ok(!a.findings.some((f) => f.check === 'hook-dead-start'), 'its own: the first word at 0.1 s, not B\'s at 1.5 s');
+    assert.equal(a.fps, 30000 / 1001, 'a client\'s project renders at 29.97');
+    const b = await run('b');
+    assert.deepEqual(b.findings.filter((f) => f.check === 'evidence').map((f) => f.evidence.missing), [['c0']], 'B was never transcribed, whatever transcript.json holds');
+    assert.equal(b.fps, 30);
+    // a version is judged as it was rendered: the props of its snapshot win, their rate included
+    const snap = path.join(pub, 'snap.json');
+    fs.writeFileSync(snap, JSON.stringify({clips: [clip('clips/A.mp4')], fps: 30000 / 1001}));
+    const s = await run('b', {snapshot: snap});
+    assert.equal(s.fps, 30000 / 1001);
+    assert.ok(!s.findings.some((f) => f.check === 'evidence'), 'the snapshot\'s clip, with its words');
+    // a pre-edit split where nothing was removed (0.3 s pieces included) is one shot: no flash, jump, cut-in-word or glued cut;
+    // the same pieces with time taken out between them are real cuts
+    const cutChecks = ['flash-cut', 'jump-cut', 'cut-word', 'cut-tight', 'coverage', 'color-jump'];
+    const splitAt = (ranges) => fs.writeFileSync(path.join(pub, 'projects', 'c.json'), JSON.stringify({name: 'C', captionsOff: true, clips: ranges.map(([i, o], k) => ({id: `s${k}`, src: 'clips/A.mp4', inSec: i, outSec: o, sourceDurationSec: 2}))}));
+    fs.writeFileSync(path.join(pub, 'clips', 'transcripts', 'A.auto.json'), JSON.stringify([{word: 'Hola', startMs: 100, endMs: 400}, {word: 'mundo', startMs: 800, endMs: 1100}, {word: 'bonito.', startMs: 1150, endMs: 1500}]));
+    splitAt([[0, 0.9], [0.9, 1.2], [1.2, 2]]);
+    assert.deepEqual((await run('c')).findings.filter((f) => cutChecks.includes(f.check)).map((f) => f.check), []);
+    splitAt([[0, 0.9], [0.95, 1.25], [1.3, 2]]);
+    const cuts = new Set((await run('c')).findings.map((f) => f.check));
+    assert.ok(['flash-cut', 'jump-cut', 'cut-word'].every((c) => cuts.has(c)), [...cuts].join());
+    // what a review version keeps of it: a pass with checks skipped (here the source scan) says so
+    const sum = versionSummary(a);
+    assert.match(sum.label, /^(superado \(evidencia reducida\)|\d+ hallazgos?)$/);
+    assert.equal(sum.label.startsWith('superado'), a.verdict === 'PASS');
+    assert.ok(sum.findings.every((f) => Object.keys(f).join() === 'check,severity,at,end,msg' && counts(a.findings.find((x) => x.check === f.check && x.msg === f.msg))));
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('versionSummary: superado on a PASS; otherwise n hallazgos = blockers + majors + minor patterns; never "aprobado"', () => {
+  const f = (check, severity, kind = 'rule') => ({check, severity, kind, at: 1, end: 2, msg: check, fix: [], evidence: {}});
+  const of = (findings) => versionSummary({...verdictOf(findings), findings, profile: 'x'});
+  assert.deepEqual(of([f('static', 'nit', 'candidate')]), {label: 'superado', findings: [], profile: 'x'});
+  assert.equal(versionSummary({...verdictOf([], {reduced: true}), findings: [], skipped: ['color vs "refs": missing'], profile: 'x'}).label, 'superado (evidencia reducida)');
+  assert.equal(of([f('black-flash', 'blocker')]).label, '1 hallazgo');
+  const three = of([f('black-flash', 'blocker'), f('pause', 'major'), ...Array.from({length: 3}, () => f('glue', 'minor')), f('static', 'nit', 'candidate')]);
+  assert.equal(three.label, '3 hallazgos');
+  assert.equal(three.findings.length, 5, 'the findings that count, not the candidates');
 });

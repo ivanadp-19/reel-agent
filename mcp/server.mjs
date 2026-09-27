@@ -287,7 +287,7 @@ const sec = (d) => z.number().describe(d);
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_guion', 'set_identity', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
-  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs',
+  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge',
 ]);
 // Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
 // and the last save would drop the others: a call that may write a project waits for the one before
@@ -298,7 +298,7 @@ const OPEN_BEFORE_APPROVAL = new Set([
 // (set_caption_style, run_ai_step, prepare_mattes) holds every other edit of its project meanwhile.
 const READ_ONLY = new Set([
   'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
-  'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link',
+  'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link', 'rejudge',
 ]);
 const queues = new Map(); // project id → its last queued call
 const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
@@ -1252,11 +1252,12 @@ const reviewsApi = async (route, opts) => {
   return j;
 };
 const mbOf = (b) => `${(b / 1e6).toFixed(1)} MB`;
-server.registerTool('list_versions', {description: 'The review versions of a project (every final render that passed QC; drafts never count), newest first, and its review links (id, state live/expired/revoked, expiry). Tokens are not listed — they are shown once, by share_version.', inputSchema: {project_id: pid}}, async ({project_id}) => {
+server.registerTool('list_versions', {description: 'The review versions of a project (every final render that passed QC; drafts never count), newest first, and its review links (id, state live/expired/revoked, expiry). Tokens are not listed — they are shown once, by share_version. A client\'s version (a project with an identity) carries its QC técnico label: the render judge\'s rules run in the backend after the version is recorded — "en curso", then "superado", "superado (evidencia reducida)" (a pass with checks skipped: the report says which), "n hallazgos" (listed with where and what) or "no disponible" (the judge failed: rejudge). Never call a version "aprobado": only the client approves.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   projFile(project_id);
   const r = await reviewsApi(project_id);
   if (!r.versions.length) return text(`No review versions yet for ${project_id} — a final render (not a draft) that passes QC records one.`);
-  const lines = r.versions.map((v) => `v${v.v}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${f1(v.durationSec)}s  full ${mbOf(v.sizeBytes)} · proxy ${mbOf(v.proxyBytes)}${v.playable ? '' : '  (proxy gone — not on the page)'}${v.deliverables ? `\n    deliverables (public/${path.dirname(Object.values(v.deliverables)[0])}/): ${Object.values(v.deliverables).map((f) => path.basename(f)).join(', ')}${v.pruned?.some((f) => Object.values(v.deliverables).includes(f)) ? ' — REMOVED by the retention (REEL_REVIEW_KEEP_UNAPPROVED)' : ''}` : ''}`);
+  const qcOf = (v) => (v.qcLabel ? `\n    ${v.qcLabel}${v.judge?.profile ? ` (profile ${v.judge.profile})` : ''}${v.judge?.error ? ` — ${v.judge.error}` : ''}${(v.judge?.findings ?? []).slice(0, 8).map((x) => `\n      [${x.severity}] ${x.check}${x.at != null ? ` @${f1(x.at)}s` : ''} — ${String(x.msg).slice(0, 140)}`).join('')}${v.judge?.report ? `\n      full report + contact sheets: ${path.dirname(v.judge.report)}/` : ''}` : '');
+  const lines = r.versions.map((v) => `v${v.v}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${f1(v.durationSec)}s  full ${mbOf(v.sizeBytes)} · proxy ${mbOf(v.proxyBytes)}${v.playable ? '' : '  (proxy gone — not on the page)'}${qcOf(v)}${v.deliverables ? `\n    deliverables (public/${path.dirname(Object.values(v.deliverables)[0])}/): ${Object.values(v.deliverables).map((f) => path.basename(f)).join(', ')}${v.pruned?.some((f) => Object.values(v.deliverables).includes(f)) ? ' — REMOVED by the retention (REEL_REVIEW_KEEP_UNAPPROVED)' : ''}` : ''}`);
   const links = r.links.map((l) => `${l.id}  ${l.state}${l.state === 'live' ? ` until ${l.expiresAt.slice(0, 10)}` : l.revokedAt ? ` ${l.revokedAt.slice(0, 10)}` : ''}  (created ${l.createdAt.slice(0, 10)})`);
   return text(`Versions of ${project_id}:\n${lines.join('\n')}\n\nLinks:\n${links.length ? links.join('\n') : 'none — share_version creates one'}`);
 });
@@ -1270,6 +1271,11 @@ server.registerTool('share_version', {description: 'Create a private review link
   const l = await reviewsApi(`${project_id}/links`, {method: 'POST', body: JSON.stringify({days})});
   const url = version != null ? `${l.url}?v=${version}` : l.url;
   return text(`Review link (${l.id}, expires ${l.expiresAt.slice(0, 10)}):\n${url}${l.access ? `\n${l.access}` : ''}${/\/\/(127\.0\.0\.1|localhost)[:/]/.test(url) ? '\n(this is the local address — set REEL_PUBLIC_URL on the backend for the address clients can open)' : ''}`);
+});
+server.registerTool('rejudge', {description: 'Run the render judge\'s rules again on a review version, without rendering it again (after "QC técnico no disponible", a fixed judge or a changed client profile). It judges the version\'s own render against the props it was rendered from (the snapshot a client\'s version keeps: a version without one — no identity, or from before them — is refused), touches neither the project nor the version\'s files, and answers at once with "QC técnico en curso"; list_versions shows the new label when it is done.', inputSchema: {project_id: pid, v: z.number().int().min(1).describe('the version number (list_versions)')}}, async ({project_id, v}) => {
+  projFile(project_id);
+  const r = await reviewsApi(`${project_id}/versions/${v}/judge`, {method: 'POST', body: '{}'});
+  return text(`v${r.v}: ${r.qcLabel} — the judge runs in the background; list_versions shows its answer.`);
 });
 server.registerTool('revoke_review_link', {description: 'Revoke a review link of the project by its id (from list_versions / share_version): the page and its videos stop working at once.', inputSchema: {project_id: pid, link_id: z.string().regex(/^[0-9a-f]{8}$/)}}, async ({project_id, link_id}) => {
   projFile(project_id);

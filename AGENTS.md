@@ -114,7 +114,22 @@ counts once confirmed on the frame. PASS is labeled "QC técnico superado" —
 never "aprobado": only the client approves. FAIL → prioritized findings go out
 with the delivery → fix → next version → re-judge, at most 3 iterations, then
 escalate. Agent tooling, not a product feature: it reads the project and the
-render and never edits either.
+render and never edits either. A client's version (a project with an identity) is
+judged by the backend itself (CEO-6): the version appears at once as `QC técnico en
+curso`, then `scripts/reviews.mjs` `judgeVersion` runs `judge.mjs --summary` niced
+on it (its render and snapshot; the per-source transcripts; the project's fps) and
+writes `version.judge` = `{label: superado | superado (evidencia reducida) | n
+hallazgos | no disponible, findings, at, profile}` (reducida: a pass with checks
+skipped, the report says which — approval may take it, the suffix always shows; a
+crash or timeout: `no disponible` + an `[owner-alert]` log line naming why); the
+render job never waits for it, and judges run one at a time. Re-judge without a
+re-render: MCP `rejudge`, `POST /api/reviews/<id>/versions/<v>/judge` (backend
+token, an owner login or the local editor; 409 for a version without a snapshot —
+it cannot be judged as it was rendered), the editor's Share panel. A pass a dead
+backend left `en curso` is judged again once on the next start, then `no
+disponible`; the judge process it left behind (a SIGKILL skips the exit hook) is
+killed first, by the pid on the version once its command line names judge.mjs and
+that render.
 
 ## Headless runners
 
@@ -155,7 +170,7 @@ The production box is a small Linux VM (2 vCPU) shared by several agent sessions
   Stop the app with `npm run stop` (by pid file); anything else: `pgrep -af <pattern>`
   first, read the list, then `kill <pid>` of exactly the process you mean.
 - **The asset catalog runs niced.** `scripts/catalog.mjs` renices itself to 15 (`REEL_CATALOG_NICE`; ffmpeg inherits it) and decodes with one thread (`REEL_CATALOG_THREADS`), so a render or another session keeps the CPU. Run it by hand as `nice -n 15 ionice -c3 node scripts/catalog.mjs` on the VM, and only when there are new files — it is incremental, a second run over the same folder decodes nothing. Never put it on server start or a tight cron. One run per folder: `public/catalog/<dir>.lock` (`scripts/project-lock.mjs`); a second run over a locked folder skips it instead of decoding it again. `catalog_assets` stops its child (and the ffmpeg under it) when the MCP request is cancelled or after `REEL_CATALOG_TIMEOUT_MS` (10 min); what was analyzed stays saved.
-- **The render judge runs niced too.** `judge.mjs` renices itself to 15 (`REEL_JUDGE_NICE`) and scans source clips with one decoder thread (`REEL_JUDGE_THREADS`), incrementally: a file's already-decoded ranges are cached in `.captions-tmp/judge/source-scan.json` (path + size + mtime), so the next iteration decodes only the ranges an edit moved.
+- **The render judge runs niced too.** `judge.mjs` renices itself to 15 (`REEL_JUDGE_NICE`) and every ffmpeg it starts (the QC gate's included) decodes and filters on one thread (`REEL_JUDGE_THREADS`); it scans source clips incrementally: a file's already-decoded ranges are cached in `.captions-tmp/judge/source-scan.json` (path + size + mtime), so the next iteration decodes only the ranges an edit moved.
 - **Export cleanup.** Cron on the VM, dry-run first and read the log:
   `17 4 * * * cd ~/reel-agent && ~/.nvm/versions/node/v24.*/bin/node scripts/cleanup-exports.mjs --apply >> .cleanup.log 2>&1`.
   Where no cron can reach `public/` (Railway's volume), `REEL_CLEANUP_EVERY_H=24` makes the backend run it

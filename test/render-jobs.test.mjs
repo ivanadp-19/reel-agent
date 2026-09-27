@@ -69,12 +69,12 @@ if (process.argv[3] === 'hang') {
   require('node:fs').writeFileSync(process.argv[2].replace(/\\.mp4$/, '.loudnorm.mp4'), 'half');
   console.error('normalizing');
   setInterval(() => {}, 1e6);
-} else console.log(JSON.stringify({ok, error: null, checks: ok ? [] : [{name: 'loudness', value: '-20 LUFS', want: '-14 ±1', ok: false, blocking: true}], text: ok ? '✓ fake qc' : '✗ loudness'}));
+} else console.log(JSON.stringify({ok, error: null, checks: ok ? [] : [{name: 'loudness', value: '-20 LUFS', want: '-14 ±1', ok: false, blocking: true}], text: ok ? '✓ fake qc' : '✗ loudness', lufs: ok ? -14.2 : -20, truePeak: -1.6}));
 `;
 
 // a public/ + root with the fakes, a job store and a runner over them
 // (more: extra command fakes; unrecord null: the runner's own, over the real reviews store)
-function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner, more = {}, projects = {}} = {}) {
+function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unrecord, prepare, stallMs, prepareStallMs, finalizeMode = '', runner, memory = () => null, childEnv, owner, more = {}, projects = {}, judge} = {}) {
   const root = tmpdir();
   const pub = path.join(root, 'public');
   fs.mkdirSync(path.join(pub, 'exports'), {recursive: true});
@@ -96,7 +96,7 @@ function setup({workers = 1, masterCache = null, chooseMode, keyOf, record, unre
     ...more,
   };
   const run = runner ?? createRenderRunner({
-    root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}),
+    root, publicDir: pub, commands, masterCache, log: quiet, ...(childEnv ? {childEnv} : {}), ...(prepare ? {prepare} : {}), ...(chooseMode ? {chooseMode} : {}), ...(keyOf ? {keyOf} : {}), ...(judge ? {judge} : {}),
     logStage: (project, stage, ms, extra) => calls.timing.push({project, stage, ms, ...extra}),
     record: record ?? (async (o) => { calls.record.push(o); return {v: calls.record.length}; }),
     ...(unrecord === null ? {} : {unrecord: unrecord ?? ((r) => { calls.unrecord = [...(calls.unrecord ?? []), r]; })}),
@@ -482,6 +482,31 @@ const recording = (seen) => async (o) => {
   return recordFinal({...o, makeProxy: async (input, proxy, poster) => { fs.copyFileSync(input, proxy); fs.writeFileSync(poster, 'jpg'); return {durationSec: 2}; }});
 };
 const filesUnder = (d) => (fs.existsSync(d) ? fs.readdirSync(d, {recursive: true}).filter((f) => fs.statSync(path.join(d, f)).isFile()).sort() : []);
+
+test('a client\'s version is recorded with its qc (loudness as the gate measured it, the frames and rate of the pair) and "QC técnico en curso"; the judge then starts on it and the job is done without waiting (CEO-6)', async () => {
+  const L = paired();
+  const judged = [];
+  let pub;
+  // a judge that never answers: the job must be done anyway
+  const s = setup({...L, record: recording([]), unrecord: null, judge: (x) => { judged.push({...x, label: loadReviews(path.join(pub, 'reviews'), x.projectId).versions.find((y) => y.v === x.v)?.judge?.label}); return new Promise(() => {}); }});
+  pub = s.pub;
+  const {job} = s.jobs.submit({props: pairProps({frames: 2}), draft: false, projectId: 'p1', identity: IDENTITY});
+  await s.jobs.idle();
+  const j = readJob(s.dir, job.id);
+  assert.equal(j.status, 'done', j.error);
+  assert.deepEqual(judged, [{projectId: 'p1', v: 1, label: 'en curso'}], 'started once, on the version already recorded');
+  const v = loadReviews(path.join(pub, 'reviews'), 'p1').versions[0];
+  assert.deepEqual(v.qc, {lufs: -14.2, truePeak: -1.6, parity: {frames: 60, fps: '30000/1001'}});
+  assert.equal(v.masterKey, 'k-same-f');
+  assert.equal(v.judge.label, 'en curso');
+  // R-2: a final of a project without identity — a version as before, never judged by the queue
+  const plain = s.jobs.submit({props: props({frames: 1}), draft: false, projectId: 'p2'}).job;
+  await s.jobs.idle();
+  assert.equal(readJob(s.dir, plain.id).status, 'done');
+  const p2 = loadReviews(path.join(pub, 'reviews'), 'p2').versions[0];
+  assert.ok(p2 && !('judge' in p2) && !('qc' in p2));
+  assert.equal(judged.length, 1);
+});
 
 test('the pair: a layered final of a project with an identity leaves master + ProRes captions in reviews/<id>/v1/ under system names, with the snapshot', async () => {
   const L = paired();

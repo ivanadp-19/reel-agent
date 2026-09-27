@@ -55,6 +55,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {availableMemMb, startMinMemMb} from './render-memory.mjs';
 
 export const STATES = ['queued', 'running', 'done', 'failed', 'cancelled'];
@@ -73,9 +74,13 @@ export function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
-// the command line of a pid (Linux /proc); null elsewhere or when it is gone
+// the command line of a pid (Linux /proc; ps where there is none, macOS); null when it is gone
 export function pidCmdline(pid) {
-  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return null; }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch {}
+  if (fs.existsSync('/proc/self')) return null;
+  const r = spawnSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {encoding: 'utf8'});
+  return (r.status === 0 && r.stdout.trim()) || null;
 }
 // every process below pid (Linux /proc; [] elsewhere)
 export function descendants(pid) {
