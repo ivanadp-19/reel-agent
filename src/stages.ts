@@ -94,6 +94,7 @@ export const CLIP_FIELD_STAGE: Record<string, Stage[]> = {
   graded: ['color'], location: ['color'], // a head's grade fixed by hand; where the shot is (color-jump compares only within one)
   label: [], srcKey: [], // the reel CLI's key of the file it came from (the Drive import's: drive:<fileId>:<modifiedTime>:<size>)
   take: [], // the Drive import's {script, variant} the user confirmed for the file (server/drive.mjs)
+  piece: [], // hook / body / cta of its variant: what sync_family copies, nothing drawn
 };
 
 // the stage(s) each MCP tool (mcp/server.mjs) works in; [] = reads, searches, libraries, the plan, project
@@ -110,6 +111,7 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   add_broll: ['broll'], edit_broll: ['broll'], delete_brolls: ['broll'], add_graphic: ['broll'], edit_graphic: ['broll'], delete_graphics: ['broll'],
   set_keyframes: ['broll'], prepare_mattes: ['broll'],
   set_clip: ['corte', 'audio', 'color'], // speed; volume, muted; graded, location — by its arguments (callStages)
+  sync_family: ['corte', 'color', 'audio', 'captions', 'broll'], // onto the siblings: speed and J/L, grade overrides, clip audio, pages, B-roll and graphics
   set_accent_color: ['captions', 'broll'],
   set_brand: ['captions', 'broll', 'color', 'audio'], // a kit brings its captions, color and audio; its fonts / glossary alone: captions
   run_ai_step: ['corte', 'captions'], // autocut; captions — by its step (callStages)

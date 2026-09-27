@@ -1,6 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {useEditor} from './store';
-import {clipDurationSec} from '../src/timeline';
+import {clipDurationSec, inferPieces} from '../src/timeline';
 import {fmtMB, isVideoFile, pct, pendingIngests, uploadClip, waitIngest, type UploadItem} from './upload';
 
 export type ProjectMeta = {id: string; name: string; clips: number; updatedAt: string | null; thumb: string | null};
@@ -123,7 +123,8 @@ export const Start: React.FC<{
     try {
       const p = await fetch('/api/projects/' + id).then((r) => r.json());
       const {createdAt: _c, updatedAt: _u, identity: _i, ...rest} = p; // one project per client + script + variant: the copy has none
-      await fetch(`/api/projects/p-${Date.now()}`, {method: 'POST', body: JSON.stringify({...rest, name: `${p.name || 'Untitled project'} (copy)`})});
+      const clips = inferPieces(p.clips ?? [], p.identity?.variant); // …but its clips keep the pieces that identity tells (sync_family)
+      await fetch(`/api/projects/p-${Date.now()}`, {method: 'POST', body: JSON.stringify({...rest, clips, name: `${p.name || 'Untitled project'} (copy)`})});
     } catch { /* ignore */ }
     onRefresh();
   };

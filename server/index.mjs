@@ -48,7 +48,7 @@ import {createTokenStore, openForUser} from './tokens.mjs';
 import {handleCliTokens, isCliTokenPath} from './cli-tokens.mjs';
 import {captionsRevision, replaceCaptions} from './captions-revision.mjs';
 import {UPLOAD_ID, appendChunk, partFile, partSize, sweepParts} from './uploads.mjs';
-import {pairIdentity, projectIssues, savedProject, withDefaults} from '../mcp/checks.mjs';
+import {pairIdentity, projectIssues, projectWords, savedProject, withDefaults} from '../mcp/checks.mjs';
 import {checkStage, finalStageHash, inRow, nextRev, readProject, recordProof, saveProject, setStagesMode, stageView, waive, writeProject} from '../scripts/stages.mjs';
 import {whisperxCheck} from './health.mjs';
 import {createClipIngest} from './ingest.mjs';
@@ -482,6 +482,13 @@ async function handle(req, res) {
     let b; try { b = JSON.parse((await body(req)) || '{}'); } catch { return json(res, 400, {error: 'bad json', code: 'bad_request'}); }
     const [status, out] = !action ? await setStagesMode(PUBLIC, id, b.mode, g) : action === 'waive' ? await waive(PUBLIC, id, stage, b, g) : await recordProof(PUBLIC, id, stage, b, actor);
     return json(res, status, out);
+  }
+  // the words of a project's own clips as saved (mcp/checks.mjs projectWords, what validate reads): the editor's Sync
+  // body checks the graphics it copies against the sibling's audio with them (src/validate.ts unbackedData)
+  const wd = url.pathname.match(/^\/api\/projects\/([\w-]+)\/words$/);
+  if (wd && req.method === 'GET') {
+    const p = readProject(PUBLIC, wd[1]);
+    return p ? json(res, 200, projectWords(withDefaults(p), PUBLIC, {...readEnvFile(), ...process.env})) : json(res, 404, {error: `project ${wd[1]} not found`, code: 'not_found'});
   }
   if (url.pathname.startsWith('/api/projects/')) {
     const id = url.pathname.split('/').pop();

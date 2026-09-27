@@ -46,7 +46,7 @@ const CLIP_FIELDS = {
   volume: ['audio', 'entregables'], muted: ['audio', 'entregables'],
   transform: ['broll', 'entregables'],
   graded: ['color', 'entregables'], location: ['color', 'entregables'],
-  label: [], srcKey: [], take: [],
+  label: [], srcKey: [], take: [], piece: [],
 };
 
 test('every map row has its expected line in this test (and no line is left over)', () => {
@@ -62,7 +62,7 @@ for (const [field, stale] of Object.entries(FIELDS)) {
 
 const clip = (x = {}) => ({id: 'a', src: 'clips/a.mp4', label: 'a', inSec: 0, outSec: 4, sourceDurationSec: 10, ...x});
 const B = {id: 'b', src: 'clips/b.mp4', inSec: 0, outSec: 3, sourceDurationSec: 3};
-const CHANGED = {sourceDurationSec: 11, ingest: 'HDR', id: 'a2', src: 'clips/b.mp4', inSec: 1, outSec: 3, speed: 1.5, enter: 'whip', jSec: 0.5, lSec: 0.5, volume: 0.8, muted: true, transform: [{t: 0, scale: 1.2, x: 0, y: 0}], label: 'take 1', srcKey: 'a.mp4:1:2', take: {script: 2, variant: {hook: 1}}, graded: true, location: 'rooftop'};
+const CHANGED = {sourceDurationSec: 11, ingest: 'HDR', id: 'a2', src: 'clips/b.mp4', inSec: 1, outSec: 3, speed: 1.5, enter: 'whip', jSec: 0.5, lSec: 0.5, volume: 0.8, muted: true, transform: [{t: 0, scale: 1.2, x: 0, y: 0}], label: 'take 1', srcKey: 'a.mp4:1:2', take: {script: 2, variant: {hook: 1}}, graded: true, location: 'rooftop', piece: 'body'};
 for (const [field, stale] of Object.entries(CLIP_FIELDS)) {
   test(`clip field ${field} → ${stale.join(', ') || 'nothing'} stale`, () => {
     assert.deepEqual(invalidate({clips: [clip(), B]}, {clips: [clip({[field]: CHANGED[field]}), B]}), {stale, unmapped: []});
