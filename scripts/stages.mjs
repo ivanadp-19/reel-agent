@@ -13,14 +13,19 @@
 //   checkStage                  the only writer of verde / rojo / trabajando / chequeando, bound to the
 //                               revision it read (CEO-11)
 //   recordProof                 a proof (caption_proof, motion_proof) of the revision it showed
-// and the MCP appends its dependency lines (logStage). Advisory: nothing is refused yet (plan phase 11).
+//   waive                       a finding waived with a reason: warnings by anyone the gate lets through, blockers by
+//                               the owner's login only
+//   setStagesMode               project.stagesMode, the owner's login only (saveProject writes enforce on a first identity)
+// and the MCP appends its dependency lines (logStage: a tool started, or refused in enforce, on a red / stale stage).
+//   .jsonl events: {stage, from, to, …} (a status change), UnmappedField, proof, dependency, waiver, stagesMode
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {STAGES, canon, changedFields, inScope, invalidate, stageSlice, waitingOn} from '../src/stages.ts';
+import {STAGES, STAGES_MODES, canon, changedFields, inScope, invalidate, stageSlice, stagesModeOf, waitingOn, withWaivers} from '../src/stages.ts';
 import {projectRenderProps} from '../src/renderProps.ts';
 import {identityWrite, stageChecks, withDefaults} from '../mcp/checks.mjs';
 import {ACTIVE, jobsDir, listJobs} from './render-jobs.mjs';
+import {humanOnly} from '../server/http.mjs';
 
 // a project's fields only the backend writes (stage records, approvals, notes, the stages mode): a POST's are dropped
 export const SERVER_FIELDS = ['stages', 'approval', 'notes', 'stagesMode'];
@@ -48,7 +53,7 @@ export function logStage(publicDir, id, entry) {
   fs.mkdirSync(stagesDir(publicDir), {recursive: true});
   fs.appendFileSync(fileOf(publicDir, id, '.jsonl'), `${JSON.stringify({at: new Date().toISOString(), ...entry})}\n`);
 }
-const brief = (list) => list?.map((f) => ({level: f.level, code: f.code, ...(f.ref ? {ref: f.ref} : {}), ...(f.omitted ? {omitted: f.omitted} : {})}));
+const brief = (list) => list?.map((f) => ({level: f.level, code: f.code, ...(f.ref ? {ref: f.ref} : {}), ...(f.omitted ? {omitted: f.omitted} : {}), ...(f.waived ? {waived: true} : {})}));
 
 // One writer at a time per project (the shape of scripts/reviews.mjs inReviewsRow): the project write, a check's
 // start and its result, a proof. ponytail: in-process only — one backend per public/, the reviews' ceiling too
@@ -96,8 +101,9 @@ export const nextRev = (prev, now = new Date().toISOString()) => new Date(Math.m
 // on updatedAt (a writer that read an older version is refused instead of overwriting the other's work), the
 // identity check (mcp/checks.mjs), the server's fields dropped, merge (a field the writer does not know is kept;
 // clearing is null / []), write, invalidate. A save that changes nothing (the editor's echo of an outside write)
-// writes nothing and keeps the revision: proofs and checks of it stay current. Synchronous from the read to the
-// write; the backend runs it in the row.
+// writes nothing and keeps the revision: proofs and checks of it stay current. A project that gets its first identity
+// (and has no stagesMode yet) is written enforce (CEO-20). Synchronous from the read to the write; the backend runs it
+// in the row.
 export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
   if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return [400, {error: 'bad json: a project object'}];
   const was = readProject(publicDir, id), prev = was ?? {}; // missing, or corrupt: overwritten
@@ -111,8 +117,11 @@ export function saveProject(publicDir, id, incoming, {actor = null, now} = {}) {
   if (was && !changedFields(prev, {...prev, ...incoming, createdAt: prev.createdAt, updatedAt: prev.updatedAt}).length) return [200, {ok: true, updatedAt: prev.updatedAt ?? null, stale: [], unchanged: true, ...kept}];
   now = nextRev(prev, now);
   const saved = {...prev, ...incoming, createdAt: prev.createdAt || now, updatedAt: now};
+  const enforce = !prev.identity && saved.identity && prev.stagesMode == null;
+  if (enforce) saved.stagesMode = 'enforce';
   const {stale} = writeProject(publicDir, id, prev, saved, actor);
-  return [200, {ok: true, updatedAt: now, stale, ...kept}];
+  if (enforce) logStage(publicDir, id, {event: 'stagesMode', from: null, to: 'enforce', actor, rev: now, why: 'first identity'});
+  return [200, {ok: true, updatedAt: now, stale, ...kept, ...(enforce ? {stagesMode: 'enforce'} : {})}];
 }
 
 // check_stage (POST /api/projects/<id>/stages/<stage>/check): a stage's gate on the project as saved now, its
@@ -144,12 +153,14 @@ export async function checkStage(publicDir, id, stage, {actor = null, env = proc
 // the rules of one stage (mcp/checks.mjs stageChecks), the proofs its gate needs, and for the delivery the newest
 // final render of the project as it is now (its stageHash) → {status, findings, infra?, job?}
 async function gate(publicDir, id, p, stage, env) {
-  const findings = [...(await stageChecks(withDefaults(structuredClone(p)), publicDir, env))[stage]];
+  let findings = [...(await stageChecks(withDefaults(structuredClone(p)), publicDir, env))[stage]];
+  const rec = readStages(publicDir, id)[stage];
   if (stage === 'captions' && p.captions?.length && !p.captionsOff) {
-    const have = readStages(publicDir, id).captions?.proofs ?? {}, hash = sliceHash(p, 'captions');
+    const have = rec?.proofs ?? {}, hash = sliceHash(p, 'captions');
     for (const kind of PROOFS.captions) if (have[kind]?.hash !== hash) findings.push({level: 'error', code: 'proof-missing', msg: `no ${kind} of the captions as they are now — take one${kind === 'motion_proof' ? ' at a key word' : ''}, then check_stage captions`});
   }
-  const red = findings.some((f) => f.level === 'error');
+  findings = withWaivers(findings, rec?.waivers); // a waived finding stays listed and never makes the stage red
+  const red = findings.some((f) => f.level === 'error' && !f.waived);
   if (stage !== 'entregables') return {status: red ? 'rojo' : 'verde', findings};
   const finals = listJobs(jobsDir(publicDir), {projectId: id}).filter((j) => !j.draft);
   const job = finals.find((j) => j.stageHash === sliceHash(p, 'entregables'));
@@ -187,9 +198,67 @@ export function recordProof(publicDir, id, stage, {kind, rev} = {}, actor = null
   });
 }
 
+// POST /api/projects/<id>/stages/<stage>/waive {rule, ref?, reason} (MCP waive_finding): a finding of the stage's last
+// check waived with a reason — `g` is the gate's caller. A warning (a heuristic: off-mic, crew-talk, script-coverage…):
+// anyone the gate lets through, the agent included; a blocker: only the owner's login session (humanOnly — never a
+// token nor loopback, E-2). The next check_stage applies it (withWaivers). → [status, body]
+export function waive(publicDir, id, stage, {rule, ref, reason} = {}, g = null) {
+  const bad = (error) => Promise.resolve([400, {error, code: 'bad_request'}]);
+  if (!STAGES.includes(stage)) return bad(`stage: one of ${STAGES.join(', ')}`);
+  if (typeof rule !== 'string' || !rule) return bad('rule: the code of the finding (check_stage lists them)');
+  if (ref != null && typeof ref !== 'string') return bad('ref: the finding\'s ref, as check_stage lists it');
+  if (typeof reason !== 'string' || !reason.trim()) return bad('reason: why the reel is right as it is — a waiver always says why');
+  return inRow(id, () => {
+    if (!readProject(publicDir, id)) return [404, {error: `project ${id} not found`, code: 'not_found'}];
+    const all = readStages(publicDir, id), rec = all[stage];
+    const same = (x) => x.code === rule && (x.ref ?? null) === (ref ?? null);
+    const hits = (rec?.findings ?? []).filter(same);
+    if (!hits.length) return [404, {error: `no ${rule}${ref ? ` (${ref})` : ''} in the last check of ${stage} — check_stage ${stage}, then waive what it lists`, code: 'not_found'}];
+    const blocker = hits.some((f) => f.level === 'error');
+    const who = blocker ? humanOnly(g, {role: 'owner'}) : {ok: true, by: g?.user ?? g?.via ?? null};
+    if (!who.ok) return [403, {error: `${rule} is a blocker: only Felipe waives it, with his login (${who.error})`, code: who.code}];
+    const w = {rule, ...(ref != null ? {ref} : {}), reason: reason.trim().slice(0, 500), by: who.by, level: blocker ? 'error' : 'warn', at: new Date().toISOString()};
+    all[stage] = {...rec, waivers: [...(rec.waivers ?? []).filter((x) => !(x.rule === rule && (x.ref ?? null) === (ref ?? null))), w]};
+    writeStages(publicDir, id, all);
+    logStage(publicDir, id, {event: 'waiver', stage, ...w, actor: who.by});
+    return [200, {stage, waiver: w}];
+  });
+}
+
+// POST /api/projects/<id>/stages/mode {mode} — off | advisory | enforce, the owner's login session only (humanOnly: a
+// token, basic auth or loopback get 403 — local mode never relaxes enforce, E-2), logged with who. The mode changes
+// no content: updatedAt stays, and a body's stagesMode is dropped (SERVER_FIELDS). → [status, body]
+export function setStagesMode(publicDir, id, mode, g = null) {
+  const who = humanOnly(g, {role: 'owner'});
+  if (!who.ok) return Promise.resolve([who.status, {error: who.error, code: who.code}]);
+  if (!STAGES_MODES.includes(mode)) return Promise.resolve([400, {error: `mode: one of ${STAGES_MODES.join(', ')}`, code: 'bad_request'}]);
+  return inRow(id, () => {
+    const p = readProject(publicDir, id);
+    if (!p) return [404, {error: `project ${id} not found`, code: 'not_found'}];
+    if (p.stagesMode === mode) return [200, {mode, changed: false}];
+    writeJson(path.join(publicDir, 'projects', `${id}.json`), {...p, stagesMode: mode});
+    logStage(publicDir, id, {event: 'stagesMode', from: p.stagesMode ?? null, to: mode, actor: who.by, rev: p.updatedAt ?? null});
+    return [200, {mode, from: stagesModeOf(p), changed: true}];
+  });
+}
+
 // GET /api/projects/<id>/stages, stage_status: every stage as it stands for the project `p` now
 export function stageView(publicDir, id, p) {
   const recs = readStages(publicDir, id), on = inScope(p.scope);
-  return {project: id, rev: p.updatedAt ?? null, scope: p.scope ?? null, runs: on, mode: p.stagesMode ?? 'advisory',
+  return {project: id, rev: p.updatedAt ?? null, scope: p.scope ?? null, runs: on, mode: stagesModeOf(p),
     stages: STAGES.map((s) => (on.includes(s) ? {stage: s, ...recs[s], status: recs[s]?.status ?? 'pendiente', waitingOn: waitingOn(recs, p.scope, s), ...(recs[s]?.reds >= 3 ? {escalate: true} : {})} : {stage: s, status: 'omitida'}))};
+}
+
+// scripts/run-report.mjs — the stage metrics of a run (CEO-16's pass criteria): each stage as it ended, green, waived
+// (green with a waived finding), omitida or its status; and from the .jsonl every tool that started — or, in
+// enforce, was refused — while a stage it depends on was red or stale, and the waivers
+export function stageReport(publicDir, id, p) {
+  const v = stageView(publicDir, id, p);
+  const stages = Object.fromEntries(v.stages.map((s) => [s.stage, s.status !== 'verde' ? s.status : s.findings?.some((f) => f.waived) ? 'waived' : 'green']));
+  let log = [];
+  try { log = fs.readFileSync(fileOf(publicDir, id, '.jsonl'), 'utf8').split('\n').flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } }); } catch {}
+  const dep = log.filter((e) => e.event === 'dependency'), on = (e) => `${e.tool} on ${Object.entries(e.deps ?? {}).map(([d, st]) => `${d} ${st}`).join(', ')}`;
+  return {mode: v.mode, scope: v.scope, stages, allGreenOrWaived: Object.values(stages).every((s) => ['green', 'waived', 'omitida'].includes(s)),
+    startsOnRedOrStale: dep.filter((e) => !e.refused).map(on), refused: dep.filter((e) => e.refused).map(on),
+    waivers: log.filter((e) => e.event === 'waiver').map((e) => `${e.stage} ${e.rule}${e.ref ? ` (${e.ref})` : ''} by ${e.by}: ${e.reason}`)};
 }

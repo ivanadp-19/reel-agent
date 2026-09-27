@@ -52,7 +52,7 @@ import {FONT_FAMILIES, FONT_FILE, clientFont, resolveFamily} from '../src/fonts.
 import {projectRenderProps} from '../src/renderProps.ts';
 import {aheadOf, describeJob, jobsDir, listJobs, readJob} from '../scripts/render-jobs.mjs';
 import {PLAN_MODES, planGate, planMode, planStatus, planWords, reviewPlan, setPlanMode, withPlan} from '../src/plan.ts';
-import {SCOPABLE, STAGES, TOOL_STAGE, inScope, scopeInput, waitingOn} from '../src/stages.ts';
+import {SCOPABLE, STAGES, inScope, scopeInput, stagesModeOf, toolGate} from '../src/stages.ts';
 import {logStage, readStages} from '../scripts/stages.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -292,7 +292,7 @@ const sec = (d) => z.number().describe(d);
 const OPEN_BEFORE_APPROVAL = new Set([
   'get_project', 'duplicate_project', 'rename_project', 'set_plan', 'set_guion', 'set_identity', 'set_plan_mode', 'approve_plan', 'request_plan_changes',
   'add_clips', 'import_drive', 'list_drive', 'set_language', 'set_brand', 'get_transcript', 'find_cut_candidates', 'suggest_broll',
-  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge', 'set_scope', 'check_stage', 'stage_status',
+  'validate', 'caption_proof', 'motion_proof', 'frame_at', 'qc', 'list_render_jobs', 'rejudge', 'set_scope', 'check_stage', 'stage_status', 'waive_finding',
 ]);
 // Parallel calls in one turn (a page break moved as two edit_caption) would each load the project
 // and the last save would drop the others: a call that may write a project waits for the one before
@@ -304,7 +304,7 @@ const OPEN_BEFORE_APPROVAL = new Set([
 const READ_ONLY = new Set([
   'get_project', 'get_transcript', 'find_cut_candidates', 'suggest_broll', 'timing_report', 'validate', 'caption_proof', 'motion_proof',
   'frame_at', 'qc', 'render', 'start_render', 'list_render_jobs', 'list_versions', 'share_version', 'revoke_review_link', 'rejudge',
-  'check_stage', 'stage_status', // they write the stage records only (the backend's), never the project
+  'check_stage', 'stage_status', 'waive_finding', // they write the stage records only (the backend's), never the project
   'list_drive',
 ]);
 const queues = new Map(); // project id → its last queued call
@@ -322,24 +322,24 @@ server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name)
       const why = planGate(p, name === 'render' || name === 'start_render' ? 'The final render' : name, planMode(p));
       if (why) throw new Error(why);
     }
-    if (args?.project_id && TOOL_STAGE[name]?.length) logDependencies(name, args.project_id);
+    if (args?.project_id && !((name === 'render' || name === 'start_render') && args.draft)) stageGate(name, args.project_id);
     return cb(args, extra);
   };
   return args?.project_id && !READ_ONLY.has(name) ? inTurn(args.project_id, call) : call();
 });
 
-// Stages (scripts/stages.mjs, advisory — plan phase 10): a tool of stage S that starts while a stage S depends on
-// is red or stale (in the project's scope) is logged to public/stages/<id>.jsonl, never refused yet (enforce: phase
-// 11). stagesMode off: nothing; absent: advisory. A log that cannot be written never stops the tool.
-function logDependencies(name, id) {
-  try {
-    const p = load(id);
-    if (p.stagesMode === 'off') return;
-    const own = TOOL_STAGE[name], recs = readStages(PUBLIC, id);
-    const deps = Object.fromEntries(own.flatMap((s) => waitingOn(recs, p.scope, s)).filter((d) => !own.includes(d)).map((d) => [d, recs[d].status]));
-    const tag = callCtx.getStore()?.tag;
-    if (Object.keys(deps).length) logStage(PUBLIC, id, {event: 'dependency', tool: name, stages: own, deps, mode: p.stagesMode ?? 'advisory', actor: tag ? `mcp http session ${tag}` : OWNER});
-  } catch {}
+// Stages (src/stages.ts toolGate, project.stagesMode — plan phase 11): a tool of stage S called while a stage S depends
+// on is red or stale (in the project's scope: an omitted stage never holds anything back) is logged to
+// public/stages/<id>.jsonl (advisory, the default) or refused with the reason (enforce, logged `refused`); off: nothing.
+// A tool with no TOOL_STAGE row is refused in enforce. Draft renders are for looking, like frame_at: never gated. A log
+// that cannot be written never stops the tool; a project or record that cannot be read refuses nothing.
+function stageGate(name, id) {
+  let r = null;
+  try { r = toolGate(name, load(id), readStages(PUBLIC, id)); } catch {}
+  if (!r) return;
+  const tag = callCtx.getStore()?.tag;
+  try { logStage(PUBLIC, id, {event: 'dependency', tool: name, stages: r.stages, deps: r.deps, mode: r.mode, ...(r.refuse ? {refused: true} : {}), actor: tag ? `mcp http session ${tag}` : OWNER}); } catch {}
+  if (r.refuse) throw new Error(r.refuse);
 }
 
 server.registerTool('list_projects', {description: 'List reel-agent projects (id, name, clip count, identity family, last update).', inputSchema: {}}, async () => {
@@ -675,7 +675,8 @@ server.registerTool('set_identity', {description: 'Name whose reel this is and w
   const r = claimIdentity(PROJECTS, project_id, identityOf(a));
   if (r.error) throw new Error(r.error);
   p.identity = r.identity; await save(project_id, p);
-  return text(`Identity set: ${identityLine(p.identity)}`);
+  const enforce = stagesModeOf(load(project_id)) === 'enforce' ? '\nStages: enforce — a tool whose stage depends on a red or stale stage is refused until that stage is checked (check_stage between the stages; stage_status shows them).' : '';
+  return text(`Identity set: ${identityLine(p.identity)}${enforce}`);
 });
 
 server.registerTool('delete_captions', {description: 'Delete caption pages by id. Their words stay uncaptioned even after set_caption_style or regenerating (to change wording use edit_caption instead).', inputSchema: {project_id: pid, caption_ids: z.array(z.string()).min(1)}}, async ({project_id, caption_ids}) => {
@@ -1215,7 +1216,7 @@ server.registerTool('motion_proof', {description: 'SEE the motion: 24 consecutiv
   return {content: [{type: 'text', text: `24 frames from ${f1(first / fps)}s (1 frame = ${Math.round(1000 / fps)} ms), 8 per row, left→right then down${await stageProof(project_id, 'motion_proof', p.updatedAt)}`}, {type: 'image', data, mimeType: 'image/jpeg'}]};
 });
 
-// ---------- the stages of the reel (src/stages.ts, scripts/stages.mjs), through the backend — advisory ----------
+// ---------- the stages of the reel (src/stages.ts, scripts/stages.mjs), through the backend ----------
 const stagesApi = async (route, opts) => {
   let r;
   try { r = await fetch(`${API}/api/projects/${route}`, opts); } catch { throw new Error(`reel-agent backend is not running at ${API} — run \`npm start\` in the reel-agent folder`); }
@@ -1228,14 +1229,14 @@ const stageProof = async (id, kind, rev) => {
   try { const r = await stagesApi(`${id}/stages/captions/proof`, {method: 'POST', body: JSON.stringify({kind, rev})}); return r.recorded ? `\n(${kind} recorded for check_stage captions)` : `\n(${kind} NOT recorded for check_stage captions: ${r.reason})`; }
   catch (e) { return `\n(${kind} not recorded for check_stage captions: ${e.message})`; }
 };
-const findingLine = (f) => `  ${f.level === 'error' ? 'ERR ' : 'WARN'} ${f.code}${f.omitted ? ` (${f.omitted} omitida: advisory)` : ''}: ${f.msg ?? ''}`;
+const findingLine = (f) => `  ${f.waived ? 'WAIVED' : f.level === 'error' ? 'ERR ' : 'WARN'} ${f.code}${f.ref ? ` [ref ${f.ref}]` : ''}${f.omitted ? ` (${f.omitted} omitida: advisory)` : ''}: ${f.msg ?? ''}${f.waived ? ` — waived by ${f.waived.by}: ${f.waived.reason}` : ''}`;
 server.registerTool('set_scope', {description: `What the job asks for: the stages of the reel the brief requests — ${SCOPABLE.join(', ')}. ["captions"] = captions only (a finished export, e.g. César's Morantes: no cut, no color, no B-roll), ["corte","captions"] = cut and captions, all five = everything (the default when the brief does not narrow it). ingest and the delivery always run; the script (guion) goes with captions. A stage left out is omitida: its checks do not run, it never blocks another, and what the checks or the render judge find about it is advisory (reported, never counted in the QC label) — and you skip its steps (reel-edit step 0). Set it first, from the brief's own words; never narrow what the brief did not.`, inputSchema: {project_id: pid, stages: z.array(z.enum(SCOPABLE)).min(1).describe('the stages the brief asks for')}}, async ({project_id, stages}) => {
   const r = scopeInput(stages);
   if (r.error) throw new Error(r.error);
   const p = load(project_id); p.scope = r.scope; await save(project_id, p);
   return text(`Scope ${r.scope ? r.scope.join(' + ') : 'everything'}: ${scopeLine(p)}.`);
 });
-server.registerTool('check_stage', {description: `Run the gate of one stage (${STAGES.join(' → ')}) on the project as saved now and record the result: verde (no error; warnings listed), rojo (errors to fix, each with its code), trabajando (its final render is still running, or retrying after a backend restart), pendiente (entregables: no final render of this version yet), stale (the project changed while it ran: its result was discarded — check again), omitida (outside the scope, set_scope: nothing runs). captions needs a caption_proof and a motion_proof of the captions as they are now; entregables reads the newest final render of this version of the project. A red from the machine (out of memory, a stall, a restart) says so and does not count toward the 3 reds in a row that mean: stop and ask Felipe (one per version of the stage: checking the same edit again is no new attempt). Advisory: nothing is refused yet. stage_status shows every stage.`, inputSchema: {project_id: pid, stage: z.enum(STAGES)}}, async ({project_id, stage}) => {
+server.registerTool('check_stage', {description: `Run the gate of one stage (${STAGES.join(' → ')}) on the project as saved now and record the result: verde (no error; warnings listed), rojo (errors to fix, each with its code), trabajando (its final render is still running, or retrying after a backend restart), pendiente (entregables: no final render of this version yet), stale (the project changed while it ran: its result was discarded — check again), omitida (outside the scope, set_scope: nothing runs). captions needs a caption_proof and a motion_proof of the captions as they are now; entregables reads the newest final render of this version of the project. A red from the machine (out of memory, a stall, a restart) says so and does not count toward the 3 reds in a row that mean: stop and ask Felipe (one per version of the stage: checking the same edit again is no new attempt). Each finding has its code (and ref): fix it, or waive_finding a warning with the reason; a waived finding never makes the stage red. In stages mode enforce (a project with an identity), a tool whose stage depends on a red or stale stage is refused until that stage is checked green: check the stage the refusal names. stage_status shows every stage.`, inputSchema: {project_id: pid, stage: z.enum(STAGES)}}, async ({project_id, stage}) => {
   projFile(project_id);
   const r = await stagesApi(`${project_id}/stages/${stage}/check`, {method: 'POST', body: '{}'});
   const f = r.findings ?? [];
@@ -1246,8 +1247,14 @@ server.registerTool('check_stage', {description: `Run the gate of one stage (${S
 server.registerTool('stage_status', {description: 'Where each stage of the reel stands (pendiente, trabajando, chequeando, verde, rojo, stale = an edit reopened it, omitida = outside the scope), what each waits on (a stage it depends on that is red or stale), and 3 reds in a row (stop and ask Felipe). check_stage runs one.', inputSchema: {project_id: pid}}, async ({project_id}) => {
   projFile(project_id);
   const v = await stagesApi(`${project_id}/stages`);
-  const lines = v.stages.map((s) => `  ${s.stage.padEnd(12)}${s.status}${s.infra ? ' (infra)' : ''}${s.findings?.length ? `  ${s.findings.filter((x) => x.level === 'error').length} err / ${s.findings.filter((x) => x.level !== 'error').length} warn` : ''}${s.waitingOn?.length ? `  — waits on ${s.waitingOn.join(', ')}` : ''}${s.escalate ? `  — ${s.reds} reds in a row: stop and ask Felipe` : ''}`);
-  return text([`Stages of ${project_id} (mode ${v.mode}; ${v.scope ? `scope ${v.scope.join(' + ')}` : 'scope: everything'}):`, ...lines].join('\n'));
+  const lines = v.stages.map((s) => `  ${s.stage.padEnd(12)}${s.status}${s.infra ? ' (infra)' : ''}${s.findings?.length ? `  ${s.findings.filter((x) => x.level === 'error' && !x.waived).length} err / ${s.findings.filter((x) => x.level !== 'error' && !x.waived).length} warn${s.findings.some((x) => x.waived) ? ` / ${s.findings.filter((x) => x.waived).length} waived` : ''}` : ''}${s.waitingOn?.length ? `  — waits on ${s.waitingOn.join(', ')}` : ''}${s.escalate ? `  — ${s.reds} reds in a row: stop and ask Felipe` : ''}`);
+  const how = {off: 'nothing logged nor refused', advisory: 'a tool started on a red or stale stage is logged, not refused', enforce: 'a tool whose stage depends on a red or stale stage is refused'}[v.mode];
+  return text([`Stages of ${project_id} (mode ${v.mode}: ${how}; ${v.scope ? `scope ${v.scope.join(' + ')}` : 'scope: everything'}):`, ...lines].join('\n'));
+});
+server.registerTool('waive_finding', {description: 'Waive one finding of a stage\'s last check_stage, with the reason the reel is right as it is: rule = its code, ref = its ref when it has one (check_stage lists both). Warnings (the heuristics: off-mic, read-through, crew-talk, fillers, script-coverage, color-ref, broll-fit, claim-image, wind…) are yours to decide: fix them, or waive them saying why. A blocker (ERR) is not yours: only Felipe waives it, with his login — here the backend refuses it; fix it, or stop and ask him. Recorded in the stage\'s log with who and why; check_stage the stage again to apply it (a waived finding stays listed and never makes the stage red).', inputSchema: {project_id: pid, stage: z.enum(STAGES), rule: z.string().min(1).describe('the finding\'s code, e.g. "off-mic"'), ref: z.string().optional().describe('the finding\'s ref, as check_stage lists it'), reason: z.string().min(3).max(500).describe('why the reel is right as it is')}}, async ({project_id, stage, rule, ref, reason}) => {
+  projFile(project_id);
+  const r = await stagesApi(`${project_id}/stages/${stage}/waive`, {method: 'POST', body: JSON.stringify({rule, ref, reason})});
+  return text(`Waived ${stage} ${rule}${ref ? ` [ref ${ref}]` : ''} (${r.waiver.level === 'error' ? 'blocker' : 'warning'}): ${r.waiver.reason} — check_stage ${stage} to apply it.`);
 });
 
 const renderModeArg = z.enum(['full', 'layers']).optional().describe('default: the backend\'s (REEL_RENDER_MODE, else full)');

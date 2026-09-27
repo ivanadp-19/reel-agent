@@ -4,15 +4,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, inScope, invalidate, scopeFindings, scopeInput, scopeSkips, stageFindings, stageSlice, waitingOn} from '../src/stages.ts';
+import {CLIP_FIELD_STAGE, FIELD_STAGE, JUDGE_STAGE, RULES, SCOPABLE, STAGES, TOOL_STAGE, inScope, invalidate, scopeFindings, scopeInput, scopeSkips, stageFindings, stageSlice, toolGate, waitingOn, waiverOf} from '../src/stages.ts';
 import {projectRenderProps, withDeliveryFps} from '../src/renderProps.ts';
 import {normalizeCaption} from '../src/captions.ts';
 import {splitClip, trimClip} from '../src/timeline.ts';
 import {validateProject} from '../src/validate.ts';
 import {newProject, stageChecks, withDefaults} from '../mcp/checks.mjs';
-import {SERVER_FIELDS, checkStage, finalStageHash, readProject, readStages, recordProof, saveProject, sliceHash, stageView, stagesDir} from '../scripts/stages.mjs';
+import {SERVER_FIELDS, checkStage, finalStageHash, logStage, readProject, readStages, recordProof, saveProject, setStagesMode, sliceHash, stageReport, stageView, stagesDir, waive} from '../scripts/stages.mjs';
+import {gate} from '../server/http.mjs';
+import {SESSION_COOKIE, createLoginLimiter, parseRoles, signSession} from '../server/session.mjs';
+import {createTokenStore} from '../server/tokens.mjs';
 import {createRenderJobs, jobsDir, readJob, writeJob} from '../scripts/render-jobs.mjs';
 import {backendStub} from './backend-stub.mjs';
 
@@ -33,7 +38,7 @@ const FIELDS = {
   accentColor: CAPTIONS_ON,
   brand: ['color', ...CAPTIONS_ON],
   name: [], plan: [], planMode: [], planModeLog: [], planApproved: [], planReviews: [], createdAt: [], updatedAt: [],
-  scope: [],
+  scope: [], stagesMode: [],
 };
 const CLIP_FIELDS = {
   sourceDurationSec: ALL, ingest: ALL,
@@ -72,7 +77,7 @@ test('clips: a new source is ingest; a clip moved, removed or split from a known
 });
 
 test('a field no stage owns: everything after ingest stale, and named', () => {
-  assert.deepEqual(invalidate({}, {stagesMode: 'enforce'}), {stale: AFTER_INGEST, unmapped: ['stagesMode']});
+  assert.deepEqual(invalidate({}, {wobble: 'enforce'}), {stale: AFTER_INGEST, unmapped: ['wobble']});
   assert.deepEqual(invalidate({clips: [clip()]}, {clips: [clip({crop: 'x'})], name: 'n'}), {stale: AFTER_INGEST, unmapped: ['clips.crop']});
   assert.deepEqual(invalidate({constructor: 1}, {constructor: 2}).unmapped, ['constructor'], 'not the prototype\'s');
 });
@@ -636,5 +641,199 @@ test('MCP: set_scope, check_stage and stage_status through the backend; a tool s
     await client.close(); await backend.close();
     for (const f of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(file.replace(/\.json$/, f), {force: true});
     for (const f of ['.json', '.jsonl']) fs.rmSync(path.join('public', 'stages', `${id}${f}`), {force: true});
+  }
+});
+
+// ---- plan phase 11: stagesMode, the MCP's gate (toolGate), waivers, the stage metrics of run-report ----
+test('toolGate: off says nothing; advisory (the default) logs; enforce refuses a tool whose in-scope dependency is red or stale', () => {
+  const recs = {ingest: {status: 'verde'}, corte: {status: 'stale'}, guion: {status: 'rojo'}, captions: {status: 'rojo'}};
+  assert.equal(toolGate('edit_caption', {stagesMode: 'off'}, recs), null);
+  for (const p of [{}, {stagesMode: 'advisory'}, {stagesMode: 'bogus'}]) assert.deepEqual(toolGate('edit_caption', p, recs), {mode: 'advisory', stages: ['captions'], deps: {corte: 'stale', guion: 'rojo'}}, JSON.stringify(p));
+  const r = toolGate('edit_caption', {stagesMode: 'enforce'}, recs);
+  assert.deepEqual([r.mode, r.deps], ['enforce', {corte: 'stale', guion: 'rojo'}]);
+  assert.equal(r.refuse, 'edit_caption refused (stages enforce): it works in captions, which waits on corte (stale), guion (rojo). Fix what guion reports, then check_stage corte (then guion) and call edit_caption again; stage_status shows every stage. A warning you keep: waive_finding with the reason; a blocker only Felipe waives.');
+  assert.equal(toolGate('edit_caption', {stagesMode: 'enforce'}, {captions: {status: 'rojo'}, corte: {status: 'pendiente'}}), null, 'its own stage red is how it gets fixed; never checked holds nothing');
+  assert.equal(toolGate('get_project', {stagesMode: 'enforce'}, recs), null, 'a tool of no stage');
+  assert.deepEqual(toolGate('set_clip', {stagesMode: 'enforce'}, {ingest: {status: 'stale'}, corte: {status: 'stale'}}).deps, {ingest: 'stale'}, 'a tool of several stages waits only on what none of them is');
+});
+
+test('toolGate enforce: an omitted stage never blocks (Felipe\'s rule) — only the dependencies the job asked for', () => {
+  const recs = {corte: {status: 'rojo'}, color: {status: 'stale'}, captions: {status: 'stale'}};
+  assert.equal(toolGate('edit_caption', {stagesMode: 'enforce', scope: ['captions']}, recs), null, 'corte omitted');
+  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce', scope: ['captions']}, recs).deps, {captions: 'stale'}, 'the delivery: color and corte omitted');
+  assert.deepEqual(toolGate('start_render', {stagesMode: 'enforce'}, recs).deps, {corte: 'rojo', color: 'stale', captions: 'stale'}, 'no scope: all of them');
+});
+
+test('toolGate: a tool with no TOOL_STAGE row is refused in enforce (default-deny, like the plan gate), let through in advisory and off', () => {
+  assert.match(toolGate('brand_new_tool', {stagesMode: 'enforce'}, {}).refuse, /^brand_new_tool refused \(stages enforce\): it has no stage in src\/stages\.ts TOOL_STAGE/);
+  assert.ok(toolGate('toString', {stagesMode: 'enforce'}, {}).refuse, 'not the prototype\'s');
+  assert.equal(toolGate('brand_new_tool', {}, {}), null);
+  assert.equal(toolGate('brand_new_tool', {stagesMode: 'off'}, {}), null);
+});
+
+const ACME = {client: 'acme', script: 2, variant: {hook: 1}};
+test('the first identity writes stagesMode enforce, logged; a project that had one, or a mode already, keeps its mode; a body never sets it', async () => {
+  const pub = pubDir();
+  try {
+    const [, a] = saveProject(pub, 'p1', {...PROJ(), stagesMode: 'off'}, {actor: 'editor'});
+    assert.deepEqual([readProject(pub, 'p1').stagesMode, stageView(pub, 'p1', readProject(pub, 'p1')).mode], [undefined, 'advisory'], 'no identity: advisory; the body\'s mode dropped');
+    const [, b] = saveProject(pub, 'p1', {identity: ACME, updatedAt: a.updatedAt}, {actor: 'agent'});
+    assert.deepEqual([b.stagesMode, readProject(pub, 'p1').stagesMode], ['enforce', 'enforce']);
+    const modes = () => log(pub, 'p1').filter((e) => e.event === 'stagesMode').map((e) => [e.from, e.to, e.actor, e.why]);
+    assert.deepEqual(modes(), [[null, 'enforce', 'agent', 'first identity']]);
+    assert.ok(!log(pub, 'p1').some((e) => e.event === 'UnmappedField'), 'the mode is no content');
+    // cleared and set again: still enforce, nothing new logged; a body's mode is dropped
+    const [, c] = saveProject(pub, 'p1', {identity: null, stagesMode: 'off', updatedAt: b.updatedAt});
+    saveProject(pub, 'p1', {identity: ACME, updatedAt: c.updatedAt});
+    assert.deepEqual([readProject(pub, 'p1').stagesMode, modes().length], ['enforce', 1]);
+    // before phase 11: an identity and no mode — a new identity is no first one, it stays advisory
+    fs.writeFileSync(path.join(pub, 'projects', 'old.json'), JSON.stringify({...PROJ(), identity: {client: 'acme', script: 3}}));
+    saveProject(pub, 'old', {identity: {client: 'acme', script: 4}});
+    assert.equal(readProject(pub, 'old').stagesMode, undefined);
+    // a mode the owner set before any identity stays
+    fs.writeFileSync(path.join(pub, 'projects', 'mine.json'), JSON.stringify({...PROJ(), stagesMode: 'advisory'}));
+    saveProject(pub, 'mine', {identity: {client: 'acme', script: 5}});
+    assert.equal(readProject(pub, 'mine').stagesMode, 'advisory');
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+const TOKEN = crypto.randomBytes(16).toString('hex'), SECRET = crypto.randomBytes(32).toString('hex');
+test('the mode route: only the owner\'s login session changes stagesMode — loopback, basic auth, every token and a reviewer get 403; logged with who', async () => {
+  const pub = pubDir(), pass = crypto.randomBytes(8).toString('hex');
+  try {
+    const auth = {boss: bcrypt.hashSync(pass, 4)};
+    const roles = parseRoles(JSON.stringify({boss: {role: 'owner'}}));
+    const users = createTokenStore(path.join(pub, 't.json'));
+    const {token: bossToken} = users.create({user: 'boss', admin: true});
+    const at = (headers, publicMode = true) => gate({method: 'POST', headers: {host: '127.0.0.1:3333', ...headers}, socket: {}}, new URL('http://x/api/projects/p1/stages/mode'), {publicMode, auth, tokens: [TOKEN, 'second'], sessionSecret: SECRET, users, roles, limiter: createLoginLimiter({max: 50})});
+    const session = {cookie: `${SESSION_COOKIE}=${signSession(SECRET, 'boss', {hash: auth.boss})}`};
+    const callers = {
+      loopback: await at({}, false),
+      'the backend token in local mode': await at({'x-reel-token': TOKEN}, false),
+      'the owner\'s session cookie in local mode': await at(session, false),
+      'basic auth of the owner': await at({authorization: 'Basic ' + Buffer.from(`boss:${pass}`).toString('base64')}),
+      'the primary backend token': await at({'x-reel-token': TOKEN}),
+      'another backend token': await at({'x-reel-token': 'second'}),
+      'the owner\'s own user token': await at({'x-reel-token': bossToken}),
+      'a reviewer\'s login': {kind: 'ok', user: 'rev', via: 'session', role: 'reviewer', clients: ['acme']},
+    };
+    fs.mkdirSync(path.join(pub, 'projects'));
+    const [, a] = saveProject(pub, 'p1', {...PROJ(), identity: ACME});
+    for (const [who, g] of Object.entries(callers)) {
+      assert.equal(g.kind, 'ok', `${who}: the gate lets it through`);
+      const [code, r] = await setStagesMode(pub, 'p1', 'off', g);
+      assert.deepEqual([code, r.code], [403, 'human_only'], who);
+    }
+    assert.equal(readProject(pub, 'p1').stagesMode, 'enforce', 'nobody but the owner relaxes enforce');
+    const boss = await at(session);
+    assert.deepEqual([boss.via, boss.role], ['session', 'owner']);
+    assert.equal((await setStagesMode(pub, 'p1', 'strict', boss))[0], 400);
+    assert.deepEqual(await setStagesMode(pub, 'p1', 'advisory', boss), [200, {mode: 'advisory', from: 'enforce', changed: true}]);
+    assert.deepEqual(await setStagesMode(pub, 'p1', 'advisory', boss), [200, {mode: 'advisory', changed: false}]);
+    const p = readProject(pub, 'p1');
+    assert.deepEqual([p.stagesMode, p.updatedAt], ['advisory', a.updatedAt], 'no content changed: the revision stays (checks and proofs of it stand)');
+    assert.deepEqual(log(pub, 'p1').filter((e) => e.event === 'stagesMode').map((e) => [e.from, e.to, e.actor]), [[null, 'enforce', null], ['enforce', 'advisory', 'boss']]);
+    assert.equal((await setStagesMode(pub, 'nope', 'off', boss))[0], 404);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+const AGENT = {kind: 'ok', admin: true, via: 'backend-token', primary: true}, OWNER = {kind: 'ok', user: 'boss', via: 'session', role: 'owner', clients: []};
+const GUION = 'Hola amigos dos. Una frase que el corte no guarda nunca jamás.';
+test('waivers: the agent waives a warning with a reason; a blocker only the owner\'s login — and a waived blocker leaves the stage green', async () => {
+  const pub = pubDir();
+  try {
+    saveProject(pub, 'p1', {...PROJ(), guion: GUION});
+    const pause = {rule: 'pause', ref: 'a:1', reason: 'la pausa es dramática'};
+    assert.equal((await waive(pub, 'p1', 'corte', pause, OWNER))[0], 404, 'only what a check found');
+    assert.equal((await checkStage(pub, 'p1', 'corte', ENV))[1].status, 'rojo');
+    for (const g of [AGENT, {kind: 'ok', via: 'loopback'}, {kind: 'ok', user: 'rev', via: 'session', role: 'reviewer', clients: ['acme']}]) {
+      const [code, r] = await waive(pub, 'p1', 'corte', pause, g);
+      assert.deepEqual([code, r.code], [403, 'human_only'], g.via);
+      assert.match(r.error, /pause is a blocker: only Felipe waives it/);
+    }
+    assert.equal((await waive(pub, 'p1', 'corte', {...pause, reason: '  '}, OWNER))[0], 400, 'a waiver says why');
+    const [code, r] = await waive(pub, 'p1', 'corte', pause, OWNER);
+    assert.deepEqual([code, r.waiver.by, r.waiver.level, r.waiver.reason], [200, 'boss', 'error', 'la pausa es dramática']);
+    const [, g] = await checkStage(pub, 'p1', 'corte', ENV);
+    assert.deepEqual([g.status, g.findings.map((f) => [f.code, f.waived?.by])], ['verde', [['pause', 'boss']]]);
+    // a warning: the agent's to decide
+    await checkStage(pub, 'p1', 'captions', ENV);
+    const [cw, rw] = await waive(pub, 'p1', 'captions', {rule: 'guion-missing', ref: 'c1', reason: 'that line is the other variant\'s CTA'}, AGENT);
+    assert.deepEqual([cw, rw.waiver.level, rw.waiver.by], [200, 'warn', 'backend-token']);
+    const [, c] = await checkStage(pub, 'p1', 'captions', ENV);
+    assert.deepEqual(c.findings.map((f) => [f.code, !!f.waived]), [['guion-missing', true], ['proof-missing', false], ['proof-missing', false]]);
+    assert.equal(c.status, 'rojo', 'the blockers it did not waive still count');
+    // one finding by code and ref; an agent's waiver of a warning never covers that rule as a blocker
+    assert.ok(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'warn'}));
+    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c2', level: 'warn'}), undefined);
+    assert.equal(waiverOf([rw.waiver], {code: 'guion-missing', ref: 'c1', level: 'error'}), undefined);
+    const l = log(pub, 'p1');
+    assert.deepEqual(l.filter((e) => e.event === 'waiver').map((e) => [e.stage, e.rule, e.ref, e.by, e.level]), [['corte', 'pause', 'a:1', 'boss', 'error'], ['captions', 'guion-missing', 'c1', 'backend-token', 'warn']]);
+    assert.deepEqual(l.filter((e) => e.stage === 'corte' && e.to === 'verde').map((e) => e.findings), [[{level: 'error', code: 'pause', ref: 'a:1', waived: true}]]);
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('run-report stage metrics: each stage green, waived or its status, and every tool started or refused on a red or stale stage', async () => {
+  const pub = pubDir();
+  try {
+    saveProject(pub, 'p1', PROJ());
+    for (const s of ['ingest', 'corte', 'guion', 'color', 'audio', 'captions']) await checkStage(pub, 'p1', s, ENV);
+    await waive(pub, 'p1', 'corte', {rule: 'pause', ref: 'a:1', reason: 'dramática'}, OWNER);
+    await checkStage(pub, 'p1', 'corte', ENV);
+    logStage(pub, 'p1', {event: 'dependency', tool: 'add_broll', stages: ['broll'], deps: {captions: 'rojo'}, mode: 'advisory', actor: 'a'});
+    logStage(pub, 'p1', {event: 'dependency', tool: 'start_render', stages: ['entregables'], deps: {captions: 'rojo', broll: 'stale'}, mode: 'enforce', refused: true, actor: 'a'});
+    const r = stageReport(pub, 'p1', readProject(pub, 'p1'));
+    assert.deepEqual(r.stages, {ingest: 'green', corte: 'waived', guion: 'green', color: 'green', audio: 'green', captions: 'rojo', broll: 'pendiente', entregables: 'pendiente'});
+    assert.deepEqual([r.mode, r.allGreenOrWaived], ['advisory', false]);
+    assert.deepEqual(r.startsOnRedOrStale, ['add_broll on captions rojo']);
+    assert.deepEqual(r.refused, ['start_render on captions rojo, broll stale']);
+    assert.deepEqual(r.waivers, ['corte pause (a:1) by boss: dramática']);
+    // a captions-only job: the omitted stages count as done
+    saveProject(pub, 'p1', {scope: ['captions'], updatedAt: readProject(pub, 'p1').updatedAt});
+    assert.deepEqual(Object.entries(stageReport(pub, 'p1', readProject(pub, 'p1')).stages).filter(([, v]) => v === 'omitida').map(([k]) => k), ['corte', 'color', 'audio', 'broll']);
+    assert.deepEqual(stageReport(pub, 'nolog', {}).startsOnRedOrStale, [], 'no log yet');
+  } finally { fs.rmSync(pub, {recursive: true, force: true}); }
+});
+
+test('MCP enforce: a tool on a red dependency is refused with the reason and logged; a blocker is not the agent\'s to waive; off lets it run; set_identity says enforce', async () => {
+  const id = `p-stagetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, id2 = `${id}-b`;
+  const file = (x) => path.join('public', 'projects', `${x}.json`);
+  fs.mkdirSync(path.dirname(file(id)), {recursive: true});
+  const base = {...PROJ(), name: 'stage enforce test', clips: [clip({src: 'clips/stagetest-none.mp4', outSec: 5})], captions: []};
+  fs.writeFileSync(file(id), JSON.stringify({...base, stagesMode: 'enforce'}));
+  fs.writeFileSync(file(id2), JSON.stringify(base));
+  const backend = await backendStub();
+  const client = new Client({name: 'test', version: '0'});
+  await client.connect(new StdioClientTransport({command: 'node', args: ['mcp/server.mjs'], cwd: process.cwd(), env: {...process.env, REEL_API: backend.url, REEL_AGENT: 'stages-test'}}));
+  const call = async (name, args, pid = id) => { const r = await client.callTool({name, arguments: {project_id: pid, ...args}}); return {err: !!r.isError, text: r.content.map((c) => c.text ?? '').join('\n')}; };
+  const saved = (x = id) => JSON.parse(fs.readFileSync(file(x), 'utf8'));
+  const deps = (x = id) => { try { return fs.readFileSync(path.join('public', 'stages', `${x}.jsonl`), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.event === 'dependency'); } catch { return []; } };
+  try {
+    assert.match((await call('check_stage', {stage: 'ingest'})).text, /^ingest: ROJO/);
+    const no = await call('set_accent_color', {color: '#00FF00'});
+    assert.equal(no.err, true);
+    assert.match(no.text, /set_accent_color refused \(stages enforce\): it works in captions \+ broll, which waits on ingest \(rojo\)\. Fix what ingest reports, then check_stage ingest/);
+    assert.notEqual(saved().accentColor, '#00FF00', 'nothing written');
+    assert.deepEqual(deps().map((e) => [e.tool, e.deps, e.mode, e.refused]), [['set_accent_color', {ingest: 'rojo'}, 'enforce', true]]);
+    assert.equal((await call('get_project', {})).err, false, 'reads stay open');
+    assert.match((await call('stage_status', {})).text, /mode enforce: a tool whose stage depends on a red or stale stage is refused/);
+    const w = await call('waive_finding', {stage: 'ingest', rule: 'untranscribed', ref: 'stagetest-none', reason: 'no audio in this clip'});
+    assert.equal(w.err, true);
+    assert.match(w.text, /untranscribed is a blocker: only Felipe waives it, with his login \(solo con login en la VM\)/);
+    // off (what the owner's login sets): the same tool runs and nothing is logged
+    fs.writeFileSync(file(id), JSON.stringify({...saved(), stagesMode: 'off'}));
+    assert.equal((await call('set_accent_color', {color: '#00FF00'})).err, false);
+    assert.equal(deps().length, 1);
+    // a first identity through the MCP: the backend writes enforce and the tool says so
+    const si = await call('set_identity', {client: `zzst${process.pid % 100000}`, script: 7, hook: 1}, id2);
+    assert.equal(si.err, false, si.text);
+    assert.match(si.text, /Stages: enforce — a tool whose stage depends on a red or stale stage is refused/);
+    assert.equal(saved(id2).stagesMode, 'enforce');
+  } finally {
+    await client.close(); await backend.close();
+    for (const x of [id, id2]) {
+      for (const f of ['.json', '.lock', '.timing.jsonl']) fs.rmSync(file(x).replace(/\.json$/, f), {force: true});
+      for (const f of ['.json', '.jsonl']) fs.rmSync(path.join('public', 'stages', `${x}${f}`), {force: true});
+    }
   }
 });

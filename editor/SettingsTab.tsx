@@ -4,7 +4,7 @@ import {CLEAN, dbToGain, fmtDb, gainToDb, musicOf} from '../src/audio';
 import {spansWithoutMatte} from '../src/graphicTemplates';
 import {DELIVERABLES, deliverableName, eachTarget, identityOf, identityTaken, projectTargets, validateIdentity, type Issue} from '../src/validate';
 import type {Matte} from '../src/Person';
-import {SCOPABLE, STAGES, inScope, scopeInput, type Scopable} from '../src/stages';
+import {SCOPABLE, STAGES, STAGES_MODES, inScope, scopeInput, type Scopable} from '../src/stages';
 import {runJob, readPublic} from './jobs';
 import {Btn, Label, Row, Section, Select, TextInput, Toggle} from './ui';
 
@@ -61,17 +61,36 @@ const IdentitySection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => 
 
 // The stages of the reel (src/stages.ts; the MCP's set_scope, check_stage, stage_status — one backend for both):
 // what the job asks for — a stage left out is omitida: its gate does not run and what is found there is advisory —
-// and each stage's gate, run on the saved project (autosaved 600 ms after an edit). Advisory: nothing is refused.
-type StageRow = {stage: string; status: string; findings?: Issue[]; waitingOn?: string[]; infra?: boolean};
+// and each stage's gate, run on the saved project (autosaved 600 ms after an edit). The editor is never refused (a
+// person edits freely; the edits still reopen stages). A finding is waived with a reason (waive_finding: a warning
+// by anyone, a blocker by the owner's login only), and the mode (off / advisory / enforce: how the agent's tools are
+// held) changes with the owner's login only — the backend answers 403 otherwise, local mode included (E-2).
+type StageRow = {stage: string; status: string; findings?: (Issue & {waived?: {reason: string; by: string | null}})[]; waitingOn?: string[]; infra?: boolean};
 const StagesSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => void}> = ({notify}) => {
   const {projectId, scope, setScope} = useEditor();
   const [rows, setRows] = useState<StageRow[] | null>(null);
+  const [mode, setMode] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pick, setPick] = useState('0');
+  const [reason, setReason] = useState('');
   const at = `/api/projects/${encodeURIComponent(projectId ?? '')}/stages`;
   const refresh = async () => {
-    try { const v = await fetch(at).then((r) => r.json()); if (!Array.isArray(v.stages)) throw new Error(v.error ?? 'no answer'); setRows(v.stages); }
+    try { const v = await fetch(at).then((r) => r.json()); if (!Array.isArray(v.stages)) throw new Error(v.error ?? 'no answer'); setRows(v.stages); setMode(v.mode); }
     catch (e) { notify(`Stages: ${(e as Error).message}`, 'error'); }
   };
+  const post = async (label: string, route: string, body: object, done: string) => {
+    setBusy(label);
+    try {
+      const r = await fetch(`${at}/${route}`, {method: 'POST', body: JSON.stringify(body)}).then((x) => x.json());
+      if (r.error) throw new Error(r.error);
+      notify(done, 'ok');
+      await refresh();
+      return true;
+    } catch (e) { notify(`${label}: ${(e as Error).message}`, 'error'); return false; }
+    finally { setBusy(null); }
+  };
+  const open = rows?.flatMap((r) => (r.findings ?? []).filter((f) => !f.waived).map((f) => ({stage: r.stage, f}))) ?? [];
+  const chosen = open[+pick] ?? open[0];
   const check = async (stage: string) => {
     setBusy(stage);
     try {
@@ -108,20 +127,31 @@ const StagesSection: React.FC<{notify: (msg: string, kind: 'error' | 'ok') => vo
       {STAGES.map((s) => {
         const row = rows?.find((x) => x.stage === s);
         const status = !on.includes(s) ? 'omitida' : row && row.status !== 'omitida' ? row.status : '—';
-        const errs = row?.findings?.filter((i) => i.level === 'error').length ?? 0;
+        const errs = row?.findings?.filter((i) => i.level === 'error' && !i.waived).length ?? 0;
         return (
-          <div key={s} className="flex items-center gap-2 text-[12px]" title={row?.findings?.map((i) => `${i.level === 'error' ? 'ERR' : 'WARN'} ${i.code}: ${i.msg}`).join('\n') || undefined}>
+          <div key={s} className="flex items-center gap-2 text-[12px]" title={row?.findings?.map((i) => `${i.waived ? 'WAIVED' : i.level === 'error' ? 'ERR' : 'WARN'} ${i.code}: ${i.msg}${i.waived ? ` — ${i.waived.by}: ${i.waived.reason}` : ''}`).join('\n') || undefined}>
             {(SCOPABLE as readonly string[]).includes(s)
               ? <input type="checkbox" checked={asked.includes(s as Scopable)} onChange={() => toggle(s as Scopable)} className="accent-primary" aria-label={`${s} in scope`} />
               : <span className="w-[13px]" title={s === 'guion' ? 'goes with captions' : 'always runs'} />}
             <span className="flex-1 font-mono">{s}</span>
-            <span className={status === 'rojo' ? 'text-error' : status === 'verde' ? 'text-[#39d98a]' : 'text-on-surface-variant'}>{status}{row?.infra ? ' (infra)' : ''}{errs ? ` · ${errs} err` : ''}{row?.waitingOn?.length ? ` · waits on ${row.waitingOn.join(', ')}` : ''}</span>
+            <span className={status === 'rojo' ? 'text-error' : status === 'verde' ? 'text-[#39d98a]' : 'text-on-surface-variant'}>{status}{row?.infra ? ' (infra)' : ''}{errs ? ` · ${errs} err` : ''}{row?.findings?.some((i) => i.waived) ? ` · ${row.findings.filter((i) => i.waived).length} waived` : ''}{row?.waitingOn?.length ? ` · waits on ${row.waitingOn.join(', ')}` : ''}</span>
             {s === 'captions' && <Btn onClick={proofed} disabled={!projectId || !!busy || !on.includes(s)} title="I watched the captions in the preview, stills and motion: records the caption_proof and motion_proof the captions check asks for">{busy === 'proof' ? '…' : 'Proofed'}</Btn>}
             <Btn onClick={() => check(s)} disabled={!projectId || !!busy || !on.includes(s)}>{busy === s ? '…' : 'Check'}</Btn>
           </div>
         );
       })}
-      <Btn onClick={refresh} disabled={!projectId}>Show status</Btn>
+      {chosen && (
+        <div className="flex items-center gap-2 text-[12px]">
+          <Select value={String(open.indexOf(chosen))} onChange={setPick} title="a finding of the last check: a warning you may waive; a blocker only the owner's login" options={open.map(({stage, f}, i) => ({value: String(i), label: `${stage} · ${f.level === 'error' ? 'ERR' : 'WARN'} ${f.code}${f.ref ? ` (${f.ref})` : ''}`, title: f.msg}))} className="flex-1" />
+          <TextInput value={reason} onChange={setReason} placeholder="why it is right as it is" maxLength={500} className="flex-1" />
+          <Btn onClick={() => post('Waive', `${chosen.stage}/waive`, {rule: chosen.f.code, ref: chosen.f.ref, reason}, `${chosen.stage} ${chosen.f.code} waived — Check ${chosen.stage} to apply it`).then((ok) => ok && setReason(''))} disabled={!reason.trim() || !!busy}>Waive</Btn>
+        </div>
+      )}
+      <div className="flex items-center gap-2 text-[12px]">
+        <Btn onClick={refresh} disabled={!projectId}>Show status</Btn>
+        {mode && <span className="flex-1 text-right text-on-surface-variant">Mode</span>}
+        {mode && <Select value={mode} onChange={(m) => post('Mode', 'mode', {mode: m}, `Stages mode ${m}`)} title="off: nothing logged nor refused; advisory: the agent's tools on a red or stale stage are logged; enforce: refused. The owner's login only." options={STAGES_MODES.map((m) => ({value: m}))} className="w-auto" />}
+      </div>
     </Section>
   );
 };

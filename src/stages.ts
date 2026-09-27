@@ -1,7 +1,7 @@
 // The stages of a reel (docs/designs/cesar-etapas-bandeja.md §3, CEO-13): which stage owns each project
 // field and each MCP tool, what an edit leaves stale, the rules each stage's gate reads and what the job asks
-// for (scope). Pure data and functions: the backend keeps each stage's state with them (scripts/stages.mjs,
-// advisory — plan phase 10); refusing tools comes with phase 11.
+// for (scope). Pure data and functions: the backend keeps each stage's state with them (scripts/stages.mjs), and
+// the MCP wrapper logs or refuses a tool by them (toolGate, project.stagesMode — plan phase 11).
 //
 //   ingest → corte → guion (the client's script against the ASR, #35: only captions and script coverage
 //                    depend on it, so set_guion never reopens the cut, the color or the audio)
@@ -79,6 +79,7 @@ export const FIELD_STAGE: Record<string, Stage[]> = {
   brand: ['captions', 'broll', 'color'],
   name: [], plan: [], planMode: [], planModeLog: [], planApproved: [], planReviews: [], createdAt: [], updatedAt: [],
   scope: [], // what the job asks for changes no content: a stage it brings back in shows the state it had
+  stagesMode: [], // how the gates are enforced (the backend's, never a body's)
 };
 // inside a clip (matched by id). A source the project did not have is ingest; a clip added, removed or moved is corte
 export const CLIP_FIELD_STAGE: Record<string, Stage[]> = {
@@ -114,8 +115,42 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   find_cut_candidates: [], search_stock: [], add_broll_assets: [], tag_broll_asset: [], broll_library: [], suggest_broll: [], catalog_assets: [],
   search_catalog: [], search_music: [], search_asset: [], list_assets: [], generate_asset: [], timing_report: [], validate: [], frame_at: [], qc: [],
   render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], rejudge: [], revoke_review_link: [], health: [], list_drive: [],
-  set_scope: [], check_stage: [], stage_status: [], // what the job asks for, and the gates themselves
+  set_scope: [], check_stage: [], stage_status: [], waive_finding: [], // what the job asks for, and the gates themselves
 };
+
+// How a project's gates are enforced (CEO-20, D29; plan phase 11): off = nothing is logged nor refused; advisory
+// (the default: every project before it) = a tool started while a stage it depends on is red or stale is logged;
+// enforce = it is refused. The backend writes enforce on a project's first identity; only the owner's login
+// session changes it (scripts/stages.mjs setStagesMode) — no MCP tool, no token.
+export const STAGES_MODES = ['off', 'advisory', 'enforce'] as const;
+export type StagesMode = (typeof STAGES_MODES)[number];
+export const stagesModeOf = (p: {stagesMode?: unknown} | null | undefined): StagesMode =>
+  (STAGES_MODES as readonly unknown[]).includes(p?.stagesMode) ? (p!.stagesMode as StagesMode) : 'advisory';
+// What the MCP wrapper does with a tool call on a project → null (nothing to say) or {mode, stages, deps, refuse?}:
+// deps = the in-scope stages the tool's stages depend on that are red or stale (waitingOn: an omitted stage never
+// holds anything back), refuse = the message when enforce refuses it. Default-deny, like the plan gate: a tool
+// with no TOOL_STAGE row is refused in enforce.
+export function toolGate(name: string, p: {stagesMode?: unknown; scope?: unknown}, records: Partial<Record<Stage, {status?: string}>>) {
+  const mode = stagesModeOf(p);
+  if (mode === 'off') return null;
+  if (!Object.hasOwn(TOOL_STAGE, name)) return mode === 'enforce' ? {mode, stages: [] as Stage[], deps: {}, refuse: `${name} refused (stages enforce): it has no stage in src/stages.ts TOOL_STAGE, and a tool without one is refused until it gets its row.`} : null;
+  const own = TOOL_STAGE[name], held = new Set(own.flatMap((s) => waitingOn(records, p.scope, s)));
+  const deps = Object.fromEntries(STAGES.filter((d) => held.has(d) && !own.includes(d)).map((d) => [d, records[d]!.status!]));
+  const list = Object.entries(deps);
+  if (!list.length) return null;
+  const red = list.filter(([, st]) => st === 'rojo').map(([d]) => d);
+  return {mode, stages: own, deps, ...(mode === 'enforce' ? {refuse: `${name} refused (stages enforce): it works in ${own.join(' + ')}, which waits on ${list.map(([d, st]) => `${d} (${st})`).join(', ')}. ${red.length ? `Fix what ${red.join(', ')} reports, then ` : ''}check_stage ${list[0][0]}${list.length > 1 ? ` (then ${list.slice(1).map(([d]) => d).join(', ')})` : ''} and call ${name} again; stage_status shows every stage. A warning you keep: waive_finding with the reason; a blocker only Felipe waives.`} : {})};
+}
+
+// Waivers (§3 "Reglas de cada gate"): a finding of a stage's check waived with a reason — {rule, ref, reason, by, level}.
+// A waiver names one finding by its code and ref (none = the findings without one) and covers a blocker only when it
+// was a blocker's (level 'error': the owner's login, scripts/stages.mjs waive); the agent waives warnings. A waived
+// finding stays listed, marked, and never makes its stage red.
+export type Waiver = {rule: string; ref?: string; reason: string; by: string | null; level: 'error' | 'warn'};
+export const waiverOf = (waivers: Waiver[] | undefined, f: {code: string; ref?: string; level: string}) =>
+  (waivers ?? []).find((w) => w.rule === f.code && (w.ref ?? null) === (f.ref ?? null) && (f.level !== 'error' || w.level === 'error'));
+export const withWaivers = <T extends {code: string; ref?: string; level: string}>(findings: T[], waivers: Waiver[] | undefined) =>
+  findings.map((f) => { const w = waiverOf(waivers, f); return w ? {...f, waived: {reason: w.reason, by: w.by}} : f; });
 
 // the defaults a writer fills into a project that lacks them (mcp/checks.mjs withDefaults / newProject; a test
 // holds them together): the same as absent
