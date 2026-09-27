@@ -2,7 +2,8 @@
 // deterministically from the word-level transcript. The agent reviews them and
 // approves each with cut_words; nothing is cut here.
 //   filler   — hesitations (um, uh, eh, mmm; "you know", "o sea"; "este" only between pauses)
-//   meta     — talk about the recording ("sorry", "say it again", "otra vez", "te lo repito", "a cuadro")
+//   meta     — talk about the recording ("sorry", "say it again", "otra vez", "te lo repito", "a cuadro"),
+//              and crew talk (isCrewRun: a countdown, "listo", "acción")
 //   retake   — an attempt the speaker said again; the kept take is the LAST complete one (a
 //              presenter reads the line to herself, then performs it: rehearsal first, take last —
 //              the same prior Descript's Remove Retakes and TimeBolt use)
@@ -28,6 +29,22 @@ const META = [/\bsorry\b/, /\bsay it again\b/, /\bone more time\b/, /\blet me (s
 const META_MAX = 10; // tokens: direction talk is short
 const JOIN_MS = 2500; // a pause up to this long inside a sentence does not end the attempt
 
+// Crew talk: a countdown, "listo", "acción", set chatter — a meta cut, never a second presenter. One list and
+// one rule for find_cut_candidates (kind 'meta') and the render judge's off-mic check (crew-talk), which adds
+// the client profile's crewWords. A run is crew talk when ≥ 60 % of its tokens are crew words AND it is an
+// off-mic run or holds a countdown ("tres dos uno") / "acción" / "listo": a figure the presenter says
+// ("Montealbán tres veintiséis", "dos recámaras") never counts, however many small numbers it has.
+export const CREW_WORDS = ['tres', 'dos', 'uno', 'cuatro', 'cinco', 'listo', 'listos', 'lista', 'accion', 'grabando', 'corre', 'corriendo', 'rodando', 'va', 'ya', 'corte', 'corta', 'cuadro', 'otra', 'vez', 'vamos', 'ok', 'okay', 'sale', 'queda', 'bien', 'perfecto', 'rolling', 'action', 'ready', 'speed', 'cut', 'three', 'two', 'one', 'go', '3', '2', '1'];
+const COUNT: Record<string, number> = {cinco: 5, cuatro: 4, tres: 3, dos: 2, uno: 1, five: 5, four: 4, three: 3, two: 2, one: 1, 5: 5, 4: 4, 3: 3, 2: 2, 1: 1};
+const SET_CALL = new Set(['accion', 'action', 'listo', 'listos', 'lista', 'rolling']);
+// tokens folded as norm() folds them (lowercase, no accents)
+export function isCrewRun(tokens: string[], {off = false, extra = []}: {off?: boolean; extra?: string[]} = {}): boolean {
+  if (!tokens.length) return false;
+  const crew = new Set([...CREW_WORDS, ...extra.map(norm)]);
+  if (tokens.filter((t) => crew.has(t)).length / tokens.length < 0.6) return false;
+  return off || tokens.some((t, k) => SET_CALL.has(t) || COUNT[t] - COUNT[tokens[k + 1]] === 1); // "tres dos": counting down
+}
+
 // longest common subsequence length of two token lists
 function lcs(a: string[], b: string[]): number {
   const dp = new Array(b.length + 1).fill(0);
@@ -51,7 +68,7 @@ export function similar(a: string[], b: string[]): boolean {
 }
 
 type Run = {clip: TClip; words: TWord[]; tokens: string[]; off: boolean; complete: boolean};
-const isMeta = (r: Run) => r.tokens.length <= META_MAX && META.some((re) => re.test(r.tokens.join(' ')));
+const isMeta = (r: Run) => (r.tokens.length <= META_MAX && META.some((re) => re.test(r.tokens.join(' ')))) || isCrewRun(r.tokens, {off: r.off});
 // attempts: words between sentence ends or pauses longer than gapMs…
 function runsOf(clip: TClip, gapMs: number): Run[] {
   const runs: Run[] = [];

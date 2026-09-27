@@ -79,6 +79,7 @@ li{padding:8px 0;border-top:1px solid #1f1f24;font-size:14px}
 <video src="${base}.mp4" playsinline controls preload="metadata"${cur.poster ? ` poster="${base}.jpg"` : ''}></video>
 <p class="meta">${esc(day(cur.createdAt))} · ${esc(clock(cur.durationSec))}</p>
 ${full ? `<a class="dl" href="${base}/full.mp4" download>Descargar original (1080p, ${esc(mb(full.size))})</a>` : ''}
+${cur.datosPorConfirmar?.length ? `<h2>Datos por confirmar</h2><ul>${cur.datosPorConfirmar.map((d) => `<li>«${esc(d.dato)}» en ${esc(clock(d.atSec))} — no se oye en el audio de este reel</li>`).join('')}</ul>` : ''}
 ${versions.length > 1 ? `<h2>Versiones</h2><ul>${others}</ul>` : ''}
 </main>
 </body>

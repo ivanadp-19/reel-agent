@@ -210,3 +210,23 @@ test('applyWordCuts removes the spans, re-anchors B-roll and drops a silent piec
   assert.equal(r.brolls.length, 1);
   assert.equal(r.brolls[0].clipId, r.clips[1].id); // the cue followed its footage
 });
+
+import {CREW_WORDS, isCrewRun} from '../src/cuts.ts';
+
+test('crew talk (isCrewRun): a countdown, "acción" or an off-mic run of set words — never a figure the presenter says', () => {
+  assert.ok(CREW_WORDS.includes('listo'));
+  assert.equal(isCrewRun(['tres', 'dos', 'uno', 'accion']), true); // counting down, on the mic
+  assert.equal(isCrewRun(['listo', 'ya']), true); // "listo" is a set call
+  assert.equal(isCrewRun(['va', 'ya']), false); // set words said on the mic, no countdown or call
+  assert.equal(isCrewRun(['va', 'ya'], {off: true}), true); // the same from a voice off the mic
+  assert.equal(isCrewRun(['tres', 'veintiseis']), false); // a figure: "tres veintiséis"
+  assert.equal(isCrewRun(['dos', 'tres']), false); // counting up is no countdown
+  assert.equal(isCrewRun(['son', 'tres', 'dos', 'recamaras']), false); // under 60 % crew words
+  assert.equal(isCrewRun(['gracias', 'gracias'], {off: true}), false);
+  assert.equal(isCrewRun(['gracias', 'gracias'], {off: true, extra: ['Gracias']}), true); // a profile's crewWords
+});
+
+test('find_cut_candidates proposes crew talk as a meta cut, not a retake or a second presenter', () => {
+  const c = clip([['Tres, dos, uno, acción.'], ['Mi casa tiene dos terrazas.'], ['Listo, ya quedó.', true], ['Mi casa mide tres veintiséis.']]);
+  assert.deepEqual(brief(findCutCandidates([c])), ['meta Tres, dos, uno, acción.', 'meta Listo, ya quedó.']);
+});

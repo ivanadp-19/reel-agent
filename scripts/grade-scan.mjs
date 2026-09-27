@@ -205,13 +205,14 @@ export async function scanSource(publicDir, src, {force = false} = {}) {
 }
 
 // The backend's background lane: kick(srcs) queues each unscanned source (a second kick of one queued
-// or running joins it) and never throws; one scan at a time for the whole backend.
-export function createGradeScans({publicDir, log = console.log, scan = (src) => scanSource(publicDir, src)} = {}) {
+// or running joins it) and never throws; one scan at a time for the whole backend. read: what counts as
+// scanned (the backend's lane also runs the wind scan, scripts/wind-scan.mjs, and wants both current)
+export function createGradeScans({publicDir, log = console.log, scan = (src) => scanSource(publicDir, src), read = readScan} = {}) {
   const queued = new Set();
   let chain = Promise.resolve();
   const kick = (srcs) => {
     for (const src of [].concat(srcs)) {
-      if (queued.has(src) || readScan(publicDir, src) !== null) continue; // current, or no such file
+      if (queued.has(src) || read(publicDir, src) !== null) continue; // current, or no such file
       queued.add(src);
       chain = chain.then(async () => {
         const t0 = Date.now();

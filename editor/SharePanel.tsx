@@ -5,7 +5,7 @@ import React, {useEffect, useState} from 'react';
 // passed QC is a version; a link opens a mobile page with the latest one. A client's
 // version carries its QC técnico label (the judge runs after it is recorded, CEO-6);
 // Re-judge runs the judge again without a re-render (the MCP rejudge, the same route).
-type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean; snapshot?: string; qcLabel?: string | null; judge?: {label: string; error?: string; findings?: {check: string; severity: string; at: number | null; msg: string}[]}};
+type Version = {v: number; createdAt: string; durationSec: number; sizeBytes: number; proxyBytes: number; playable: boolean; snapshot?: string; qcLabel?: string | null; judge?: {label: string; error?: string; findings?: {check: string; severity: string; at: number | null; msg: string}[]}; datosPorConfirmar?: {graphic: string; dato: string; src: string; atSec: number}[]};
 type Link = {id: string; createdAt: string; expiresAt: string; revokedAt: string | null; state: 'live' | 'expired' | 'revoked'};
 
 const mb = (b: number) => `${(b / 1e6).toFixed(1)} MB`;
@@ -83,6 +83,11 @@ export const SharePanel: React.FC<{projectId: string | null; refreshKey?: unknow
                     <div className="flex justify-between text-[11px]" title={v.judge?.error ?? (v.judge?.findings ?? []).map((f) => `[${f.severity}] ${f.check}${f.at != null ? ` @${f.at}s` : ''} — ${f.msg}`).join('\n')}>
                       <span className={v.judge?.label?.startsWith('superado') ? 'text-primary' : v.judge?.label === 'en curso' ? 'text-on-surface-variant' : 'text-error'}>{v.qcLabel}</span>
                       {v.judge?.label !== 'en curso' && v.snapshot && <button onClick={() => rejudge(v.v)} className="text-primary hover:underline">Re-judge</button>}
+                    </div>
+                  )}
+                  {!!v.datosPorConfirmar?.length && (
+                    <div className="text-[11px] text-error" title="Figures / names its graphics show that its own audio does not say — the client confirms them">
+                      Datos por confirmar: {v.datosPorConfirmar.map((d) => `"${d.dato}" @${d.atSec}s`).join(', ')}
                     </div>
                   )}
                 </li>

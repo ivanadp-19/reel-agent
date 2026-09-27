@@ -605,7 +605,7 @@ export const COMMANDS = [
       needId(id);
       if (o.list) {
         const r = await api(ctx, 'GET', `/api/reviews/${id}`);
-        return [r, [...r.versions.map((v) => `v${v.v}  ${v.createdAt ?? ''}${v.playable ? '' : '  (file gone)'}`), ...r.links.map((l) => `link ${l.id}  ${l.revokedAt ? 'revoked' : `until ${l.expiresAt}`}`)].join('\n') || 'no versions yet'];
+        return [r, [...r.versions.map((v) => `v${v.v}  ${v.createdAt ?? ''}${v.playable ? '' : '  (file gone)'}${v.datosPorConfirmar?.length ? `  datos por confirmar: ${v.datosPorConfirmar.map((d) => `"${d.dato}" @${d.atSec}s`).join(', ')}` : ''}`), ...r.links.map((l) => `link ${l.id}  ${l.revokedAt ? 'revoked' : `until ${l.expiresAt}`}`)].join('\n') || 'no versions yet'];
       }
       if (o.revoke) {
         const l = await api(ctx, 'DELETE', `/api/reviews/${id}/links/${o.revoke}`);

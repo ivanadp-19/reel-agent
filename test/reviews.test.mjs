@@ -653,3 +653,17 @@ test('a version without a snapshot (no identity, or from before them) is never j
   assert.equal(alerts.length, 1);
   assert.deepEqual(fake.calls(), [], 'the live project was never judged in its place');
 });
+
+import {reviewPage} from '../server/review.mjs';
+
+test('datos por confirmar (CEO-21): kept in the version, shown on its review page, escaped', () => {
+  const {pub, dir} = fixture(0);
+  const full = path.join(pub, 'exports', 'edited-7.mp4'), proxy = path.join(pub, '.proxy-7');
+  fs.writeFileSync(full, 'mp4'); fs.writeFileSync(proxy, 'proxy');
+  const datos = [{graphic: 'g2', dato: '<80>', src: 'toma-a', atSec: 21.4}];
+  const v = recordVersion(dir, 'p-1', {file: full, proxyTmp: proxy, durationSec: 30, sizeBytes: 3, publicDir: pub, jobId: 'j7', datosPorConfirmar: datos});
+  assert.deepEqual(loadReviews(dir, 'p-1').versions[0].datosPorConfirmar, datos);
+  const html = reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [v], current: v.v, fullOf: () => null});
+  assert.match(html, /<h2>Datos por confirmar<\/h2><ul><li>«&lt;80&gt;» en 0:21 — no se oye en el audio de este reel<\/li><\/ul>/);
+  assert.doesNotMatch(reviewPage({token: 'x'.repeat(22), name: 'Reel', versions: [{...v, datosPorConfirmar: []}], current: v.v, fullOf: () => null}), /Datos por confirmar/);
+});
