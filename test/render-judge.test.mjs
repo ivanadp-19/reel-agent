@@ -708,6 +708,12 @@ test('caption-text: a page word that is not the word said is flagged; pipeline r
   assert.equal(captionTextFindings(spelled, w).filter((x) => x.check === 'caption-text').length, 1);
   const digits = words(clips, [{clipId: 'a', source: 'a', words: [TW(0, 'Caben', 0, 300), TW(1, '70', 350, 800)]}]);
   assert.deepEqual(captionTextFindings([page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', 'setenta', 350, 800)])], digits), []);
+  // a figure typed by hand over several spoken words, and a page of a take whose words sit on its second piece
+  const said = [{clipId: 'a', source: 'a', words: [TW(0, 'Caben', 0, 300), TW(1, 'setenta', 350, 600), TW(2, 'y', 620, 680), TW(3, 'cinco', 700, 900)]}];
+  const hand = [page('c0', 'a', [CW('a:0', 'Caben', 0, 300), CW('a:1', '75', 350, 900)])];
+  assert.deepEqual(captionTextFindings(hand, words(clips, said)).filter((x) => x.check === 'caption-text'), []);
+  const split = [clip('a', 'a', 0, 0.33), clip('b', 'a', 0.33, 10)]; // a take split with nothing cut out: its pages carry 'a'
+  assert.deepEqual(captionTextFindings(hand, words(split, [said[0], {...said[0], clipId: 'b'}])).filter((x) => x.check === 'caption-text'), []);
 });
 
 test('crew talk in the judge is src/cuts.ts isCrewRun, with the profile\'s crew words added', () => {

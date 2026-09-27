@@ -326,7 +326,7 @@ export function transcriptIssues(p: WordsProject, tr: TClip[], glossary: Glossar
 // location-tag's one-word place / sub; and, as a guess (`guess`: the judge confirms it on the frame), a capitalized
 // word past the start of sentence-case text — a Title Case or ALL CAPS label is styling, not names. The contact
 // props (cta, handle) come from the brief. A warning, never a stop: what is left goes to the client to confirm
-// (datosPorConfirmar of the version); the broll stage gate is where it will block, scoped and waivable.
+// (datosPorConfirmar of the version); it never blocks — filed under the broll stage as a warning.
 // ponytail: capitals are a poor signal, so no more than that; a name the ASR spells otherwise → a glossary term
 // (its variants = what the ASR writes); the kit's own name is skipped (the client, not a fact)
 export const DATA_NEAR_MS = 3000;

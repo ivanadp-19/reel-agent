@@ -353,7 +353,7 @@ export function captionTextFindings(pages, words, hidden = new Set(), glossary =
   const seen = new Set(); // a word the guion split ("acomodan" → "acomoda" "a") shares its id: only its first piece starts with it
   const forms = (f) => [fold(f), ...String(f).split(/\s+/).map(fold)]; // a form whole and its tokens
   const terms = glossary.map((g) => ({term: new Set(forms(g.term)), variants: new Set((g.variants ?? []).flatMap(forms))}));
-  const figure = (digits, words) => /^\d+$/.test(digits) && numberOf([words]) === +digits;
+  const figure = (digits, words) => /^\d+$/.test(digits) && numberOf(words.split(/\s+/).filter(Boolean)) === +digits; // "setenta y cinco" is 75
   const sameWord = (shown, said) => shown === said || terms.some((t) => t.term.has(shown) && t.variants.has(said)) || figure(shown, said) || figure(said, shown);
   const shownWids = new Set(pages.flatMap((c) => c.words.map((w) => w.wid).filter(Boolean)));
   for (const c of pages) {
@@ -372,9 +372,9 @@ export function captionTextFindings(pages, words, hidden = new Set(), glossary =
       const said = toDisplay(s.word);
       if (w.asr == null && fold(w.text)) {
         // a word the pipeline joined ("tres veintiséis" → 326) spans the ones it swallowed (shown on no page): all of them were said there
-        const under = words.filter((x) => x.clipId === c.clipId && x !== s && !shownWids.has(x.wid) && x.t0 >= s.t0 && x.t0 * 1000 < w.endMs - 30);
+        const under = words.filter((x) => takeOf(x) === c.clipId && x !== s && !shownWids.has(x.wid) && x.t0 >= s.t0 && x.t0 * 1000 < w.endMs - 30);
         const all = [said, ...under.map((x) => toDisplay(x.word))].join(' ');
-        if (!sameWord(fold(w.text), fold(all))) other.set(w, all);
+        if (!sameWord(fold(w.text), fold(all)) && !figure(fold(w.text), all.split(/\s+/).map(fold).filter(Boolean).join(' '))) other.set(w, all);
       }
       // a diacritic pair (esta/está) is grammar the ASR also gets wrong: the judge reads it in context
       if (fold(said) === fold(w.text) && said.toLowerCase() !== w.text.toLowerCase() && /[áéíóúñü]/i.test(said) && !/[áéíóúñü]/i.test(w.text))
@@ -1004,8 +1004,8 @@ export function claimEvidence(sentences, brolls, gfx, extraCues = []) {
 // client confirms; the judge never fails a reel for it. color-jump: two shots may look different on
 // purpose (CEO-15); a look that breaks INSIDE a shot is grade-coverage, which blocks. data-from-audio: a
 // figure or name the reel's audio does not say goes to the client to confirm (datosPorConfirmar of the version,
-// CEO-21) — the brief or the client may have given it; the broll stage gate is where it blocks, scoped and
-// waivable. Matched by check name, so a finding written by hand is covered too.
+// CEO-21) — the brief or the client may have given it; it never blocks (a warning in validate, filed under the
+// broll stage). Matched by check name, so a finding written by hand is covered too.
 export const ADVISORY = new Set(['source-cut', 'validate-guion-conflict', 'color-jump', 'data-from-audio']);
 export const isAdvisory = (f) => !!f.advisory || ADVISORY.has(f.check);
 export const counts = (f) => !f.dismissed && !isAdvisory(f) && (f.kind !== 'candidate' || f.confirmed);
