@@ -52,10 +52,12 @@ export async function stageChecks(p, publicDir, env, judged = []) {
   const fps = deliveryFps(p);
   // a judge finding as a gate reads it: a rule that counts toward its verdict blocks, the rest are warnings
   const asIssue = (f) => ({level: f.kind === 'rule' && counts(f) && ['blocker', 'major'].includes(f.severity) ? 'error' : 'warn', code: f.check, msg: f.msg, ...(f.ref ? {ref: f.ref} : {})});
-  const emphasized = new Set(p.captions.flatMap((c) => c.words.filter((w) => (w.tier ?? 0) > 0 && w.wid).map((w) => w.wid)));
-  const heard = timelineSpeech(p.clips, await projectWords(p, publicDir, env), fps).words;
+  // corte judges the cut, never what later stages own: every clip heard (muting is the mix's, audio), and every
+  // pause possibly dramatic (the key words are the captions') — only dead air blocks it; the judge on the final
+  // render hears the rest
+  const heard = timelineSpeech(p.clips.map(({muted, volume, ...c}) => c), await projectWords(p, publicDir, env), fps).words;
   const cached = (key) => [true, false].some((dg) => fs.existsSync(path.join(publicDir, 'clips', 'transcripts', cacheName(key, p.lang ?? 'auto', dg))));
-  return stageFindings({p, fps, issues: [...await projectIssues(p, publicDir, env), ...pauseFindings(heard, p.clips, emphasized).map(asIssue)],
+  return stageFindings({p, fps, issues: [...await projectIssues(p, publicDir, env), ...pauseFindings(heard, p.clips, null).map(asIssue)],
     untranscribed: [...new Set(p.clips.map(sourceKey))].filter((k) => !cached(k)), judged: judged.map(asIssue)});
 }
 

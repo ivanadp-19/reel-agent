@@ -23,9 +23,12 @@ export function sweepParts(dir, {maxAgeMs = 86400e3, now = Date.now()} = {}) {
 
 // Append one chunk where the part ends. A chunk sent at another offset (a retry of one
 // that already landed, a second writer) gets 409 and the size to resume from; whatever
-// bytes of a broken chunk arrived stay — they are the next bytes of the file.
+// bytes of a broken chunk arrived stay — they are the next bytes of the file. `total`: the
+// whole file's size when the client says it (?total=), so a file over maxBytes is refused
+// at its first chunk. A chunk that sends nothing for idleMs (a network gone without a word)
+// is dropped, so it does not hold the part for Node's 300 s request timeout.
 const writing = new Set();
-export async function appendChunk(req, file, offset, {maxBytes, freeBytes = Infinity, minFreeBytes = 0} = {}) {
+export async function appendChunk(req, file, offset, {maxBytes = Infinity, total = 0, freeBytes = Infinity, minFreeBytes = 0, idleMs = 30e3} = {}) {
   const refuse = (status, out) => { req.resume(); return [status, out]; }; // drain the chunk we do not take
   const len = +req.headers['content-length'];
   if (!Number.isInteger(len) || len <= 0) return refuse(411, {error: 'a chunk needs Content-Length', code: 'bad_chunk'});
@@ -33,9 +36,10 @@ export async function appendChunk(req, file, offset, {maxBytes, freeBytes = Infi
   if (writing.has(file)) return refuse(409, {error: 'another chunk of this upload is being written', code: 'offset_mismatch', size: partSize(file)});
   const size = partSize(file);
   if (offset !== size) return refuse(409, {error: `the upload is at ${size} bytes, not ${offset}`, code: 'offset_mismatch', size});
-  if (size + len > maxBytes) return refuse(413, {error: `uploads of at most ${Math.round(maxBytes / 2 ** 20)} MB`, code: 'too_large'});
+  if (Math.max(size + len, total) > maxBytes) return refuse(413, {error: `uploads of at most ${Math.round(maxBytes / 2 ** 20)} MB`, code: 'too_large'});
   if (freeBytes - len < minFreeBytes) return refuse(507, {error: 'not enough free disk for this upload', code: 'low_disk'});
   writing.add(file);
+  req.setTimeout?.(idleMs); // no listener: the socket is destroyed, the pipeline below fails
   try {
     fs.mkdirSync(path.dirname(file), {recursive: true});
     await pipeline(req, fs.createWriteStream(file, {flags: 'a'}));

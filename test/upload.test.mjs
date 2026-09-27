@@ -97,13 +97,15 @@ test('pendingIngests: an upload still going up is kept by its part id, and becom
 
 // ---- chunked, resumable clip uploads (server/uploads.mjs as a fake: the part's bytes in memory) ----
 // script(n, put) may answer the n-th PUT itself: 'drop' lands `put.half` bytes and throws like a cut network
-function fakeServer({script = () => null, staleFirstGet = false} = {}) {
+function fakeServer({script = () => null, staleFirstGet = false, lostPosts = 0} = {}) {
   const part = [];
   const puts = [];
+  const urls = [];
   let gets = 0;
   const res = (status, body) => ({ok: status < 300, status, statusText: '', text: async () => JSON.stringify(body), json: async () => body});
   const fn = async (url, init = {}) => {
     const u = new URL(url, 'http://x');
+    urls.push(`${init.method ?? 'GET'} ${u.search}`);
     if (u.pathname.startsWith('/api/uploads/') && !init.method) return res(200, {size: staleFirstGet && !gets++ ? 0 : part.length});
     if (init.method === 'PUT') {
       const offset = +u.searchParams.get('offset');
@@ -118,12 +120,13 @@ function fakeServer({script = () => null, staleFirstGet = false} = {}) {
     }
     if (init.method === 'POST' && u.pathname === '/api/add-clip') {
       puts.push(`add-clip ${u.searchParams}`);
+      if (lostPosts-- > 0) throw new TypeError('Failed to fetch'); // the job started, its 202 did not come back
       return res(202, {jobId: 'job-1'});
     }
     if (u.pathname === '/api/add-clip/job-1') return res(200, {status: 'done', clip: {id: 'take', src: 'clips/take.mp4'}});
     return res(404, {error: 'no route'});
   };
-  return {fn, part, puts};
+  return {fn, part, puts, urls};
 }
 const bytes = Uint8Array.from({length: 10}, (_, i) => i + 1);
 const net = (fetchFn) => ({fetchFn, chunk: 4, backoffMs: 0, everyMs: 0});
@@ -142,6 +145,16 @@ test('uploadParts: a PUT dropped halfway resumes where the server\'s part ends; 
   const s = fakeServer({script: (n) => (n === 2 ? 'drop' : n === 3 ? {status: 502, body: {}} : null)});
   await uploadParts(new Blob([bytes]), 'b'.repeat(32), {}, net(s.fn));
   assert.deepEqual(s.puts, [0, 4, 6, 6], 'the dropped slice left 2 bytes: it goes on at 6 (and again after the 502)');
+  assert.deepEqual(s.part, [...bytes]);
+});
+
+test('uploadParts: a part another request is still writing (409 over and over) is waited for, longer each time, and asked again — no storm of slices', async () => {
+  const s = fakeServer({script: (n) => (n <= 3 ? {status: 409, body: {error: 'another chunk of this upload is being written', code: 'offset_mismatch', size: 0}} : null)});
+  const t0 = Date.now();
+  await uploadParts(new Blob([bytes]), 'e'.repeat(32), {}, {...net(s.fn), backoffMs: 20});
+  assert.ok(Date.now() - t0 >= 40 + 80 + 160 - 10, `waited ${Date.now() - t0} ms`);
+  assert.deepEqual(s.urls.slice(0, 7).map((u) => u.split('&')[0]), ['GET ', 'PUT ?offset=0', 'GET ', 'PUT ?offset=0', 'GET ', 'PUT ?offset=0', 'GET ']);
+  assert.ok(s.urls.every((u) => !u.startsWith('PUT') || u.endsWith('&total=10')), 'every slice says the file\'s size (a capped server refuses it at the first)');
   assert.deepEqual(s.part, [...bytes]);
 });
 
@@ -168,4 +181,8 @@ test('uploadClip: the part\'s id from the file, its slices, then add-clip ?uploa
   assert.deepEqual(clip, {id: 'take', src: 'clips/take.mp4'});
   assert.deepEqual(calls, ['upload true', 'uploaded', 'job job-1']);
   assert.deepEqual(s.puts, [0, 4, 8, `add-clip name=Guion+1.mp4&upload=${id}&size=10&async=1`]);
+  // the add-clip answer lost on the way: asked again, the server answers the job it started
+  const lost = fakeServer({lostPosts: 1});
+  assert.deepEqual(await uploadClip(file, {}, net(lost.fn)), {id: 'take', src: 'clips/take.mp4'});
+  assert.equal(lost.puts.filter((p) => String(p).startsWith('add-clip')).length, 2);
 });

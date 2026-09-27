@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import {Readable} from 'node:stream';
 import {spawnSync} from 'node:child_process';
 import {createTokenStore, openForUser} from '../server/tokens.mjs';
@@ -108,11 +109,31 @@ test('uploads: chunks append only where the part ends; a retry of a landed chunk
   assert.deepEqual(await appendChunk(chunk('world'), file, 6, {maxBytes: 100}), [200, {size: 11}]);
   assert.equal(fs.readFileSync(file, 'utf8'), 'hello world');
   assert.equal((await appendChunk(chunk('x'.repeat(95)), file, 11, {maxBytes: 100}))[0], 413);
+  assert.deepEqual((await appendChunk(chunk('x'), file, 11, {maxBytes: 100, total: 101}))[0], 413, 'a file over the cap is refused at once when the client says its size');
+  assert.equal(partSize(file), 11);
   assert.equal((await appendChunk(chunk('xyz'), file, 11, {maxBytes: 100, freeBytes: 10, minFreeBytes: 8}))[0], 507);
   assert.equal((await appendChunk(Object.assign(Readable.from([]), {headers: {}}), file, 11, {maxBytes: 100}))[0], 411);
   fs.utimesSync(file, new Date(0), new Date(0));
   sweepParts(dir);
   assert.equal(partSize(file), 0, 'a part left for a day is swept');
+});
+
+test('uploads: a chunk whose client went silent is dropped after idleMs, so the part is not held for the request timeout', async () => {
+  const file = partFile(tmpdir(), 'ana', 'd'.repeat(32));
+  const srv = http.createServer(async (req, res) => {
+    const [st, out] = await appendChunk(req, file, +new URL(req.url, 'http://x').searchParams.get('offset'), {idleMs: 150});
+    if (!res.destroyed) { res.writeHead(st); res.end(JSON.stringify(out)); }
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const stuck = http.request({port, path: '/?offset=0', method: 'PUT', headers: {'content-length': 1000}});
+  stuck.on('error', () => {});
+  stuck.write('0123456789'); // then nothing: a network gone without a word
+  try {
+    await new Promise((r) => setTimeout(r, 400));
+    const r = await fetch(`http://127.0.0.1:${port}/?offset=10`, {method: 'PUT', body: 'abc'});
+    assert.deepEqual([r.status, await r.json()], [200, {size: 13}], 'the part is free again, the bytes that arrived kept');
+  } finally { stuck.destroy(); srv.close(); }
 });
 
 test('admitRender: one render per user, a retry of the same one gets it back, floors of disk and memory', () => {

@@ -53,8 +53,10 @@ export async function uploadId(f: {name: string; size: number; lastModified: num
 
 type Net = {fetchFn?: typeof fetch; chunk?: number; retries?: number; backoffMs?: number; everyMs?: number};
 // Send `file` as the part `id`, a slice at a time from where the server's part ends (as cli/reel.mjs uploadFile
-// does). 409 offset_mismatch (a slice that landed though its answer was lost): go on from the server's size. A
-// dropped PUT or a 5xx: wait, ask where the part stands, go on. 507 low_disk and the other 4xx stop with the reason
+// does). 409 offset_mismatch (a slice that landed though its answer was lost, or another request — a second tab,
+// one a dropped network left hanging — still writing the part): wait a little longer each time, ask where the part
+// stands, go on — never a storm of re-sent slices. A dropped PUT or a 5xx: the same, a few times. 507 low_disk and
+// the other 4xx stop with the reason
 export async function uploadParts(file: Blob, id: string, on: {progress?: (loaded: number, total: number) => void} = {}, {fetchFn = fetch, chunk = CHUNK, retries = 8, backoffMs = 500}: Net = {}): Promise<void> {
   const where = async () => {
     const r = await fetchFn(`/api/uploads/${id}`);
@@ -63,16 +65,20 @@ export async function uploadParts(file: Blob, id: string, on: {progress?: (loade
     return size as number;
   };
   let size = await where();
-  for (let fails = 0; size < file.size; ) {
+  for (let fails = 0, busy = 0; size < file.size; ) {
     on.progress?.(size, file.size);
     let r: Response | null = null;
     try {
-      r = await fetchFn(`/api/uploads/${id}?offset=${size}`, {method: 'PUT', headers: {'content-type': 'application/octet-stream'}, body: file.slice(size, Math.min(file.size, size + chunk))});
+      r = await fetchFn(`/api/uploads/${id}?offset=${size}&total=${file.size}`, {method: 'PUT', headers: {'content-type': 'application/octet-stream'}, body: file.slice(size, Math.min(file.size, size + chunk))});
     } catch { /* the network dropped: below */ }
     const text = r ? await r.text().catch(() => '') : '';
     const j = parse(text);
-    if (r?.ok && Number.isInteger(j?.size)) { size = j.size; fails = 0; continue; }
-    if (r?.status === 409 && j?.code === 'offset_mismatch' && Number.isInteger(j.size)) { size = j.size; continue; }
+    if (r?.ok && Number.isInteger(j?.size)) { size = j.size; fails = busy = 0; continue; }
+    if (r?.status === 409 && j?.code === 'offset_mismatch' && Number.isInteger(j.size)) {
+      await wait(Math.min(15e3, backoffMs * 2 ** Math.min(++busy, 5)));
+      size = await where().catch(() => j.size);
+      continue;
+    }
     const why = r ? uploadError(r.status, r.statusText, text) : uploadError(0, '', '');
     if ((r && (r.status < 500 || r.status === 507)) || ++fails > retries) throw new Error(why);
     await wait(Math.min(15e3, backoffMs * 2 ** fails));
@@ -128,15 +134,20 @@ export async function uploadClip<T extends {id?: string}>(
   on: {progress?: (loaded: number, total: number) => void; uploaded?: () => void; upload?: (id: string) => void; job?: (jobId: string) => void; processing?: (progress: number, label: string) => void} = {},
   net: Net = {},
 ): Promise<T> {
-  const {fetchFn = fetch} = net;
+  const {fetchFn = fetch, retries = 8, backoffMs = 500} = net;
   const id = await uploadId(file);
   on.upload?.(id);
   await uploadParts(file, id, on, net);
   on.uploaded?.();
-  const r = await fetchFn(`/api/add-clip?name=${encodeURIComponent(file.name)}&upload=${id}&size=${file.size}&async=1`, {method: 'POST'});
-  const text = await r.text();
+  // a dropped answer or a 5xx is asked again: the server answers a part's second POST with the job it already has
+  let r: Response | null = null, text = '';
+  for (let fails = 0; ; await wait(Math.min(15e3, backoffMs * 2 ** fails))) {
+    r = await fetchFn(`/api/add-clip?name=${encodeURIComponent(file.name)}&upload=${id}&size=${file.size}&async=1`, {method: 'POST'}).catch(() => null);
+    text = r ? await r.text().catch(() => '') : '';
+    if ((r && (r.status < 500 || r.status === 507)) || ++fails > retries) break;
+  }
   const jobId = parse(text)?.jobId;
-  if (!r.ok || typeof jobId !== 'string') throw new Error(uploadError(r.status, r.statusText, text));
+  if (!r?.ok || typeof jobId !== 'string') throw new Error(r ? uploadError(r.status, r.statusText, text) : uploadError(0, '', ''));
   on.job?.(jobId);
   return waitIngest<T>(jobId, {progress: on.processing}, {fetchFn, everyMs: net.everyMs});
 }

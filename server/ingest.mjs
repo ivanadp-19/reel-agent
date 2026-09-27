@@ -9,8 +9,8 @@
 //     The job does not depend on the upload's connection: a browser that goes away after uploading still gets
 //     its clip in public/clips/ — a proxy's timeout (Railway's edge answered 502 after ~2 min) no longer matters.
 // Jobs live in memory, like the other job stores of the backend.
-// A file with the same bytes as a source already in public/clips/ (that very file, or a copy of it) is not
-// ingested again: the clip points at that source and keeps its transcripts (sameSource).
+// A file with the same bytes as a source already in public/clips/ (that very file, one ingested before, or a copy
+// of it) is not ingested again: the clip points at that source and keeps its transcripts (sameSource).
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -59,35 +59,54 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
   partFile = partFileDefault, partSize = partSizeDefault, UPLOAD_ID = UPLOAD_ID_DEFAULT,
   hdrLut = () => null, explain = (tail, fallback) => fallback, log = console.log, freeBytes = () => Infinity, minFreeBytes = 0, onClip = () => {}}) {
   const jobs = {}; // jobId -> {status, progress, label, clip?, error?}
+  const byPart = new Map(); // an upload part's file -> the job made from it (a second tab, a retry whose 202 was lost)
   const reserved = new Set(); // clip ids of ingests in flight, so two uploads of one name never share an id
   const clipsDir = path.join(publicDir, 'clips');
   const thumbsDir = path.join(clipsDir, 'thumbs');
 
   const durationOf = async (file) => parseFloat((await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], {cwd: root})).stdout) || 0;
   const sha256 = async (file) => { const h = crypto.createHash('sha256'); for await (const b of fs.createReadStream(file)) h.update(b); return h.digest('hex'); };
-  // the source of public/clips/ this file already is: that path, or the same size and sha256 → its id, else null.
-  // Adding Guion1.mp4 again made Guion1-2 — no transcript cache, so its audio went to Deepgram again.
-  // ponytail: hashes the same-size sources on each ingest (rare: sizes seldom match); an index of hashes if it gets slow
-  async function sameSource(file) {
-    const real = fs.realpathSync(file), dir = fs.realpathSync(clipsDir);
-    if (path.dirname(real) === dir && real.endsWith('.mp4')) return path.basename(real, '.mp4');
+  // Adding Guion1.mp4 again made Guion1-2 — no transcript cache, so its audio went to Deepgram again. A file whose
+  // bytes public/clips/ already has is that source: the file itself, one ingested before (clips/ holds its remux or
+  // transcode, other bytes: the sha256 of what came in is recorded in clips/sha256/<hash> → the id), or a copy of a clip
+  const hashes = path.join(clipsDir, 'sha256');
+  const inflight = new Map(); // sha256 → the ingest making it: a second of the same bytes waits, then finds its clip
+  const sizeOf = (id) => fs.statSync(path.join(clipsDir, `${id}.mp4`)).size;
+  async function sameSource(real, hash) {
+    try { const [id, size] = fs.readFileSync(path.join(hashes, hash), 'utf8').split(' '); if (sizeOf(id) === +size) return id; } catch {} // the clip it made, still there
+    // ponytail: hashes the same-size clips on each ingest (rare: sizes seldom match); record the clips' own hashes if it gets slow
     const size = fs.statSync(real).size;
-    const twins = fs.readdirSync(dir).filter((n) => n.endsWith('.mp4') && fs.statSync(path.join(dir, n)).size === size);
-    const mine = twins.length ? await sha256(real) : null;
-    for (const n of twins) if ((await sha256(path.join(dir, n))) === mine) return n.slice(0, -4);
+    for (const n of fs.readdirSync(clipsDir)) if (n.endsWith('.mp4') && fs.statSync(path.join(clipsDir, n)).size === size && (await sha256(path.join(clipsDir, n))) === hash) return n.slice(0, -4);
     return null;
   }
+  const reused = async (same, {rawName, tag}) => {
+    const dur = await durationOf(path.join(clipsDir, `${same}.mp4`));
+    log(`ingest ${tag}: same bytes as clips/${same}.mp4 → reused, nothing re-encoded or re-transcribed`);
+    return {id: same, src: `clips/${same}.mp4`, label: rawName.replace(/\.[^.]+$/, ''), inSec: 0, outSec: dur, sourceDurationSec: dur, ingest: `same file as clips/${same}.mp4: reused with its transcripts`};
+  };
 
-  // tmp → public/clips/<id>.mp4 + thumbnail; resolves the clip, throws an IngestError
-  async function ingest({tmp, id, rawName, tag, report = () => {}}) {
+  // tmp → the clip: the source public/clips/ has for these bytes, or a new one (make); resolves the clip, throws an IngestError
+  async function ingest(a) {
+    a.report?.(0, 'Probing');
+    const real = fs.realpathSync(a.tmp);
+    if (path.dirname(real) === fs.realpathSync(clipsDir) && real.endsWith('.mp4')) return reused(path.basename(real, '.mp4'), a);
+    const hash = await sha256(real);
+    for (let w; (w = inflight.get(hash)); ) await w.catch(() => {});
+    const p = (async () => {
+      const same = await sameSource(real, hash);
+      if (same) return reused(same, a);
+      const clip = await make(a);
+      fs.mkdirSync(hashes, {recursive: true});
+      fs.writeFileSync(path.join(hashes, hash), `${clip.id} ${sizeOf(clip.id)}`);
+      return clip;
+    })();
+    inflight.set(hash, p);
+    try { return await p; } finally { inflight.delete(hash); }
+  }
+
+  // tmp → public/clips/<id>.mp4 + thumbnail
+  async function make({tmp, id, tag, rawName, report = () => {}}) {
     const out = path.join(clipsDir, `${id}.mp4`);
-    report(0, 'Probing');
-    const same = await sameSource(tmp);
-    if (same) {
-      const dur = await durationOf(path.join(clipsDir, `${same}.mp4`));
-      log(`ingest ${tag}: same bytes as clips/${same}.mp4 → reused, nothing re-encoded or re-transcribed`);
-      return {id: same, src: `clips/${same}.mp4`, label: rawName.replace(/\.[^.]+$/, ''), inSec: 0, outSec: dur, sourceDurationSec: dur, ingest: `same file as clips/${same}.mp4: reused with its transcripts`};
-    }
     // probe codec / pixel format / size / rotation / duration
     const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
       '-show_entries', 'stream=codec_name,pix_fmt,width,height,color_transfer:stream_side_data=rotation:format=duration', '-of', 'json', tmp], {cwd: root});
@@ -160,6 +179,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
       .then((clip) => { jobs[jobId] = {status: 'done', progress: 100, label: 'Ready', clip}; log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); onClip(clip); })
       .catch((e) => { jobs[jobId] = {status: 'error', error: message(e)}; log(`ingest ${tag}: error — ${message(e)}`); })
       .finally(cleanup);
+    return jobId;
   }
 
   // POST /api/add-clip and GET /api/add-clip/<jobId>; true when the request was one of them
@@ -194,6 +214,13 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     } else if (upload) {
       if (!UPLOAD_ID.test(upload)) return refuse(400, {error: 'bad upload id', code: 'bad_request'});
       uploaded = partFile(uploadsDir, g.user, upload);
+      // the part already has a job (it may be gone by now): that job — never a second clip, nor its part taken from under it
+      const had = url.searchParams.get('async') === '1' && byPart.get(uploaded);
+      const done = had && jobs[had].status === 'done' && fs.existsSync(path.join(publicDir, jobs[had].clip.src));
+      if (had && (jobs[had].status === 'running' || done)) {
+        if (done) fs.rmSync(uploaded, {force: true}); // the same file uploaded again after it
+        return refuse(202, {jobId: had});
+      }
       const have = partSize(uploaded), want = +(url.searchParams.get('size') ?? have);
       if (!have) return refuse(404, {error: `no upload ${upload}`, code: 'not_found'});
       if (have !== want) return refuse(409, {error: `upload ${upload} has ${have} of ${want} bytes`, code: 'upload_incomplete', size: have});
@@ -218,7 +245,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     const cleanup = () => { reserved.delete(id); opened?.close(); if (!local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
 
     if (uploaded && url.searchParams.get('async') === '1') {
-      startJob(res, {tmp, id, rawName, cleanup, what: `upload ${upload}, ${(fs.statSync(tmp).size / 1048576).toFixed(1)} MB`});
+      byPart.set(tmp, startJob(res, {tmp, id, rawName, cleanup, what: `upload ${upload}, ${(fs.statSync(tmp).size / 1048576).toFixed(1)} MB`}));
       return true;
     }
     if (local || uploaded) {

@@ -475,7 +475,7 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
   await needBackend();
   const id = project_id || `p-${Date.now()}`;
   const p = project_id ? load(project_id) : newProject(name);
-  const added = [];
+  const added = [], already = [];
   for (const f of files) {
     hostFile(f);
     // same machine: hand the backend the path instead of streaming the file through memory
@@ -483,10 +483,11 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
     const {ingest, ...raw} = r;
     const clip = addedClip(p.clips, raw);
-    p.clips.push(clip); added.push(`${clip.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
+    if (clip) { p.clips.push(clip); added.push(`${clip.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`); continue; }
+    already.push(`${path.basename(f)} is ${raw.src}, already on the timeline as ${p.clips.find((c) => c.src === raw.src).id} — not added twice (split_clip / trim_clip to use it twice)`);
   }
   await save(id, p);
-  return text(`Project ${id}: added ${added.join(', ')}\n\n${summary(id, p)}`);
+  return text(`Project ${id}: ${added.length ? `added ${added.join(', ')}` : 'nothing added'}${already.map((a) => `\n${a}`).join('')}\n\n${summary(id, p)}`);
 });
 
 server.registerTool('reorder_clips', {description: 'Set the timeline order. Clips not listed keep their relative order after the listed ones.', inputSchema: {project_id: pid, clip_ids: z.array(z.string()).min(1)}}, async ({project_id, clip_ids}) => {

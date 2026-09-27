@@ -138,5 +138,5 @@ settings: `REEL_REQUIRE_TOKEN=1` makes loopback API calls carry a token (a box
 shared over SSH; without it a caller with no token is still let in; the MCP sends
 the backend token, the editor served by `npm start` sends none and stops working),
 `REEL_RENDER_MIN_FREE_DISK_MB` (3072) and `REEL_RENDER_MIN_FREE_MEM_MB` (1024,
-Linux) are the render floors (0 turns one off), `REEL_UPLOAD_MAX_MB` (2048),
+Linux) are the render floors (0 turns one off), `REEL_UPLOAD_MAX_MB` (no cap unless set — the disk floor decides; a file over it is refused at its first chunk),
 `REEL_TOKENS_FILE` (`.reel-tokens.json`).

@@ -85,12 +85,15 @@ export const TOOL_STAGE: Record<string, Stage[]> = {
   render_status: [], list_render_jobs: [], cancel_render: [], list_versions: [], revoke_review_link: [], health: [],
 };
 
-// equal for the gates: key order ignored, and absent / null / '' / [] / false are one "nothing" (a writer
-// that fills a default must not reopen a stage)
-const nothing = (v: unknown) => v == null || v === '' || v === false || (Array.isArray(v) && !v.length);
+// the defaults a writer fills into a project that lacks them (mcp/checks.mjs withDefaults / newProject; a test
+// holds them together): the same as absent
+const DEFAULTS: Record<string, unknown> = {offMic: 'mark', audio: {clean: 'off'}, lang: 'auto', accentColor: '#FFB020', captionStyle: 'palabra'};
+// equal for the gates: key order ignored, and absent / null / '' / [] / false / the field's default are one
+// "nothing" (a writer that fills a default must not reopen a stage)
 const canon = (v: unknown) => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x));
-const same = (a: unknown, b: unknown) => (nothing(a) && nothing(b)) || canon(a) === canon(b);
-const row = (map: Record<string, Stage[]>, k: string) => (Object.hasOwn(map, k) ? map[k] : null);
+const nothing = (v: unknown, dflt?: unknown) => v == null || v === '' || v === false || (Array.isArray(v) && !v.length) || (dflt !== undefined && canon(v) === canon(dflt));
+const same = (a: unknown, b: unknown, dflt?: unknown) => (nothing(a, dflt) && nothing(b, dflt)) || canon(a) === canon(b);
+const row = <T>(map: Record<string, T>, k: string) => (Object.hasOwn(map, k) ? map[k] : null);
 
 type Fields = Record<string, any>;
 // What an edit leaves stale: the stages owning each changed field and every stage after them, in STAGES
@@ -104,7 +107,7 @@ export function invalidate(prev: Fields | null | undefined, next: Fields | null 
     for (const s of stages ?? dependents('ingest')) owners.add(s);
   };
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if (same(a[k], b[k])) continue;
+    if (same(a[k], b[k], row(DEFAULTS, k) ?? undefined)) continue;
     if (k !== 'clips') { own(row(FIELD_STAGE, k), k); continue; }
     const was: Fields[] = Array.isArray(a.clips) ? a.clips : [], now: Fields[] = Array.isArray(b.clips) ? b.clips : [];
     const srcs = new Set(was.map((c) => c.src));
@@ -123,6 +126,8 @@ export function invalidate(prev: Fields | null | undefined, next: Fields | null 
 // The rules each stage's gate reads, by the code of their findings: src/validate.ts (validateProject,
 // transcriptIssues), the judge's rules on the words as heard (mcp/checks.mjs stageChecks) and the ones made
 // here. entregables reads the judge's findings on the final render. A code in no list lands in entregables.
+// A rule that reads the graphics too — where captions land around them (safe-*: avoidGraphics), the pages an
+// end-card hides (layer-blocker) — is broll's: the first stage both captions and graphics edits reopen.
 // ponytail: J rules only; the probe (P) rules — durations, LUT copies, clipping, voice level, wind — and
 // crew talk / script coverage / caption text come with their phases (12, 16, 18)
 export const RULES: Record<Stage, string[]> = {
@@ -131,9 +136,9 @@ export const RULES: Record<Stage, string[]> = {
   guion: [],
   color: [],
   audio: [],
-  captions: ['font-missing', 'font-wrong', 'safe-top', 'safe-bottom', 'glue', 'short', 'long', 'timing', 'overlap-captions', 'fast-words',
-    'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing', 'layer-blocker'],
-  broll: ['safe-top', 'safe-bottom', 'face', 'behind-hidden', 'overlap-graphic', 'overlap-graphics', 'supers-order', 'matte', 'hook', 'supers-blocker'],
+  captions: ['font-missing', 'font-wrong', 'glue', 'short', 'long', 'timing', 'overlap-captions', 'fast-words',
+    'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing'],
+  broll: ['safe-top', 'safe-bottom', 'face', 'behind-hidden', 'overlap-graphic', 'overlap-graphics', 'supers-order', 'matte', 'hook', 'layer-blocker', 'supers-blocker'],
   entregables: [],
 };
 
@@ -150,14 +155,13 @@ export function stageFindings({p, fps, issues, untranscribed = [], judged = []}:
   const id = validateIdentity(p.identity);
   // a client's deliverables: the captions and the text graphics are layers of their own, or the render fails
   const layers = {clips: p.clips, captions: p.captions, graphics: p.graphics, captionStyle: p.captionStyle, captionsOff: p.captionsOff};
-  const gfx = new Set((p.graphics ?? []).map((g) => g.id));
   for (const i of [
     ...untranscribed.map((s): Issue => ({level: 'error', code: 'untranscribed', msg: `${s} has no transcript yet — get_transcript`, ref: s})),
     ...(id.error ? [{level: 'error', code: 'identity', msg: id.error} as Issue] : []),
     ...(id.identity ? layerBlockers(layers, fps).map((msg): Issue => ({level: 'error', code: 'layer-blocker', msg})) : []),
     ...(id.identity ? supersBlockers(layers, fps).map((msg): Issue => ({level: 'error', code: 'supers-blocker', msg})) : []),
     ...issues,
-  ]) out[/^safe-/.test(i.code) ? (gfx.has(i.ref ?? '') ? 'broll' : 'captions') : STAGES.find((s) => RULES[s].includes(i.code)) ?? 'entregables'].push(i);
+  ]) out[STAGES.find((s) => RULES[s].includes(i.code)) ?? 'entregables'].push(i);
   out.entregables.push(...judged);
   return out;
 }

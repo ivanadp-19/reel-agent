@@ -57,8 +57,7 @@ export const Start: React.FC<{
         job: (id) => { jobId = id; watching.add(id); pending.add({upload: part, jobId: id, name: file.name, size: file.size}); },
         processing: (progress, label) => patch(key, {progress, label}),
       });
-      addClip(clip);
-      patch(key, {phase: 'done'});
+      patch(key, {phase: 'done', label: addClip(clip) ?? undefined}); // a label: why it was not added
     } catch (e) {
       patch(key, {phase: 'error', error: e instanceof Error ? e.message : String(e)});
     } finally {
@@ -79,7 +78,7 @@ export const Start: React.FC<{
     for (const p of resume) {
       watching.add(p.jobId);
       waitIngest<NewClip>(p.jobId, {progress: (progress, label) => patch(p.jobId, {progress, label})})
-        .then((clip) => { addClip(clip); patch(p.jobId, {phase: 'done'}); })
+        .then((clip) => patch(p.jobId, {phase: 'done', label: addClip(clip) ?? undefined}))
         .catch((e) => patch(p.jobId, {phase: 'error', error: e instanceof Error ? e.message : String(e)}))
         .finally(() => { watching.delete(p.jobId); pending.remove(p.upload ?? p.jobId); });
     }
@@ -225,7 +224,7 @@ export const Start: React.FC<{
                       {u.phase === 'queued' && `Waiting · ${fmtMB(u.size)}`}
                       {u.phase === 'uploading' && `${pct(u.loaded, u.size)}% · ${fmtMB(u.loaded)} / ${fmtMB(u.size)}`}
                       {u.phase === 'processing' && `${u.label ?? 'Processing'} · ${u.progress ?? 0}%`}
-                      {u.phase === 'done' && 'Ready'}
+                      {u.phase === 'done' && (u.label ? 'Not added' : 'Ready')}
                       {u.phase === 'error' && 'Failed'}
                     </span>
                   </div>
@@ -247,6 +246,7 @@ export const Start: React.FC<{
                   {u.phase === 'processing' && (
                     <p className="mt-1 text-[11px] text-on-surface-variant">Uploaded — converting the video and making a thumbnail. Large or 4K/HDR clips can take a few minutes; the server finishes it even if this tab closes.</p>
                   )}
+                  {u.phase === 'done' && u.label && <p className="mt-1 text-[11px] text-on-surface-variant">{u.label}</p>}
                   {u.phase === 'error' && <p role="alert" className="mt-1 text-[11px] text-error break-words">{u.error}</p>}
                 </li>
               ))}

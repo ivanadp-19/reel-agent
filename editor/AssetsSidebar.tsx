@@ -46,7 +46,8 @@ export const AssetsSidebar: React.FC<{playerRef: React.RefObject<PlayerRef | nul
           progress: (loaded, total) => setImporting(`Uploading ${what} · ${pct(loaded, total)}%`),
           processing: (progress, label) => setImporting(`${label} ${what} · ${progress}%`),
         });
-        addClip(clip);
+        const why = addClip(clip);
+        if (why) setImportErrors((l) => [...l, `${vids[i].name}: ${why}`]);
       } catch (e) {
         // show why, keep going with the next file
         setImportErrors((l) => [...l, `${vids[i].name}: ${e instanceof Error ? e.message : String(e)}`]);

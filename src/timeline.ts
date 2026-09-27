@@ -208,10 +208,12 @@ export function uniqId(taken: Iterable<string>, base: string, tag: string): stri
   while (set.has(`${base}-${tag}${n}`)) n++;
   return `${base}-${tag}${n}`;
 }
-// a clip added to the timeline (the editor, add_clips, reel clips add): a source already in the project (the
-// ingest reuses an identical file, server/ingest.mjs) comes back with an id the project has → the next free one
-export const addedClip = <C extends {id: string}>(clips: {id: string}[], clip: C): C =>
-  clips.some((c) => c.id === clip.id) ? {...clip, id: uniqId(clips.map((c) => c.id), clip.id, 'c')} : clip;
+// a clip added to the timeline (the editor, add_clips, reel clips add), or null: a source the project has already (the
+// ingest hands an identical file back as that source, server/ingest.mjs) is not added twice — both copies' words would
+// carry the same ids, and cut_words, key words and hidden words could not tell them apart (split_clip / trim_clip to
+// use it twice). A new source whose id a clip has already gets the next free one.
+export const addedClip = <C extends {id: string; src: string}>(clips: {id: string; src: string}[], clip: C): C | null =>
+  clips.some((c) => c.src === clip.src) ? null : clips.some((c) => c.id === clip.id) ? {...clip, id: uniqId(clips.map((c) => c.id), clip.id, 'c')} : clip;
 
 // Remove a source range [aSec, bSec] from a clip: a trim when it touches an
 // edge (pieces under 0.2 s fold into the cut), otherwise split twice and drop

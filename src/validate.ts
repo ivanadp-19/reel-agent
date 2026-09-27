@@ -7,7 +7,7 @@ import {FLOAT_SLOTS, pageScale, presetOf} from './captionPresets.ts';
 import {CENTERED, DECOR_FULL, STAR_PX, TEMPLATES, isTextGraphic, oversizedPx, projectGraphics, spansWithoutMatte, type Graphic} from './graphicTemplates.ts';
 import {isGlue} from './paging.ts';
 import {guionIssues} from './guion.ts';
-import {continuesPrev, placeClips, type Clip} from './timeline.ts';
+import {continuesPrev, placeClips, renderSec, type Clip} from './timeline.ts';
 import {textWidthEm} from './textFit.ts';
 import type {FontFamily} from './fonts.ts';
 
@@ -200,11 +200,12 @@ export function validateProject(p: {clips: Clip[]; captions: Caption[]; graphics
   const words = p.captions.flatMap((c) => c.words);
   const t2 = words.filter((w) => w.tier === 2).length;
   const t1 = words.filter((w) => w.tier === 1).length;
-  if (totalMs && t2 > Math.max(1, totalMs / 10000)) issues.push({level: 'warn', code: 'tier2-density', msg: `${t2} tier-2 words in ${(totalMs / 1000).toFixed(0)} s — aim for ≤ 1 per 10 s`});
+  const reelMs = renderSec(p.clips, fps) * 1000; // per second of the reel: the cut's length, never the graphics' (src/stages.ts)
+  if (reelMs && t2 > Math.max(1, reelMs / 10000)) issues.push({level: 'warn', code: 'tier2-density', msg: `${t2} tier-2 words in ${(reelMs / 1000).toFixed(0)} s — aim for ≤ 1 per 10 s`});
   const maxShare = presetOf(p.captionStyle).highlight?.maxShare ?? 0.2; // a pack may mark more (vibem: v11 is 27 %)
   if (words.length >= 20 && t1 / words.length > maxShare) issues.push({level: 'warn', code: 'tier1-density', msg: `${Math.round((t1 / words.length) * 100)}% of words are accented — keep it under ${Math.round(maxShare * 100)}%`});
   const emoji = words.filter((w) => w.emoji).length;
-  if (totalMs && emoji > Math.max(2, totalMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(totalMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
+  if (reelMs && emoji > Math.max(2, reelMs / 5000)) issues.push({level: 'warn', code: 'emoji-density', msg: `${emoji} emoji in ${(reelMs / 1000).toFixed(0)} s — keep it to about one per 5 s`});
 
   // --- graphics ---
   for (const g of gfx) {

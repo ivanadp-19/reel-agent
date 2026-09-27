@@ -284,7 +284,7 @@ const clipIngest = createClipIngest({publicDir: PUBLIC, root: ROOT, token: TOKEN
   freeBytes: () => { const mb = resources().freeDiskMb; return mb == null ? Infinity : mb * 2 ** 20; }, minFreeBytes: MIN_DISK_MB * 2 ** 20, onClip: (clip) => gradeScans.kick(clip.src)});
 // B-roll contact sheets (public/broll-assets/sheets/<id>.jpg), one ffmpeg pass at a time in the background: GET /api/broll-library and the upload only trigger them
 const brollSheets = createSheetJobs();
-const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || 2048) * 2 ** 20;
+const UPLOAD_MAX = (+process.env.REEL_UPLOAD_MAX_MB || Infinity) * 2 ** 20; // no cap unless set: the disk floor decides (the editor's uploads never had one)
 const DIST = path.join(ROOT, 'editor', 'dist');
 // Where a review link points: REEL_PUBLIC_URL (https://reels.example.com) when set,
 // else the address this request came through (the proxy's forwarded host first).
@@ -378,7 +378,7 @@ async function handle(req, res) {
       if (!Number.isInteger(offset) || offset < 0) return json(res, 400, {error: 'offset required', code: 'bad_request'});
       sweepParts(UPLOADS);
       const {freeDiskMb} = resources();
-      const [status, out] = await appendChunk(req, file, offset, {maxBytes: UPLOAD_MAX, freeBytes: freeDiskMb == null ? Infinity : freeDiskMb * 2 ** 20, minFreeBytes: MIN_DISK_MB * 2 ** 20});
+      const [status, out] = await appendChunk(req, file, offset, {maxBytes: UPLOAD_MAX, total: +url.searchParams.get('total') || 0, freeBytes: freeDiskMb == null ? Infinity : freeDiskMb * 2 ** 20, minFreeBytes: MIN_DISK_MB * 2 ** 20});
       return json(res, status, out);
     }
     return json(res, 405, {error: 'method not allowed'});

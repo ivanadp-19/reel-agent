@@ -77,7 +77,7 @@ type EditorState = {
   deleteCaption: (id: string) => void;
 
   // clips track (multi-clip timeline)
-  addClip: (clip: Clip) => void;
+  addClip: (clip: Clip) => string | null; // null: added; else why not (src/timeline.ts addedClip)
   setClipOrder: (orderedIds: string[]) => void;
   splitClipAtFrame: (frame: number) => void;
   setKeyframe: (clipId: string, t: number, tr: {scale: number; x: number; y: number}) => void;
@@ -264,12 +264,16 @@ export const useEditor = create<EditorState>((set) => ({
     })),
 
   // ---- clips track ----
-  addClip: (added) =>
+  addClip: (added) => {
+    let why: string | null = null;
     set((s) => {
       const clip = addedClip(s.clips, added);
+      if (!clip) { why = `already on the timeline as ${s.clips.find((c) => c.src === added.src)!.id} — split or trim it to use it twice`; return s; }
       const clips = [...s.clips, clip];
       return {...withHistory(s), clips, meta: withMeta(s.meta, clips), selectedClipId: clip.id};
-    }),
+    });
+    return why;
+  },
   // reorder clips to match an explicit id order (unknown ids appended, missing kept)
   setClipOrder: (orderedIds) =>
     set((s) => {
