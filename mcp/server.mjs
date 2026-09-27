@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
+import {PIECES, addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, inferPieces, locateSec, nextId, placeClips, reanchor, splitClip, syncFamily, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -30,7 +30,7 @@ import {TEMPLATES, MATTE_TEMPLATES, describeSchema, isTemplate, parseProps, proj
 import {searchAssets, findOrGenerate, listLibrary, librarySearch} from './assets.mjs';
 import {searchStock} from './stock.mjs';
 import {renderProof, renderStrip} from './proof.mjs';
-import {DELIVERABLES, deliverableName, eachTarget, identityOf, projectTargets, validateIdentity, validateProject} from '../src/validate.ts';
+import {DELIVERABLES, deliverableName, eachTarget, familyTargets, identityOf, projectTargets, unbackedData, validateIdentity, validateProject} from '../src/validate.ts';
 import {claimIdentity, facesOf, newProject, projectIssues, projectRows, projectWords, withDefaults} from './checks.mjs';
 import {applyWordCuts, findCutCandidates, planWordCuts, SNAP_MS} from '../src/cuts.ts';
 import {qcText} from '../scripts/qc.mjs';
@@ -188,9 +188,10 @@ function summary(id, p) {
   if (inScope(p.scope).length < STAGES.length) out.push('', `SCOPE (set_scope): ${scopeLine(p)}`);
   if (p.guion) out.push('', `GUION (set_guion): ${p.guion.trim().split(/\s+/).length} words — captions take its wording where it aligns with the audio; validate reports guion-conflict / guion-missing / guion-altered`);
   out.push('', 'CLIPS (timeline order):');
+  const pieces = inferPieces(p.clips, p.identity?.variant); // what sync_family takes for the body
   place(p).forEach((pc, i) => {
-    const c = pc.clip;
-    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : '', c.graded != null ? (c.graded ? 'graded' : 'needs grading') : '', c.location ? `at ${c.location}` : ''].filter(Boolean).join(', ');
+    const c = pc.clip, piece = pieces[i]?.piece;
+    const extra = [c.enter && c.enter !== 'cut' ? `enters with ${c.enter}` : '', c.speed && c.speed !== 1 ? `speed ${c.speed}x` : '', c.muted ? 'muted' : '', c.volume != null && c.volume !== 1 ? `vol ${c.volume}` : '', c.jSec ? `J-cut ${c.jSec}s` : '', c.lSec ? `L-cut ${c.lSec}s` : '', c.transform?.length ? `${c.transform.length} keyframes` : '', c.graded != null ? (c.graded ? 'graded' : 'needs grading') : '', c.location ? `at ${c.location}` : '', piece ? `${piece} piece${c.piece ? '' : ' (by the identity)'}` : ''].filter(Boolean).join(', ');
     out.push(`  ${i + 1}. ${c.id}  @${f1(pc.startMs / 1000)}–${f1(pc.endMs / 1000)}s  source ${path.basename(c.src)} [${f1(c.inSec)}–${f1(c.outSec)} of ${f1(c.sourceDurationSec)}s]${extra ? '  ' + extra : ''}`);
   });
   out.push('', 'CAPTIONS (timeline time; *word* = tier 1 accent, **word** = tier 2 emphasis; word ids come from get_transcript):');
@@ -310,9 +311,9 @@ const READ_ONLY = new Set([
 const queues = new Map(); // project id → its last queued call
 const inTurn = (id, fn) => { const run = (queues.get(id) ?? Promise.resolve()).then(fn); queues.set(id, run.catch(() => {})); return run; };
 // Caption corrections take no argument they do not know: it is an error, never dropped (edit_caption
-// start_sec used to answer ok and do nothing); nor does set_music, whose targets a dropped except (nested
-// in targets, or misspelled) would widen to the whole family. Other tools still ignore extra arguments.
-const STRICT = new Set(['edit_caption', 'add_caption', 'set_music']);
+// start_sec used to answer ok and do nothing); nor do set_music and sync_family, whose targets a dropped except
+// (nested in targets, or misspelled) would widen to the whole family. Other tools still ignore extra arguments.
+const STRICT = new Set(['edit_caption', 'add_caption', 'set_music', 'sync_family']);
 // on top of the timing wrapper above: a call the gate refuses is still logged (as failed)
 const registerTimed = server.registerTool.bind(server);
 server.registerTool = (name, config, cb) => registerTimed(name, STRICT.has(name) ? {...config, inputSchema: z.object(config.inputSchema ?? {}).strict()} : config, async (args, extra) => {
@@ -354,10 +355,12 @@ server.registerTool('list_projects', {description: 'List reel-agent projects (id
 
 server.registerTool('get_project', {description: 'Full readable state of a project: clips on the timeline, every caption with its text/accents/position, B-roll cues, music. Call this before editing and again after to verify.', inputSchema: {project_id: pid}}, async ({project_id}) => text(summary(project_id, load(project_id))));
 
-server.registerTool('duplicate_project', {description: 'Copy a project under a new id/name (safe sandbox for experiments).', inputSchema: {project_id: pid, name: z.string().optional()}}, async ({project_id, name}) => {
+server.registerTool('duplicate_project', {description: 'Copy a project under a new id/name (safe sandbox for experiments, or another variant of its script: the copy\'s clips carry their piece — hook / body / cta — inferred from the identity when none is set; check them in get_project, set_clip piece to fix).', inputSchema: {project_id: pid, name: z.string().optional()}}, async ({project_id, name}) => {
   const p = load(project_id); const id = `p-${Date.now()}`;
-  await save(id, {...p, name: name || `${p.name || 'Untitled project'} (copy)`, createdAt: undefined, identity: undefined});
-  return text(`Created ${id} "${name || (p.name || 'Untitled project') + ' (copy)'}"${p.identity ? ' — identity not copied (one project per client, script and variant): set_identity for the copy' : ''}`);
+  const clips = inferPieces(p.clips, p.identity?.variant); // the pieces the identity tells, before it is dropped
+  await save(id, {...p, clips, name: name || `${p.name || 'Untitled project'} (copy)`, createdAt: undefined, identity: undefined});
+  const pieces = clips !== p.clips ? ` — pieces from the identity: ${PIECES.map((k) => `${k} ${clips.filter((c) => c.piece === k).map((c) => c.id).join(', ') || '—'}`).join('; ')}` : '';
+  return text(`Created ${id} "${name || (p.name || 'Untitled project') + ' (copy)'}"${p.identity ? ' — identity not copied (one project per client, script and variant): set_identity for the copy' : ''}${pieces}`);
 });
 
 server.registerTool('rename_project', {description: 'Rename a project.', inputSchema: {project_id: pid, name: z.string()}}, async ({project_id, name}) => { const p = load(project_id); p.name = name; await save(project_id, p); return text(`Renamed to "${name}"`); });
@@ -549,11 +552,11 @@ server.registerTool('trim_clip', {description: 'Change where a clip starts/ends 
   await save(project_id, p); return text(`${clip_id}: ${f1(c.inSec)}–${f1(c.outSec)}s (${f1(clipDurationSec(c))}s on the timeline)`);
 });
 
-server.registerTool('set_clip', {description: 'Per clip: playback — speed (0.25–4), volume (0–2), muted — and what the user says about its footage: graded = true when it already carries the client\'s grade (César\'s pre-edits usually do: do not regrade it), false when it needs one; location = where it was shot (color-jump never compares clips of two locations). null clears graded; "" clears location.', inputSchema: {project_id: pid, clip_id: z.string(), speed: z.number().min(0.25).max(4).optional(), volume: z.number().min(0).max(2).optional(), muted: z.boolean().optional(), graded: z.boolean().nullable().optional(), location: z.string().max(60).nullable().optional()}}, async ({project_id, clip_id, speed, volume, muted, graded, location}) => {
+server.registerTool('set_clip', {description: 'Per clip: playback — speed (0.25–4), volume (0–2), muted — and what the user says about its footage: graded = true when it already carries the client\'s grade (César\'s pre-edits usually do: do not regrade it), false when it needs one; location = where it was shot (color-jump never compares clips of two locations); piece = which part of its variant it is, hook / body / cta (sync_family copies what sits on the body to the family\'s other variants). null clears graded or piece; "" clears location.', inputSchema: {project_id: pid, clip_id: z.string(), speed: z.number().min(0.25).max(4).optional(), volume: z.number().min(0).max(2).optional(), muted: z.boolean().optional(), graded: z.boolean().nullable().optional(), location: z.string().max(60).nullable().optional(), piece: z.enum(PIECES).nullable().optional()}}, async ({project_id, clip_id, speed, volume, muted, graded, location, piece}) => {
   const p = load(project_id); const i = p.clips.findIndex((x) => x.id === clip_id); if (i < 0) throw new Error(`no clip ${clip_id}`);
-  const c = p.clips[i] = clipTags(p.clips[i], {graded, location}); // the editor's Clip tab sets them through the same function
+  const c = p.clips[i] = clipTags(p.clips[i], {graded, location, piece}); // the editor's Clip tab sets them through the same function
   if (speed != null) c.speed = speed; if (volume != null) c.volume = volume; if (muted != null) c.muted = muted;
-  await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}, ${c.graded == null ? 'grade not said' : c.graded ? 'already graded' : 'needs grading'}${c.location ? `, shot at ${c.location}` : ''}`);
+  await save(project_id, p); return text(`${clip_id}: speed ${c.speed ?? 1}x, volume ${c.volume ?? 1}, ${c.muted ? 'muted' : 'audio on'}, ${c.graded == null ? 'grade not said' : c.graded ? 'already graded' : 'needs grading'}${c.location ? `, shot at ${c.location}` : ''}${c.piece ? `, ${c.piece} piece` : ''}`);
 });
 
 server.registerTool('set_audio_cut', {description: 'J-cuts and L-cuts (per clip, seconds of TIMELINE time; 0 clears). j_sec = J-cut: this clip\'s audio starts that early, under the previous clip\'s tail — you hear the next take before you see it (its first j seconds of audio lead; they are muted in place so the sound flows straight through the cut). l_sec = L-cut: this clip\'s audio keeps playing after its video ends, under the next clip — the voice walks the viewer into the next shot. Classic use: 0.5–1.5 s on a change of take/place; j on the clip you enter, l on the one you leave. A J-cut is clamped to the clip\'s own length and the previous clip\'s, an L-cut to the audio left in the source after out_sec and the next clip\'s length. Muted clips stay silent. Set them after cutting: pieces made by later cuts start plain.', inputSchema: {project_id: pid, clip_id: z.string(), j_sec: z.number().min(0).max(4).optional(), l_sec: z.number().min(0).max(4).optional()}}, async ({project_id, clip_id, j_sec, l_sec}) => {
@@ -855,22 +858,47 @@ server.registerTool('set_music', {description: 'Set or remove the music track: m
   const music = remove ? null : {src, ...level, ...(credit ? {credit} : {})};
   const said = music ? `Music ${src} ${musicLine(music)}${credit ? `\nCredit to ship with the reel: ${credit}` : ''}` : 'Music removed';
   if (p) { p.music = music; await save(project_id, p); return text(said); }
-  // a one-off write to a sibling does not keep its lock (save takes it): the agent editing that project
-  // can write again right after, not only when this session ends or the lock's TTL runs out
+  const {failed, lines} = await eachTarget(picked.ids, (id) => writeTarget(id, 'set_music', (q) => { q.music = music; }));
+  return text(`${said}\n${picked.ids.length - failed} of ${picked.ids.length} project(s) set:\n${lines.map((l) => `  ${l}`).join('\n')}`);
+});
+
+// One write to a project of a batch (set_music targets, sync_family): queued behind that project's other calls,
+// plan-gated, saved by its own CAS route; edit(q) changes q and says what it did. The lock save takes is not kept:
+// the agent editing that project can write again right after, not only when this session ends or the lock's TTL runs
+// out. A project another agent holds fails its save (lockMessage) — the batch's line for it says so.
+function writeTarget(id, tool, edit) {
   const tag = callCtx.getStore()?.tag || '';
-  const {failed, lines} = await eachTarget(picked.ids, (id) => inTurn(id, async () => {
+  return inTurn(id, async () => {
     const had = held.get(tag)?.has(id);
     try {
       const q = load(id);
-      const why = planGate(q, 'set_music', planMode(q));
+      const why = planGate(q, tool, planMode(q));
       if (why) throw new Error(why);
-      stageGate('set_music', id, {});
-      q.music = music; await save(id, q);
+      stageGate(tool, id, {});
+      const said = await edit(q);
+      await save(id, q);
+      return said;
     } finally {
       if (!had) { releaseLock(PROJECTS, id, process.pid, tag || undefined); held.get(tag)?.delete(id); }
     }
+  });
+}
+
+// A fix to the body of a script reaches its other variants (CEO-5, D17): src/timeline.ts syncFamily on each sibling
+// (familyTargets, src/validate.ts: its family and client only — the editor's Sync body runs the same two), written by
+// writeTarget. No project_id: like set_music's targets, nothing is queued or gated for `from`, which is only read.
+server.registerTool('sync_family', {description: 'Copy what sits on the body of `from` onto the other variants of its script (its identity family, same client only): caption pages (key words, hand edits), graphics, B-roll cues, grade overrides and per-clip audio (speed and ramps, volume, J/L between body clips). Body clips are matched by source and time range, never by id, and everything lands on each sibling\'s own timeline (its hook may be longer); hooks and CTAs are never touched, nor the J/L at their seams. Each sibling\'s line names what of its own the copy replaced. Body = the clips whose piece is body (set_clip piece; inferred from the identity when a project has none — check get_project). A graphic whose figure or name the sibling\'s own audio does not say is left out. Each sibling is saved on its own and its stages go stale; one another agent is editing (its project lock) or saved meanwhile is reported and left as it is. targets = {family} or {project_ids} of that family only (default: the whole family); except = ids to leave out. Run it after fixing the body on one variant.', inputSchema: {from: pid.describe('the variant whose body is right'), targets: z.object({family: z.string().optional(), project_ids: z.array(pid).min(1).optional()}).strict().optional().describe('default {family: from\'s}; except goes beside it, not inside'), except: z.array(z.string()).optional().describe('project ids to leave out')}}, async ({from, targets, except}) => {
+  const p = load(from);
+  const picked = familyTargets(projectRows(PROJECTS), from, targets, except);
+  if (picked.error) throw new Error(picked.error);
+  const {failed, lines} = await eachTarget(picked.ids, (id) => writeTarget(id, 'sync_family', (q) => {
+    const tr = projectWords(q, PUBLIC, JOB_ENV);
+    const r = syncFamily(p, q, {words: tr, unbacked: (x) => unbackedData(x, tr)});
+    if ('error' in r) throw new Error(r.error);
+    Object.assign(q, r.project, {sync: {from, replaced: r.replaced}}); // logged on its stages by the backend's write
+    return r.said;
   }));
-  return text(`${said}\n${picked.ids.length - failed} of ${picked.ids.length} project(s) set:\n${lines.map((l) => `  ${l}`).join('\n')}`);
+  return text(`${picked.ids.length - failed} of ${picked.ids.length} sibling(s) of ${from} synced:\n${lines.map((l) => `  ${l}`).join('\n')}${failed ? '\nThe ones with an error were left as they are: sync again once they are free.' : ''}`);
 });
 
 server.registerTool('set_audio', {description: `Audio options. clean = voice cleanup on the final render (drafts are untouched): ${Object.entries(CLEAN).map(([k, v]) => `${k} = ${v.desc}`).join('; ')} — light is safe on phone recordings with room noise, strong can dull sibilants, wind is for outdoor takes validate flags as windy (it thins the low end of the whole mix, music too: listen). sfx = sound effects (synthesized, license-free): a whoosh on whip/zoom/card/split cuts and a pop on stickers/starbursts; off by default.`, inputSchema: {project_id: pid, clean: z.enum(Object.keys(CLEAN)).optional(), sfx: z.boolean().optional()}}, async ({project_id, clean, sfx}) => {

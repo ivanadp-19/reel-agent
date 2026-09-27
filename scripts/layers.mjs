@@ -94,8 +94,8 @@ export function masterInputs(props, fps) {
   const {clean, ...audioRest} = audio ?? {};
   // solid plates (src/renderProps.ts) are drawn with the text graphics: a text-free master (textOff) keys without them
   const out = {...rest, ...(solidPlates && !rest.textOff ? {solidPlates} : {}), audio: audio ? audioRest : null};
-  // a clip's tags (graded, location — src/timeline.ts clipTags) steer validate and the judge, never a pixel
-  if (rest.clips) out.clips = rest.clips.map(({graded, location, ...c}) => c);
+  // a clip's tags (graded, location, piece — src/timeline.ts clipTags) steer validate, the judge and sync_family, never a pixel
+  if (rest.clips) out.clips = rest.clips.map(({graded, location, piece, ...c}) => c);
   // the music ducks under the speech spans (src/layers.ts), drawn or not
   if (props.music?.duck) out.duckSpeech = captionLayout(props, fps).speech;
   return out;

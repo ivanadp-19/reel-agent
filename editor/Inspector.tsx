@@ -1,7 +1,8 @@
 import React, {useEffect, useState} from 'react';
 import type {PlayerRef} from '@remotion/player';
 import {useEditor} from './store';
-import {clipDurationSec, placeClips} from '../src/timeline';
+import {PIECES, clipDurationSec, inferPieces, placeClips, syncFamily, type Piece} from '../src/timeline';
+import {eachTarget, familyTargets, unbackedData, validateIdentity} from '../src/validate';
 import {pageBefore, projectCaptions} from '../src/captions';
 import {projectBrolls, type BrollAsset, type BrollItem} from '../src/brollModel';
 import type {PresetId} from '../src/captionPresets';
@@ -12,7 +13,7 @@ import {GraphicsTab} from './GraphicsTab';
 import {BrollSuggestions, StockSearch, type LibAsset} from './BrollSourcing';
 import {StylesTab} from './StylesTab';
 import {SettingsTab} from './SettingsTab';
-import {Btn, IconBtn, Label, NumberInput, Row, Section, Select, Toggle, fmtSec} from './ui';
+import {Btn, IconBtn, Label, NumberInput, Row, Section, Select, TextInput, Toggle, fmtSec} from './ui';
 
 type Tab = 'Clip' | 'Captions' | 'B-roll' | 'Graphics' | 'Styles' | 'Settings';
 const TABS: Tab[] = ['Clip', 'Captions', 'B-roll', 'Graphics', 'Styles', 'Settings'];
@@ -42,7 +43,7 @@ export const Inspector: React.FC<{
     select, selectClip, setText, movePageStart, shiftCaption, setTopPct, toggleAccent, setEmoji, pushHistory, setCaptionBehind, addCaption, deleteCaption,
     deleteClip, moveClip, setBrollMode, swapBroll, removeBroll, setBrollMotion, setBrollTiming, addBroll,
     setClipVolume, toggleClipMute, setClipSpeed, setClipEnter, setClipAudioCut, setClipTags, setTransitionPattern, applySpeedRamp,
-    captionsOff, setCaptionsOff, guion, setGuion,
+    captionsOff, setCaptionsOff, guion, setGuion, projectId, identity,
   } = useEditor();
   const [tab, setTab] = useState<Tab>('Captions');
   const [ramp, setRamp] = useState({from: 1, to: 2, steps: 3});
@@ -50,6 +51,8 @@ export const Inspector: React.FC<{
   const [library, setLibrary] = useState<LibAsset[]>([]); // the machine's own B-roll library (add_broll_assets / the Assets panel), with tags
   const [stockQuery, setStockQuery] = useState<string | undefined>(undefined);
   const [newCue, setNewCue] = useState<{asset: string; mode: BrollItem['mode']; sec: number}>({asset: '', mode: 'inset', sec: 3});
+  const [syncExcept, setSyncExcept] = useState('');
+  const [syncing, setSyncing] = useState(false);
   // a clip selected anywhere (timeline, assets, preview) opens its tab
   useEffect(() => { if (selectedClipId) setTab('Clip'); }, [selectedClipId]);
   useEffect(() => {
@@ -70,6 +73,37 @@ export const Inspector: React.FC<{
   const assets: BrollAsset[] = [...brollAssets, ...library.filter((a) => !brollAssets.some((b) => b.id === a.id)).map((a) => ({id: a.id, src: a.src, kind: a.kind, label: a.label}))];
   const rampPieces = ramp.steps;
   const rampOk = selClip ? (selClip.outSec - selClip.inSec) / rampPieces >= 0.3 : false;
+
+  const family = validateIdentity(identity).identity?.family;
+  // sync_family: this variant's body onto the other variants of its script — the MCP's selection (familyTargets) and
+  // copy (syncFamily); each sibling read with its words (the graphics' data against its own audio, unbackedData) and its
+  // lock (one another agent holds is left as it is), saved by its own CAS route (GET then POST with its updatedAt: one
+  // saved meanwhile is a 409, reported, never overwritten)
+  const syncBody = async () => {
+    if (!projectId) return;
+    setSyncing(true);
+    try {
+      const r = familyTargets(await fetch('/api/projects').then((x) => x.json()), projectId, undefined, syncExcept.split(',').map((x) => x.trim()).filter(Boolean));
+      if (r.error) throw new Error(r.error);
+      const s = useEditor.getState();
+      const from = {clips: s.clips, captions: s.captions, brolls: s.brolls, graphics: s.graphics, mattes: s.mattes, grade: s.grade, hiddenWids: s.hiddenWids, identity: validateIdentity(s.identity).identity};
+      const {failed, lines} = await eachTarget(r.ids, async (id) => {
+        const at = `/api/projects/${encodeURIComponent(id)}`;
+        const got = await Promise.all([fetch(at), fetch(`${at}/words`), fetch(`${at}/lock`)]), bad = got.find((x) => !x.ok);
+        if (bad) throw new Error(`could not read it (${bad.status})`);
+        const [cur, tr, lock] = await Promise.all(got.map((x) => x.json()));
+        if (lock.message) throw new Error(lock.message); // another agent is editing it: left as it is, as the MCP does
+        const out = syncFamily(from, cur, {words: tr, unbacked: (q) => unbackedData(q, tr)});
+        if ('error' in out) throw new Error(out.error);
+        const w = await fetch(at, {method: 'POST', body: JSON.stringify({...out.project, sync: {from: projectId, replaced: out.replaced}})});
+        if (w.status === 409) throw new Error('it changed meanwhile — sync again');
+        if (!w.ok) throw new Error((await w.json().catch(() => ({}))).error ?? `save failed (${w.status})`);
+        return out.said;
+      });
+      notify(`Body of the family ${family}: ${r.ids.length - failed} of ${r.ids.length} synced — ${lines.join('; ')}`, failed ? 'error' : 'ok');
+    } catch (e) { notify('Sync body: ' + (e as Error).message, 'error'); }
+    setSyncing(false);
+  };
 
   const addPage = () => {
     const t = pageText.trim();
@@ -185,6 +219,13 @@ export const Inspector: React.FC<{
                   </div>
                 </div>
 
+                {/* which part of its variant (set_clip piece): Sync body copies what sits on the body */}
+                <div className="mt-3" title="Which part of its variant this clip is: Sync body (below) copies what sits on the body clips to the family's other variants; their hooks and CTAs stay theirs">
+                  <Label>Piece</Label>
+                  <Select value={selClip.piece ?? ''} onChange={(v) => setClipTags(selClip.id, {piece: v === '' ? null : (v as Piece)})}
+                    options={[{value: '', label: `not said${(() => { const k = inferPieces(clips, validateIdentity(identity).identity?.variant).find((c) => c.id === selClip.id)?.piece; return k ? ` (${k} by the identity)` : ''; })()}`}, ...PIECES.map((k) => ({value: k, label: k}))]} />
+                </div>
+
                 {/* speed ramp */}
                 <div className="mt-3" title="The clip becomes pieces whose speed eases from → to (1 → 2.5 rushes a walk-through, 2 → 1 lands on a reveal). Pieces start plain: add transitions after.">
                   <Label>Speed ramp</Label>
@@ -207,6 +248,14 @@ export const Inspector: React.FC<{
                 <Btn onClick={() => setTransitionPattern('none')} disabled={!clips.some((c) => c.enter)} className="flex-1">All plain cuts</Btn>
               </div>
             </Section>
+            {family && (
+              <Section title={`Family ${family}`} hint="sync_family: this variant's body (the body pieces: pages, graphics, B-roll, grade overrides, clip audio) onto the other variants of the script, on their own timelines; their hooks and CTAs stay theirs. A graphic whose data a sibling's audio does not say stays behind.">
+                <div className="flex gap-1">
+                  <TextInput value={syncExcept} onChange={setSyncExcept} placeholder="except: project ids, comma-separated" />
+                  <Btn onClick={syncBody} disabled={syncing || !clips.length} className="whitespace-nowrap">{syncing ? '…' : 'Sync body'}</Btn>
+                </div>
+              </Section>
+            )}
           </div>
         )}
 

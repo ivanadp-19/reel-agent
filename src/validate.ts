@@ -557,12 +557,27 @@ export function projectTargets(rows: {id: string; identity?: unknown}[], {family
   return {ids};
 }
 
-// the write of each target in turn; one failing never stops the others → a line per project (ok / error and why)
+// sync_family's siblings (the MCP and the editor's Sync body): the other projects of `from`'s family — or the targets
+// given, all of that family — minus except. Same family and same client only, whatever the targets say.
+export function familyTargets(rows: {id: string; identity?: unknown}[], from: string, targets?: {family?: string; project_ids?: string[]}, except: string[] = []): {ids: string[]; error?: string} {
+  const idOf = (id: string) => validateIdentity(rows.find((r) => r.id === id)?.identity).identity;
+  const own = idOf(from);
+  if (!own) return {ids: [], error: `${from} has no identity (set_identity): its family names its siblings`};
+  const r = projectTargets(rows, targets ?? {family: own.family}, except);
+  if (r.error) return r;
+  const ids = r.ids.filter((id) => id !== from);
+  const out = ids.filter((id) => { const i = idOf(id); return i?.family !== own.family || i.client !== own.client; });
+  if (out.length) return {ids: [], error: `${out.join(', ')}: not of family ${own.family} of ${own.client} — sync_family never crosses families or clients`};
+  return ids.length ? {ids} : {ids: [], error: `no other project in family ${own.family}`};
+}
+
+// the write of each target in turn; one failing never stops the others → a line per project (ok, and what the write
+// said, or error and why)
 export async function eachTarget(ids: string[], write: (id: string) => Promise<unknown>): Promise<{failed: number; lines: string[]}> {
   const lines: string[] = [];
   let failed = 0;
   for (const id of ids) {
-    try { await write(id); lines.push(`${id}: ok`); } catch (e) { failed++; lines.push(`${id}: error — ${(e as Error).message}`); }
+    try { const said = await write(id); lines.push(`${id}: ok${typeof said === 'string' && said ? ` — ${said}` : ''}`); } catch (e) { failed++; lines.push(`${id}: error — ${(e as Error).message}`); }
   }
   return {failed, lines};
 }

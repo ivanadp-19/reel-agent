@@ -2,6 +2,10 @@
 // in/out trim points, assembled back-to-back. Optional music track on top.
 // This is the spine of the editor: trim = change in/out, reorder = change order,
 // delete = drop a clip. Captions are mapped onto the assembled timeline (see remapCaptions).
+import {autoSources, lutBakes, type GradeParams, type ProjectGrade} from './grade.ts';
+import type {Caption} from './captions.ts';
+import type {BrollItem} from './brollModel.ts';
+import type {Graphic} from './graphicTemplates.ts';
 
 // a keyframe ("flag") pins a transform at a source-relative time inside the clip
 export type Keyframe = {t: number; scale: number; x: number; y: number};
@@ -22,11 +26,16 @@ export type Clip = {
   lSec?: number; // L-cut: the audio trails this many seconds under the next clip's head
   graded?: boolean; // the footage already carries the client's grade (true) or needs one (false); unset = not said
   location?: string; // where it was shot: color-jump never compares clips of two locations
+  piece?: Piece; // which part of its variant (identity) the clip is: sync_family copies what sits on the body to the siblings
 };
+export const PIECES = ['hook', 'body', 'cta'] as const;
+export type Piece = (typeof PIECES)[number];
 
-// graded / location as the user sets them (set_clip, the editor's Clip tab): null or '' clears one
-export function clipTags(c: Clip, t: {graded?: boolean | null; location?: string | null}): Clip {
+// graded / location / piece as the user sets them (set_clip, the editor's Clip tab): null or '' clears one
+export function clipTags(c: Clip, t: {graded?: boolean | null; location?: string | null; piece?: Piece | null}): Clip {
   const out = {...c};
+  if (t.piece === null) delete out.piece;
+  else if (t.piece !== undefined) out.piece = t.piece;
   if (t.graded === null) delete out.graded;
   else if (t.graded !== undefined) out.graded = t.graded;
   if (t.location !== undefined) {
@@ -270,4 +279,167 @@ export function applyAutocut(clips: Clip[], plan: AutocutPlan): {clips: Clip[]; 
     });
   }
   return {clips: out, remap};
+}
+
+// ---- variants of one script (CEO-5, D17): the body a family shares ----
+
+type Variant = {hook?: number; cta?: number; v?: number} | null | undefined;
+// The pieces of a variant's clips where its identity tells them: a hook variant opens with its hook — the clips of the
+// first clip's source up to one of another source (G2's hook is two pieces of one file) — a CTA variant closes with its
+// CTA the same way, and the rest is the body. A piece the user set stays; nothing is inferred for a plain variant ({v}
+// or none) or when no body would be left. duplicate_project (and the editor's Duplicate) stores them on the copy.
+export function inferPieces<C extends {src: string; piece?: Piece}>(clips: C[], variant: Variant): C[] {
+  if (!variant || clips.every((c) => c.piece)) return clips;
+  const run = (l: C[]) => { let n = 0; while (n < l.length && l[n].src === l[0].src) n++; return n; };
+  const h = variant.hook ? run(clips) : 0, t = variant.cta ? run([...clips].reverse()) : 0;
+  if ((!h && !t) || h + t >= clips.length) return clips;
+  return clips.map((c, i) => (c.piece ? c : {...c, piece: i < h ? 'hook' : i >= clips.length - t ? 'cta' : 'body'}));
+}
+
+type Family = {
+  clips: Clip[]; captions?: Caption[]; brolls?: BrollItem[]; graphics?: Graphic[]; mattes?: {src: string; startMs: number; endMs: number; file: string}[];
+  grade?: ProjectGrade | null; hiddenWids?: string[]; identity?: {client?: string; family?: string; variant?: Variant} | null;
+};
+// the per-clip settings that go with the footage: playback, clip audio, what the footage is (J/L below: the head's, the tail's)
+const OWN = ['speed', 'volume', 'muted', 'graded', 'location'] as const;
+// sync_family (the MCP) and the editor's Sync body button: what `from` has on its body copied onto `sibling`, a variant
+// of the same family and client. Body clips are matched by source + overlapping source range, never by clip id (the
+// sibling may be cut apart). A sibling body clip takes the per-clip settings and clip grade override of the body clip
+// it shows most — split where the from's differ (a speed ramp, a head graded apart); J/L live on joins: at the
+// sibling's own hook / CTA seams they stay its own, between two of its body clips they are the from's where it has
+// that join (the first piece showing a from clip takes its J, the last its L), else none. A source override goes along
+// when the sibling shows only its body from that source. R = the source ranges both bodies show; what lies on R is the
+// from's, by span (never by where an item starts: two bodies trimmed apart cut pages and graphics): the sibling's
+// captions, graphics, B-roll cues (on a body clip) there go — a page across R's edge keeps its words outside — and the
+// from's come in, each on R only (a page with its words there, a cue on the first sibling body clip under it); an
+// item of each alike but for its id is left as the sibling has it. Hidden words (deleted pages) swap only on R: a
+// word's time from `words` (the sibling's, src/validate.ts projectWords) or a page. All of it is source time: each
+// lands on the sibling's own timeline (its hook may be longer). Hook and CTA are never touched. A copied graphic whose
+// figure or name the sibling's audio does not say (unbacked: unbackedData over its words) stays behind, and the
+// sibling's own there stays. → the sibling, what was done, and what of its own it lost (`replaced`), or why not.
+// ponytail: B-roll cues with no clip (timeline-absolute, legacy) stay as they are
+export function syncFamily<P extends Family>(from: P, sibling: P, {words = [], unbacked}: {words?: {source: string; words: {i: number; startMs: number}[]}[]; unbacked?: (p: P) => {ref: string; dato?: string}[]} = {}): {project: P; said: string; replaced: string[]} | {error: string} {
+  const a = from.identity, b = sibling.identity;
+  if (!a?.client || !a.family || a.client !== b?.client || a.family !== b?.family) return {error: `not the same family and client (${a?.family ?? 'no identity'} of ${a?.client ?? '—'} vs ${b?.family ?? 'no identity'} of ${b?.client ?? '—'}) — sync_family never crosses them`};
+  const bodyIds = (p: Family) => new Set(inferPieces(p.clips, p.identity?.variant).filter((c) => c.piece === 'body').map((c) => c.id));
+  const fbIds = bodyIds(from), fb = from.clips.filter((c) => fbIds.has(c.id));
+  if (!fb.length) return {error: 'the from project has no body clip (set_clip piece: body)'};
+  const sb = bodyIds(sibling);
+  const over = (c: Clip, f: Clip) => Math.min(c.outSec, f.outSec) - Math.max(c.inSec, f.inSec);
+  const shown = (c: Clip) => fb.filter((f) => f.src === c.src && over(c, f) > 0).sort((x, y) => x.inSec - y.inSec);
+  if (![...sb].some((id) => shown(sibling.clips.find((c) => c.id === id)!).length)) return {error: `no body clip of it shows the from's body (${[...new Set(fb.map((f) => f.src))].join(', ')}) — set_clip piece: body on its body clips`};
+  const fo = from.grade?.overrides ?? {}, so = sibling.grade?.overrides ?? {};
+  const look = (f: Clip) => JSON.stringify([...OWN.map((k) => f[k] ?? null), fo[f.id] ?? null]);
+  let clips = sibling.clips, brolls = sibling.brolls ?? [], splits = 0;
+  const origin = new Map<string, string>(); // a piece split off here → the sibling clip it was
+  for (const id of [...sb]) {
+    const fs = shown(clips.find((c) => c.id === id)!);
+    let cur = id;
+    for (let k = 1; k < fs.length; k++) {
+      if (look(fs[k]) === look(fs[k - 1])) continue;
+      const r = splitClip(clips, cur, fs[k].inSec); // refused under 0.2 s from an edge: that piece follows the clip it shows most
+      if (!r) continue;
+      clips = r.clips; brolls = reanchor(brolls, r.remap); sb.add(r.newId); origin.set(r.newId, id); cur = r.newId; splits++;
+    }
+  }
+  const ov: Record<string, GradeParams> = {...so};
+  const set = <T extends object>(o: T, k: keyof T, v: unknown) => { if (v === undefined) delete o[k]; else o[k] = v as T[keyof T]; };
+  const body = (c?: Clip) => !!c && sb.has(c.id);
+  const fromJoin = (f: Clip, d: number) => fbIds.has(from.clips[from.clips.indexOf(f) + d]?.id ?? ''); // the from's neighbour is body too
+  const onF = (l: Clip[], f: Clip) => l.some((k) => body(k) && k.src === f.src && over(k, f) > 0);
+  const before = clips;
+  clips = before.map((c, i) => {
+    const fs = body(c) ? shown(c) : [];
+    if (!fs.length) return c;
+    const best = fs.reduce((x, y) => (over(c, y) > over(c, x) ? y : x)), out = {...c}, f0 = fs[0], f1 = fs[fs.length - 1];
+    for (const k of OWN) set(out, k, best[k]);
+    if (body(before[i - 1])) set(out, 'jSec', !onF(before.slice(0, i), f0) && fromJoin(f0, -1) ? f0.jSec : undefined);
+    if (body(before[i + 1])) set(out, 'lSec', !onF(before.slice(i + 1), f1) && fromJoin(f1, 1) ? f1.lSec : undefined);
+    set(ov, c.id, fo[best.id]);
+    return out;
+  });
+  const replaced: string[] = []; // what of the sibling's own, set apart from the from's, the sync takes away
+  for (const o of sibling.clips) {
+    const ps = clips.filter((c) => (origin.get(c.id) ?? c.id) === o.id);
+    if (!ps.some((c) => body(c) && shown(c).length)) continue;
+    const lost = [...OWN.filter((k) => o[k] !== undefined && ps.some((c) => c[k] !== o[k])), ...(o.jSec !== undefined && ps[0].jSec !== o.jSec ? ['jSec'] : []),
+      ...(o.lSec !== undefined && ps[ps.length - 1].lSec !== o.lSec ? ['lSec'] : []), ...(so[o.id] && ps.some((c) => JSON.stringify(ov[c.id]) !== JSON.stringify(so[o.id])) ? ['grade override'] : [])];
+    if (lost.length) replaced.push(`${o.id}'s ${lost.join(' ')}`);
+  }
+  const notes: string[] = [];
+  for (const src of new Set(fb.map((f) => f.src))) {
+    if (!clips.some((c) => c.src === src && sb.has(c.id)) || JSON.stringify(fo[src]) === JSON.stringify(ov[src])) continue;
+    if (clips.some((c) => c.src === src && !sb.has(c.id))) notes.push(`the grade of ${src} stays: the sibling's hook or CTA is from it too`);
+    else { if (so[src]) replaced.push(`grade override of ${src}`); set(ov, src, fo[src]); }
+  }
+  const R = fb.flatMap((f) => clips.filter((c) => sb.has(c.id) && c.src === f.src && over(c, f) > 0).map((c) => ({src: f.src, a: Math.max(f.inSec, c.inSec) * 1000, b: Math.min(f.outSec, c.outSec) * 1000})));
+  const inR = (src: string, ms: number) => R.some((r) => r.src === src && ms >= r.a && ms < r.b);
+  const hits = (src: string, a: number, b: number) => R.some((r) => r.src === src && a < r.b && r.a < b);
+  const mattes = [...(sibling.mattes ?? []), ...(from.mattes ?? []).filter((m) => hits(m.src, m.startMs, m.endMs) && !sibling.mattes?.some((x) => x.file === m.file))];
+  let grade = sibling.grade ?? null;
+  if (JSON.stringify(ov) !== JSON.stringify(grade?.overrides ?? {})) {
+    const g: ProjectGrade = {...(grade ?? {look: 'none', intensity: 0.8, auto: false, bySrc: {}}), overrides: ov};
+    const bakes = lutBakes(g, clips, mattes).filter((x) => !g.baked?.[x.key] && from.grade?.baked?.[x.key]); // the copies the from has baked already
+    if (bakes.length) g.baked = {...g.baked, ...Object.fromEntries(bakes.map((x) => [x.key, from.grade!.baked![x.key]]))};
+    const auto = autoSources(g, clips).filter((s) => !g.bySrc?.[s] && from.grade?.bySrc?.[s]);
+    if (auto.length) g.bySrc = {...g.bySrc, ...Object.fromEntries(auto.map((s) => [s, from.grade!.bySrc[s]]))};
+    grade = g;
+  }
+  // the sibling's items on R and the from's as they would land: a pair alike but for the id stays the sibling's
+  const bare = (x: object) => JSON.stringify({...x, id: undefined});
+  const pair = <T extends {id: string}>(mine: T[], theirs: T[]) => {
+    const add = [...theirs], gone: T[] = [];
+    for (const x of mine) { const j = add.findIndex((y) => bare(y) === bare(x)); if (j < 0) gone.push(x); else add.splice(j, 1); }
+    return {gone, add};
+  };
+  // each added item keeps its id unless an item the sibling keeps has it
+  const swap = <T extends {id: string}>(kept: T[], add: T[], prefix: string) => {
+    const taken: {id: string}[] = [...kept];
+    const added = add.map((x) => { const y = {...x, id: taken.some((t) => t.id === x.id) ? nextId(taken, prefix) : x.id}; taken.push(y); return y; });
+    return {all: [...kept, ...added], added};
+  };
+  const at = new Map<string, number>(); // a word id → its source ms
+  for (const t of words) for (const w of t.words) at.set(`${t.source}:${w.i}`, w.startMs);
+  for (const c of [...(sibling.captions ?? []), ...(from.captions ?? [])]) for (const w of c.words) if (w.wid && !at.has(w.wid)) at.set(w.wid, w.startMs);
+  const widInR = (w: string) => { const t = at.get(w); return t != null && R.some((r) => r.src.split('/').pop()!.replace(/\.[^.]+$/, '') === w.slice(0, w.lastIndexOf(':')) && t >= r.a && t < r.b); };
+  // a page's words on R (on = true) or off it; the page itself when all of them are
+  const part = (c: Caption, on: boolean): Caption | null => {
+    const keep = (ms: number) => inR(c.src, ms) === on, ws = c.words.filter((w) => keep(w.startMs)), last = ws[ws.length - 1];
+    if (ws.length === c.words.length) return ws.length || keep(c.startMs) ? c : null;
+    if (!ws.length) return null;
+    return {...c, words: ws, startMs: ws[0] === c.words[0] ? c.startMs : ws[0].startMs, endMs: last === c.words[c.words.length - 1] ? c.endMs : last.endMs, ...(c.covers ? {covers: c.covers.filter((w) => !at.has(w) || widInR(w) === on)} : {})};
+  };
+  const sOn = new Map((sibling.captions ?? []).flatMap((c) => { const r = part(c, true); return r ? [[r, c] as const] : []; }));
+  const cp = pair([...sOn.keys()], (from.captions ?? []).flatMap((c) => part(c, true) ?? []));
+  const goneCaps = new Set(cp.gone.map((r) => sOn.get(r)!));
+  const caps = swap((sibling.captions ?? []).flatMap((c) => (goneCaps.has(c) ? part(c, false) ?? [] : [c])), cp.add, 'c');
+  const gOn = (g: Graphic) => hits(g.src, g.startMs, g.endMs);
+  const gp = pair((sibling.graphics ?? []).filter(gOn), (from.graphics ?? []).filter(gOn));
+  const gfx = swap((sibling.graphics ?? []).filter((g) => !gp.gone.includes(g)), gp.add, 'g');
+  const landed = (x: BrollItem): BrollItem[] => {
+    const f = fb.find((k) => k.id === x.clipId);
+    if (!f || !hits(f.src, x.startMs, x.endMs)) return [];
+    const span = (k: Clip) => Math.min(x.endMs, k.outSec * 1000) - Math.max(x.startMs, k.inSec * 1000);
+    const c = clips.find((k) => body(k) && k.src === f.src && span(k) > 0); // the first under it; never before its clip (into the hook)
+    return c ? [{...x, clipId: c.id, startMs: Math.max(x.startMs, c.inSec * 1000)}] : [];
+  };
+  const bp = pair(brolls.filter((x) => { const c = clips.find((k) => k.id === x.clipId); return body(c) && hits(c!.src, x.startMs, x.endMs); }), (from.brolls ?? []).flatMap(landed));
+  const cues = swap(brolls.filter((x) => !bp.gone.includes(x)), bp.add, 'b');
+  const hiddenWids = [...new Set([...(sibling.hiddenWids ?? []).filter((w) => !widInR(w)), ...(from.hiddenWids ?? []).filter(widInR)])];
+  let project = {...sibling, clips, captions: caps.all, graphics: gfx.all, brolls: cues.all, mattes, grade, hiddenWids};
+  const bad = new Map((unbacked?.(project) ?? []).filter((d) => gfx.added.some((g) => g.id === d.ref)).map((d) => [d.ref, d.dato]));
+  // a graphic left out leaves the sibling's own it would have replaced, unless a graphic of the from kept covers it too
+  const near = (x: Graphic, y: Graphic) => x.src === y.src && x.startMs < y.endMs && y.startMs < x.endMs;
+  const stays = gp.gone.filter((g) => gfx.added.some((x) => bad.has(x.id) && near(g, x)) && !gfx.added.some((x) => !bad.has(x.id) && near(g, x)));
+  if (bad.size) {
+    const kept = project.graphics.filter((g) => !bad.has(g.id));
+    for (const g of stays) kept.push(kept.some((k) => k.id === g.id) ? {...g, id: nextId(kept, 'g')} : g);
+    project = {...project, graphics: kept};
+  }
+  replaced.push(...[...goneCaps].map((c) => `caption page ${c.id}`), ...gp.gone.filter((g) => !stays.includes(g)).map((g) => `graphic ${g.id}`), ...bp.gone.map((x) => `B-roll cue ${x.id}`));
+  const n = (k: number, what: string) => `${k} ${what}${k === 1 ? '' : 's'}`;
+  const said = [`${n(sb.size, 'body clip')}${splits ? ` (${n(splits, 'split')} to follow the from's)` : ''}`, n(caps.added.length, 'caption page'), n(gfx.added.length - bad.size, 'graphic'), n(cues.added.length, 'B-roll cue'),
+    ...(grade !== (sibling.grade ?? null) ? ['grade overrides'] : []), ...[...bad].map(([g, d]) => `${g} left out ("${d}": dato sin respaldo en el audio de este reel)`),
+    ...(stays.length ? [`its own ${stays.map((g) => g.id).join(', ')} kept there`] : []), ...notes, ...(replaced.length ? [`replaced ${replaced.length} of its own: ${replaced.join('; ')}`] : [])].join(', ');
+  return {project, said, replaced};
 }

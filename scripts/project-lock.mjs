@@ -16,6 +16,9 @@ export const LOCK_TTL_MS = 15 * 60 * 1000;
 const lockFile = (dir, id) => path.join(dir, `${id}.lock`);
 const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+const live = (cur, now, ttlMs) => cur && cur.host === os.hostname() && alive(cur.pid) && now - cur.beat < ttlMs;
+// the live holder of a project's lock, or null — read only (the editor's Sync body, which never takes one)
+export const lockHolder = (dir, id, now = Date.now()) => { const cur = read(lockFile(dir, id)); return live(cur, now, LOCK_TTL_MS) ? cur : null; };
 
 // {ok: true} when this process holds the lock now; {ok: false, holder} when another live one does
 export function acquireLock(dir, id, {pid = process.pid, owner = `pid ${pid}`, session, now = Date.now(), ttlMs = LOCK_TTL_MS} = {}) {
@@ -30,8 +33,7 @@ export function acquireLock(dir, id, {pid = process.pid, owner = `pid ${pid}`, s
   }
   const cur = read(f);
   const same = cur && cur.pid === pid && cur.host === mine.host && (cur.session ?? null) === (session ?? null);
-  const live = cur && !same && cur.host === mine.host && alive(cur.pid) && now - cur.beat < ttlMs;
-  if (live) return {ok: false, holder: cur};
+  if (!same && live(cur, now, ttlMs)) return {ok: false, holder: cur};
   // ours (refresh), or stale: a dead process, another host's leftover, or silent past the TTL
   const tmp = `${f}.${pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(same ? {...cur, beat: now} : mine));

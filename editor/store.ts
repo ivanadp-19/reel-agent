@@ -99,7 +99,7 @@ type EditorState = {
   setClipSpeed: (id: string, speed: number) => void;
   setClipEnter: (id: string, enter: Enter | undefined) => void;
   setClipAudioCut: (id: string, cut: {jSec?: number; lSec?: number}) => void;
-  setClipTags: (id: string, tags: {graded?: boolean | null; location?: string | null}) => void;
+  setClipTags: (id: string, tags: Parameters<typeof clipTags>[1]) => void; // graded / location / piece
   setTransitionPattern: (pattern: 'punch-alternate' | 'none') => void;
   applySpeedRamp: (id: string, from: number, to: number, steps: number) => void;
   cutWords: (tr: TClip[], ranges: CutRange[]) => void; // cut_words: approved word ranges, snapped into the pauses
@@ -390,7 +390,7 @@ export const useEditor = create<EditorState>((set) => ({
       return {clips, meta: withMeta(s.meta, clips)};
     }),
 
-  // graded / location (set_clip): the same clipTags the MCP applies
+  // graded / location / piece (set_clip): the same clipTags the MCP applies
   setClipTags: (id, tags) => set((s) => ({...withHistory(s), clips: s.clips.map((c) => (c.id === id ? clipTags(c, tags) : c))})),
 
   // how the clip starts (set_transitions items); undefined = plain cut
