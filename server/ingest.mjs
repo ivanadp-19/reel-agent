@@ -3,11 +3,14 @@
 //     could read anyway — server/tokens.mjs openForUser) — synchronous: answers with the clip JSON
 //   ?upload=<id>&size=n (the reel CLI) — a part it uploaded in chunks (server/uploads.mjs), taken whole and
 //     removed once ingested; synchronous too — the CLI and the MCP wait for the clip in the answer
+//   ?upload=<id>&size=n&async=1 (the editor, editor/upload.ts) — the same part, as a job (below)
 //   a body (the browser upload)           — asynchronous: once the upload is on disk it answers 202 {jobId} and
 //     works in the background; GET /api/add-clip/<jobId> → {status: running|done|error, progress, label, clip | error}.
 //     The job does not depend on the upload's connection: a browser that goes away after uploading still gets
 //     its clip in public/clips/ — a proxy's timeout (Railway's edge answered 502 after ~2 min) no longer matters.
 // Jobs live in memory, like the other job stores of the backend.
+// A file with the same bytes as a source already in public/clips/ (that very file, or a copy of it) is not
+// ingested again: the clip points at that source and keeps its transcripts (sameSource).
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,10 +63,31 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
   const clipsDir = path.join(publicDir, 'clips');
   const thumbsDir = path.join(clipsDir, 'thumbs');
 
+  const durationOf = async (file) => parseFloat((await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file], {cwd: root})).stdout) || 0;
+  const sha256 = async (file) => { const h = crypto.createHash('sha256'); for await (const b of fs.createReadStream(file)) h.update(b); return h.digest('hex'); };
+  // the source of public/clips/ this file already is: that path, or the same size and sha256 → its id, else null.
+  // Adding Guion1.mp4 again made Guion1-2 — no transcript cache, so its audio went to Deepgram again.
+  // ponytail: hashes the same-size sources on each ingest (rare: sizes seldom match); an index of hashes if it gets slow
+  async function sameSource(file) {
+    const real = fs.realpathSync(file), dir = fs.realpathSync(clipsDir);
+    if (path.dirname(real) === dir && real.endsWith('.mp4')) return path.basename(real, '.mp4');
+    const size = fs.statSync(real).size;
+    const twins = fs.readdirSync(dir).filter((n) => n.endsWith('.mp4') && fs.statSync(path.join(dir, n)).size === size);
+    const mine = twins.length ? await sha256(real) : null;
+    for (const n of twins) if ((await sha256(path.join(dir, n))) === mine) return n.slice(0, -4);
+    return null;
+  }
+
   // tmp → public/clips/<id>.mp4 + thumbnail; resolves the clip, throws an IngestError
   async function ingest({tmp, id, rawName, tag, report = () => {}}) {
     const out = path.join(clipsDir, `${id}.mp4`);
     report(0, 'Probing');
+    const same = await sameSource(tmp);
+    if (same) {
+      const dur = await durationOf(path.join(clipsDir, `${same}.mp4`));
+      log(`ingest ${tag}: same bytes as clips/${same}.mp4 → reused, nothing re-encoded or re-transcribed`);
+      return {id: same, src: `clips/${same}.mp4`, label: rawName.replace(/\.[^.]+$/, ''), inSec: 0, outSec: dur, sourceDurationSec: dur, ingest: `same file as clips/${same}.mp4: reused with its transcripts`};
+    }
     // probe codec / pixel format / size / rotation / duration
     const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
       '-show_entries', 'stream=codec_name,pix_fmt,width,height,color_transfer:stream_side_data=rotation:format=duration', '-of', 'json', tmp], {cwd: root});
@@ -105,9 +129,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     log(`ingest ${tag}: ${verb === 'Remuxing' ? 'remux' : 'transcode'} done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
     // re-probe duration from the output (authoritative)
-    const dp = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of',
-      'default=noprint_wrappers=1:nokey=1', out], {cwd: root});
-    const dur = parseFloat(dp.stdout) || duration || 0;
+    const dur = (await durationOf(out)) || duration || 0;
 
     report(95, 'Making thumbnail');
     await run('ffmpeg', ['-y', '-ss', String(Math.min(0.5, dur / 2)), '-i', out, '-frames:v', '1',
@@ -125,6 +147,20 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     const why = e instanceof IngestError && e.detail ? explain(e.detail, '') : '';
     return (why ? `${e.message}: ${why}` : e.message || String(e)).slice(0, 300);
   };
+
+  // an ingest as a job: 202 {jobId} at once, then GET /api/add-clip/<jobId> (a browser body, the editor's upload part)
+  function startJob(res, {tmp, id, rawName, cleanup, what}) {
+    const jobId = crypto.randomUUID();
+    const tag = `${jobId.slice(0, 8)} ${id}`;
+    jobs[jobId] = {status: 'running', progress: 0, label: 'Starting'};
+    json(res, 202, {jobId});
+    log(`ingest ${tag}: start (${what})`);
+    const report = (progress, label) => { jobs[jobId] = {status: 'running', progress, label}; };
+    ingest({tmp, id, rawName, tag, report})
+      .then((clip) => { jobs[jobId] = {status: 'done', progress: 100, label: 'Ready', clip}; log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); onClip(clip); })
+      .catch((e) => { jobs[jobId] = {status: 'error', error: message(e)}; log(`ingest ${tag}: error — ${message(e)}`); })
+      .finally(cleanup);
+  }
 
   // POST /api/add-clip and GET /api/add-clip/<jobId>; true when the request was one of them
   function handle(req, res, url, g = {}) {
@@ -181,6 +217,10 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     const tmp = opened?.path ?? local ?? uploaded ?? path.join(root, `.upload-${id}.bin`);
     const cleanup = () => { reserved.delete(id); opened?.close(); if (!local) { try { fs.rmSync(tmp, {force: true}); } catch {} } };
 
+    if (uploaded && url.searchParams.get('async') === '1') {
+      startJob(res, {tmp, id, rawName, cleanup, what: `upload ${upload}, ${(fs.statSync(tmp).size / 1048576).toFixed(1)} MB`});
+      return true;
+    }
     if (local || uploaded) {
       const tag = id;
       log(`ingest ${tag}: start (${local ? `path ${local}` : `upload ${upload}`})`);
@@ -198,19 +238,7 @@ export function createClipIngest({publicDir, root, token, uploadsDir = path.join
     req.on('error', () => abort('failed'));
     req.on('close', () => { if (!req.complete) abort('interrupted'); });
     ws.on('error', () => abort('could not be written'));
-    ws.on('finish', () => {
-      if (failed) return;
-      const jobId = crypto.randomUUID();
-      const tag = `${jobId.slice(0, 8)} ${id}`;
-      jobs[jobId] = {status: 'running', progress: 0, label: 'Starting'};
-      json(res, 202, {jobId});
-      log(`ingest ${tag}: start (${(ws.bytesWritten / 1048576).toFixed(1)} MB uploaded)`);
-      const report = (progress, label) => { jobs[jobId] = {status: 'running', progress, label}; };
-      ingest({tmp, id, rawName, tag, report})
-        .then((clip) => { jobs[jobId] = {status: 'done', progress: 100, label: 'Ready', clip}; log(`ingest ${tag}: done ${clip.src} (${clip.sourceDurationSec.toFixed(1)}s)`); onClip(clip); })
-        .catch((e) => { jobs[jobId] = {status: 'error', error: message(e)}; log(`ingest ${tag}: error — ${message(e)}`); })
-        .finally(cleanup);
-    });
+    ws.on('finish', () => { if (!failed) startJob(res, {tmp, id, rawName, cleanup, what: `${(ws.bytesWritten / 1048576).toFixed(1)} MB uploaded`}); });
     return true;
   }
 

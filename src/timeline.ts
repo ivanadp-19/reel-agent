@@ -208,6 +208,10 @@ export function uniqId(taken: Iterable<string>, base: string, tag: string): stri
   while (set.has(`${base}-${tag}${n}`)) n++;
   return `${base}-${tag}${n}`;
 }
+// a clip added to the timeline (the editor, add_clips, reel clips add): a source already in the project (the
+// ingest reuses an identical file, server/ingest.mjs) comes back with an id the project has → the next free one
+export const addedClip = <C extends {id: string}>(clips: {id: string}[], clip: C): C =>
+  clips.some((c) => c.id === clip.id) ? {...clip, id: uniqId(clips.map((c) => c.id), clip.id, 'c')} : clip;
 
 // Remove a source range [aSec, bSec] from a clip: a trim when it touches an
 // edge (pieces under 0.2 s fold into the cut), otherwise split twice and drop

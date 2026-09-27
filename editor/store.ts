@@ -6,7 +6,7 @@ import type {Graphic} from '../src/graphicTemplates';
 import type {Matte} from '../src/Person';
 import type {Brand} from '../src/brand';
 import type {ProjectGrade} from '../src/grade';
-import {applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
+import {addedClip, applyAutocut as autocutClips, clipTags, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, totalDurationFrames, trimClip as trimClipIn, type Clip, type Music} from '../src/timeline';
 import {punchAlternate, speedRamp, type Enter} from '../src/transitions';
 import type {BrollIn, BrollOut} from '../src/motion';
 import {TEMPLATES, type Life, type Out, type Reveal, type TemplateId} from '../src/graphicTemplates';
@@ -264,8 +264,9 @@ export const useEditor = create<EditorState>((set) => ({
     })),
 
   // ---- clips track ----
-  addClip: (clip) =>
+  addClip: (added) =>
     set((s) => {
+      const clip = addedClip(s.clips, added);
       const clips = [...s.clips, clip];
       return {...withHistory(s), clips, meta: withMeta(s.meta, clips), selectedClipId: clip.id};
     }),

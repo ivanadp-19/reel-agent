@@ -18,7 +18,7 @@ import {execFileSync} from 'node:child_process';
 import {parseArgs} from 'node:util';
 import {PRESETS} from '../src/captionPresets.ts';
 import {projectTiers, repage} from '../src/paging.ts';
-import {applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
+import {addedClip, applyAutocut, deliveryFps, reanchor, renderSec} from '../src/timeline.ts';
 import {newProject} from '../mcp/checks.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -420,10 +420,10 @@ export const COMMANDS = [
         const key = ingestKey(file, st);
         if (known.has(key)) { skipped.push({file, clip: known.get(key)}); continue; }
         const {clip: r, via} = await ingest(ctx, file, st, key, o);
-        const {ingest: note, ...clip} = r;
-        clip.srcKey = key;
+        const {ingest: note, ...raw} = r;
+        let clip = {...raw, srcKey: key};
         // saved clip by clip: a failure later keeps what is in
-        await updateProject(ctx, id, (p) => ((p.clips ?? []).some((c) => c.srcKey === key) ? null : {clips: [...(p.clips ?? []), clip]}));
+        await updateProject(ctx, id, (p) => ((p.clips ?? []).some((c) => c.srcKey === key) ? null : {clips: [...(p.clips ?? []), (clip = addedClip(p.clips ?? [], {...raw, srcKey: key}))]}));
         known.set(key, clip.id);
         added.push({file, clip: clip.id, via, ...(note ? {ingest: note} : {})});
         if (!ctx.json) ctx.err(`added ${clip.id} (${(clip.outSec ?? 0).toFixed(1)}s, ${via})${note ? ` — ${note}` : ''}`);

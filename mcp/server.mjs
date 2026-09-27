@@ -21,7 +21,7 @@ import {fileURLToPath} from 'node:url';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {z} from 'zod';
-import {applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
+import {addedClip, applyAutocut, clipDurationSec, clipTags, cutRange, deliveryFps, locateSec, nextId, placeClips, reanchor, splitClip, trimClip} from '../src/timeline.ts';
 import {projectCaptions, retext, setPageStart, shiftPage} from '../src/captions.ts';
 import {isGlue, moveIds, projectTiers, repage} from '../src/paging.ts';
 import {PRESETS} from '../src/captionPresets.ts';
@@ -481,8 +481,9 @@ server.registerTool('add_clips', {description: 'Add video files to a project (ab
     // same machine: hand the backend the path instead of streaming the file through memory
     const r = await fetch(`${API}/api/add-clip?name=${encodeURIComponent(path.basename(f))}&path=${encodeURIComponent(f)}`, {method: 'POST', headers: {'x-reel-token': TOK}}).then((x) => x.json());
     if (!r.id) throw new Error(`upload failed for ${f}: ${r.error ?? ''}`);
-    const {ingest, ...clip} = r;
-    p.clips.push(clip); added.push(`${r.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
+    const {ingest, ...raw} = r;
+    const clip = addedClip(p.clips, raw);
+    p.clips.push(clip); added.push(`${clip.id} (${f1(r.outSec)}s${ingest ? `, ${ingest}` : ''})`);
   }
   await save(id, p);
   return text(`Project ${id}: added ${added.join(', ')}\n\n${summary(id, p)}`);

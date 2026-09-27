@@ -46,13 +46,15 @@ export const Start: React.FC<{
   const pending = pendingIngests();
   const upload = async (file: File, key: string) => {
     patch(key, {phase: 'uploading'});
-    let jobId = '';
+    let jobId = '', part = '';
     try {
       const clip = await uploadClip<NewClip>(file, {
         progress: (loaded) => patch(key, {loaded}),
+        // remembered from the first byte: after a reload, the same file added again goes on where it stopped
+        upload: (id) => { part = id; pending.add({upload: id, name: file.name, size: file.size}); },
         uploaded: () => patch(key, {phase: 'processing', loaded: file.size, progress: 0, label: 'Processing on the server'}),
         // the server works on its own from here: remembered, so a reload picks the clip up
-        job: (id) => { jobId = id; watching.add(id); pending.add({jobId: id, name: file.name, size: file.size}); },
+        job: (id) => { jobId = id; watching.add(id); pending.add({upload: part, jobId: id, name: file.name, size: file.size}); },
         processing: (progress, label) => patch(key, {progress, label}),
       });
       addClip(clip);
@@ -60,20 +62,26 @@ export const Start: React.FC<{
     } catch (e) {
       patch(key, {phase: 'error', error: e instanceof Error ? e.message : String(e)});
     } finally {
-      if (jobId) { watching.delete(jobId); pending.remove(jobId); }
+      if (jobId) { watching.delete(jobId); pending.remove(part || jobId); } // an upload that failed stays for the reload's note
     }
   };
-  // clips whose upload finished in an earlier page load: wait for them here
+  // clips whose upload finished in an earlier page load: wait for them here; an upload the page left halfway: say
+  // how to go on (its part waits a day on the server)
   useEffect(() => {
-    const resume = pending.list().filter((p) => !watching.has(p.jobId));
-    if (!resume.length) return;
-    setUploads((l) => [...l, ...resume.map((p): UploadItem => ({key: p.jobId, name: p.name, size: p.size, loaded: p.size, phase: 'processing', progress: 0, label: 'Processing on the server'}))]);
+    const list = pending.list();
+    const cut = list.filter((p) => !p.jobId);
+    const resume = list.flatMap((p) => (p.jobId && !watching.has(p.jobId) ? [{...p, jobId: p.jobId}] : []));
+    for (const p of cut) pending.remove(p.upload!);
+    if (!cut.length && !resume.length) return;
+    setUploads((l) => [...l,
+      ...cut.map((p): UploadItem => ({key: p.upload!, name: p.name, size: p.size, loaded: 0, phase: 'error', error: `the upload stopped when the page closed — add ${p.name} again and it goes on where it stopped`})),
+      ...resume.map((p): UploadItem => ({key: p.jobId, name: p.name, size: p.size, loaded: p.size, phase: 'processing', progress: 0, label: 'Processing on the server'}))]);
     for (const p of resume) {
       watching.add(p.jobId);
       waitIngest<NewClip>(p.jobId, {progress: (progress, label) => patch(p.jobId, {progress, label})})
         .then((clip) => { addClip(clip); patch(p.jobId, {phase: 'done'}); })
         .catch((e) => patch(p.jobId, {phase: 'error', error: e instanceof Error ? e.message : String(e)}))
-        .finally(() => { watching.delete(p.jobId); pending.remove(p.jobId); });
+        .finally(() => { watching.delete(p.jobId); pending.remove(p.upload ?? p.jobId); });
     }
   }, []);
   // files picked or dropped while others are still going wait behind them

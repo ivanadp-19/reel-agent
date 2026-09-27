@@ -8,8 +8,9 @@ import {normalizeCaption} from '../src/captions.ts';
 import {deliveryFps} from '../src/timeline.ts';
 import {fontFiles, halfGradedIssues, identityTaken, transcriptIssues, validateIdentity, validateProject} from '../src/validate.ts';
 import {readFont} from '../src/sfnt.ts';
-import {projectTranscript} from '../scripts/transcript-cache.mjs';
+import {cacheName, projectTranscript, sourceKey} from '../scripts/transcript-cache.mjs';
 import {readScan} from '../scripts/grade-scan.mjs';
+import {stageFindings} from '../src/stages.ts';
 
 // a new, empty project (MCP add_clips without a project, `reel projects create`)
 export const newProject = (name) => ({name: name || 'Untitled project', clips: [], captions: [], brolls: [], graphics: [], mattes: [], brollAssets: [], music: null, accentColor: '#FFB020', lang: 'auto', captionStyle: 'palabra'});
@@ -40,6 +41,22 @@ export async function projectIssues(p, publicDir, env, {kick} = {}) {
   return [...validateProject(p, fps, facesOf(p, publicDir), fonts), ...transcriptIssues(p, await projectWords(p, publicDir, env)), ...halfGradedIssues(p, scans, fps),
     ...(pending.length ? [{level: 'warn', code: 'half-graded-pending', msg: `${pending.join(', ')} not checked for a half-graded shot yet — the scan runs in the backend's background (about a third of the clip's length); validate again in a minute (or: node scripts/grade-scan.mjs ${pending.join(' ')})`}] : []),
     ...failed.map((src) => ({level: 'warn', code: 'half-graded-pending', msg: `${src} could not be checked for a half-graded shot (${scans[src].error}) — retry: node scripts/grade-scan.mjs ${src} --force`}))];
+}
+
+// Every finding of a project by stage (src/stages.ts stageFindings): its issues (projectIssues), the judge's
+// pause rules (dead air, tight cuts, J-cut holes) over the words as heard, the sources with no transcript cache
+// yet, and `judged` — the render judge's findings on its final render, when there is one. Not enforced yet.
+// ponytail: reads the transcript caches twice (projectIssues too); share the words if it shows
+export async function stageChecks(p, publicDir, env, judged = []) {
+  const {counts, pauseFindings, timelineSpeech} = await import('../.agents/skills/render-judge/judge.mjs');
+  const fps = deliveryFps(p);
+  // a judge finding as a gate reads it: a rule that counts toward its verdict blocks, the rest are warnings
+  const asIssue = (f) => ({level: f.kind === 'rule' && counts(f) && ['blocker', 'major'].includes(f.severity) ? 'error' : 'warn', code: f.check, msg: f.msg, ...(f.ref ? {ref: f.ref} : {})});
+  const emphasized = new Set(p.captions.flatMap((c) => c.words.filter((w) => (w.tier ?? 0) > 0 && w.wid).map((w) => w.wid)));
+  const heard = timelineSpeech(p.clips, await projectWords(p, publicDir, env), fps).words;
+  const cached = (key) => [true, false].some((dg) => fs.existsSync(path.join(publicDir, 'clips', 'transcripts', cacheName(key, p.lang ?? 'auto', dg))));
+  return stageFindings({p, fps, issues: [...await projectIssues(p, publicDir, env), ...pauseFindings(heard, p.clips, emphasized).map(asIssue)],
+    untranscribed: [...new Set(p.clips.map(sourceKey))].filter((k) => !cached(k)), judged: judged.map(asIssue)});
 }
 
 // A project's identity (set_identity) checked against the others saved here (public/projects/*.json):
