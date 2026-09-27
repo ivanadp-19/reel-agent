@@ -32,6 +32,7 @@ const CLIP_FIELDS = {
   id: AFTER_INGEST, src: AFTER_INGEST, inSec: AFTER_INGEST, outSec: AFTER_INGEST, speed: AFTER_INGEST, enter: AFTER_INGEST, jSec: AFTER_INGEST, lSec: AFTER_INGEST,
   volume: ['audio', 'entregables'], muted: ['audio', 'entregables'],
   transform: ['broll', 'entregables'],
+  graded: ['color', 'entregables'], location: ['color', 'entregables'],
   label: [], srcKey: [],
 };
 
@@ -48,7 +49,7 @@ for (const [field, stale] of Object.entries(FIELDS)) {
 
 const clip = (x = {}) => ({id: 'a', src: 'clips/a.mp4', label: 'a', inSec: 0, outSec: 4, sourceDurationSec: 10, ...x});
 const B = {id: 'b', src: 'clips/b.mp4', inSec: 0, outSec: 3, sourceDurationSec: 3};
-const CHANGED = {sourceDurationSec: 11, ingest: 'HDR', id: 'a2', src: 'clips/b.mp4', inSec: 1, outSec: 3, speed: 1.5, enter: 'whip', jSec: 0.5, lSec: 0.5, volume: 0.8, muted: true, transform: [{t: 0, scale: 1.2, x: 0, y: 0}], label: 'take 1', srcKey: 'a.mp4:1:2'};
+const CHANGED = {sourceDurationSec: 11, ingest: 'HDR', id: 'a2', src: 'clips/b.mp4', inSec: 1, outSec: 3, speed: 1.5, enter: 'whip', jSec: 0.5, lSec: 0.5, volume: 0.8, muted: true, transform: [{t: 0, scale: 1.2, x: 0, y: 0}], label: 'take 1', srcKey: 'a.mp4:1:2', graded: true, location: 'rooftop'};
 for (const [field, stale] of Object.entries(CLIP_FIELDS)) {
   test(`clip field ${field} → ${stale.join(', ') || 'nothing'} stale`, () => {
     assert.deepEqual(invalidate({clips: [clip(), B]}, {clips: [clip({[field]: CHANGED[field]}), B]}), {stale, unmapped: []});

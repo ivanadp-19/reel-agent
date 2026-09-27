@@ -58,6 +58,7 @@ export const CLIP_FIELD_STAGE: Record<string, Stage[]> = {
   id: ['corte'], src: ['corte'], inSec: ['corte'], outSec: ['corte'], speed: ['corte'], enter: ['corte'], jSec: ['corte'], lSec: ['corte'],
   volume: ['audio'], muted: ['audio'],
   transform: ['broll'], // framing: zoom / pan keyframes
+  graded: ['color'], location: ['color'], // a head's grade fixed by hand; where the shot is (color-jump compares only within one)
   label: [], srcKey: [], // the reel CLI's key of the file it came from
 };
 
@@ -134,7 +135,7 @@ export const RULES: Record<Stage, string[]> = {
   ingest: ['untranscribed', 'identity'],
   corte: ['cut-word', 'off-mic', 'pause', 'cut-tight', 'jcut-gap'],
   guion: [],
-  color: [],
+  color: ['half-graded', 'half-graded-pending'], // src/validate.ts halfGradedIssues, mcp/checks.mjs (the scan not done yet)
   audio: [],
   captions: ['font-missing', 'font-wrong', 'glue', 'short', 'long', 'timing', 'overlap-captions', 'fast-words',
     'tier1-density', 'tier2-density', 'emoji-density', 'guion-conflict', 'guion-missing', 'guion-altered', 'guion-extra', 'guion-timing'],
